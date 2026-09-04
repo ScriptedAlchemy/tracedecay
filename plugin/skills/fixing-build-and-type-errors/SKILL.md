@@ -49,10 +49,10 @@ host MCP allowlist.
 
 - Deferred: one ToolSearch call —
   `select:tracedecay_diagnose,tracedecay_diagnostics,tracedecay_search,tracedecay_signature,tracedecay_callers`.
-- MCP error: `tracedecay tool diagnose --cargo-output @/tmp/err.txt` (the `@`
-  reads a file) / `tracedecay tool diagnostics --scope file --path …` (see
-  `tracedecay:using-the-cli`). Only if the CLI is also unavailable, run the
-  raw toolchain and paste its output back through `diagnose` when possible.
+- MCP transport error: use the equivalent CLI tool only while the daemon
+  remains available (see `tracedecay:using-the-cli`). If the daemon is
+  unavailable or intentionally held, preserve its lifecycle and run the
+  already-authorized raw toolchain check instead of retrying TraceDecay.
 
 ## Deliverable
 

@@ -16,9 +16,12 @@ Audit whether the same TraceDecay capabilities survive packaging and host-native
 3. Run only read-only host diagnostics and compare actual discovery with packaged intent.
 4. Classify gaps as missing product source, packaging drift, lifecycle drift, host limitation, or stale installation.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
-discover and run the equivalent `tracedecay tool <name> --help` command. This
-agent must not execute shell commands. Never query `.tracedecay` databases directly.
+MCP is optional. If only MCP transport is unavailable while the daemon remains
+available, ask the parent to run the equivalent
+`tracedecay tool <name> --help` command. If the daemon is unavailable or
+intentionally held, report that state; do not ask for retries or lifecycle
+changes. This agent must not
+execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

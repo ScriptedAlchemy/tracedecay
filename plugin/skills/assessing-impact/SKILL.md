@@ -55,8 +55,10 @@ Announce: "Using tracedecay:assessing-impact for <change>."
 
 - Deferred: one ToolSearch call —
   `select:tracedecay_diff_context,tracedecay_impact,tracedecay_affected,tracedecay_test_map,tracedecay_run_affected_tests`.
-- MCP error: `tracedecay tool diff_context --files …` etc. (see
-  `tracedecay:using-the-cli`). Do not degrade to running the full suite.
+- MCP transport error: use the CLI only while the daemon remains available
+  (see `tracedecay:using-the-cli`). Preserve an unavailable or intentionally
+  held daemon; report the gap instead of retrying or changing lifecycle. Do
+  not degrade to running the full suite.
 
 ## Deliverable
 

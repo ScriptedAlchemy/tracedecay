@@ -47,3 +47,7 @@ Every MCP tool is also available from the shell as `tracedecay tool <name>`
 (`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
 parameters). Bundled skills and steering use that CLI fallback when MCP
 transport errors or times out, instead of querying `.tracedecay` databases.
+The CLI uses the same daemon authority and is not an availability guarantee;
+neither client starts a missing or stopped service. If the daemon is
+unavailable or intentionally held, report that state and use scoped native
+tools without retrying or changing daemon lifecycle.

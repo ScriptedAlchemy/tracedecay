@@ -140,9 +140,11 @@ chat content.
 - Deferred (names listed without schemas): load once with ToolSearch —
   `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_describe,tracedecay_lcm_expand,tracedecay_lcm_expand_query,tracedecay_lcm_status,tracedecay_sessions_for,tracedecay_workflows,tracedecay_session_refresh,tracedecay_session_refresh_begin,tracedecay_session_refresh_status,tracedecay_session_refresh_cancel,tracedecay_project_search,tracedecay_project_context`
   (one batched call, add only the rungs needed) — then call normally.
-- MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
-  query `.tracedecay` databases directly; never abandon the graph over transport.
+- MCP transport error/timeout/disconnect: use the same tool and args via the
+  CLI only while the daemon remains available (see
+  `tracedecay:using-the-cli`). Preserve an unavailable or intentionally held
+  daemon; report the gap instead of retrying or changing lifecycle. Never
+  query `.tracedecay` databases directly.
 
 ## Deliverable
 

@@ -43,6 +43,10 @@ Every MCP tool is also available from the shell as `tracedecay tool <name>`
 parameters). The bundled `using-the-cli` skill and always-applied rule use
 that CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
+The CLI uses the same daemon authority and is not an availability guarantee;
+neither client starts a missing or stopped service. If the daemon is
+unavailable or intentionally held, report that state and use scoped native
+tools without retrying or changing daemon lifecycle.
 
 ## Desktop native diagnostics
 

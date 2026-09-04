@@ -118,9 +118,11 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
 - Deferred (names listed without schemas): load once with ToolSearch —
   `select:tracedecay_search,tracedecay_similar,tracedecay_signature_search,tracedecay_redundancy,tracedecay_rename_preview,tracedecay_rename_symbol,tracedecay_str_replace,tracedecay_replace_symbol`
   (one batched call, add others needed) — then call normally.
-- MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
-  query `.tracedecay` databases directly; never abandon the graph over transport.
+- MCP transport error/timeout/disconnect: use the same tool and args via the
+  CLI only while the daemon remains available (see
+  `tracedecay:using-the-cli`). Preserve an unavailable or intentionally held
+  daemon; report the gap instead of retrying or changing lifecycle. Never
+  query `.tracedecay` databases directly.
 
 ## Deliverable
 

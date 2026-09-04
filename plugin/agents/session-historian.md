@@ -17,9 +17,12 @@ Read-only recall subagent. Retrieve what past sessions said, did, and decided fo
 4. When durable facts are required, use `tracedecay_fact_store_search` with a bounded query and limit. It preserves canonical fact ids, provenance, trust, and holographic ranking without granting mutation access.
 5. If the `tracedecay:managing-session-context` skill is available, follow its full ladder.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
-discover and run the equivalent `tracedecay tool <name> --help` command. This
-agent must not execute shell commands. Never query `.tracedecay` databases directly.
+MCP is optional. If only MCP transport is unavailable while the daemon remains
+available, ask the parent to run the equivalent
+`tracedecay tool <name> --help` command. If the daemon is unavailable or
+intentionally held, report that state; do not ask for retries or lifecycle
+changes. This agent must not
+execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

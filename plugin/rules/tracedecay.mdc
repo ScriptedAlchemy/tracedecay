@@ -21,7 +21,7 @@ If there is even a 1% chance this workspace has a TraceDecay index, the graph, m
 | Build/type errors, or run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
 | Write MEMORY.md/CLAUDE.md, or a past decision | `tracedecay:project-memory` (`fact_store`) |
 | Architecture, tech debt, index/project status | `tracedecay:code-health` |
-| An MCP call failed | `tracedecay:using-the-cli` — `tracedecay tool <name>`, never abandon over transport |
+| MCP transport failed but the daemon is available | `tracedecay:using-the-cli` — `tracedecay tool <name>`; preserve a missing, unavailable, or intentionally held daemon |
 
 ## Red flags — these thoughts mean STOP, you are rationalizing
 
@@ -31,6 +31,10 @@ If there is even a 1% chance this workspace has a TraceDecay index, the graph, m
 - "I'll use gh for the PR diff" — `pr_context` computes changed symbols offline; gh is for comments/CI only.
 - "I'll jot this in MEMORY.md" — durable facts go to `fact_store` (add); MEMORY.md is not memory.
 - "The index might be stale, sync first" — hooks auto-sync; never run manual sync.
-- "The MCP call might fail" — `tracedecay tool <name>` always works. Transport ≠ capability.
+- "The MCP call failed, so I should retry until it works or start the daemon" — the CLI uses the same daemon and can also be unavailable. Report the state and preserve an intentional hold.
 
-If an MCP call errors or times out, fall back to `tracedecay tool <name> --args '<json>'` — the same JSON arguments object as the MCP tool (see `tracedecay:using-the-cli`) — never query `.tracedecay` databases directly or abandon tracedecay. Fall back to plain Grep/Read only for non-indexed content or after the graph pinpoints exact files.
+If MCP transport errors or times out while the daemon remains available, use
+`tracedecay tool <name> --args '<json>'` with the same JSON arguments object
+(see `tracedecay:using-the-cli`). If the daemon is missing, unavailable, or
+intentionally held, do not retry or run a lifecycle command: report the state
+and use scoped native reads. Never query `.tracedecay` databases directly.

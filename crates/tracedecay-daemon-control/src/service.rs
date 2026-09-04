@@ -204,10 +204,11 @@ impl QuiescedDaemonLifecycle {
         self.restore_state(state)
     }
 
-    /// Restores the post-update target rather than the captured snapshot.
+    /// Restores the exact captured state after an update.
     ///
-    /// See [`DaemonServiceState::expected_after_update`]: installed units that
-    /// were found stopped are started; masked and missing stay as captured.
+    /// A stopped service may be an intentional operator hold. Maintenance
+    /// therefore preserves both running state and enablement instead of
+    /// treating an installed-but-stopped unit as an outage to heal.
     pub fn finish_after_update(self) -> Result<()> {
         let target = self.previous_state.expected_after_update();
         self.finish_with_state(target)
@@ -386,25 +387,20 @@ impl DaemonServiceState {
     }
 
     pub fn lifecycle_operator_advice(self) -> String {
-        let remedy = daemon_service_enable_now_remedy();
         match self {
             Self::RunningEnabled => {
                 "TraceDecay daemon unit is installed, enabled, and running.".to_string()
             }
-            Self::RunningDisabled => format!(
-                "TraceDecay daemon unit is running but disabled, so it will not return after an exit. Run {remedy}."
-            ),
-            Self::StoppedEnabled => {
-                format!("TraceDecay daemon unit is installed but stopped. Run {remedy}.")
-            }
-            Self::StoppedDisabled => format!(
-                "TraceDecay daemon unit is installed but stopped and disabled. Run {remedy}."
-            ),
-            Self::Masked => {
-                format!("TraceDecay daemon unit is masked. Unmask it, then run {remedy}.")
-            }
+            Self::RunningDisabled => "TraceDecay daemon unit is running but disabled, so it will not return after an exit. This may be intentional; passive clients leave its lifecycle unchanged."
+                .to_string(),
+            Self::StoppedEnabled => "TraceDecay daemon unit is installed but stopped and may be intentionally held; passive clients do not start it. Run `tracedecay daemon start` only if you want it running."
+                .to_string(),
+            Self::StoppedDisabled => "TraceDecay daemon unit is installed but stopped and disabled, and may be intentionally held; passive clients do not start or enable it. Run `tracedecay daemon start` only if you want it running while remaining disabled."
+                .to_string(),
+            Self::Masked => "TraceDecay daemon unit is masked, which is an intentional hold; passive clients leave it masked. Unmask it and run `tracedecay daemon start` only if you want it running."
+                .to_string(),
             Self::Missing => {
-                "Run `tracedecay daemon install-service` and ensure the service is running."
+                "No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
                     .to_string()
             }
         }
@@ -412,31 +408,13 @@ impl DaemonServiceState {
 
     /// State to restore after `tracedecay update` / `upgrade`.
     ///
-    /// The supervisor snapshot cannot tell "operator stopped this on purpose"
-    /// from "found dead" (`StoppedEnabled` covers both `systemctl --user stop`
-    /// and an OOM-killed unit that hit its start limit). Leaving a dead
-    /// installed unit stopped is the worse failure: every later update
-    /// preserves that deadness. Masked and missing stay untouched — those are
-    /// explicit operator shapes. A unit that was running while disabled keeps
-    /// that enablement; a unit found stopped and disabled is healed, because
-    /// that is the observed outage shape (dead + disabled).
+    /// The supervisor snapshot cannot distinguish an operator hold from an
+    /// unexpected exit. Updates are lifecycle-neutral, so the captured state
+    /// remains authoritative. Explicit `daemon start` and `daemon restart`
+    /// commands own intentional activation.
     #[hotpath::skip]
     pub(crate) const fn expected_after_update(self) -> Self {
-        match self {
-            Self::Missing | Self::Masked => self,
-            Self::RunningDisabled => Self::RunningDisabled,
-            Self::RunningEnabled | Self::StoppedEnabled | Self::StoppedDisabled => {
-                Self::RunningEnabled
-            }
-        }
-    }
-}
-
-fn daemon_service_enable_now_remedy() -> &'static str {
-    if cfg!(target_os = "linux") {
-        "`tracedecay daemon install-service` or `systemctl --user enable --now tracedecay.service`"
-    } else {
-        "`tracedecay daemon install-service`"
+        self
     }
 }
 
@@ -454,11 +432,11 @@ pub fn unavailable_daemon_socket_advice(
         Some(state) => state.lifecycle_operator_advice(),
         None => match installed_service_unit_present() {
             Ok(true) => format!(
-                "TraceDecay daemon unit is installed but the socket is not available. Run {}.",
-                daemon_service_enable_now_remedy()
+                "TraceDecay daemon unit is installed but socket '{}' is not available. The service may be intentionally held; passive clients do not start it. Check `tracedecay daemon status`, and run `tracedecay daemon start` only if you want it running.",
+                socket_path.display()
             ),
             Ok(false) | Err(_) => {
-                "Run `tracedecay daemon install-service` and ensure the service is running."
+                "No managed TraceDecay daemon service is installed. Run `tracedecay daemon install-service` only if you want a managed daemon."
                     .to_string()
             }
         },
@@ -1171,14 +1149,10 @@ fn verify_installed_service_quiesced_under_lease_with_runner(
 
 /// Restores the managed daemon after an update maintenance window.
 ///
-/// History (`ef3b3cb0`, later comments) described this as restoring the exact
-/// captured running/disabled snapshot so an operator-stopped daemon stayed
-/// stopped. That snapshot cannot distinguish an explicit stop from a unit
-/// found dead (OOM, start-limit, disabled-by-accident). After-update restore
-/// therefore starts an installed, non-masked unit — see
-/// [`DaemonServiceState::expected_after_update`]. Non-update callers that must
-/// preserve a stopped snapshot use [`QuiescedDaemonLifecycle::finish`] rather
-/// than this function.
+/// The captured running/enabled pair is authoritative. In particular, a
+/// stopped unit stays stopped because the snapshot cannot distinguish an
+/// intentional operator hold from an unexpected exit. Activation belongs to
+/// explicit lifecycle commands.
 ///
 /// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
 #[doc(hidden)]
