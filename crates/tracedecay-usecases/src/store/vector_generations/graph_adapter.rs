@@ -59,6 +59,9 @@ pub use evaluation_runtime::{
 
 pub const SEMANTIC_VECTOR_GRAPH_PROJECTION: &str = "tracedecay.semantic-vector.graph";
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
+/// Effectively-unbounded budget for daemon-owned, corpus-scaled graph work.
+/// Lifecycle cancellation remains the governing reclamation mechanism.
+pub const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_hours(168);
 
 pub struct GraphVectorGenerationStoreV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
