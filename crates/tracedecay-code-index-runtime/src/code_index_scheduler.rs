@@ -102,7 +102,7 @@ use crate::{
     },
 };
 use tracedecay_code_index_retention::code_index_generations::{
-    DurableCodeTextArtifactDescriptorV1, DurableGenerationCardinalityV1,
+    CodeGenerationStoreLockV1, DurableCodeTextArtifactDescriptorV1, DurableGenerationCardinalityV1,
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
     MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_code_generation_store_lock,
@@ -674,6 +674,12 @@ struct TemporaryEvidencePackV1 {
     published_path: Option<PathBuf>,
 }
 
+struct PinnedGenerationSegmentV1 {
+    digest: String,
+    size_bytes: u64,
+    file: File,
+}
+
 impl TemporaryEvidencePackV1 {
     fn create(path: PathBuf) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
         let file = std::fs::OpenOptions::new()
@@ -953,6 +959,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     fn corruption(error: impl std::fmt::Display) -> CodeIndexPublicationStoreErrorV1 {
         CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(error.to_string())
+    }
+
+    fn acquire_generation_read_lock(
+        &self,
+    ) -> Result<CodeGenerationStoreLockV1, CodeIndexPublicationStoreErrorV1> {
+        let store_root = self
+            .active_path
+            .parent()
+            .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
+        acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)
     }
 
     fn remove_abandoned_evidence_packs(
@@ -1397,6 +1413,129 @@ impl DaemonCodeIndexPublicationStoreV1 {
             })
     }
 
+    fn open_pinned_partitioned_segment(
+        &self,
+        request: SealedGenerationSegmentReadV1<'_>,
+    ) -> Result<PinnedGenerationSegmentV1, CodeIndexProductionErrorV1> {
+        let (digest, expected_size, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest.as_str(), size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest.as_str(), size_bytes, offset, length),
+        };
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > expected_size)
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment range exceeds its manifest identity".to_owned(),
+            ));
+        }
+        let digest_hex = digest.strip_prefix("sha256:").ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+        })?;
+        let path = self
+            .segments_root
+            .join(format!("segment-{digest_hex}.json"));
+        let path_metadata = path.symlink_metadata().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment is unavailable: {error}"
+            ))
+        })?;
+        if !path_metadata.file_type().is_file() || path_metadata.len() != expected_size {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment identity does not match its manifest".to_owned(),
+            ));
+        }
+        let file = File::open(&path).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment cannot be opened: {error}"
+            ))
+        })?;
+        let file_metadata = file.metadata().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment metadata cannot be read: {error}"
+            ))
+        })?;
+        let file_identity = Handle::from_file(file.try_clone().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment handle cannot be cloned: {error}"
+            ))
+        })?)
+        .map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment handle identity cannot be read: {error}"
+            ))
+        })?;
+        let path_identity = Handle::from_path(&path).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment path identity cannot be read: {error}"
+            ))
+        })?;
+        if !file_metadata.is_file()
+            || file_metadata.len() != expected_size
+            || file_identity != path_identity
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment identity changed while it was opened".to_owned(),
+            ));
+        }
+        Ok(PinnedGenerationSegmentV1 {
+            digest: digest.to_owned(),
+            size_bytes: expected_size,
+            file,
+        })
+    }
+
+    fn read_pinned_partitioned_segment(
+        pinned: &mut PinnedGenerationSegmentV1,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let (digest, expected_size, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest.as_str(), size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest.as_str(), size_bytes, offset, length),
+        };
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > expected_size)
+            || digest != pinned.digest
+            || expected_size != pinned.size_bytes
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence page does not match its pinned segment".to_owned(),
+            ));
+        }
+        let length = usize::try_from(length).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment range exceeds addressable memory".to_owned(),
+            )
+        })?;
+        buffer.clear();
+        buffer.resize(length, 0);
+        pinned
+            .file
+            .seek(SeekFrom::Start(offset))
+            .and_then(|_| pinned.file.read_exact(buffer))
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment read failed: {error}"
+                ))
+            })
+    }
+
     #[hotpath::measure(label = "code_index.generation.validate_partitioned_manifest")]
     fn partitioned_text_metadata(
         &self,
@@ -1427,6 +1566,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         file: &mut File,
         admitted_len: u64,
         expected_file_digest: &ManifestDigest,
+        lifetime_lock: CodeGenerationStoreLockV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
         let monolithic = CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
             &mut *file,
@@ -1453,8 +1593,31 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation manifest filename digest does not match its bytes".to_owned(),
             ));
         }
+        let mut lifetime_lock = Some(lifetime_lock);
+        let mut pinned_evidence = None;
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |request, buffer| {
-            self.read_partitioned_segment(request, buffer)
+            match request {
+                SealedGenerationSegmentReadV1::Whole { .. } => {
+                    self.read_partitioned_segment(request, buffer)
+                }
+                SealedGenerationSegmentReadV1::Range { .. } => {
+                    if pinned_evidence.is_none() {
+                        pinned_evidence = Some(self.open_pinned_partitioned_segment(request)?);
+                        // The store lock proves the pack pathname is live through
+                        // this open. The handle then owns all remaining page reads.
+                        drop(lifetime_lock.take());
+                    }
+                    Self::read_pinned_partitioned_segment(
+                        pinned_evidence.as_mut().ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "sealed generation evidence handle was not pinned".to_owned(),
+                            )
+                        })?,
+                        request,
+                        buffer,
+                    )
+                }
+            }
         })
     }
 
@@ -1565,6 +1728,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index file does not match its sealed digest",
             ));
         }
+        let lifetime_lock = self.acquire_generation_read_lock()?;
         let path = self.generations_root.join(&entry.generation_file);
         let metadata = path.symlink_metadata().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -1603,7 +1767,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
         hotpath::gauge!("code_index.generation.decode.bytes_total").inc(entry.size_bytes);
         let decoded = hotpath::measure_block!(
             "code_index.generation.decode.file_read",
-            self.decode_generation_file(&mut file, entry.size_bytes, &expected_digest,)
+            self.decode_generation_file(
+                &mut file,
+                entry.size_bytes,
+                &expected_digest,
+                lifetime_lock,
+            )
         );
         // A failing decode still swept the sealed bytes, and fail-closed
         // serving depends on that sweep re-running per request; count it
@@ -1784,6 +1953,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn decode_active_generation(
         &self,
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+        let lifetime_lock = self.acquire_generation_read_lock()?;
         let Some(pointer) = self.read_publication_pointer()? else {
             return Ok(None);
         };
@@ -1831,7 +2001,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
         hotpath::gauge!("code_index.generation.decode.bytes_total").inc(metadata.len());
         let decoded = hotpath::measure_block!(
             "code_index.generation.decode.file_read",
-            self.decode_generation_file(&mut file, metadata.len(), &expected_digest,)
+            self.decode_generation_file(
+                &mut file,
+                metadata.len(),
+                &expected_digest,
+                lifetime_lock,
+            )
         );
         // A failing decode still swept the sealed bytes, and fail-closed
         // serving depends on that sweep re-running per request; count it
@@ -1908,6 +2083,12 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
+        if self.undecoded_active_expectation.is_none() {
+            // Cold hydration takes the store lock itself. Complete it before
+            // entering the publication transaction, then recheck the exact
+            // expected pointer under the writer lock below.
+            let _ = self.load_active_shared()?;
+        }
         let _store_lock =
             acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
         let prior_pointer = if let Some(expected) = self.undecoded_active_expectation.as_ref() {
@@ -1922,9 +2103,16 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             }
             Some(pointer)
         } else {
-            let _ = self.load_active_shared()?;
             self.read_publication_pointer()?
         };
+        if self.undecoded_active_expectation.is_none()
+            && prior_pointer
+                .as_ref()
+                .map(|pointer| pointer.generation_id.as_str())
+                != expected_active_generation.map(CodeGenerationId::as_str)
+        {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
         let state = self.cache.lock_state()?;
         let cached_active = state
             .active
