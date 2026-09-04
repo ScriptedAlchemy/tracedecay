@@ -103,10 +103,15 @@ impl ManualBranchArtifactsV1 {
         }
     }
 
+    /// Lifecycle locks live beside `branch-worktrees`, never inside it. The
+    /// lease is taken before the branch identity is resolved, so a typed
+    /// pre-mutation refusal (missing ref, unavailable Git authority) must not
+    /// leave the worktree root behind as evidence of an activation that never
+    /// happened — and nothing enumerating branch worktrees has to filter a
+    /// non-worktree entry out.
     fn lifecycle_lock_path(&self, data_root: &Path) -> PathBuf {
         data_root
-            .join("branch-worktrees")
-            .join(".lifecycle")
+            .join("branch-lifecycle")
             .join(format!("{}.lock", self.branch_digest))
     }
 }
