@@ -19,6 +19,23 @@ pub(crate) use generated::PRODUCT_BUILD_VERSION;
 /// host plugins as their `generator_commit` provenance.
 pub(crate) use generated::PRODUCT_FULL_SHA;
 
+/// Registers this binary's own provider for unit tests that reach a daemon
+/// handshake.
+///
+/// `main` performs this registration at process start, but nextest runs every
+/// unit test in a process that never enters `main`, so a test whose subject
+/// builds a handshake would otherwise see
+/// `no product runtime provider is registered`. Registration is set-once, so a
+/// second call from another fixture in the same process is a no-op and every
+/// fixture may call this unconditionally.
+#[cfg(test)]
+pub(crate) fn register_for_tests() {
+    match tracedecay::register_product_runtime(provider()) {
+        Ok(()) | Err(tracedecay::ProductRuntimeError::ConflictingProvider) => {}
+        Err(error) => panic!("register the CLI product runtime for tests: {error}"),
+    }
+}
+
 pub(crate) fn provider() -> tracedecay::ProductRuntimeProvider {
     tracedecay::ProductRuntimeProvider {
         release_version: env!("CARGO_PKG_VERSION"),
