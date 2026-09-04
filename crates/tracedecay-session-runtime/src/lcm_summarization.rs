@@ -5,7 +5,7 @@ use tracedecay_domain::CanonicalObservationEnvelopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_lcm::{LcmError, LcmSummaryRequest, LcmSummarySourceRange};
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 mod cursor_agent;
 mod provider_capabilities;
@@ -28,7 +28,8 @@ pub(super) async fn resolve_authoritative_summary(
     timeout: Duration,
     required_native_source_range: Option<&LcmSummarySourceRange>,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
-    if let Some(summary) = native_summary_evidence(database, provider, session_id).await?
+    if let Some(summary) =
+        native_summary_evidence(database, provider, session_id, Some(&request)).await?
         && required_native_source_range
             .is_none_or(|required| summary.source_range.as_ref() == Some(required))
     {
@@ -62,6 +63,7 @@ pub(super) async fn native_summary_evidence(
     database: &RegisteredGlobalDb,
     provider: &str,
     session_id: &str,
+    required_source: Option<&LcmSummaryRequest>,
 ) -> Result<Option<AuthoritativeSummary>, LcmError> {
     let snapshot = database
         .read_snapshot()
@@ -171,6 +173,18 @@ pub(super) async fn native_summary_evidence(
                     })
                 },
             );
+            if let Some(required_source) = required_source
+                && !native_source_membership_is_exact(
+                    &snapshot,
+                    provider,
+                    session_id,
+                    source_range.as_ref(),
+                    required_source,
+                )
+                .await?
+            {
+                continue;
+            }
             return Ok(Some(AuthoritativeSummary {
                 text,
                 route: route.to_string(),
@@ -179,6 +193,55 @@ pub(super) async fn native_summary_evidence(
         }
     }
     Ok(None)
+}
+
+async fn native_source_membership_is_exact(
+    snapshot: &impl QueryExecutor,
+    provider: &str,
+    session_id: &str,
+    native_range: Option<&LcmSummarySourceRange>,
+    required: &LcmSummaryRequest,
+) -> Result<bool, LcmError> {
+    if native_range != Some(&required.source_range) || required.source_messages.is_empty() {
+        return Ok(false);
+    }
+    let limit = i64::try_from(required.source_messages.len().saturating_add(1))
+        .map_err(|_| LcmError::Db("native source membership limit overflow".to_string()))?;
+    let mut rows = snapshot
+        .query(
+            "SELECT store_id
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND session_id = ?2
+               AND store_id BETWEEN ?3 AND ?4
+             ORDER BY store_id
+             LIMIT ?5",
+            params![
+                provider,
+                session_id,
+                required.source_range.from_store_id,
+                required.source_range.to_store_id,
+                limit,
+            ],
+        )
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let mut actual = Vec::with_capacity(required.source_messages.len().saturating_add(1));
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?
+    {
+        actual.push(
+            row.get::<i64>(0)
+                .map_err(|error| LcmError::Db(error.to_string()))?,
+        );
+    }
+    Ok(actual
+        == required
+            .source_messages
+            .iter()
+            .map(|message| message.store_id)
+            .collect::<Vec<_>>())
 }
 
 pub(super) enum SummaryResolutionError {

@@ -72,43 +72,18 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_insert
                 lcm_summary_convergence_queue.raw_revision_generation + 1;
     END;
 CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
-    AFTER UPDATE OF provider, session_id, content_hash, storage_kind,
-                    payload_ref, metadata_json ON lcm_raw_messages
-    WHEN NOT (
-        OLD.provider IS NEW.provider
-        AND OLD.session_id IS NEW.session_id
-        AND CASE
-              WHEN json_valid(OLD.metadata_json)
-              THEN json_extract(
-                  OLD.metadata_json,
-                  '$.ingest_protection.sanitization_receipt'
-              ) IS NULL
-              ELSE 1
-            END
-        AND CASE
-              WHEN json_valid(NEW.metadata_json)
-              THEN json_extract(
-                  NEW.metadata_json,
-                  '$.ingest_protection.sanitization_receipt'
-              ) IS NOT NULL
-              ELSE 0
-            END
-      )
-      AND (
-        OLD.provider IS NOT NEW.provider
-        OR OLD.session_id IS NOT NEW.session_id
-        OR OLD.content_hash IS NOT NEW.content_hash
-        OR OLD.storage_kind IS NOT NEW.storage_kind
-        OR OLD.payload_ref IS NOT NEW.payload_ref
-        OR CASE
-             WHEN json_valid(NEW.metadata_json)
-             THEN json_extract(
-                 NEW.metadata_json,
-                 '$.ingest_protection.sanitization_receipt'
-             ) IS NULL
-             ELSE 1
-           END
-      )
+    AFTER UPDATE OF provider, session_id, role, ordinal, timestamp,
+                    content_hash, storage_kind, payload_ref, metadata_json
+                    ON lcm_raw_messages
+    WHEN OLD.provider IS NOT NEW.provider
+      OR OLD.session_id IS NOT NEW.session_id
+      OR OLD.role IS NOT NEW.role
+      OR OLD.ordinal IS NOT NEW.ordinal
+      OR OLD.timestamp IS NOT NEW.timestamp
+      OR OLD.content_hash IS NOT NEW.content_hash
+      OR OLD.storage_kind IS NOT NEW.storage_kind
+      OR OLD.payload_ref IS NOT NEW.payload_ref
+      OR OLD.metadata_json IS NOT NEW.metadata_json
     BEGIN
         INSERT INTO lcm_summary_convergence_queue (
             provider, session_id, newest_raw_store_id,
@@ -127,9 +102,13 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
             END,
             1,
             CASE
-              WHEN OLD.content_hash IS NOT NEW.content_hash
+              WHEN OLD.role IS NOT NEW.role
+                OR OLD.ordinal IS NOT NEW.ordinal
+                OR OLD.timestamp IS NOT NEW.timestamp
+                OR OLD.content_hash IS NOT NEW.content_hash
                 OR OLD.storage_kind IS NOT NEW.storage_kind
                 OR OLD.payload_ref IS NOT NEW.payload_ref
+                OR OLD.metadata_json IS NOT NEW.metadata_json
               THEN NEW.store_id
               ELSE NULL
             END
@@ -269,7 +248,7 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
         ),
         (
             "lcm_summary_convergence_raw_unprotected_update",
-            "json_valid(OLD.metadata_json)",
+            "OLD.role IS NOT NEW.role",
         ),
     ] {
         let mut rows = conn
@@ -413,9 +392,47 @@ pub async fn next_candidate(
     }))
 }
 
-pub async fn record_protection_progress(
+pub async fn candidate_for_session(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+) -> Result<Option<LcmSummaryConvergenceCandidate>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT provider, session_id, newest_raw_store_id,
+                    protection_frontier_store_id, attempted_raw_store_id,
+                    failure_count, raw_revision_generation, stale_from_store_id
+             FROM lcm_summary_convergence_queue
+             WHERE provider = ?1 AND session_id = ?2
+               AND state IN ('pending', 'retryable')
+             LIMIT 1",
+            params![provider, session_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let failure_count = u32::try_from(row.get::<i64>(5)?).map_err(|error| {
+        LcmError::Db(format!(
+            "invalid LCM summary convergence failure count: {error}"
+        ))
+    })?;
+    Ok(Some(LcmSummaryConvergenceCandidate {
+        provider: row.get(0)?,
+        session_id: row.get(1)?,
+        newest_raw_store_id: row.get(2)?,
+        protection_frontier_store_id: row.get(3)?,
+        attempted_raw_store_id: row.get(4)?,
+        failure_count,
+        raw_revision_generation: row.get(6)?,
+        stale_from_store_id: row.get(7)?,
+    }))
+}
+
+pub async fn record_current_protection_progress(
     conn: &(impl Executor + ?Sized),
-    candidate: &LcmSummaryConvergenceCandidate,
+    provider: &str,
+    session_id: &str,
     protection_frontier_store_id: i64,
 ) -> Result<(), LcmError> {
     conn.execute(
@@ -424,14 +441,8 @@ pub async fn record_protection_progress(
                  protection_frontier_store_id, ?3
              ),
              attempt_generation = attempt_generation + 1
-         WHERE provider = ?1 AND session_id = ?2
-           AND raw_revision_generation = ?4",
-        params![
-            candidate.provider.as_str(),
-            candidate.session_id.as_str(),
-            protection_frontier_store_id,
-            candidate.raw_revision_generation,
-        ],
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, session_id, protection_frontier_store_id],
     )
     .await?;
     Ok(())
