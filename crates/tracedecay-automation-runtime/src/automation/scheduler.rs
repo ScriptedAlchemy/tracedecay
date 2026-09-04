@@ -1556,6 +1556,10 @@ disconnected: config error: codex app-server closed stdout before completing";
 
     #[test]
     fn deterministic_backend_failure_settles_once_and_never_relaunches() {
+        // The executable override is process-global. Keep the stamped
+        // identity and every later suppression read under one environment
+        // lock so the same-path replacement test cannot interleave them.
+        let _env_lock = crate::config::lock_user_data_dir_test_env();
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
@@ -1592,6 +1596,7 @@ disconnected: config error: codex app-server closed stdout before completing";
 
     #[test]
     fn changing_the_configuration_revision_readmits_a_settled_failure() {
+        let _env_lock = crate::config::lock_user_data_dir_test_env();
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
@@ -1694,6 +1699,7 @@ evidence about it",
 
     #[test]
     fn typed_permanent_protocol_failure_stays_suppressed_under_the_same_identity() {
+        let _env_lock = crate::config::lock_user_data_dir_test_env();
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
