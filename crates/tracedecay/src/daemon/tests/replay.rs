@@ -4,10 +4,22 @@ use super::*;
 async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
     let temp = TempDir::new().unwrap();
     let profile_root = temp.path().join("profile");
-    // A real profile identity but no daemon database scope: setup passes the
-    // identity gate and must then surface the registered-authority route
-    // failure as JSON-RPC instead of hanging or panicking.
+    // A real profile identity whose registered profile-session store cannot be
+    // opened: setup passes the identity gate and must then surface the
+    // registered-authority route failure as JSON-RPC instead of hanging or
+    // panicking.
+    //
+    // The unopenable store is created by putting a directory where the
+    // user-sessions database belongs. Merely withholding the daemon database
+    // scope no longer produces a failure here: in a test build
+    // `DatabaseAuthority::for_runtime` grants fixture `Test` authority to any
+    // database under the system temp dir, so the whole retained path succeeds
+    // and the JSON-RPC error contract goes unexercised.
     let administration = test_store_administration_for_profile(&profile_root);
+    std::fs::create_dir_all(tracedecay_sessions::runtime::user_sessions_db_path(
+        &profile_root,
+    ))
+    .expect("block the registered profile-session store");
     let identity = test_client_identity_for(profile_root);
     let params = serde_json::json!({
         "name": "tracedecay_lcm_status",
@@ -26,9 +38,9 @@ async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
     )
     .await;
 
-    let error = response
-        .error
-        .expect("profile setup failure must be returned as JSON-RPC");
+    let error = response.error.clone().unwrap_or_else(|| {
+        panic!("profile setup failure must be returned as JSON-RPC: {response:?}")
+    });
     assert_eq!(error.code, -32603);
     assert!(
         error

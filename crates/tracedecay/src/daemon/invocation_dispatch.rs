@@ -461,6 +461,25 @@ pub(super) async fn write_tool_list_changed_notification(
     Ok(())
 }
 
+/// `NotFoundOrNotAuthorized` is one closed outcome for every way a named root
+/// can be refused, which is right on the wire and useless in a log. Record
+/// which gate refused so an operator can tell "this project was never
+/// registered" from "this root is registered but its LSP owner answers for a
+/// different checkout".
+fn multi_root_root_refused(
+    selector: &tracedecay_application::RegisteredRootSelectorV1,
+    reason_code: &str,
+) {
+    log_daemon_event(
+        "multi_root_root_refused",
+        &[
+            ("project_id", selector.project_id.as_str().to_owned()),
+            ("root", selector.root.display().to_string()),
+            ("reason_code", reason_code.to_owned()),
+        ],
+    );
+}
+
 pub(super) async fn resolve_multi_root_projects(
     store_administration: &StoreAdministration,
     service: &DaemonInvocationService,
@@ -488,8 +507,12 @@ pub(super) async fn resolve_multi_root_projects(
             .project_registry_context_by_id(selector.project_id.as_str())
             .await
             .map_err(|_| DaemonInvocationProblem::Unavailable)?
-            .ok_or(DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+            .ok_or_else(|| {
+                multi_root_root_refused(selector, "project_not_registered");
+                DaemonInvocationProblem::NotFoundOrNotAuthorized
+            })?;
         if context.project.project_id != selector.project_id.as_str() {
+            multi_root_root_refused(selector, "registry_project_id_mismatch");
             return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
         let mut stores = context
@@ -522,6 +545,12 @@ pub(super) async fn resolve_multi_root_projects(
             tracedecay_code_index_runtime::resolved_scope_for_project(&root, &selector.project_id)
                 .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         if !service.lsp_owner_matches_scope(&root, &scope).await {
+            let reason_code = if service.lsp_owner(Some(&root)).await.is_some() {
+                "lsp_owner_scope_mismatch"
+            } else {
+                "lsp_owner_absent"
+            };
+            multi_root_root_refused(selector, reason_code);
             return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
         let locator = tracedecay_application::RegisteredRootLocatorV1::new(
