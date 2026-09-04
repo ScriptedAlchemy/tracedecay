@@ -6441,9 +6441,8 @@ fn feedback_document_logical_path(
     let path = url
         .to_file_path()
         .map_err(|()| LspRuntimeFailure::new("feedback-document-uri-invalid"))?;
-    let relative = path
-        .strip_prefix(project_root)
-        .map_err(|_| LspRuntimeFailure::new("feedback-document-outside-root"))?;
+    let relative = canonical_relative_document_path(project_root, &path)
+        .ok_or_else(|| LspRuntimeFailure::new("feedback-document-outside-root"))?;
     if relative.as_os_str().is_empty()
         || relative
             .components()
@@ -6455,6 +6454,122 @@ fn feedback_document_logical_path(
         .to_str()
         .map(|path| path.replace('\\', "/"))
         .ok_or_else(|| LspRuntimeFailure::new("feedback-document-path-unavailable"))
+}
+
+/// Strip the canonical `project_root` from a client-supplied document path,
+/// comparing canonical to canonical.
+///
+/// The caller canonicalizes the mounted root; the client addresses a document
+/// by whatever path it opened. Those two spellings differ whenever any prefix
+/// of the root is a symlink — on macOS every `/var/folders/...` root the
+/// daemon holds as `/private/var/folders/...` — and a raw prefix strip
+/// refused every document under such a root as outside it.
+///
+/// The document need not exist yet (an unsaved buffer), so the deepest
+/// existing ancestor is canonicalized and the unresolved tail re-appended.
+/// The fence tightens rather than loosens: resolving before the strip refuses
+/// a path that reaches outside the root through a symlink *inside* it, which
+/// a raw prefix strip accepted as an ordinary logical path. The caller still
+/// refuses any relative path that is empty or carries a non-normal component,
+/// so an unresolved tail can neither escape upward nor name a root-external
+/// path.
+fn canonical_relative_document_path(project_root: &Path, path: &Path) -> Option<PathBuf> {
+    let mut unresolved: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut candidate = path;
+    loop {
+        if let Ok(canonical) = candidate.canonicalize() {
+            let mut relative = canonical.strip_prefix(project_root).ok()?.to_path_buf();
+            for component in unresolved.iter().rev() {
+                relative.push(component);
+            }
+            return Some(relative);
+        }
+        unresolved.push(candidate.file_name()?);
+        candidate = candidate.parent()?;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod feedback_document_path_tests {
+    use super::feedback_document_logical_path;
+
+    /// A symlinked root reproduces on Linux exactly what every macOS
+    /// `/var/folders/...` temporary root does in production: the daemon holds
+    /// the canonical root while the client addresses documents through the
+    /// alias it opened.
+    #[test]
+    fn a_symlinked_root_alias_resolves_to_the_same_logical_path() {
+        let base = tempfile::TempDir::new().expect("temporary base");
+        let real = base.path().join("real");
+        std::fs::create_dir_all(real.join("src")).expect("real tree");
+        std::fs::write(real.join("src/lib.rs"), b"pub fn alpha() {}\n").expect("document");
+        let alias = base.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("root alias");
+
+        let canonical_root = real.canonicalize().expect("canonical root");
+        let canonical_uri = url::Url::from_file_path(canonical_root.join("src/lib.rs"))
+            .expect("canonical document uri");
+        let alias_uri =
+            url::Url::from_file_path(alias.join("src/lib.rs")).expect("alias document uri");
+
+        assert_eq!(
+            feedback_document_logical_path(&canonical_root, canonical_uri.as_str())
+                .expect("canonical spelling resolves"),
+            "src/lib.rs"
+        );
+        assert_eq!(
+            feedback_document_logical_path(&canonical_root, alias_uri.as_str())
+                .expect("the client's alias spelling resolves against the canonical root"),
+            "src/lib.rs"
+        );
+    }
+
+    /// An unsaved buffer has no file to canonicalize; the deepest existing
+    /// ancestor still binds it to the root.
+    #[test]
+    fn an_unsaved_document_under_a_root_alias_still_resolves() {
+        let base = tempfile::TempDir::new().expect("temporary base");
+        let real = base.path().join("real");
+        std::fs::create_dir_all(real.join("src")).expect("real tree");
+        let alias = base.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("root alias");
+        let canonical_root = real.canonicalize().expect("canonical root");
+
+        let uri = url::Url::from_file_path(alias.join("src/unsaved.rs")).expect("document uri");
+        assert_eq!(
+            feedback_document_logical_path(&canonical_root, uri.as_str())
+                .expect("an unsaved buffer resolves through its existing ancestor"),
+            "src/unsaved.rs"
+        );
+    }
+
+    /// The escape fence stays closed: an alias that leaves the root, and a
+    /// traversal that climbs out of it, are both refused.
+    #[test]
+    fn paths_outside_the_root_stay_refused_through_an_alias() {
+        let base = tempfile::TempDir::new().expect("temporary base");
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).expect("real tree");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside tree");
+        std::fs::write(outside.join("secret.rs"), b"pub fn secret() {}\n").expect("outside file");
+        std::os::unix::fs::symlink(&outside, real.join("escape")).expect("escaping alias");
+        let canonical_root = real.canonicalize().expect("canonical root");
+
+        let escaping = url::Url::from_file_path(canonical_root.join("escape/secret.rs"))
+            .expect("escaping document uri");
+        assert!(
+            feedback_document_logical_path(&canonical_root, escaping.as_str()).is_err(),
+            "a symlink out of the root is not a document of this project"
+        );
+
+        let traversal =
+            url::Url::from_file_path(outside.join("secret.rs")).expect("outside document uri");
+        assert!(
+            feedback_document_logical_path(&canonical_root, traversal.as_str()).is_err(),
+            "a sibling directory is not a document of this project"
+        );
+    }
 }
 
 #[cfg(test)]
