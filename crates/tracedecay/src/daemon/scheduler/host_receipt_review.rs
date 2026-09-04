@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 
@@ -27,11 +28,46 @@ pub(super) async fn run_host_receipt_review(
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
 ) -> Result<()> {
-    drain_ready_host_receipts(|| {
-        run_one_host_receipt_review(project_path, cg, handshake, engine, run_control)
+    run_host_receipt_review_inner(project_path, cg, handshake, engine, run_control).await
+}
+
+/// The review pass behind [`run_host_receipt_review`], boxed at definition so
+/// the instrumented outer future stays a pointer-sized state machine and each
+/// per-receipt review (which inlines combined-effect preparation and
+/// execution) lives on the heap rather than in one scheduler poll frame.
+fn run_host_receipt_review_inner<'a>(
+    project_path: &'a Path,
+    cg: &'a TraceDecay,
+    handshake: &'a DaemonHandshake,
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        drain_ready_host_receipts(|| {
+            boxed_one_host_receipt_review(project_path, cg, handshake, engine, run_control)
+        })
+        .await
+        .map(|_| ())
     })
-    .await
-    .map(|_| ())
+}
+
+/// One receipt review as a type-erased boxed future, so neither the drain
+/// loop's state machine nor any layout query above it names the concrete
+/// review future.
+fn boxed_one_host_receipt_review<'a>(
+    project_path: &'a Path,
+    cg: &'a TraceDecay,
+    handshake: &'a DaemonHandshake,
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+) -> Pin<Box<dyn Future<Output = Result<HostReceiptReviewProgress>> + Send + 'a>> {
+    Box::pin(run_one_host_receipt_review(
+        project_path,
+        cg,
+        handshake,
+        engine,
+        run_control,
+    ))
 }
 
 async fn drain_ready_host_receipts<Review, ReviewFuture>(mut review: Review) -> Result<usize>
@@ -152,7 +188,7 @@ async fn run_one_host_receipt_review(
         trigger: AutomationTrigger::HostReceipt,
         ..CombinedReviewAutomationOptions::default()
     };
-    let admission = super::combined_effect::prepare_combined_effects(
+    let admission = Box::pin(super::combined_effect::prepare_combined_effects(
         engine,
         cg,
         run_control,
@@ -161,10 +197,10 @@ async fn run_one_host_receipt_review(
         Some(&host_run_id),
         configuration.configuration_digest.clone(),
         &combined_options,
-    )
+    ))
     .await?;
     let mut first_error = None;
-    let outcome = super::combined_effect::run_combined_scheduler_effect(
+    let outcome = Box::pin(super::combined_effect::run_combined_scheduler_effect(
         admission,
         engine,
         cg,
@@ -176,7 +212,7 @@ async fn run_one_host_receipt_review(
         retrieval.as_ref(),
         combined_options,
         &mut first_error,
-    )
+    ))
     .await;
     if let Some(error) = first_error {
         return Err(error);

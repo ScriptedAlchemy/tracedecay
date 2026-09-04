@@ -17,6 +17,34 @@ use super::super::{
 
 #[tokio::test]
 async fn automation_scheduler_tick_respects_pause_control_without_backend_call() {
+    paused_tick_scenario().await;
+}
+
+/// The daemon polls its automation scheduler on Tokio workers with a 16 MiB
+/// stack (`ASYNC_STACK_BYTES` in the CLI). Under `--features hotpath` every
+/// instrumented future is wrapped by value, which is what overflowed that
+/// stack in production (#835). Run the same tick on a thread of exactly that
+/// size so a regression aborts here instead of in the live daemon.
+#[cfg(feature = "hotpath")]
+#[test]
+fn automation_scheduler_tick_fits_the_daemon_worker_stack() {
+    const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("daemon-worker-stack".to_owned())
+        .stack_size(DAEMON_WORKER_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime")
+                .block_on(paused_tick_scenario());
+        })
+        .expect("spawn daemon-sized thread")
+        .join()
+        .expect("scheduler tick must complete on a daemon-sized stack");
+}
+
+async fn paused_tick_scenario() {
     let dir = TempDir::new().expect("temp dir");
     let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().canonicalize().expect("canonical temp dir");

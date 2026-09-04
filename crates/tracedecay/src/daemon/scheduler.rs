@@ -1070,6 +1070,42 @@ fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The scheduler tick as a type-erased boxed future: the loop's state machine
+/// (and every layout query that reaches it from a runtime open) then names
+/// only a pointer, not the instrumented tick future.
+fn boxed_automation_scheduler_tick<'a>(
+    project_path: &'a Path,
+    cg: &'a TraceDecay,
+    handshake: &'a DaemonHandshake,
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(run_automation_scheduler_tick(
+        project_path,
+        cg,
+        handshake,
+        engine,
+        run_control,
+    ))
+}
+
+/// See [`boxed_automation_scheduler_tick`].
+fn boxed_host_receipt_review<'a>(
+    project_path: &'a Path,
+    cg: &'a TraceDecay,
+    handshake: &'a DaemonHandshake,
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(run_host_receipt_review(
+        project_path,
+        cg,
+        handshake,
+        engine,
+        run_control,
+    ))
+}
+
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,
@@ -1195,14 +1231,8 @@ async fn run_automation_scheduler_loop(
         );
         let tick_result = {
             let _background_job = BackgroundJobGaugeGuard::enter();
-            Box::pin(run_automation_scheduler_tick(
-                &project_path,
-                &cg,
-                &handshake,
-                &engine,
-                &run_control,
-            ))
-            .await
+            boxed_automation_scheduler_tick(&project_path, &cg, &handshake, &engine, &run_control)
+                .await
         };
         if let Err(e) = tick_result {
             log_daemon_event(
@@ -1214,14 +1244,8 @@ async fn run_automation_scheduler_loop(
                 ],
             );
         }
-        if let Err(error) = Box::pin(run_host_receipt_review(
-            &project_path,
-            &cg,
-            &handshake,
-            &engine,
-            &run_control,
-        ))
-        .await
+        if let Err(error) =
+            boxed_host_receipt_review(&project_path, &cg, &handshake, &engine, &run_control).await
         {
             log_daemon_event(
                 "host_receipt_review",
@@ -1252,13 +1276,13 @@ async fn run_automation_scheduler_loop(
                         () = wake.notified() => {}
                     }
                 }
-                if let Err(error) = Box::pin(run_host_receipt_review(
+                if let Err(error) = boxed_host_receipt_review(
                     &project_path,
                     &cg,
                     &handshake,
                     &engine,
                     &run_control,
-                ))
+                )
                 .await
                 {
                     log_daemon_event(
