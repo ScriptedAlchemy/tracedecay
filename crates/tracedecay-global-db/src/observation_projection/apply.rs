@@ -18,6 +18,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_sessions::runtime::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
+use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
 use super::state::{
     canonicalize_session_project_paths, read_message, read_output_state, read_session,
@@ -541,6 +542,96 @@ async fn upsert_projected_raw_message(
         })
 }
 
+async fn reconcile_projected_codex_goal_response(
+    conn: &impl Executor,
+    current: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    let Some(response_message_id) = find_preceding_codex_goal_response(conn, current)
+        .await
+        .map_err(|error| storage("find preceding Codex goal response", error))?
+    else {
+        return Ok(());
+    };
+    let mut provenance_rows = conn
+        .query(
+            "SELECT observation_id, receipt_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                current.provider.as_str(),
+                response_message_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("read paired Codex goal provenance", error))?;
+    let mut replaced_observations = Vec::new();
+    while let Some(row) = provenance_rows
+        .next()
+        .await
+        .map_err(|error| storage("read paired Codex goal provenance", error))?
+    {
+        replaced_observations.push((
+            row.get::<String>(0)
+                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+            row.get::<String>(1)
+                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+        ));
+    }
+    drop(provenance_rows);
+    conn.execute(
+        "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+        params![current.provider.as_str(), response_message_id.as_str()],
+    )
+    .await
+    .map_err(|error| storage("remove paired Codex goal raw message", error))?;
+    conn.execute(
+        "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+        params![current.provider.as_str(), response_message_id.as_str()],
+    )
+    .await
+    .map_err(|error| storage("remove paired Codex goal projection", error))?;
+    conn.execute(
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            current.provider.as_str(),
+            response_message_id.as_str(),
+        ],
+    )
+    .await
+    .map_err(|error| storage("remove paired Codex goal provenance", error))?;
+    for (observation_id, receipt_id) in replaced_observations {
+        conn.execute(
+            "INSERT INTO observation_projection_dispositions
+                (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT DO NOTHING",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+                receipt_id.as_str(),
+                ProjectionSkipReason::OutputCollision.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("retire paired Codex goal observation", error))?;
+    }
+    conn.execute(
+        "DELETE FROM temp.observation_projection_output_state
+         WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            current.provider.as_str(),
+            response_message_id.as_str(),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("remove paired Codex goal output state", error))
+}
+
 #[hotpath::measure(future = true, label = "global_db.observation_apply.persist.rows")]
 async fn apply_rows(
     conn: &impl Executor,
@@ -552,6 +643,7 @@ async fn apply_rows(
     apply_session(conn, session).await?;
 
     let message = projection.message();
+    reconcile_projected_codex_goal_response(conn, message).await?;
     let existing = read_message(conn, &message.provider, &message.message_id).await?;
     let state = read_output_state(conn, projection).await?;
     if existing.is_some()

@@ -981,7 +981,17 @@ async fn current_codex_goal_pair_projects_once_with_native_identity_and_goal_sem
             "type": "response_item",
             "payload": {
                 "type": "message",
-                "id": "msg-goal-1",
+                "id": "msg-goal-unpaired-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": goal}]
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.002Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-goal-paired-2",
                 "role": "user",
                 "content": [{"type": "input_text", "text": goal}]
             }
@@ -1027,13 +1037,13 @@ async fn current_codex_goal_pair_projects_once_with_native_identity_and_goal_sem
         .await
         .unwrap();
 
-    assert_eq!(projection.projected_outputs, 1);
+    assert_eq!(projection.projected_outputs, 2);
     assert_eq!(
         runtime
             .session_message_count_for_test(HostAdmissionScope::Project, None)
             .await
             .unwrap(),
-        1
+        2
     );
     let messages = runtime
         .search_session_messages_for_test(
@@ -1045,8 +1055,12 @@ async fn current_codex_goal_pair_projects_once_with_native_identity_and_goal_sem
         )
         .await
         .unwrap();
-    assert_eq!(messages.len(), 1);
-    let message = &messages[0].message;
+    assert_eq!(messages.len(), 2);
+    let message = messages
+        .iter()
+        .find(|message| message.message.message_id == "goal-user-item-1")
+        .map(|message| &message.message)
+        .expect("the paired current goal should retain native item identity");
     assert_eq!(message.message_id, "goal-user-item-1");
     assert_eq!(message.role, "system");
     assert_eq!(message.kind.as_deref(), Some("goal_context"));
@@ -1058,6 +1072,10 @@ async fn current_codex_goal_pair_projects_once_with_native_identity_and_goal_sem
         serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["codex_internal_context"], "goal");
     assert_eq!(metadata["source_event"], "item_completed");
+    assert_eq!(
+        metadata["relations"]["parent_message_id"],
+        "msg-goal-paired-2"
+    );
     assert_eq!(
         metadata["codex_goal"]["objective"],
         "finish the canonical admission fix"
@@ -1139,7 +1157,9 @@ async fn response_only_codex_goal_projects_with_native_identity_and_goal_semanti
     )
     .await
     .unwrap();
-    let scope = ObservationScopeV1::Project { project_id };
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
     let projection = facade
         .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
         .await
@@ -1183,6 +1203,65 @@ async fn response_only_codex_goal_projects_with_native_identity_and_goal_semanti
     );
     assert_eq!(metadata["codex_goal"]["token_budget"], 24000);
     assert_eq!(metadata["codex_goal"]["tokens_remaining"], 23000);
+
+    let current = json!({
+        "timestamp": "2026-09-04T12:00:02.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "thread_id": "thread-response-only-goal",
+            "turn_id": "turn-response-only-goal",
+            "item": {
+                "type": "UserMessage",
+                "id": "goal-user-item-later-1",
+                "content": [{"type": "text", "text": goal}]
+            }
+        }
+    });
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(file, "{current}").unwrap();
+    drop(file);
+
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+        &transcript,
+        &project,
+        project_id.clone(),
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        1
+    );
+    let messages = runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Project,
+            "codex",
+            None,
+            "legacy goal admission",
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message.message_id, "goal-user-item-later-1");
+    let metadata: serde_json::Value =
+        serde_json::from_str(messages[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source_event"], "item_completed");
 }
 
 fn encode_workspace_path(path: &Path) -> String {

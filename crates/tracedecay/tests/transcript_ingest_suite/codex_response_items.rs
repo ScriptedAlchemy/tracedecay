@@ -809,6 +809,49 @@ Budget:
     assert_eq!(metadata["codex_goal"]["token_budget"], 60000);
     assert_eq!(metadata["codex_goal"]["tokens_remaining"], 59923);
 
+    write_jsonl(
+        &path,
+        &lines
+            .iter()
+            .cloned()
+            .chain(std::iter::once(serde_json::json!({
+                "timestamp": "2026-01-01T00:00:12.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "UserMessage",
+                        "id": "goal-user-item-later-1",
+                        "content": [{"type": "text", "text": goal_context}]
+                    }
+                }
+            })))
+            .collect::<Vec<_>>(),
+    );
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
+    let current_hits = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "response item goals",
+            10,
+        )
+        .await;
+    let current_goals = current_hits
+        .iter()
+        .filter(|hit| hit.message.kind.as_deref() == Some("goal_context"))
+        .collect::<Vec<_>>();
+    assert_eq!(current_goals.len(), 1);
+    assert_eq!(
+        current_goals[0].message.message_id,
+        "codex-response-goal:goal-user-item-later-1"
+    );
+    let current_metadata: serde_json::Value =
+        serde_json::from_str(current_goals[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(current_metadata["source_event"], "item_completed");
+
     let duplicate_hits = db
         .search_session_messages(
             "codex",
