@@ -346,34 +346,6 @@ impl RegisteredGlobalDb {
             )
             .await?;
         }
-        if let Some(stale_from_store_id) =
-            convergence_candidate.and_then(|candidate| candidate.stale_from_store_id)
-        {
-            let invalidation = session_temporal_operations::invalidate_raw_summary_revision(
-                &transaction,
-                request.session_id.as_str(),
-                stale_from_store_id,
-                guard.row_limit.max(1),
-            )
-            .await?;
-            transaction
-                .execute(
-                    "UPDATE lcm_lifecycle_state
-                     SET current_frontier_store_id = CASE
-                           WHEN current_frontier_store_id IS NULL THEN NULL
-                           ELSE MIN(current_frontier_store_id, ?3)
-                         END,
-                         updated_at = unixepoch()
-                     WHERE provider = ?1 AND conversation_id = ?2",
-                    tracedecay_runtime_core::db::engine::params![
-                        request.provider.as_str(),
-                        request.session_id.as_str(),
-                        invalidation.rewind_frontier_store_id,
-                    ],
-                )
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-        }
         let relation_projection = seed_session_relation_projection(
             self,
             &transaction,
@@ -437,6 +409,86 @@ impl RegisteredGlobalDb {
         // Applying that potentially session-wide graph is recovered by the
         // scheduler's separately bounded relation page.
         Ok(bounded)
+    }
+
+    #[hotpath::skip]
+    pub async fn lcm_invalidate_retained_raw_revision_page(
+        &self,
+        candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
+        max_affected: usize,
+    ) -> Result<(usize, bool), LcmError> {
+        let Some(_) = candidate.stale_from_store_id else {
+            return Ok((0, false));
+        };
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let budget = max_affected.max(1);
+        let mut work = 0_usize;
+        let mut current = candidate.clone();
+        loop {
+            tracedecay_lcm::summary_convergence::require_candidate_revision(&transaction, &current)
+                .await?;
+            let Some(stale_from_store_id) = current.stale_from_store_id else {
+                break;
+            };
+            let invalidation = session_temporal_operations::invalidate_raw_summary_revision(
+                &transaction,
+                current.session_id.as_str(),
+                stale_from_store_id,
+                budget.saturating_sub(work).max(1),
+            )
+            .await?;
+            transaction
+                .execute(
+                    "UPDATE lcm_lifecycle_state
+                     SET current_frontier_store_id = CASE
+                           WHEN current_frontier_store_id IS NULL THEN NULL
+                           ELSE MIN(current_frontier_store_id, ?3)
+                         END,
+                         updated_at = unixepoch()
+                     WHERE provider = ?1 AND conversation_id = ?2",
+                    tracedecay_runtime_core::db::engine::params![
+                        current.provider.as_str(),
+                        current.session_id.as_str(),
+                        invalidation.rewind_frontier_store_id,
+                    ],
+                )
+                .await
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            if invalidation.has_more {
+                work = work.saturating_add(invalidation.stale_summary_count);
+                break;
+            }
+            tracedecay_lcm::summary_convergence::complete_stale_raw_revision(
+                &transaction,
+                &current,
+            )
+            .await?;
+            let affected_summary = invalidation.stale_summary_count > 0;
+            work = work.saturating_add(invalidation.stale_summary_count.max(1));
+            let Some(next) = tracedecay_lcm::summary_convergence::candidate_for_session(
+                &transaction,
+                current.provider.as_str(),
+                current.session_id.as_str(),
+            )
+            .await?
+            else {
+                current.stale_from_store_id = None;
+                break;
+            };
+            current = next;
+            if affected_summary || work >= budget {
+                break;
+            }
+        }
+        let has_more = current.stale_from_store_id.is_some();
+        transaction
+            .commit()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        Ok((work, has_more))
     }
 
     #[hotpath::skip]

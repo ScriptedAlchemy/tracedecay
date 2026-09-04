@@ -26,6 +26,14 @@ CREATE TABLE IF NOT EXISTS lcm_summary_convergence_queue (
     FOREIGN KEY(provider, session_id)
         REFERENCES sessions(provider, session_id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS lcm_summary_convergence_dirty_raw (
+    provider TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    store_id INTEGER NOT NULL,
+    PRIMARY KEY(provider, session_id, store_id),
+    FOREIGN KEY(provider, session_id)
+        REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+);
 "#;
 
 const SUMMARY_CONVERGENCE_WORK_SQL: &str = r#"
@@ -85,6 +93,10 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
       OR OLD.payload_ref IS NOT NEW.payload_ref
       OR OLD.metadata_json IS NOT NEW.metadata_json
     BEGIN
+        INSERT INTO lcm_summary_convergence_dirty_raw (
+            provider, session_id, store_id
+        ) VALUES (NEW.provider, NEW.session_id, NEW.store_id)
+        ON CONFLICT(provider, session_id, store_id) DO NOTHING;
         INSERT INTO lcm_summary_convergence_queue (
             provider, session_id, newest_raw_store_id,
             protection_frontier_store_id, raw_revision_generation,
@@ -248,7 +260,7 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
         ),
         (
             "lcm_summary_convergence_raw_unprotected_update",
-            "OLD.role IS NOT NEW.role",
+            "lcm_summary_convergence_dirty_raw",
         ),
     ] {
         let mut rows = conn
@@ -270,6 +282,14 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
         }
     }
     conn.execute_batch(SUMMARY_CONVERGENCE_WORK_SQL).await?;
+    conn.execute_batch(
+        "INSERT INTO lcm_summary_convergence_dirty_raw (provider, session_id, store_id)
+         SELECT provider, session_id, stale_from_store_id
+         FROM lcm_summary_convergence_queue
+         WHERE stale_from_store_id IS NOT NULL
+         ON CONFLICT(provider, session_id, store_id) DO NOTHING",
+    )
+    .await?;
     Ok(())
 }
 
@@ -448,6 +468,58 @@ pub async fn record_current_protection_progress(
     Ok(())
 }
 
+pub async fn complete_stale_raw_revision(
+    conn: &(impl Executor + ?Sized),
+    candidate: &LcmSummaryConvergenceCandidate,
+) -> Result<bool, LcmError> {
+    let Some(store_id) = candidate.stale_from_store_id else {
+        return Ok(false);
+    };
+    let removed = conn
+        .execute(
+            "DELETE FROM lcm_summary_convergence_dirty_raw
+             WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
+            params![
+                candidate.provider.as_str(),
+                candidate.session_id.as_str(),
+                store_id,
+            ],
+        )
+        .await?;
+    if removed != 1 {
+        require_candidate_revision(conn, candidate).await?;
+        return Err(LcmError::Db(
+            "retained raw revision disposition affected no row".to_string(),
+        ));
+    }
+    let advanced = conn
+        .execute(
+            "UPDATE lcm_summary_convergence_queue
+         SET stale_from_store_id = (
+                 SELECT MIN(dirty.store_id)
+                 FROM lcm_summary_convergence_dirty_raw AS dirty
+                 WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+             ),
+             attempt_generation = attempt_generation + 1
+         WHERE provider = ?1 AND session_id = ?2
+           AND raw_revision_generation = ?4",
+            params![
+                candidate.provider.as_str(),
+                candidate.session_id.as_str(),
+                store_id,
+                candidate.raw_revision_generation,
+            ],
+        )
+        .await?;
+    if advanced != 1 {
+        require_candidate_revision(conn, candidate).await?;
+        return Err(LcmError::Db(
+            "retained raw revision frontier affected no row".to_string(),
+        ));
+    }
+    Ok(true)
+}
+
 pub async fn record_outcome(
     conn: &(impl Executor + ?Sized),
     candidate: &LcmSummaryConvergenceCandidate,
@@ -460,12 +532,40 @@ pub async fn record_outcome(
         .execute(
             "UPDATE lcm_summary_convergence_queue
          SET attempted_raw_store_id = ?3,
-             state = CASE WHEN newest_raw_store_id > ?3 THEN 'pending' ELSE ?4 END,
-             failure_code = CASE WHEN newest_raw_store_id > ?3 THEN NULL ELSE ?5 END,
-             failure_count = CASE WHEN newest_raw_store_id > ?3 THEN 0 ELSE ?6 END,
-             next_attempt_at_ms = CASE WHEN newest_raw_store_id > ?3 THEN 0 ELSE ?7 END,
+             state = CASE
+                 WHEN newest_raw_store_id > ?3 OR EXISTS (
+                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 ) THEN 'pending'
+                 ELSE ?4
+             END,
+             failure_code = CASE
+                 WHEN newest_raw_store_id > ?3 OR EXISTS (
+                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 ) THEN NULL
+                 ELSE ?5
+             END,
+             failure_count = CASE
+                 WHEN newest_raw_store_id > ?3 OR EXISTS (
+                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 ) THEN 0
+                 ELSE ?6
+             END,
+             next_attempt_at_ms = CASE
+                 WHEN newest_raw_store_id > ?3 OR EXISTS (
+                     SELECT 1 FROM lcm_summary_convergence_dirty_raw AS dirty
+                     WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+                 ) THEN 0
+                 ELSE ?7
+             END,
              attempt_generation = attempt_generation + 1,
-             stale_from_store_id = NULL
+             stale_from_store_id = (
+                 SELECT MIN(dirty.store_id)
+                 FROM lcm_summary_convergence_dirty_raw AS dirty
+                 WHERE dirty.provider = ?1 AND dirty.session_id = ?2
+             )
          WHERE provider = ?1 AND session_id = ?2
            AND raw_revision_generation = ?8",
             params![
