@@ -254,6 +254,7 @@ pub async fn ensure_lcm_schema_in_transaction(
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
         LcmSchemaAdmission::Current => {
+            ensure_raw_identity_schema(conn).await?;
             super::summary_convergence::ensure_schema(conn).await?;
             return Ok(());
         }
@@ -439,6 +440,7 @@ pub async fn ensure_lcm_schema_in_transaction(
             END;",
     )
     .await?;
+    ensure_raw_identity_schema(conn).await?;
     conn.execute_batch(RAW_FTS_DDL).await?;
     super::summary_convergence::ensure_schema(conn).await?;
     for sql in LCM_STATUS_PERFORMANCE_INDEX_SQL {
@@ -448,6 +450,26 @@ pub async fn ensure_lcm_schema_in_transaction(
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version) VALUES (?1, ?2)",
         params![MIGRATION_NAME, LCM_SCHEMA_VERSION],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS lcm_raw_predecessor_ranges (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            from_store_id INTEGER NOT NULL,
+            to_store_id INTEGER NOT NULL,
+            PRIMARY KEY(provider, message_id),
+            FOREIGN KEY(provider, message_id)
+                REFERENCES lcm_raw_messages(provider, message_id) ON DELETE CASCADE,
+            FOREIGN KEY(provider, session_id)
+                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
+        );
+        ",
     )
     .await?;
     Ok(())
@@ -914,6 +936,24 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?,
             "the superseded plain payload owner index must not be reinstalled"
+        );
+        assert!(
+            schema_object_exists(&*conn, "lcm_raw_predecessor_ranges")
+                .await
+                .map_err(|error| error.to_string())?,
+            "fresh LCM schema is missing native source-range provenance"
+        );
+        conn.execute_batch("DROP TABLE lcm_raw_predecessor_ranges;")
+            .await
+            .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            schema_object_exists(&*conn, "lcm_raw_predecessor_ranges")
+                .await
+                .map_err(|error| error.to_string())?,
+            "current LCM schema did not repair native source-range provenance"
         );
         Ok(())
     }

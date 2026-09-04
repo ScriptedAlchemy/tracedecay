@@ -504,6 +504,16 @@ pub enum LcmError {
         expected: i64,
         actual: i64,
     },
+    StaleRawRevision {
+        expected: i64,
+        actual: Option<i64>,
+    },
+    StaleSummarySourceRange {
+        expected_from: i64,
+        expected_to: i64,
+        actual_from: Option<i64>,
+        actual_to: Option<i64>,
+    },
     LifecycleStateNotFound,
     Cancelled,
     DeadlineExceeded,
@@ -588,6 +598,22 @@ impl std::fmt::Display for LcmError {
                     "summary generation compare-and-swap failed: expected {expected}, actual {actual}"
                 )
             }
+            Self::StaleRawRevision { expected, actual } => {
+                write!(
+                    f,
+                    "raw revision compare-and-swap failed: expected {expected}, actual {actual:?}"
+                )
+            }
+            Self::StaleSummarySourceRange {
+                expected_from,
+                expected_to,
+                actual_from,
+                actual_to,
+            } => write!(
+                f,
+                "summary source range changed: expected {expected_from}..={expected_to}, actual \
+                 {actual_from:?}..={actual_to:?}"
+            ),
             Self::LifecycleStateNotFound => {
                 write!(f, "payload database error: lifecycle state not found")
             }

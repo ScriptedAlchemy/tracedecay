@@ -189,8 +189,18 @@ async fn process_candidate(
                 None,
             )
         };
-    if state == LcmSummaryConvergenceQueueState::Unavailable {
-        persist_outcome(database, &candidate, state, failure_code, 0, 0).await?;
+    if state == LcmSummaryConvergenceQueueState::Unavailable
+        && !persist_outcome(database, &candidate, state, failure_code, 0, 0).await?
+    {
+        return Ok(session_result(
+            candidate,
+            LcmSummaryConvergenceDisposition::Preparing,
+            0,
+            protection.rows_scanned,
+            protection.bytes_scanned,
+            bounded.rows_scanned,
+            bounded.bytes_scanned,
+        ));
     }
     observe_session_outcome(&disposition, response.summary_nodes_created);
     Ok(session_result(
@@ -242,7 +252,7 @@ async fn record_candidate_error(
             0,
         )
     };
-    persist_outcome(
+    let settled = persist_outcome(
         database,
         &candidate,
         state,
@@ -251,6 +261,17 @@ async fn record_candidate_error(
         next_attempt_at_ms,
     )
     .await?;
+    if !settled {
+        return Ok(session_result(
+            candidate,
+            LcmSummaryConvergenceDisposition::Preparing,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ));
+    }
     Ok(session_result(candidate, disposition, 0, 0, 0, 0, 0))
 }
 
@@ -261,6 +282,8 @@ fn is_retryable(error: &LcmError) -> bool {
             | LcmError::Io(_)
             | LcmError::DeadlineExceeded
             | LcmError::StaleSummaryGeneration { .. }
+            | LcmError::StaleRawRevision { .. }
+            | LcmError::StaleSummarySourceRange { .. }
             | LcmError::LifecycleStateNotFound
     )
 }
@@ -285,6 +308,8 @@ fn error_code(error: &LcmError) -> &'static str {
         LcmError::SummaryCycle { .. } => "summary_cycle",
         LcmError::SummarySourceUnavailable { .. } => "summary_source_unavailable",
         LcmError::StaleSummaryGeneration { .. } => "stale_summary_generation",
+        LcmError::StaleRawRevision { .. } => "stale_raw_revision",
+        LcmError::StaleSummarySourceRange { .. } => "stale_summary_source_range",
         LcmError::LifecycleStateNotFound => "lifecycle_state_not_found",
         LcmError::Cancelled => "cancelled",
         LcmError::DeadlineExceeded => "deadline_exceeded",
@@ -323,12 +348,12 @@ async fn persist_outcome(
     failure_code: Option<&str>,
     failure_count: u32,
     next_attempt_at_ms: i64,
-) -> Result<(), LcmError> {
+) -> Result<bool, LcmError> {
     let transaction = database
         .begin_write_transaction()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    tracedecay_lcm::summary_convergence::record_outcome(
+    let settled = tracedecay_lcm::summary_convergence::record_outcome(
         &transaction,
         candidate,
         state,
@@ -340,7 +365,8 @@ async fn persist_outcome(
     transaction
         .commit()
         .await
-        .map_err(|error| LcmError::Db(error.to_string()))
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    Ok(settled)
 }
 
 fn compression_request(candidate: &LcmSummaryConvergenceCandidate) -> LcmCompressionRequest {

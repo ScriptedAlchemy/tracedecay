@@ -222,16 +222,18 @@ async fn protected_content_revision_requeues_a_current_session() {
         .await
         .unwrap()
         .unwrap();
-    summary_convergence::record_outcome(
-        &conn,
-        &candidate,
-        summary_convergence::LcmSummaryConvergenceQueueState::Current,
-        None,
-        0,
-        0,
-    )
-    .await
-    .unwrap();
+    assert!(
+        summary_convergence::record_outcome(
+            &conn,
+            &candidate,
+            summary_convergence::LcmSummaryConvergenceQueueState::Current,
+            None,
+            0,
+            0,
+        )
+        .await
+        .unwrap()
+    );
     assert!(
         summary_convergence::next_candidate(&conn, i64::MAX)
             .await
@@ -255,4 +257,17 @@ async fn protected_content_revision_requeues_a_current_session() {
         .expect("same-store content revisions must become due work");
     assert_eq!(revised.session_id, "revised-session");
     assert!(revised.attempted_raw_store_id < revised.newest_raw_store_id);
+    assert!(
+        !summary_convergence::record_outcome(
+            &conn,
+            &candidate,
+            summary_convergence::LcmSummaryConvergenceQueueState::Current,
+            None,
+            0,
+            0,
+        )
+        .await
+        .unwrap(),
+        "an outcome from the superseded raw generation must lose its CAS"
+    );
 }
