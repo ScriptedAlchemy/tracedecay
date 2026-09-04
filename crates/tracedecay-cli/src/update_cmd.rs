@@ -951,24 +951,27 @@ mod tests {
     /// writer running before the transaction reseals the receipt is exactly
     /// what left Cursor Core's receipt stale on every version bump and made
     /// Doctor report a component-ownership conflict.
+    ///
+    /// Zed, Antigravity, and Vibe joined the receipt-backed lifecycle
+    /// (`default_components` is non-empty for every stock host except the two
+    /// typed-unavailable kinds, which share an id with a supported host), so
+    /// the roster this refresh is handed in production is now canonical end to
+    /// end. Assert that over the production roster itself rather than a frozen
+    /// copy of it, and keep one negative case so the predicate still has to
+    /// discriminate instead of answering `true` for anything.
     #[test]
     fn canonical_component_set_hosts_are_not_refreshed_by_a_second_writer() {
-        for agent_id in [
-            "claude", "cline", "codex", "copilot", "cursor", "gemini", "hermes", "kilo", "kimi",
-            "kiro", "opencode", "roo-code",
-        ] {
+        for integration in tracedecay::agents::all_integrations() {
             assert!(
-                host_owns_canonical_component_set(agent_id),
-                "{agent_id} owns a canonical component set"
+                host_owns_canonical_component_set(integration.id()),
+                "{} owns a canonical component set",
+                integration.id()
             );
         }
-        {
-            let agent_id = "zed";
-            assert!(
-                !host_owns_canonical_component_set(agent_id),
-                "{agent_id} has no canonical component set and keeps the generated refresh"
-            );
-        }
+        assert!(
+            !host_owns_canonical_component_set("not-a-stock-host"),
+            "an id that names no stock host cannot own a canonical component set"
+        );
     }
 
     /// Cursor's receipt-owned plugin bundle must not be rewritten outside the
