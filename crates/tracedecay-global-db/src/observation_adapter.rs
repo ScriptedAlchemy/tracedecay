@@ -17,7 +17,8 @@ use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1, DurabilityClassV1,
+    AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1,
+    CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, DurabilityClassV1,
     IdempotencyIdentityV1, ObservationBatchFallbackCause, ObservationBatchPersistOutcome,
     ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
     ObservationProjectionStore, ObservationReadOperationV1, ObservationReadResultV1,
@@ -59,8 +60,9 @@ impl GlobalDbObservationStore {
     }
 
     /// Records a terminal refusal — the marker in
-    /// `observation_admission_refusals` AND the typed `admission_refused`
-    /// coverage advance — in ONE atomic authority transaction, but only when
+    /// `observation_admission_refusals` AND the typed
+    /// `observation_identity_collision` coverage advance — in ONE atomic
+    /// authority transaction, but only when
     /// the candidate stands at the sequential scan frontier; any other shape
     /// (covered replay, stale expected cursor, gap, generation jump) leaves
     /// every ledger untouched.
@@ -70,7 +72,7 @@ impl GlobalDbObservationStore {
     /// can never orphan a marker whose record the cursor still re-reads. The
     /// frontier is re-verified INSIDE the transaction (exact compare-and-set
     /// against the durable cursor), the advance-ledger row must carry the
-    /// `admission_refused` reason with no receipt, and the cursor moves to
+    /// `observation_identity_collision` reason with no receipt, and the cursor moves to
     /// the advance's next position — executed through the one canonical
     /// cursor-advance statement set
     /// (`tracedecay_rusqlite_runtime::repository::observation_cursor_authority`)
@@ -181,7 +183,7 @@ impl GlobalDbObservationStore {
                     source_json.as_str(),
                     scope_json.as_str(),
                     coverage_json.as_str(),
-                    ObservationCoverageReason::AdmissionRefused.as_str(),
+                    ObservationCoverageReason::ObservationIdentityCollision.as_str(),
                     None::<&str>
                 ],
             )
@@ -217,14 +219,65 @@ impl GlobalDbObservationStore {
         // marker is not visible either — no orphan, by construction.
         if !cursor_advance_ledger_row_matches(
             ledger.as_ref(),
-            ObservationCoverageReason::AdmissionRefused.as_str(),
+            ObservationCoverageReason::ObservationIdentityCollision.as_str(),
             None,
         ) {
+            let disagreement = if let Some((stored_reason, stored_receipt_id)) = ledger.as_ref() {
+                let authority_receipt = if let Some(stored_receipt_id) =
+                    stored_receipt_id.as_deref()
+                {
+                    let mut receipt_rows = transaction
+                        .query(
+                            "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
+                            tracedecay_runtime_core::db::engine::params![stored_receipt_id],
+                        )
+                        .await
+                        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+                    let receipt_json = receipt_rows
+                        .next()
+                        .await
+                        .map_err(|error| runtime_storage_error(OPERATION, error))?
+                        .map(|row| {
+                            row.get::<String>(0)
+                                .map_err(|error| runtime_storage_error(OPERATION, error))
+                        })
+                        .transpose()?;
+                    drop(receipt_rows);
+                    receipt_json.and_then(|receipt_json| {
+                        let receipt =
+                            serde_json::from_str::<SanitizationReceiptV1>(&receipt_json).ok()?;
+                        (receipt.receipt().receipt_id().as_str() == stored_receipt_id
+                            && serde_json::to_string(&receipt).ok().as_deref()
+                                == Some(receipt_json.as_str()))
+                        .then_some(receipt)
+                    })
+                } else {
+                    None
+                };
+                Some(CursorAdvanceLedgerDisagreementV1::new(
+                    advance.next_cursor().source().clone(),
+                    advance.next_cursor().scope().clone(),
+                    advance.coverage(),
+                    CursorAdvanceLedgerIdentityV1::from_stored_row_with_authority_receipt(
+                        stored_reason,
+                        stored_receipt_id.as_deref(),
+                        authority_receipt.as_ref(),
+                    ),
+                    advance.ledger_identity(),
+                ))
+            } else {
+                None
+            };
             transaction
                 .rollback()
                 .await
                 .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Err(ObservationStoreError::CursorAdvanceCollision);
+            return Err(disagreement.map_or(
+                ObservationStoreError::CursorAdvanceCollision,
+                |disagreement| ObservationStoreError::CursorAdvanceLedgerDisagreement {
+                    disagreement: Box::new(disagreement),
+                },
+            ));
         }
         transaction
             .execute(
@@ -1271,9 +1324,15 @@ impl ObservationStore for GlobalDbObservationStore {
             "advance observation source cursor",
         )
         .await;
-        if existed_at_next && outcome.is_err() {
-            return Err(ObservationStoreError::CursorAdvanceCollision);
-        }
+        let outcome = match outcome {
+            Err(error @ ObservationStoreError::CursorAdvanceLedgerDisagreement { .. }) => {
+                return Err(error);
+            }
+            Err(_) if existed_at_next => {
+                return Err(ObservationStoreError::CursorAdvanceCollision);
+            }
+            outcome => outcome,
+        };
         match outcome? {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
@@ -1555,7 +1614,7 @@ fn refused_scan_frontier(
         identity.ordering_domain(),
         write.expected_cursor().cloned(),
         identity.position(),
-        ObservationCoverageReason::AdmissionRefused,
+        ObservationCoverageReason::ObservationIdentityCollision,
     )
     .map(Box::new)
     .map(RefusedScanFrontier::AtFrontier)
@@ -1886,6 +1945,9 @@ fn map_observation_submit_error(
         StoreRuntimeRegistryFailure::StorageRuntime(error) => match *error {
             StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual } => {
                 ObservationStoreError::CursorConflict { expected, actual }
+            }
+            StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement } => {
+                ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement }
             }
             error => runtime_storage_error(operation, error.to_string()),
         },
