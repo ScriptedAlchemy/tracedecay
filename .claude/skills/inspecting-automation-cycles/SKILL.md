@@ -51,7 +51,7 @@ analytics prove whether generated output was adopted.
 ## Guardrails
 
 - After any requested run, keep inspection read-only. Do not submit curator
-  operations or approve, reject, or apply its output.
+  operations, and do not accept, reject, or apply its output.
 - Validated memory-curator and skill-writer output settles automatically;
   inspect receipts rather than waiting for a manual gate.
 - Do not treat skipped runs as failures until grouped by skip reason and age.
