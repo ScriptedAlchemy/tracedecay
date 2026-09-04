@@ -189,8 +189,14 @@ impl FixedGitIndexRunner {
         let mut named_drivers = BTreeSet::new();
         // `--null` emits `key NL value NUL` per record; a valueless key emits
         // `key NUL`. Only the key selects the driver, so the value is ignored.
-        for record in records.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
-            let key = record.split(|byte| *byte == b'\n').next().unwrap_or_default();
+        for record in records
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let key = record
+                .split(|byte| *byte == b'\n')
+                .next()
+                .unwrap_or_default();
             let key =
                 std::str::from_utf8(key).map_err(|_| NativeGitIndexError::MalformedOutput {
                     operation: "config",
@@ -229,10 +235,7 @@ impl FixedGitIndexRunner {
             .stderr(Stdio::null());
         let output = run_command_with_stdin(command, "check-attr", &stdin)?;
         // `-z` emits `path NUL attribute NUL value NUL` triples.
-        let fields = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .collect::<Vec<_>>();
+        let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
         let mut bound = BTreeSet::new();
         for triple in fields.chunks_exact(3) {
             let Ok(value) = std::str::from_utf8(triple[2]) else {
