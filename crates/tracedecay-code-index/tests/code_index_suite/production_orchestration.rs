@@ -2846,3 +2846,71 @@ fn partitioned_codec_preserves_pre_change_bytes_and_round_trips() {
         );
     }
 }
+
+/// One edited file must publish exactly one file segment, whatever the rest of
+/// the repository holds: every unchanged file keeps the parent generation's
+/// content address, so its bytes are never re-encoded, re-hashed or rewritten.
+/// The generation-evidence segment is still whole-generation, which is the
+/// remaining delta-proportional scope tracked on the issue.
+#[test]
+fn partitioned_encode_publishes_only_the_edited_file_segment() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("delta fixture owner");
+    let parent = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("delta parent generation");
+    let parent_manifest = parent
+        .encode_partitioned_sealed(|_, _| Ok(()))
+        .expect("delta parent encoding");
+    let child = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("delta child generation");
+
+    let mut published_files = Vec::new();
+    let mut published_evidence = 0_usize;
+    let child_manifest = child
+        .encode_partitioned_sealed_with_parent(Some(&parent_manifest), |kind, digest, bytes| {
+            match kind {
+                SealedGenerationSegmentKindV1::File => {
+                    published_files.push((digest.as_str().to_owned(), bytes.len()));
+                }
+                SealedGenerationSegmentKindV1::GenerationEvidence => published_evidence += 1,
+            }
+            Ok(())
+        })
+        .expect("delta child encoding");
+
+    assert!(
+        child.snapshot().files.len() > published_files.len(),
+        "the fixture must carry unchanged files beside the edited one"
+    );
+    assert_eq!(
+        published_files.len(),
+        1,
+        "only the edited file may be re-encoded: {published_files:?}"
+    );
+    assert_eq!(published_evidence, 1, "one generation-evidence segment");
+
+    let parent_identities =
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&parent_manifest)
+            .expect("parent identities parse")
+            .expect("revision seven partitioned manifest");
+    let child_identities =
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities(&child_manifest)
+            .expect("child identities parse")
+            .expect("revision seven partitioned manifest");
+    let carried = child_identities
+        .iter()
+        .filter(|identity| {
+            parent_identities
+                .iter()
+                .any(|parent| parent.digest == identity.digest)
+        })
+        .count();
+    assert_eq!(
+        carried,
+        child.snapshot().files.len() - 1,
+        "every unchanged file must keep the parent generation's content address"
+    );
+}
