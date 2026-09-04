@@ -269,6 +269,21 @@ fn cold_mount_final_commit_gate() -> &'static Mutex<Option<ColdMountFinalCommitG
     GATE.get_or_init(|| Mutex::new(None))
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+struct RetainedGraphRecoverySuccessorGateV1 {
+    project_root: PathBuf,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn retained_graph_recovery_successor_gate()
+-> &'static Mutex<Option<RetainedGraphRecoverySuccessorGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<Option<RetainedGraphRecoverySuccessorGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(None))
+}
+
 #[cfg(test)]
 struct ExistingSemanticScheduleReplacementGateV1 {
     project_root: PathBuf,
@@ -1226,6 +1241,52 @@ impl CodeIndexSchedulerRegistryV1 {
     async fn wait_for_cold_mount_final_commit_gate(project_root: &Path) {
         let gate = {
             let mut armed = cold_mount_final_commit_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let matches_root = armed
+                .as_ref()
+                .is_some_and(|gate| gate.project_root == project_root);
+            if matches_root { armed.take() } else { None }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
+    }
+
+    /// Pause a revision-7 retained-head recovery after it is queryable and
+    /// before its dirty-checkout successor starts. This makes the recovery
+    /// boundary observable without admitting the successor's partition decode.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn pause_next_retained_graph_recovery_before_successor(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let mut gate = retained_graph_recovery_successor_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gate.is_none(),
+            "only one retained graph recovery successor gate may be armed at a time"
+        );
+        *gate = Some(RetainedGraphRecoverySuccessorGateV1 {
+            project_root,
+            entered,
+            release,
+        });
+        (entered_observed, released)
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    async fn wait_for_retained_graph_recovery_successor_gate(project_root: &Path) {
+        let gate = {
+            let mut armed = retained_graph_recovery_successor_gate()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let matches_root = armed
@@ -2882,6 +2943,11 @@ impl CodeIndexSchedulerRegistryV1 {
             // generation that serves text without a native graph to one per
             // generation, so a permanently unactivatable seal cannot spin.
             let mut graph_seat_attempted: Option<tracedecay_domain::CodeGenerationId> = None;
+            // A retained revision-7 graph gets one verified-head attempt
+            // before ordinary source reconciliation owns any repair. A failed
+            // verification falls through to one canonical replay of the same
+            // sealed generation rather than repeating the head read forever.
+            let mut retained_graph_head_recovery_attempted = false;
             // The conflict verdict of the previous failed seat attempt. A
             // Conflict can be a race (a concurrent publisher advanced the
             // head) and is retried once like any transient failure, but the
@@ -3196,6 +3262,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 let retained_text_uses_partitioned_manifest = retained_text
                     .as_ref()
                     .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest);
+                // A revision-7 owner can restore its retained persistent graph
+                // directly from the verified head. Give that recovery exactly
+                // one empty-slot pass before the dirty source capture creates
+                // its successor. Once the retained graph is Ready, this guard
+                // falls through to the ordinary reconciliation path instead of
+                // repeatedly consuming the successor's wake as a Noop.
+                let retained_partitioned_graph_recovery_pending = graph_activation_enabled
+                    && !graph_activation_deferred
+                    && serving_empty
+                    && !retained_graph_head_recovery_attempted
+                    && retained_text.as_ref().is_some_and(|text| {
+                        text.uses_partitioned_manifest() && text.interactive_graph_store().is_err()
+                    });
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
                 let shutting_down = Arc::clone(&worker_shutting_down);
@@ -3233,6 +3312,24 @@ impl CodeIndexSchedulerRegistryV1 {
                                 scheduler.seat_retained_generation_on_empty_serving()?
                         {
                             return Ok(outcome);
+                        }
+                        if retained_partitioned_graph_recovery_pending
+                            && let Some(metadata) = retained_text_metadata.as_ref()
+                        {
+                            // Reserve this pass for verified-head recovery.
+                            // `Noop` here means no successor was published;
+                            // it never claims source currency. The successor
+                            // pass below captures the source state itself so
+                            // a quiet remount is not fabricated as dirty.
+                            return Ok(CodeIndexReconcileOutcomeV1::Noop(
+                                CodeIndexNoopEvidenceV1 {
+                                    snapshot_content_identity: metadata
+                                        .snapshot()
+                                        .content_identity
+                                        .clone(),
+                                    overflow_reconciled: false,
+                                },
+                            ));
                         }
                         if let Some(metadata) = retained_text_metadata {
                             match scheduler.reconcile_retained_text_generation_with(
@@ -3560,11 +3657,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 if prepare_graph
                     && !published_pass
+                    && !retained_graph_head_recovery_attempted
                     && let Some(retained) = graph_text
                         .as_ref()
                         .filter(|retained| retained.uses_partitioned_manifest())
                         .cloned()
                 {
+                    retained_graph_head_recovery_attempted = true;
                     let generation_id = retained.metadata().manifest().generation_id.clone();
                     let replay_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -3596,6 +3695,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                         "revision-7 manifest matched the durable verified graph \
                                          head; startup seated graph reads without replay"
                                     );
+                                    #[cfg(any(test, feature = "test-helpers"))]
+                                    Self::wait_for_retained_graph_recovery_successor_gate(
+                                        &worker_project_root,
+                                    )
+                                    .await;
+                                    // The retained pass intentionally did not
+                                    // capture the dirty checkout. Wake one
+                                    // successor pass now that its stale graph
+                                    // is queryable; the Pending guard above
+                                    // becomes false after recovery, so this
+                                    // cannot spin another retained-seat Noop.
+                                    worker_wake.notify_one();
                                 }
                                 Ok(false) => {}
                                 Err(error) => {
@@ -3603,8 +3714,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                         event = "code_index_graph_head_recovery_degraded",
                                         error = %error,
                                         "verified graph head did not match the revision-7 \
-                                         manifest; graph coverage stays pending while the \
-                                         admitted worker replays canonical segments"
+                                         manifest; replay the exact sealed generation to \
+                                         repair its quarantined graph projection"
                                     );
                                 }
                             }

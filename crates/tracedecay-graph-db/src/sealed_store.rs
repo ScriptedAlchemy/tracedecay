@@ -116,7 +116,11 @@ pub(crate) fn open_direct_sealed_generation(
         sealed_database_options(sealed_path),
         PersistentGraphStoreState::Existing,
     )
-    .map_err(|error| sealed_store_failure("reopen failed", error))?;
+    .map_err(|error| match error {
+        error @ (GraphDbError::ProjectionMismatch { .. }
+        | GraphDbError::GenerationMismatch { .. }) => error,
+        error => sealed_store_failure("reopen failed", error),
+    })?;
     let identity = {
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
@@ -140,10 +144,11 @@ pub(crate) fn open_direct_sealed_generation(
     // fresh or moved container pays the full row proof and files the marker.
     if let Err(error) = sealed_copy_proof(&database, &identity, expected, check) {
         let _ = database.close();
-        return Err(sealed_store_failure(
-            "post-reopen verification failed",
-            error,
-        ));
+        return Err(match error {
+            error @ (GraphDbError::ProjectionMismatch { .. }
+            | GraphDbError::GenerationMismatch { .. }) => error,
+            error => sealed_store_failure("post-reopen verification failed", error),
+        });
     }
     database.mark_sealed_read_only();
     let lease = crate::owner::issue_derived_read_lease(database, authority_lease)?;
@@ -672,8 +677,7 @@ impl GraphDb {
         // identity so the count of concurrently materialized graphs stays
         // bounded by what is actually being read, not by how many
         // generations this process has ever sealed.
-        self.hibernate_idle_sealed_generation_engines(Some(&locator));
-        self.publish_sealed_generation_census();
+        self.reap_idle_sealed_generation_engines(Some(&locator));
         Ok(())
     }
 
@@ -686,7 +690,7 @@ impl GraphDb {
     /// locator, digest, row counts and canonical byte census, and the next
     /// read reopens the same container. A generation whose snapshot gate is
     /// busy is left resident.
-    pub(crate) fn hibernate_idle_sealed_generation_engines(
+    pub(crate) fn reap_idle_sealed_generation_engines(
         &self,
         serving: Option<&GenerationLocator>,
     ) -> usize {
@@ -712,6 +716,7 @@ impl GraphDb {
                 }
             }
         }
+        self.publish_sealed_generation_census();
         released
     }
 
@@ -1335,6 +1340,94 @@ fn sealed_copy_proof(
         canonical_bytes,
     );
     Ok(canonical_bytes)
+}
+
+#[cfg(test)]
+mod hibernation_tests {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use super::SealedGenerationStore;
+    use crate::lease::GenerationLocator;
+    use crate::location::PersistentGraphStoreState;
+    use crate::{
+        GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion,
+        GraphGenerationId, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+        NeverCancelled,
+    };
+
+    #[test]
+    fn bounded_reaper_retries_a_sealed_engine_skipped_while_its_reader_was_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let child_path = temp.path().join("sealed-reader.grafeo");
+        let child_options = || GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(child_path.clone()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        };
+        let created = GraphDb::open(child_options()).unwrap();
+        created.close().unwrap();
+        drop(created);
+        let child = GraphDb::open_lazy_with_store_state(
+            child_options(),
+            PersistentGraphStoreState::Existing,
+        )
+        .unwrap();
+        child.ensure_opened().unwrap();
+
+        let parent = GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Memory,
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::Memory,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("sealed-reader-retry").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            GraphGenerationId::new("g1").unwrap(),
+        );
+        parent.inner.sealed_generations.write().unwrap().insert(
+            locator.clone(),
+            Arc::new(SealedGenerationStore {
+                locator,
+                recovered_digest: format!("sha256:{}", "a".repeat(64)),
+                entity_count: 0,
+                relation_count: 0,
+                canonical_bytes: 0,
+                directory: temp.path().join("sealed-reader"),
+                database: Arc::clone(&child),
+            }),
+        );
+
+        let active_reader = child.read_guard().unwrap();
+        let retry_parent = Arc::clone(&parent);
+        let (result_tx, result_rx) = mpsc::channel();
+        let attempt = std::thread::spawn(move || {
+            result_tx
+                .send(retry_parent.reap_idle_sealed_generation_engines(None))
+                .unwrap();
+        });
+        let busy_result = result_rx.recv_timeout(Duration::from_millis(100));
+        drop(active_reader);
+        attempt.join().unwrap();
+        assert_eq!(
+            busy_result,
+            Ok(0),
+            "the bounded pass must return without waiting for an active database reader"
+        );
+        assert!(child.native_engine_open().unwrap());
+
+        assert_eq!(
+            parent.reap_idle_sealed_generation_engines(None),
+            1,
+            "the next maintenance pass must retry the reader after it becomes idle"
+        );
+        assert!(!child.native_engine_open().unwrap());
+    }
 }
 
 /// Measurement harness for the sealed-store verification path, phase by

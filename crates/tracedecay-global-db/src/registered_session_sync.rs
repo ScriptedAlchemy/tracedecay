@@ -45,6 +45,28 @@ impl RegisteredGlobalDb {
     }
 
     #[hotpath::skip]
+    pub async fn list_incomplete_session_sync_journal_page_through(
+        &self,
+        key_prefix: &str,
+        after_key: Option<&str>,
+        through_key: &str,
+    ) -> Result<Vec<(String, String)>, TraceDecayError> {
+        SessionStoreAccess::new(self)
+            .list_incomplete_session_sync_journal_page_through(key_prefix, after_key, through_key)
+            .await
+    }
+
+    #[hotpath::skip]
+    pub async fn session_sync_journal_high_water(
+        &self,
+        key_prefix: &str,
+    ) -> Result<Option<String>, TraceDecayError> {
+        SessionStoreAccess::new(self)
+            .session_sync_journal_high_water(key_prefix)
+            .await
+    }
+
+    #[hotpath::skip]
     pub async fn insert_session_sync_journal(
         &self,
         key: &str,
@@ -66,6 +88,18 @@ impl RegisteredGlobalDb {
         crate::hotpath_observe::record_transaction_rows(1);
         SessionStoreAccess::new(self)
             .compare_and_swap_session_sync_journal(key, expected, replacement)
+            .await
+    }
+
+    #[hotpath::skip]
+    pub async fn compare_and_delete_session_sync_journal(
+        &self,
+        key: &str,
+        expected: &str,
+    ) -> Result<bool, TraceDecayError> {
+        crate::hotpath_observe::record_transaction_rows(1);
+        SessionStoreAccess::new(self)
+            .compare_and_delete_session_sync_journal(key, expected)
             .await
     }
 }

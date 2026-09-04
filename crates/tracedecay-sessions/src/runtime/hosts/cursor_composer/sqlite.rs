@@ -6,9 +6,10 @@
 //! blocking thread via [`CursorConn::with`], so async ingest callers never
 //! block the executor and futures holding a [`CursorConn`] stay `Send`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_domain::ObservationSourceGenerationV1;
 
 use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
 use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
@@ -73,33 +74,57 @@ pub(super) const MAX_COMPOSER_SQLITE_KEY_BYTES: u64 = 512;
 /// original indexed prefix scan while keeping at most one page in memory.
 pub(super) const COMPOSER_KEY_SCAN_PAGE: usize = 1024;
 
+pub(super) const COMPOSER_KEY_SCAN_AFTER_SQL: &str = "SELECT key, octet_length(value) AS nbytes
+     FROM cursorDiskKV
+     WHERE key > ?1 AND key < 'composerData;'
+       AND typeof(key) = 'text' AND value IS NOT NULL
+       AND octet_length(key) <= ?2
+     ORDER BY key
+     LIMIT ?3";
+
+const COMPOSER_KEY_SCAN_FROM_START_SQL: &str = "SELECT key, octet_length(value) AS nbytes
+     FROM cursorDiskKV
+     WHERE key >= ?1 AND key < 'composerData;'
+       AND typeof(key) = 'text' AND value IS NOT NULL
+       AND octet_length(key) <= ?2
+     ORDER BY key
+     LIMIT ?3";
+
 /// Shared foreign-store read handle (see [`crate::runtime::shared`]),
 /// aliased locally for the Cursor composer reader signatures.
 pub(super) use crate::runtime::shared::SqliteReadConn as CursorConn;
 
-/// A read-only connection to a Cursor composer store.
+/// A read-only connection bound to the path and physical identity verified
+/// across its immutable open.
 pub(super) struct ReadOnlyDb {
     pub conn: CursorConn,
+    pub generation: ObservationSourceGenerationV1,
+    pub canonical_path: PathBuf,
 }
 
 /// Open a `SQLite` file strictly read-only and immutable (no locking, no
 /// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI. The runtime
 /// helper also pins `busy_timeout = 0` and verifies `query_only = ON`.
 ///
-/// Missing paths and unreadable files are typed `Err` — callers that already
-/// proved the path is a regular file must defer, not treat this as a no-op.
+/// Missing, unreadable, or concurrently replaced paths are typed `Err` —
+/// callers that already proved the path is a regular file must defer, not
+/// treat this as a no-op.
 pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb, String> {
     let path = db_path.to_path_buf();
-    let opened = tokio::task::spawn_blocking(move || {
-        tracedecay_rusqlite_runtime::open_immutable_reader(&path)
+    tokio::task::spawn_blocking(move || {
+        let opened = tracedecay_rusqlite_runtime::open_verified_immutable_reader(&path)
+            .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
+        let (conn, canonical_path, file_identity) = opened.into_parts();
+        let generation = ObservationSourceGenerationV1::new(file_identity)
+            .map_err(|error| format!("invalid SQLite generation identity: {error}"))?;
+        Ok(ReadOnlyDb {
+            conn: CursorConn::new(conn),
+            generation,
+            canonical_path,
+        })
     })
     .await
-    .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))?;
-    opened
-        .map(|conn| ReadOnlyDb {
-            conn: CursorConn::new(conn),
-        })
-        .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))
+    .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))?
 }
 
 /// One keyset page of `composerData:` keys with their value byte lengths.
@@ -118,26 +143,8 @@ pub(super) async fn scan_composer_keys_page(
     let after = after.map(str::to_string);
     conn.with(move |conn| {
         let (sql, lower) = match &after {
-            Some(last) => (
-                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
-                 FROM cursorDiskKV \
-                 WHERE key > ?1 AND key < 'composerData;' \
-                   AND typeof(key) = 'text' AND value IS NOT NULL \
-                   AND length(CAST(key AS BLOB)) <= ?2 \
-                 ORDER BY key \
-                 LIMIT ?3",
-                last.as_str(),
-            ),
-            None => (
-                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
-                 FROM cursorDiskKV \
-                 WHERE key >= ?1 AND key < 'composerData;' \
-                   AND typeof(key) = 'text' AND value IS NOT NULL \
-                   AND length(CAST(key AS BLOB)) <= ?2 \
-                 ORDER BY key \
-                 LIMIT ?3",
-                "composerData:",
-            ),
+            Some(last) => (COMPOSER_KEY_SCAN_AFTER_SQL, last.as_str()),
+            None => (COMPOSER_KEY_SCAN_FROM_START_SQL, "composerData:"),
         };
         let mut stmt = conn
             .prepare_cached(sql)
@@ -179,8 +186,8 @@ fn fetch_kv_text_bounded_sync(
 ) -> BoundedSqliteValue<String> {
     let effective_cap = effective_sqlite_cap(max_bytes, remaining);
     let Ok(mut stmt) = conn.prepare_cached(
-        "SELECT length(CAST(value AS BLOB)) AS nbytes, \
-         CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
+        "SELECT octet_length(value) AS nbytes, \
+         CASE WHEN octet_length(value) <= ?1 THEN value ELSE NULL END AS payload \
          FROM cursorDiskKV WHERE key = ?2",
     ) else {
         return BoundedSqliteValue::Corrupt;
@@ -230,7 +237,9 @@ pub(super) async fn fetch_bubble_bounded(
 ) -> BoundedSqliteValue<Value> {
     let key = format!("bubbleId:{composer_id}:{bubble_id}");
     if key.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES {
-        return BoundedSqliteValue::Missing;
+        return BoundedSqliteValue::Malformed {
+            byte_len: key.len() as u64,
+        };
     }
     match fetch_kv_text_bounded(conn, &key, max_composer_record_bytes(), remaining).await {
         BoundedSqliteValue::Missing => BoundedSqliteValue::Missing,

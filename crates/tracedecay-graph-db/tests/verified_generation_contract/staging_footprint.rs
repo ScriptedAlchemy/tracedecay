@@ -4,6 +4,7 @@
 //! fails the assertion called out in the test's doc comment.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use tracedecay_graph_db::{
     GraphGenerationManifestProvider, GraphTraversalDirection, TraversalRequest,
@@ -753,6 +754,114 @@ fn retained_sealed_generations_hold_at_most_one_resident_engine() {
         assert_snapshot_reads(snapshot, identity, marker);
         assert_projection_page_and_telemetry(snapshot, identity);
     }
+}
+
+/// The bounded release sweep is also the retry point for a sealed reader
+/// that stayed resident when an earlier non-blocking hibernation attempt met
+/// an active reader. Once idle, the next sweep must step it down without
+/// losing its exact sealed identity or reopening it afterward.
+///
+/// Fails if idle-reader hibernation remains install-only: the reopened engine
+/// stays resident forever when no later generation is published.
+#[test]
+fn release_sweep_retries_idle_sealed_reader_hibernation() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("code:retry-idle-hibernation", "code");
+    let manifest = rich_manifest(identity.clone(), "retry-idle-g1", "retry-idle");
+    let replay = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:retry-idle-g1",
+        None,
+        '5',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &replay, &manifest);
+    let database = probe_lease(&registered, temp.path());
+
+    assert_snapshot_reads(&commit.snapshot, &identity, "retry-idle");
+    assert_eq!(
+        database.sealed_generation_engine_census(),
+        (1, 1),
+        "the read must materialize the retained sealed engine"
+    );
+
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let snapshot = commit.snapshot.clone();
+    let read_identity = identity.clone();
+    let read_entered = Arc::clone(&entered);
+    let read_release = Arc::clone(&release);
+    let reader = thread::spawn(move || {
+        snapshot.entity(
+            &GraphEntityRef::new(read_identity, GraphEntityId::new("entity:a").unwrap()),
+            Arc::new(GateOnPoll {
+                polls: AtomicUsize::new(0),
+                // `GraphDb::entity` probes once before `read_database`, which
+                // probes before and after acquiring the native database read
+                // guard. Park on the latter so this is a real in-flight read.
+                gate_on: 3,
+                entered: read_entered,
+                release: read_release,
+            }),
+        )
+    });
+    entered.wait();
+
+    let registry = registered.registry.clone();
+    let binding = registered.binding.clone();
+    let root = temp.path().to_path_buf();
+    let projection = replay.publication.key.projection.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let sweep = thread::spawn(move || {
+        let (control, probe) = control_and_probe();
+        let result = registry.release_sealed_generation_staging_rows(
+            registration(binding, &root),
+            &mut authority,
+            &GraphPublicationOperationContextV1::new(&control, &probe).unwrap(),
+            &projection,
+        );
+        result_tx.send(()).unwrap();
+        (authority, result)
+    });
+    let busy_completion = result_rx.recv_timeout(Duration::from_millis(100));
+    release.wait();
+    assert!(reader.join().unwrap().unwrap().is_some());
+    assert_eq!(
+        busy_completion,
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "staging-row mutation remains serialized behind the snapshot's parent gate"
+    );
+    let (mut authority, sweep_result) = sweep.join().unwrap();
+    assert_eq!(
+        sweep_result,
+        Ok(SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        })
+    );
+    assert_eq!(
+        database.sealed_generation_engine_census(),
+        (1, 1),
+        "the child reaper must skip the active native reader rather than hibernate it once the read ends"
+    );
+    assert_eq!(
+        release_sealed_head(
+            &registered,
+            temp.path(),
+            &mut authority,
+            &replay.publication.key.projection,
+        ),
+        SealedStagingRelease::AlreadyReleased
+    );
+    assert_eq!(
+        database.sealed_generation_engine_census(),
+        (1, 0),
+        "the next bounded sweep must retry the now-idle reader"
+    );
+    assert_snapshot_reads(&commit.snapshot, &identity, "retry-idle");
 }
 
 /// A remount after release must adopt the sealed store and must not re-stage

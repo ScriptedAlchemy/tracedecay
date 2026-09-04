@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -44,6 +45,66 @@ struct GraphPublishModeV1 {
     supplied_manifest: Option<Arc<GraphGenerationManifest>>,
     /// Reopen metadata rather than treating the existing handle as current.
     reopen_metadata: bool,
+}
+
+/// Exact persisted identity emitted by the shipped per-generation code-graph
+/// layout. This predicate gates destructive cleanup, so the broader reporting
+/// classifier is deliberately insufficient here.
+fn is_shipped_legacy_code_graph_projection(projection: &GraphProjectionIdentityV1) -> bool {
+    let Some(digest) = projection
+        .namespace
+        .as_str()
+        .strip_prefix(crate::LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX)
+    else {
+        return false;
+    };
+    projection.projection.as_str() == "code-graph"
+        && digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod legacy_cleanup_identity_tests {
+    use super::is_shipped_legacy_code_graph_projection;
+    use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
+    use tracedecay_store::{
+        GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, StoreShardIdV1,
+    };
+
+    fn projection(namespace: String, projection: &str) -> GraphProjectionIdentityV1 {
+        GraphProjectionIdentityV1 {
+            shard_id: StoreShardIdV1::project(
+                BrainId::new("brain.legacy-cleanup").unwrap(),
+                UserProfileId::new("profile.legacy-cleanup").unwrap(),
+                ProjectId::new("project.legacy-cleanup").unwrap(),
+            ),
+            namespace: GraphNamespaceV1::new(namespace).unwrap(),
+            projection: GraphProjectionIdV1::new(projection).unwrap(),
+        }
+    }
+
+    #[test]
+    fn destructive_legacy_cleanup_requires_the_exact_shipped_projection_identity() {
+        let prefix = crate::LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX;
+        assert!(is_shipped_legacy_code_graph_projection(&projection(
+            format!("{prefix}{}", "1a".repeat(32)),
+            "code-graph",
+        )));
+        assert!(!is_shipped_legacy_code_graph_projection(&projection(
+            format!("{prefix}{}", "a".repeat(63)),
+            "code-graph",
+        )));
+        assert!(!is_shipped_legacy_code_graph_projection(&projection(
+            format!("{prefix}{}", "A".repeat(64)),
+            "code-graph",
+        )));
+        assert!(!is_shipped_legacy_code_graph_projection(&projection(
+            format!("{prefix}{}", "b".repeat(64)),
+            "semantic-vector",
+        )));
+    }
 }
 
 /// A publication whose durable generation proof completed but whose
@@ -175,54 +236,151 @@ impl GraphDbRegistry {
         check_all(&registration, context, "generation.release_sealed_staging")?;
         require_projection_binding(&registration, projection)?;
         let database = self.resolve(registration.clone())?;
-        let Some(relational_head) = authority
+        // This bounded maintenance entrypoint is also the retry clock for an
+        // installed sealed reader whose prior non-blocking hibernation pass
+        // met an active operation. Identity and receipt stay installed; only
+        // idle native engines are released.
+        database.reap_idle_sealed_generation_engines(None);
+        let relational_head = authority
             .verified_head(projection, context)
-            .map_err(map_publication_error)?
-        else {
-            return Ok(SealedStagingRelease::Retained(
-                SealedStagingRetentionReason::NoVerifiedLease,
-            ));
-        };
-        let replay = authority
-            .replay(&relational_head.key, context)
             .map_err(map_publication_error)?;
-        let replay = require_active_replay_evidence(
-            replay,
-            "verified graph head has no durable active replay",
-        )?;
-        require_head_replay(&relational_head, &replay)?;
-        if !replay.publication.direct_dependency_generations.is_empty() {
+        let (key, direct_dependencies, canonical_replay_source, relational_recovered_digest) =
+            if let Some(head) = &relational_head {
+                let replay = authority
+                    .replay(&head.key, context)
+                    .map_err(map_publication_error)?;
+                let replay = require_active_replay_evidence(
+                    replay,
+                    "verified graph head has no durable active replay",
+                )?;
+                require_head_replay(head, &replay)?;
+                (
+                    replay.publication.key,
+                    replay.publication.direct_dependency_generations,
+                    replay.publication.canonical_replay_source,
+                    head.recovered_digest.clone(),
+                )
+            } else {
+                if !is_shipped_legacy_code_graph_projection(projection)
+                    || authority
+                        .pending_replay(projection, context)
+                        .map_err(map_publication_error)?
+                        .is_some()
+                {
+                    return Ok(SealedStagingRelease::Retained(
+                        SealedStagingRetentionReason::NoVerifiedLease,
+                    ));
+                }
+                // The shipped pre-cutover layout put one code generation in one
+                // projection. Its head and active replay are retired atomically;
+                // the retained cleanup tombstone is the durable proof that the
+                // publication completed and that only derived native bytes remain.
+                // An active replay without a head is always pending in the
+                // production authority and can never authorize deletion.
+                let mut selected = None;
+                let mut after = None;
+                loop {
+                    let request = GraphPublicationRetiredCleanupPageRequestV1::new(
+                        projection.clone(),
+                        after.clone(),
+                        MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
+                    )
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                    let page = authority
+                        .retired_cleanup_page(&request, context)
+                        .map_err(map_publication_error)?;
+                    for tombstone in page.records {
+                        if tombstone.key.projection != *projection {
+                            return Err(GraphDbError::Corrupt {
+                                message: "legacy graph cleanup page escaped its projection"
+                                    .to_owned(),
+                            });
+                        }
+                        if selected.replace(tombstone).is_some() {
+                            return Ok(SealedStagingRelease::Retained(
+                                SealedStagingRetentionReason::NoVerifiedLease,
+                            ));
+                        }
+                    }
+                    let Some(continuation) = page.continuation else {
+                        break;
+                    };
+                    validate_replay_cursor(
+                        projection,
+                        after.as_ref(),
+                        &continuation,
+                        "legacy graph cleanup staging release",
+                    )?;
+                    after = Some(continuation);
+                }
+                let Some(tombstone) = selected else {
+                    return Ok(SealedStagingRelease::Retained(
+                        SealedStagingRetentionReason::NoVerifiedLease,
+                    ));
+                };
+                let source =
+                    tombstone
+                        .canonical_replay_source
+                        .ok_or_else(|| GraphDbError::Corrupt {
+                            message: "legacy graph cleanup lost its replay source".to_owned(),
+                        })?;
+                (
+                    tombstone.key,
+                    tombstone.direct_dependency_generations,
+                    source,
+                    tombstone.expected_recovered_digest,
+                )
+            };
+        if !direct_dependencies.is_empty() {
             return Ok(SealedStagingRelease::Retained(
                 SealedStagingRetentionReason::DependencyBearing,
             ));
         }
-        let source = crate::generation::checked_decode_replay_source(
-            &replay.publication.canonical_replay_source,
-            &|| check_all(&registration, context, "generation.release_sealed_staging"),
-        )?;
+        let source =
+            crate::generation::checked_decode_replay_source(&canonical_replay_source, &|| {
+                check_all(&registration, context, "generation.release_sealed_staging")
+            })?;
         if !matches!(source, GraphGenerationReplaySource::SealedCodeGeneration(_)) {
             return Ok(SealedStagingRelease::Retained(
                 SealedStagingRetentionReason::NoSealedCodeGenerationReplay,
             ));
         }
-        let locator = locator_from_key(&relational_head.key)?;
-        // The relational head is the authority for which sealed artifact may
-        // stand in for the staging rows: the runtime verifies the sealed
-        // store's recovered digest against it, opens the staging engine if
-        // it is hibernated, releases, and re-hibernates. Requiring an
-        // installed lease here left every scope a freshly opened daemon had
-        // not activated (only the memory head and the serving generation are)
-        // answering NoVerifiedLease forever, which is how a multi-gigabyte
-        // staging container accumulated fifteen sealed generations' rows.
+        let locator = locator_from_key(&key)?;
+        // Relational publication evidence is the authority for which sealed
+        // artifact may stand in for the staging rows: normally the verified
+        // head, or the unique cleanup tombstone for a shipped legacy
+        // per-generation projection after its head and replay were retired.
+        // The runtime
+        // verifies the sealed store's recovered digest against that evidence,
+        // opens the staging engine if it is hibernated, releases, and
+        // re-hibernates. Requiring an installed lease here left every scope a
+        // freshly opened daemon had not activated (only the memory head and
+        // the serving generation are) answering NoVerifiedLease forever,
+        // which is how a multi-gigabyte staging container accumulated fifteen
+        // sealed generations' rows.
         if database.installed_verified_generation(&locator)?.is_none() {
-            let recovered = self.recover_verified_snapshot(
-                registration.clone(),
-                authority,
-                context,
-                projection,
-            );
-            if let Ok(snapshot) = recovered {
-                drop(snapshot);
+            if relational_head.is_some() {
+                let recovered = self.recover_verified_snapshot(
+                    registration.clone(),
+                    authority,
+                    context,
+                    projection,
+                );
+                if let Ok(snapshot) = recovered {
+                    drop(snapshot);
+                }
+            } else if let Some(commit) = database.staging_generation_commit(&locator)? {
+                let identity = GraphGenerationManifestIdentity::new(
+                    locator.projection.clone(),
+                    locator.generation.clone(),
+                    commit.source_generation,
+                    commit.watermark,
+                    Vec::new(),
+                );
+                database.open_sealed_generation_store_if_present(
+                    &identity,
+                    &relational_recovered_digest,
+                )?;
             }
         }
         if let Some(installed) = database.installed_verified_generation(&locator)? {
@@ -230,7 +388,7 @@ impl GraphDbRegistry {
         }
         database.release_sealed_generation_staging_rows_with(
             &locator,
-            Some(relational_head.recovered_digest.as_str()),
+            Some(relational_recovered_digest.as_str()),
             &|| check_all(&registration, context, "generation.release_sealed_staging"),
         )
     }
@@ -1094,21 +1252,141 @@ impl GraphDbRegistry {
                     )
                     .map(|commit| GraphPublicationPreparationV1::Settled(Box::new(commit)));
                 }
+                // A durable projection quarantine blocks dependency hydration
+                // too: a dependency walk is allowed to inspect only readable
+                // generations. Repair the adopted head first, then load its
+                // closure against the reopened, verified projection.
+                let quarantined = quarantined_generation_requires_repair(&database, &identity)?;
                 let mut visiting = BTreeSet::new();
-                let dependencies = self.load_dependencies(
-                    operation,
-                    &database,
-                    authority,
-                    context,
-                    &identity,
-                    &mut visiting,
-                )?;
+                let dependencies = if quarantined {
+                    BTreeMap::new()
+                } else {
+                    self.load_dependencies(
+                        operation,
+                        &database,
+                        authority,
+                        context,
+                        &identity,
+                        &mut visiting,
+                    )?
+                };
                 // The journaled replay's expected recovered digest already
                 // binds this exact manifest, so the durable generation proof
                 // checks against it directly instead of re-canonicalizing the
                 // full manifest.
                 let sealed_digest = &replay.publication.expected_recovered_digest;
                 let row_counts = (entity_rows, relation_rows);
+                if quarantined {
+                    if !is_current_head {
+                        // A projection-level quarantine must only be cleared
+                        // by the exact verified head that adopted it. A
+                        // superseded generation cannot establish that
+                        // ownership, even when its stored rows still prove.
+                        return Err(GraphDbError::conflict_observed(
+                            "publication.repair.adopted_head",
+                            describe_verified_head(Some(&historical_head)),
+                            describe_verified_head(current.as_ref()),
+                        ));
+                    }
+                    // The initial corruption path records a durable
+                    // projection quarantine, which correctly bars ordinary
+                    // staging. First re-open and fully verify the exact
+                    // adopted head. A sealed-only code generation has already
+                    // released its duplicate staging rows, though: that proof
+                    // truthfully reports a mismatch. Only then may the exact
+                    // current head restore those rows from its canonical
+                    // replay before retrying the checkpointed proof.
+                    let repair_authority = RefCell::new(authority);
+                    let repair_check = || {
+                        operation.check(self, context)?;
+                        let mut authority = repair_authority.try_borrow_mut().map_err(|_| {
+                            GraphDbError::conflict("publication.repair.authority_reentrancy")
+                        })?;
+                        let observed = authority
+                            .verified_head(&historical_head.key.projection, context)
+                            .map_err(map_publication_error)?;
+                        if observed.as_ref() != Some(&historical_head) {
+                            return Err(GraphDbError::conflict_observed(
+                                "publication.repair.adopted_head",
+                                describe_verified_head(Some(&historical_head)),
+                                describe_verified_head(observed.as_ref()),
+                            ));
+                        }
+                        let replay = authority
+                            .replay(&historical_head.key, context)
+                            .map_err(map_publication_error)?;
+                        let replay = require_active_replay_evidence(
+                            replay,
+                            "adopted graph head has no durable active replay",
+                        )?;
+                        require_head_replay(&historical_head, &replay)
+                    };
+                    let repaired = database.reopen_and_verify_existing_generation(
+                        &identity,
+                        sealed_digest,
+                        row_counts,
+                        &repair_check,
+                    );
+                    let (historical_commit, recovered_digest) = match repaired {
+                        Ok(recovered) => recovered,
+                        Err(GraphDbError::GenerationMismatch { .. })
+                            if identity.dependencies.is_empty() =>
+                        {
+                            // Keep the durable marker in place while the
+                            // canonical pages are restored. This process-local
+                            // sealed-only lease only opens the existing exact
+                            // staging path; readers still fail closed on the
+                            // durable quarantine until the second full proof
+                            // clears it through the checkpoint authority.
+                            let repair_lease = generation_lease(
+                                &identity,
+                                historical_head.clone(),
+                                BTreeMap::new(),
+                            );
+                            database.remember_sealed_only_generation(&repair_lease)?;
+                            database.apply_generation_unverified_with_digest_observed(
+                                manifest,
+                                sealed_digest,
+                                &repair_check,
+                            )?;
+                            database.reopen_and_verify_existing_generation(
+                                &identity,
+                                sealed_digest,
+                                row_counts,
+                                &repair_check,
+                            )?
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    // Quarantine invalidates the derived sealed artifact.
+                    // Rebuild it only after the checkpointed staging proof
+                    // has cleared the adopted marker.
+                    database.ensure_sealed_generation_store(
+                        &identity,
+                        sealed_digest,
+                        &repair_check,
+                    )?;
+                    let authority = repair_authority.into_inner();
+                    let dependencies = self.load_dependencies(
+                        operation,
+                        &database,
+                        authority,
+                        context,
+                        &identity,
+                        &mut visiting,
+                    )?;
+                    operation.check(self, context)?;
+                    let lease = generation_lease(&identity, historical_head.clone(), dependencies);
+                    return seat_historical_verified_lease(
+                        database,
+                        lease,
+                        historical_head,
+                        true,
+                        historical_commit,
+                        recovered_digest,
+                    )
+                    .map(|commit| GraphPublicationPreparationV1::Settled(Box::new(commit)));
+                }
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
@@ -1865,6 +2143,22 @@ enum PublicationHeadRelationV1 {
     ForeignMarker,
 }
 
+/// Whether this exact generation is still refused by the read-side
+/// quarantine guard. The guard's mismatch is deliberately distinct from a
+/// retirement or lease conflict: only a full replay of the adopted current
+/// head can repair it.
+fn quarantined_generation_requires_repair(
+    database: &GraphDbLeaseV1,
+    identity: &GraphGenerationManifestIdentity,
+) -> Result<bool, GraphDbError> {
+    let namespace = identity.physical_namespace()?;
+    match database.ensure_projection_readable(&namespace, &identity.projection.projection) {
+        Ok(_) => Ok(false),
+        Err(GraphDbError::ProjectionMismatch { .. }) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 fn publication_head_relation(
     current: Option<&GraphVerifiedHeadV1>,
     replay: &GraphPublicationReplayRecordV1,
@@ -1953,17 +2247,18 @@ mod historical_publication_reuse_tests {
     use tracedecay_domain::{CodeGenerationId, RepositoryId};
     use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
     use tracedecay_store::{
-        BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-        GraphPublicationOperationContextV1, GraphPublicationProjectionPageRequestV1,
-        GraphPublicationProjectionPageV1, GraphPublicationReplayLookupV1,
-        GraphPublicationReplayPageRequestV1, GraphPublicationReplayPageV1,
-        GraphPublicationReplayRecordV1, GraphPublicationReplayRetirementV1,
-        GraphPublicationReplayV1, GraphPublicationRetiredCleanupPageRequestV1,
-        GraphPublicationRetiredCleanupPageV1, GraphPublicationSequenceV1,
-        GraphPublicationStoreErrorV1, GraphPublicationStoreResultV1, GraphPublicationStoreV1,
-        GraphReplayAppendOutcomeV1, GraphRetiredReplayCleanupFinalizeOutcomeV1,
-        GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
-        ProjectId, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+        BrainId, GraphGenerationIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
+        GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+        GraphPublicationProjectionPageRequestV1, GraphPublicationProjectionPageV1,
+        GraphPublicationReplayLookupV1, GraphPublicationReplayPageRequestV1,
+        GraphPublicationReplayPageV1, GraphPublicationReplayRecordV1,
+        GraphPublicationReplayRetirementV1, GraphPublicationReplayV1,
+        GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationRetiredCleanupPageV1,
+        GraphPublicationSequenceV1, GraphPublicationStoreErrorV1, GraphPublicationStoreResultV1,
+        GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
+        GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
+        GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1, ProjectId,
+        RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
         RetainedGraphStoreOwnerOperationLeaseErrorV1, RuntimeCancellationIdV1,
         RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
         RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
@@ -1977,6 +2272,7 @@ mod historical_publication_reuse_tests {
     };
     #[cfg(feature = "graph-sealed-store")]
     use crate::generation::{reset_sealed_copy_marker_hits, sealed_copy_marker_hits};
+    use crate::lease::GenerationLocator;
     use crate::{
         GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
         GraphDbRegistry, GraphDbRegistryConfig, GraphEntity, GraphEntityId, GraphGenerationId,
@@ -2743,5 +3039,135 @@ mod historical_publication_reuse_tests {
             usize::from(counters.full_verifications == 1),
             "row enumeration must happen only when the proof was not inherited"
         );
+    }
+
+    #[test]
+    fn corrupt_current_head_repair_clears_its_marker_across_restart() {
+        let mut fixture = published_fixture();
+        let manifest = Arc::new(test_manifest(fixture.projection.clone()));
+        let identity = manifest.identity();
+        let locator =
+            GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+        let database = fixture
+            .registry
+            .resolve(registration(fixture.binding.clone(), &fixture.root))
+            .unwrap();
+        database.quarantine_generation(&identity).unwrap();
+        assert!(matches!(
+            database.verified_generation(&locator),
+            Err(GraphDbError::GenerationMismatch { .. })
+        ));
+        drop(database);
+        assert!(
+            fixture
+                .registry
+                .close(&registration(fixture.binding.clone(), &fixture.root))
+                .unwrap(),
+            "the quarantine must survive the restart before its exact-head repair"
+        );
+        mount(&fixture.registry, &fixture.binding, &fixture.root);
+
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        let repaired = fixture
+            .registry
+            .publish_verified(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key,
+                Some(Arc::clone(&manifest)),
+            )
+            .unwrap();
+        assert_eq!(repaired.head, fixture.head);
+        assert_eq!(repaired.snapshot.generation(), &fixture.generation);
+        assert_eq!(
+            fixture.authority.heads[&fixture.key.projection],
+            fixture.head
+        );
+        assert_eq!(
+            fixture.authority.next_sequence, 1,
+            "repairing a current quarantined head must not mint a successor replay"
+        );
+        drop(repaired);
+
+        assert!(
+            fixture
+                .registry
+                .close(&registration(fixture.binding.clone(), &fixture.root))
+                .unwrap(),
+            "the repaired marker must be checkpointed before another restart"
+        );
+        mount(&fixture.registry, &fixture.binding, &fixture.root);
+        let database = fixture
+            .registry
+            .resolve(registration(fixture.binding.clone(), &fixture.root))
+            .unwrap();
+        assert!(
+            !super::quarantined_generation_requires_repair(&database, &identity).unwrap(),
+            "the exact-head repair must checkpoint the durable marker clear"
+        );
+        drop(database);
+        let recovered = fixture
+            .registry
+            .recover_verified_snapshot(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key.projection,
+            )
+            .unwrap();
+        assert_eq!(recovered.verified_head(), &fixture.head);
+        assert_eq!(recovered.generation(), &fixture.generation);
+    }
+
+    #[test]
+    fn corrupt_superseded_generation_cannot_clear_the_current_marker() {
+        let mut fixture = published_fixture();
+        let manifest = Arc::new(test_manifest(fixture.projection.clone()));
+        let identity = manifest.identity();
+        let database = fixture
+            .registry
+            .resolve(registration(fixture.binding.clone(), &fixture.root))
+            .unwrap();
+        database.quarantine_generation(&identity).unwrap();
+        drop(database);
+
+        let mut newer_head = fixture.head.clone();
+        newer_head.sequence =
+            GraphPublicationSequenceV1::new(fixture.head.sequence.get() + 1).unwrap();
+        newer_head.key.generation = GraphGenerationIdV1::new("reuse-g2").unwrap();
+        newer_head.key.idempotency_key =
+            GraphPublicationIdempotencyKeyV1::new("publish:reuse-g2").unwrap();
+        fixture
+            .authority
+            .heads
+            .insert(fixture.key.projection.clone(), newer_head);
+
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        assert!(matches!(
+            fixture.registry.publish_verified(
+                registration(fixture.binding.clone(), &fixture.root),
+                &mut fixture.authority,
+                &context,
+                &fixture.key,
+                Some(manifest),
+            ),
+            Err(GraphDbError::Conflict { .. })
+        ));
+        assert!(
+            fixture
+                .registry
+                .close(&registration(fixture.binding.clone(), &fixture.root))
+                .unwrap(),
+            "a rejected superseded repair must leave the marker durable"
+        );
+        mount(&fixture.registry, &fixture.binding, &fixture.root);
+        let database = fixture
+            .registry
+            .resolve(registration(fixture.binding.clone(), &fixture.root))
+            .unwrap();
+        assert!(super::quarantined_generation_requires_repair(&database, &identity).unwrap());
     }
 }

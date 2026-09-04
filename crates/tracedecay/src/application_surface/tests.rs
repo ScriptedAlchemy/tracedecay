@@ -5,7 +5,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use tracedecay_api::is_http_application_operation_exposed;
+use tracedecay_api::{WorkOperation, WorkflowOperation, is_http_application_operation_exposed};
 use tracedecay_application::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
     CancellationSignal, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
@@ -23,6 +23,7 @@ use tracedecay_tool_catalog::{
 };
 
 use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
+use super::registered_http::RegisteredHttpOperation;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
     APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, ApplicationSurfaceAdapterError,
@@ -83,6 +84,23 @@ fn operation_context(project_id: &ProjectId) -> RequestContext {
         CancellationContext::active("cancel.http-adapter").expect("cancellation"),
     )
     .expect("context")
+}
+
+#[test]
+fn work_and_workflow_http_dispatch_borrow_process_static_registries() {
+    let work = WorkOperation::Create.registry().expect("Work registry");
+    let workflow = WorkflowOperation::GetRun
+        .registry()
+        .expect("Workflow registry");
+
+    assert!(
+        matches!(work, std::borrow::Cow::Borrowed(_)),
+        "Work HTTP dispatch must not clone every schema-rich binding per request",
+    );
+    assert!(
+        matches!(workflow, std::borrow::Cow::Borrowed(_)),
+        "Workflow HTTP dispatch must not clone every schema-rich binding per request",
+    );
 }
 
 #[test]

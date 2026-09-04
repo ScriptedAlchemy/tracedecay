@@ -627,6 +627,75 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             self.assertNotIn("Traceback", completed.stderr)
             self.assertNotIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
 
+    def test_run_mode_retains_valid_status_when_next_probe_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dogfood-malformed-status-") as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "output"
+            output.mkdir()
+            project, base_oid, head_oid = make_two_commit_project(tmp_path)
+
+            status_counter = tmp_path / "status-counter"
+            fake_binary = tmp_path / "fake-tracedecay"
+            fake_binary.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    if [[ "${1:-}" == "--version" ]]; then
+                      echo "tracedecay fake-test"
+                    elif [[ "${1:-}" == "init" ]]; then
+                      :
+                    elif [[ "${1:-}" == "status" ]]; then
+                      count=0
+                      [[ ! -f "$FAKE_STATUS_COUNTER" ]] || count="$(cat "$FAKE_STATUS_COUNTER")"
+                      count="$((count + 1))"
+                      echo "$count" >"$FAKE_STATUS_COUNTER"
+                      if ((count == 1)); then
+                        echo '{"code_index_freshness":{"status":"current","worktree":{"coverage":"complete","staleness_state":"fresh","latest_generation_id":"generation.valid-non-ready"}},"graph_statistics":{"state":"unavailable","reason":"exact_scope_generation_not_ready"}}'
+                      else
+                        printf '%s' '{"code_index_freshness":{"status":"current","worktree":{"latest_generation_id":"generation.malformed"'
+                      fi
+                    else
+                      echo "unexpected fake TraceDecay arguments: $*" >&2
+                      exit 2
+                    fi
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_binary.chmod(0o755)
+            env = os.environ.copy()
+            env["TRACEDECAY_BIN"] = str(fake_binary)
+            env["FAKE_STATUS_COUNTER"] = str(status_counter)
+            env["TRACEDECAY_DOGFOOD_READINESS_TIMEOUT"] = "2"
+            env["TRACEDECAY_DOGFOOD_READINESS_POLL_INTERVAL"] = "0.05"
+            started = time.monotonic()
+            completed = subprocess.run(
+                [
+                    str(DOGFOOD_SCRIPT),
+                    "--run",
+                    str(project),
+                    base_oid,
+                    head_oid,
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=8,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertGreaterEqual(
+                int(status_counter.read_text(encoding="utf-8").strip()), 2
+            )
+            self.assertIn("last complete status output", completed.stderr)
+            self.assertIn('"latest_generation_id":"generation.valid-non-ready"', completed.stderr)
+            self.assertNotIn("generation.malformed", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
+            self.assertNotIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

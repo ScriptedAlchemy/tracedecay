@@ -1,6 +1,45 @@
 use super::harness::RegisteredGlobalDbHarness;
 
 #[tokio::test]
+async fn registered_session_message_batch_executes_json_rowset_with_exact_provider_identity() {
+    let harness = RegisteredGlobalDbHarness::open("session-message-identity-batch").await;
+    let writer = harness.registered.writer_connection().unwrap();
+    for provider in ["cursor", "codex"] {
+        writer
+            .execute(
+                "INSERT INTO sessions(provider, session_id, project_key, project_path)
+                 VALUES (?1, 'session.fixture', '/tmp/project', '/tmp/project')",
+                tracedecay_runtime_core::db::engine::params![provider],
+            )
+            .await
+            .unwrap();
+    }
+    writer
+        .execute(
+            "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
+             VALUES ('cursor', 'comp:b2', 'session.fixture', 'user', 1, 'cursor'),
+                    ('codex', 'comp:b1', 'session.fixture', 'user', 1, 'codex')",
+            (),
+        )
+        .await
+        .unwrap();
+
+    let existing = harness
+        .registered
+        .existing_session_message_ids(
+            "cursor",
+            &[
+                "comp:b1".to_string(),
+                "comp:b2".to_string(),
+                "comp:b3".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(existing, vec!["comp:b2"]);
+}
+
+#[tokio::test]
 async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal").await;
     let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
@@ -87,6 +126,80 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
             serde_json::to_string(&scope).unwrap(),
             serde_json::to_string(&cursor).unwrap(),
         )]
+    );
+}
+
+#[tokio::test]
+async fn session_sync_journal_cycle_bound_and_exact_delete_are_authoritative() {
+    let harness = RegisteredGlobalDbHarness::open("session-sync-journal-cycle-bound").await;
+    for suffix in ["a", "m", "z"] {
+        assert!(
+            harness
+                .registered
+                .insert_session_sync_journal(
+                    &format!("cursor-composer.retry.{suffix}"),
+                    &format!(r#"{{"nonce":"{suffix}"}}"#),
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    let high_water = harness
+        .registered
+        .session_sync_journal_high_water("cursor-composer.retry.")
+        .await
+        .unwrap();
+    assert_eq!(high_water.as_deref(), Some("cursor-composer.retry.z"));
+
+    assert!(
+        harness
+            .registered
+            .insert_session_sync_journal("cursor-composer.retry.zz", r#"{"nonce":"later"}"#,)
+            .await
+            .unwrap()
+    );
+    let page = harness
+        .registered
+        .list_incomplete_session_sync_journal_page_through(
+            "cursor-composer.retry.",
+            Some("cursor-composer.retry.m"),
+            high_water.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page,
+        vec![(
+            "cursor-composer.retry.z".to_string(),
+            r#"{"nonce":"z"}"#.to_string(),
+        )]
+    );
+
+    assert!(
+        !harness
+            .registered
+            .compare_and_delete_session_sync_journal(
+                "cursor-composer.retry.z",
+                r#"{"nonce":"stale"}"#,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        harness
+            .registered
+            .compare_and_delete_session_sync_journal("cursor-composer.retry.z", r#"{"nonce":"z"}"#,)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        harness
+            .registered
+            .read_session_sync_journal("cursor-composer.retry.z")
+            .await
+            .unwrap(),
+        None
     );
 }
 

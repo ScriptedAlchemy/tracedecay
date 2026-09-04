@@ -28,7 +28,8 @@ pub(crate) fn work_operation_for_tool(tool_name: &str) -> Option<tracedecay_api:
 /// prefix; it must not recreate those lifecycle contracts in a second table.
 pub(super) fn work_executable_binding_for_tool(
     tool_name: &str,
-) -> Result<Option<ExecutableBindingV1>, super::super::dispatch::McpDispatchMetadataError> {
+) -> Result<Option<&'static ExecutableBindingV1>, super::super::dispatch::McpDispatchMetadataError>
+{
     let Some(operation) = work_operation_for_tool(tool_name) else {
         return Ok(None);
     };
@@ -70,7 +71,6 @@ pub(super) fn dispatch_catalog_bindings()
             let binding = registry
                 .get(&operation_id)
                 .and_then(|availability| availability.binding())
-                .cloned()
                 .ok_or({
                     super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
                         tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
