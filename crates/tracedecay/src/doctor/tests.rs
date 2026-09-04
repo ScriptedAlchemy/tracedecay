@@ -45,7 +45,10 @@ fn supported_optional_host_absences_reach_doctor_without_host_directories() {
         counters.issues, 0,
         "an absent optional host is a truthful Doctor warning, not a broken installation"
     );
-    assert_eq!(counters.warnings, 6);
+    // One warning per absent host, plus one extra each for the two hosts that
+    // register two documents: Antigravity (IDE config and CLI plugin) and Vibe
+    // (MCP config and prompt rules).
+    assert_eq!(counters.warnings, 8);
 }
 
 #[test]
