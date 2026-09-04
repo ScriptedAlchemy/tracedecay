@@ -364,6 +364,12 @@ pub async fn load_uncondensed_summary_nodes(
                WHERE n.provider = ?1 AND n.session_id = ?2
                  AND NOT EXISTS (
                    SELECT 1
+                   FROM lcm_summary_convergence_dirty_raw dirty
+                   WHERE dirty.provider = n.provider
+                     AND dirty.session_id = n.session_id
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
                    FROM lcm_summary_sources s
                    JOIN session_summary_availability parent_availability
                      ON parent_availability.session_id = generation.session_id

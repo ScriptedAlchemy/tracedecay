@@ -639,6 +639,32 @@ pub async fn complete_stale_raw_revision(
     Ok(true)
 }
 
+pub async fn record_invalidation_page_yield(
+    conn: &(impl Executor + ?Sized),
+    candidate: &LcmSummaryConvergenceCandidate,
+) -> Result<(), LcmError> {
+    let changed = conn
+        .execute(
+            "UPDATE lcm_summary_convergence_queue
+             SET attempt_generation = attempt_generation + 1
+             WHERE provider = ?1 AND session_id = ?2
+               AND raw_revision_generation = ?3",
+            params![
+                candidate.provider.as_str(),
+                candidate.session_id.as_str(),
+                candidate.raw_revision_generation,
+            ],
+        )
+        .await?;
+    if changed != 1 {
+        require_candidate_revision(conn, candidate).await?;
+        return Err(LcmError::Db(
+            "retained invalidation page yield affected no row".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn record_outcome(
     conn: &(impl Executor + ?Sized),
     candidate: &LcmSummaryConvergenceCandidate,

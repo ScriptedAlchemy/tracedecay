@@ -773,6 +773,22 @@ mod tests {
                 source_kind TEXT NOT NULL,
                 source_id TEXT NOT NULL
              );
+             CREATE TABLE lcm_summary_nodes (
+                node_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                summary_text TEXT NOT NULL,
+                summary_hash TEXT NOT NULL,
+                summary_token_count INTEGER NOT NULL,
+                source_token_count INTEGER NOT NULL,
+                source_time_start INTEGER,
+                source_time_end INTEGER,
+                expand_hint TEXT,
+                metadata_json TEXT,
+                created_at INTEGER NOT NULL
+             );
              CREATE TABLE session_summary_availability (
                 session_id TEXT NOT NULL,
                 generation INTEGER NOT NULL,
@@ -809,14 +825,27 @@ mod tests {
                  ('d', 'raw_message', '100'),
                  ('b', 'summary_node', 'a'),
                  ('d', 'summary_node', 'b'),
-                 ('e', 'summary_node', 'd');
+                 ('e', 'summary_node', 'd'),
+                 ('z', 'raw_message', '200');
+             INSERT INTO lcm_summary_nodes(
+                 node_id, provider, conversation_id, session_id, depth,
+                 summary_text, summary_hash, summary_token_count, source_token_count, created_at
+             ) VALUES
+                 ('a', 'cursor', 'diamond', 'diamond', 0, 'a', 'a-hash', 1, 1, 1),
+                 ('b', 'cursor', 'diamond', 'diamond', 1, 'b', 'b-hash', 1, 1, 2),
+                 ('d', 'cursor', 'diamond', 'diamond', 2, 'd', 'd-hash', 1, 1, 3),
+                 ('e', 'cursor', 'diamond', 'diamond', 3, 'e', 'e-hash', 1, 1, 4),
+                 ('z', 'cursor', 'diamond', 'diamond', 0, 'unrelated',
+                  'c2703a7ddf6c74b39505339af20dd6dd4f0794720e038b78ba395600c72417d4',
+                  1, 1, 5);
              INSERT INTO session_summary_availability(
                  session_id, generation, summary_id, availability, reason, checked_at
              ) VALUES
                  ('diamond', 1, 'a', 'available', NULL, 0),
                  ('diamond', 1, 'b', 'available', NULL, 0),
                  ('diamond', 1, 'd', 'available', NULL, 0),
-                 ('diamond', 1, 'e', 'available', NULL, 0);",
+                 ('diamond', 1, 'e', 'available', NULL, 0),
+                 ('diamond', 1, 'z', 'available', NULL, 0);",
         )
         .await
         .unwrap();
@@ -824,7 +853,27 @@ mod tests {
         let mut work_count = 0_usize;
         let mut stale_count = 0_usize;
         let mut pages = Vec::new();
-        for _ in 0..16 {
+        let first_page =
+            invalidate_raw_summary_revision(&conn, "cursor", "diamond", 100, PAGE_LIMIT)
+                .await
+                .unwrap();
+        assert!(first_page.has_more);
+        work_count = work_count.saturating_add(first_page.work_count);
+        stale_count = stale_count.saturating_add(first_page.stale_summary_count);
+        pages.push((
+            first_page.work_count,
+            first_page.stale_summary_count,
+            first_page.has_more,
+        ));
+        assert!(
+            tracedecay_lcm::dag::load_uncondensed_summary_nodes(&conn, "cursor", "diamond")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a partial invalidation must hide the entire dirty session"
+        );
+
+        for _ in 1..16 {
             let page = invalidate_raw_summary_revision(&conn, "cursor", "diamond", 100, PAGE_LIMIT)
                 .await
                 .unwrap();
@@ -841,5 +890,18 @@ mod tests {
             work_count, 6,
             "the longer path must not retraverse an already drained shortcut node"
         );
+        conn.execute(
+            "DELETE FROM lcm_summary_convergence_dirty_raw
+             WHERE provider = 'cursor' AND session_id = 'diamond' AND store_id = 100",
+            (),
+        )
+        .await
+        .unwrap();
+        let replay =
+            tracedecay_lcm::dag::load_uncondensed_summary_nodes(&conn, "cursor", "diamond")
+                .await
+                .unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].node.node_id, "z");
     }
 }

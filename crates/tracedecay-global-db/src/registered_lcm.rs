@@ -459,6 +459,11 @@ impl RegisteredGlobalDb {
                 .await
                 .map_err(|error| LcmError::Db(error.to_string()))?;
             if invalidation.has_more {
+                tracedecay_lcm::summary_convergence::record_invalidation_page_yield(
+                    &transaction,
+                    &current,
+                )
+                .await?;
                 work = work.saturating_add(invalidation.work_count);
                 break;
             }

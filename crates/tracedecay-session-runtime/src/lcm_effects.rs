@@ -1944,6 +1944,131 @@ done
     }
 
     #[tokio::test]
+    async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-partial-invalidation-fairness").await;
+        let db = harness.registered.clone();
+        let storage_root = db.db_path().parent().unwrap();
+        let large_session = "large-revision-session-a";
+        let peer_session = "due-peer-session-b";
+        assert!(db.upsert_session(&session("cursor", large_session)).await);
+        for ordinal in 1..=4 {
+            let mut record = message(large_session, ordinal);
+            record.message_id = format!("{large_session}-message-{ordinal}");
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+        let snapshot = db.read_snapshot().await.unwrap();
+        let initial = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(snapshot);
+        let mut request = daemon_summary_request("cursor", large_session);
+        request.summarizer = LcmSummarizerMode::Provided {
+            summary_text: "summary before the raw revision".to_string(),
+            route: Some("test_partial_invalidation_fairness".to_string()),
+        };
+        db.lcm_compress_retained_page_guarded(
+            request,
+            &execution_control(),
+            || Ok(()),
+            retained_guard(None),
+            Some(&initial),
+        )
+        .await
+        .unwrap();
+
+        assert!(db.upsert_session(&session("cursor", peer_session)).await);
+        let mut peer = message(peer_session, 1);
+        peer.message_id = format!("{peer_session}-message-1");
+        db.lcm_ingest_raw_message(storage_root, &peer)
+            .await
+            .unwrap();
+        let first_store_id = db
+            .lcm_raw_message_store_id("cursor", &format!("{large_session}-message-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let transaction = db.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "INSERT INTO lcm_summary_nodes(
+                     node_id, provider, conversation_id, session_id, depth,
+                     summary_text, summary_hash, summary_token_count, source_token_count
+                 ) VALUES (
+                     'synthetic-fairness-dependent', 'cursor', ?1, ?1, 0,
+                     'second dependent summary', 'synthetic-fairness-hash', 3, 4
+                 )",
+                params![large_session],
+            )
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 VALUES ('synthetic-fairness-dependent', 'raw_message', CAST(?1 AS TEXT), 0)",
+                params![first_store_id],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let mut revised = message(large_session, 1);
+        revised.message_id = format!("{large_session}-message-1");
+        revised.text = "revised protected content".to_string();
+        db.lcm_ingest_raw_message(storage_root, &revised)
+            .await
+            .unwrap();
+        let transaction = db.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "UPDATE lcm_summary_convergence_queue
+                 SET attempt_generation = 0, next_attempt_at_ms = 0
+                 WHERE provider = 'cursor' AND session_id IN (?1, ?2)",
+                params![large_session, peer_session],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let snapshot = db.read_snapshot().await.unwrap();
+        let candidate = tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.session_id, large_session);
+        drop(snapshot);
+        let (_, has_more) = db
+            .lcm_invalidate_retained_raw_revision_page(&candidate, 1)
+            .await
+            .unwrap();
+        assert!(has_more);
+
+        let snapshot = db.read_snapshot().await.unwrap();
+        assert!(
+            tracedecay_lcm::dag::load_uncondensed_summary_nodes(
+                &snapshot,
+                "cursor",
+                large_session,
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+            "active replay must fail closed between invalidation pages"
+        );
+        assert_eq!(
+            tracedecay_lcm::summary_convergence::next_candidate(&snapshot, i64::MAX)
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id,
+            peer_session,
+            "a partial invalidation page must yield to due peer work"
+        );
+    }
+
+    #[tokio::test]
     async fn malformed_relation_receipt_is_permanent_without_starving_summary_work() {
         let harness = RegisteredGlobalDbHarness::open("lcm-relation-recovery-poison").await;
         let db = harness.registered.clone();
