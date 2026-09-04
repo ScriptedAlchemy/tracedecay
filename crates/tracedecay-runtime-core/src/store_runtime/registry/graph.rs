@@ -58,8 +58,11 @@ pub struct CanonicalGraphStoreOwnerRetirementTargetV1 {
 /// The retained store lease deliberately stays project-scoped so all linked
 /// worktrees share one physical Grafeo file and one `GraphDbRegistry` entry.
 /// The namespace remains exact to the requested repository/worktree/ref or
-/// snapshot scope and immutable generation so independently published
-/// generations never overwrite one another.
+/// snapshot scope, and is generation-agnostic: successive generations of one
+/// scope compete for a single projection head, so a newly published generation
+/// supersedes its predecessor instead of founding an immortal projection of
+/// its own. The generation stays on the lease as identity for the publication
+/// key and the sealed replay source; it no longer partitions storage.
 pub struct CanonicalCodeGraphStoreLeaseV1 {
     store: Arc<CanonicalGraphStoreLeaseV1>,
     code_shard_id: StoreShardIdV1,
@@ -220,8 +223,11 @@ impl Drop for CanonicalGraphStoreOwnerRetirementTargetV1 {
 
 impl StoreRuntimeRegistry {
     /// Retains one physical project graph store together with the exact code
-    /// namespace selected by a linked worktree, ref, or immutable snapshot and
-    /// code generation.
+    /// namespace selected by a linked worktree, ref, or immutable snapshot.
+    ///
+    /// `generation_id` identifies the generation this lease publishes; it does
+    /// not select the namespace, so two generations of one scope resolve to the
+    /// same projection and supersede one another there.
     #[hotpath::skip]
     pub async fn retain_code_graph_store(
         &self,
@@ -230,7 +236,7 @@ impl StoreRuntimeRegistry {
         generation_id: CodeGenerationId,
     ) -> Result<Arc<CanonicalCodeGraphStoreLeaseV1>, StoreRuntimeRegistryFailure> {
         validate_project_code_scope(&project_key, &code_shard_id)?;
-        let namespace = code_graph_namespace(&code_shard_id, &generation_id)?;
+        let namespace = code_graph_namespace(&code_shard_id)?;
         let store = self.retain_graph_store(project_key).await?;
         Ok(Arc::new(CanonicalCodeGraphStoreLeaseV1 {
             store,
@@ -1063,21 +1069,21 @@ fn validate_project_code_scope(
     Ok(())
 }
 
+/// The canonical graph namespace of one code scope.
+///
+/// Derived from the code shard alone. The generation is deliberately absent:
+/// every generation of a scope projects into the same namespace, so publishing
+/// generation N+1 supersedes N through the ordinary verified-head
+/// compare-and-swap and N becomes historical replay that the ordinary
+/// retirement path reclaims. Hashing the generation in (the layout retired by
+/// issue #836) made every generation the permanent head of a projection of its
+/// own, which no retirement path could ever supersede.
 fn code_graph_namespace(
     code_shard_id: &StoreShardIdV1,
-    generation_id: &CodeGenerationId,
 ) -> Result<GraphNamespace, StoreRuntimeRegistryFailure> {
-    let digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.code-graph.scope.v1",
-        code_shard_id,
-        generation_id,
-    ))
-    .map_err(|error| StoreRuntimeRegistryFailure::ResolverFailed {
-        message: format!("derive exact code graph namespace: {error}"),
-    })?;
-    GraphNamespace::new(format!("code-scope:{}", digest.as_str())).map_err(|error| {
+    tracedecay_graph_db::code_graph_shard_namespace(code_shard_id).map_err(|error| {
         StoreRuntimeRegistryFailure::ResolverFailed {
-            message: format!("construct exact code graph namespace: {error}"),
+            message: format!("derive canonical code graph namespace: {error}"),
         }
     })
 }
