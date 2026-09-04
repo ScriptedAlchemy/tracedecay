@@ -1344,7 +1344,8 @@ fn sealed_copy_proof(
 
 #[cfg(test)]
 mod hibernation_tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     use super::SealedGenerationStore;
     use crate::lease::GenerationLocator;
@@ -1402,14 +1403,23 @@ mod hibernation_tests {
             }),
         );
 
-        let active_reader = child.inner.snapshot_gate.read();
+        let active_reader = child.read_guard().unwrap();
+        let retry_parent = Arc::clone(&parent);
+        let (result_tx, result_rx) = mpsc::channel();
+        let attempt = std::thread::spawn(move || {
+            result_tx
+                .send(retry_parent.reap_idle_sealed_generation_engines(None))
+                .unwrap();
+        });
+        let busy_result = result_rx.recv_timeout(Duration::from_millis(100));
+        drop(active_reader);
+        attempt.join().unwrap();
         assert_eq!(
-            parent.reap_idle_sealed_generation_engines(None),
-            0,
-            "the bounded pass must not block or evict an active reader"
+            busy_result,
+            Ok(0),
+            "the bounded pass must return without waiting for an active database reader"
         );
         assert!(child.native_engine_open().unwrap());
-        drop(active_reader);
 
         assert_eq!(
             parent.reap_idle_sealed_generation_engines(None),
