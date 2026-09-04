@@ -13,7 +13,9 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     RetentionClass, SanitizationReceiptV1,
 };
-use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
+use tracedecay_store::observation::{
+    ObservationCoverageReason, ObservationCursorAdvance, ObservationIdentityCollisionDispositionV1,
+};
 
 use crate::admission::{
     HostAdmission, HostAdmissionOutcome, HostAdmissionRecovery, HostAdmissionStatus,
@@ -1540,6 +1542,7 @@ struct DurableJsonlFrame {
     bytes: Arc<[u8]>,
     fallback_prepared: Option<PreparedObservationRecordV1>,
     fallback_hints: JsonlFrameHints,
+    identity_collision_disposition: ObservationIdentityCollisionDispositionV1,
 }
 
 struct PendingAdmissionWindow<'window, State> {
@@ -1688,7 +1691,9 @@ impl ActiveAdmission<'_> {
             provider: self.provider,
         })
         .map(|request| {
-            request.with_resume_checkpoint(self.file_identity, frame.checkpoint.resume_fingerprint)
+            request
+                .with_resume_checkpoint(self.file_identity, frame.checkpoint.resume_fingerprint)
+                .with_identity_collision_disposition(frame.identity_collision_disposition)
         })
     }
 
@@ -2124,6 +2129,11 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                                         bytes: Arc::clone(&bytes),
                                         fallback_prepared: None,
                                         fallback_hints: hints,
+                                        identity_collision_disposition: if identity_collision_retry {
+                                            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity
+                                        } else {
+                                            ObservationIdentityCollisionDispositionV1::SettleTerminal
+                                        },
                                     },
                                     policy.retention_class,
                                 )
@@ -2177,6 +2187,8 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                                                 bytes,
                                                 fallback_prepared: None,
                                                 fallback_hints: retry_hints,
+                                                identity_collision_disposition:
+                                                    ObservationIdentityCollisionDispositionV1::SettleTerminal,
                                             },
                                             policy.retention_class,
                                             policy.persisted_cursor_update,
@@ -2346,12 +2358,12 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
             progress.frames_decoded = progress.frames_decoded.saturating_add(1);
         }
         state = frame_state;
-        let (parsed_record, native_record_id) = match admission {
+        let (parsed_record, native_record_id, identity_collision_retry) = match admission {
             JsonlFrameAdmission::Durable {
                 parsed_record,
                 native_record_id,
-                ..
-            } => (parsed_record, native_record_id),
+                identity_collision_retry,
+            } => (parsed_record, native_record_id, identity_collision_retry),
             JsonlFrameAdmission::NonDurable {
                 reason,
                 before_decode,
@@ -2421,6 +2433,11 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 .and_then(|prepared| prepared.as_ref().ok())
                 .cloned(),
             fallback_hints: frame.hints,
+            identity_collision_disposition: if identity_collision_retry {
+                ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity
+            } else {
+                ObservationIdentityCollisionDispositionV1::SettleTerminal
+            },
         });
         if pending.len() == 1 {
             pending_start_state = Some(frame_start_state);

@@ -15,6 +15,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
+    ObservationIdentityCollisionDispositionV1,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1,
@@ -323,6 +324,24 @@ impl GlobalDbObservationStore {
             preflight.admission_refusal(&observation_id, observation.payload_reference().digest())
         {
             let cursor = actual_cursor();
+            if write.identity_collision_disposition()
+                == ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity
+            {
+                if matches!(
+                    refused_scan_frontier(&write, cursor.as_ref())?,
+                    RefusedScanFrontier::NotAtFrontier
+                ) {
+                    return Err(ObservationStoreError::CursorConflict {
+                        expected: Box::new(write.expected_cursor().cloned()),
+                        actual: Box::new(cursor),
+                    });
+                }
+                return Err(identity_collision(
+                    observation_id,
+                    retained_digest.clone(),
+                    observation.payload_reference().digest().clone(),
+                ));
+            }
             // The exact refusal marker is already durable. A later stale
             // reader may no longer stand at its original scan frontier, but
             // that does not invalidate the terminal content verdict.
@@ -384,6 +403,24 @@ impl GlobalDbObservationStore {
             };
             if pending.is_none() {
                 let cursor = actual_cursor();
+                if write.identity_collision_disposition()
+                    == ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity
+                {
+                    if matches!(
+                        refused_scan_frontier(&write, cursor.as_ref())?,
+                        RefusedScanFrontier::NotAtFrontier
+                    ) {
+                        return Err(ObservationStoreError::CursorConflict {
+                            expected: Box::new(write.expected_cursor().cloned()),
+                            actual: Box::new(cursor),
+                        });
+                    }
+                    return Err(identity_collision(
+                        observation_id,
+                        retained_digest.clone(),
+                        observation.payload_reference().digest().clone(),
+                    ));
+                }
                 if let RefusalCoverageOutcome::NotAtFrontier { actual } = self
                     .record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
                     .await?

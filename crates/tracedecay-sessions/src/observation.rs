@@ -11,7 +11,9 @@ use tracedecay_domain::{
     ObservationIdentityMaterialV1, ObservationSourceCursorV1, ProjectionGenerationId,
     RetentionClass, SanitizationReceiptV1, SourceBindingIdentityV1,
 };
-use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
+use tracedecay_store::observation::{
+    CursorAdvanceOutcome, ObservationCursorAdvance, ObservationIdentityCollisionDispositionV1,
+};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationAdmissionPort, ObservationCaptureSink,
     ObservationCursorPort, ObservationPersistOutcome, ObservationProjectionStatus,
@@ -89,6 +91,7 @@ pub struct CaptureObservationRequest {
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
     repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
+    identity_collision_disposition: ObservationIdentityCollisionDispositionV1,
 }
 
 impl CaptureObservationRequest {
@@ -114,6 +117,8 @@ impl CaptureObservationRequest {
             retention_class,
             cancellation,
             repository_provenance: None,
+            identity_collision_disposition:
+                ObservationIdentityCollisionDispositionV1::SettleTerminal,
         })
     }
 
@@ -137,6 +142,19 @@ impl CaptureObservationRequest {
     ) -> Self {
         self.repository_provenance = repository_provenance;
         self
+    }
+
+    #[must_use]
+    pub fn with_identity_collision_disposition(
+        mut self,
+        disposition: ObservationIdentityCollisionDispositionV1,
+    ) -> Self {
+        self.identity_collision_disposition = disposition;
+        self
+    }
+
+    pub fn identity_collision_disposition(&self) -> ObservationIdentityCollisionDispositionV1 {
+        self.identity_collision_disposition
     }
 }
 
@@ -481,6 +499,7 @@ where
             retention_class,
             cancellation,
             repository_provenance,
+            identity_collision_disposition,
         } = request;
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
@@ -537,6 +556,7 @@ where
                     retrieval_anchor,
                     projection_generation,
                 )?
+                .with_identity_collision_disposition(identity_collision_disposition)
                 .with_repository_provenance_attachment(
                     repository_provenance.availability().clone(),
                     repository_provenance.anchor().cloned(),

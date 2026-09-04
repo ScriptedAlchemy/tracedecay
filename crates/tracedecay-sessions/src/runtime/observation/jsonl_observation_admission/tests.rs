@@ -27,6 +27,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
+    ObservationIdentityCollisionDispositionV1,
 };
 use tracedecay_store::{ObservationBatchFallbackCause, ParseOffset};
 
@@ -54,6 +55,7 @@ struct SeamSpyAdmission {
     scripted_batch_error: Mutex<Option<HostAdmissionOutcome>>,
     report_no_cursor: AtomicBool,
     capture_calls: AtomicU64,
+    capture_collision_dispositions: Mutex<Vec<ObservationIdentityCollisionDispositionV1>>,
     cover_past_advances: Mutex<Vec<ObservationCursorAdvance>>,
 }
 
@@ -782,6 +784,10 @@ impl SeamSpyAdmission {
     fn capture_count(&self) -> u64 {
         self.capture_calls.load(Ordering::Relaxed)
     }
+
+    fn capture_collision_dispositions(&self) -> Vec<ObservationIdentityCollisionDispositionV1> {
+        self.capture_collision_dispositions.lock().unwrap().clone()
+    }
 }
 
 impl HostAdmission for SeamSpyAdmission {
@@ -791,6 +797,10 @@ impl HostAdmission for SeamSpyAdmission {
     ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
         Box::pin(async move {
             self.capture_calls.fetch_add(1, Ordering::Relaxed);
+            self.capture_collision_dispositions
+                .lock()
+                .unwrap()
+                .push(request.identity_collision_disposition());
             if let Some(outcome) = self.scripted_capture_error_once.lock().unwrap().take() {
                 return Err(outcome);
             }
@@ -806,6 +816,11 @@ impl HostAdmission for SeamSpyAdmission {
         requests: Vec<CaptureObservationRequest>,
     ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
         Box::pin(async move {
+            self.capture_collision_dispositions.lock().unwrap().extend(
+                requests
+                    .iter()
+                    .map(CaptureObservationRequest::identity_collision_disposition),
+            );
             if let Some(outcome) = self.scripted_batch_error.lock().unwrap().take() {
                 return Err(outcome);
             }
@@ -1102,6 +1117,15 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
         "one primary plus one fallback write"
     );
     assert_eq!(
+        spy.capture_collision_dispositions(),
+        [
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::SettleTerminal,
+        ],
+        "the batch and scalar primary may probe, while the alternate is terminal"
+    );
+    assert_eq!(
         normalized_ids.lock().unwrap().as_slice(),
         [
             "record.legacy-content-hash",
@@ -1203,6 +1227,15 @@ async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_rea
     assert_eq!(progress.frames_persisted, 0);
     assert_eq!(progress.frames_refused, 1);
     assert_eq!(spy.capture_count(), 2, "primary plus one fallback only");
+    assert_eq!(
+        spy.capture_collision_dispositions(),
+        [
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+            ObservationIdentityCollisionDispositionV1::SettleTerminal,
+        ],
+        "the exhausted alternate must restore terminal collision semantics"
+    );
     let advances = spy.cover_past_advances();
     assert_eq!(advances.len(), 1);
     assert_eq!(

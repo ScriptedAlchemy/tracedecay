@@ -6,6 +6,20 @@ use tracedecay_domain::{
 
 use super::{ObservationStoreError, ObservationStoreResult, ObservationWrite};
 
+/// Whether an identity collision may be retried with another provider-proven
+/// stable identity for the same source evidence.
+///
+/// Terminal settlement remains the default. The retry disposition is narrow:
+/// it asks the store to return the typed collision without writing refusal or
+/// coverage state so the caller can submit one alternate identity through the
+/// ordinary exact-CAS path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ObservationIdentityCollisionDispositionV1 {
+    #[default]
+    SettleTerminal,
+    RetryWithAlternateIdentity,
+}
+
 pub(super) fn validate_retrieval_anchor_binding(
     observation: &DurableObservationV1,
     retrieval_anchor: &RetrievalAnchorRecordV2,
@@ -147,15 +161,19 @@ impl Default for RepositoryProvenanceAttachmentV1 {
     }
 }
 
-/// One observation write and its stable V2 retrieval anchor.
+/// One observation write, its stable V2 retrieval anchor, and the caller's
+/// typed identity-collision disposition.
 ///
-/// Stores commit every part of this value in one authoritative transaction.
+/// Stores commit every durable observation and anchor part in one
+/// authoritative transaction. The disposition controls whether a collision
+/// is settled in that transaction; it is not retained as observation data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchoredObservationWrite {
     write: ObservationWrite,
     retrieval_anchor: RetrievalAnchorRecordV2,
     projection_generation: ProjectionGenerationId,
     repository_provenance: RepositoryProvenanceAttachmentV1,
+    identity_collision_disposition: ObservationIdentityCollisionDispositionV1,
 }
 
 impl AnchoredObservationWrite {
@@ -174,7 +192,22 @@ impl AnchoredObservationWrite {
             retrieval_anchor,
             projection_generation,
             repository_provenance: RepositoryProvenanceAttachmentV1::unavailable(),
+            identity_collision_disposition:
+                ObservationIdentityCollisionDispositionV1::SettleTerminal,
         })
+    }
+
+    #[must_use]
+    pub fn with_identity_collision_disposition(
+        mut self,
+        disposition: ObservationIdentityCollisionDispositionV1,
+    ) -> Self {
+        self.identity_collision_disposition = disposition;
+        self
+    }
+
+    pub fn identity_collision_disposition(&self) -> ObservationIdentityCollisionDispositionV1 {
+        self.identity_collision_disposition
     }
 
     pub fn with_repository_provenance_attachment(

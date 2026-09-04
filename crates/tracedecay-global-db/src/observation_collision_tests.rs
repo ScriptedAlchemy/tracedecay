@@ -52,6 +52,7 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, UtcMicros,
 };
+use tracedecay_store::observation::ObservationIdentityCollisionDispositionV1;
 use tracedecay_store::{
     AnchoredObservationWrite, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
     ObservationCoverageReason, ObservationCursorAdvance, ObservationPersistOutcome,
@@ -806,6 +807,240 @@ async fn identity_collision_records_durable_typed_coverage() {
         1,
         "identity collision must record one durable typed advance"
     );
+}
+
+/// A provider that can derive a second stable identity must be able to prove
+/// the primary identity collision without consuming the source frontier. The
+/// alternate identity then owns the ordinary exact-CAS write; if it persists,
+/// the primary candidate was never a terminal refusal and therefore must not
+/// leave refusal or coverage state behind.
+#[tokio::test]
+async fn retryable_primary_collision_leaves_frontier_for_positional_fallback() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.identity-collision.positional-fallback").unwrap();
+    let (original, original_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash",
+        1,
+        "first occurrence",
+        "receipt.identity-collision.positional.original",
+        None,
+    );
+    assert!(matches!(
+        store.persist_observation(original_write).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    let committed_cursor = store
+        .get_source_cursor(original.source(), original.scope())
+        .await
+        .unwrap();
+
+    let (primary, primary_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash",
+        2,
+        "second occurrence",
+        "receipt.identity-collision.positional.primary",
+        committed_cursor.clone(),
+    );
+    let primary_write = primary_write.with_identity_collision_disposition(
+        ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+    );
+    let error = store
+        .persist_observation(primary_write)
+        .await
+        .expect_err("the legacy content hash must prove its collision");
+    assert!(matches!(
+        error,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    assert_eq!(
+        store
+            .get_source_cursor(primary.source(), primary.scope())
+            .await
+            .unwrap(),
+        committed_cursor,
+        "a retryable primary collision must leave the exact-CAS frontier untouched"
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+
+    let (fallback, fallback_write) = collision_candidate(
+        &session_id,
+        "record.positional-occurrence.2",
+        2,
+        "second occurrence",
+        "receipt.identity-collision.positional.fallback",
+        committed_cursor.clone(),
+    );
+    assert!(matches!(
+        store
+            .persist_observation(fallback_write.clone())
+            .await
+            .unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    assert_eq!(
+        store
+            .get_source_cursor(fallback.source(), fallback.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(fallback_write.next_cursor())
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+    assert_eq!(table_count(&runtime, "observations").await, 2);
+
+    assert!(matches!(
+        store.persist_observation(fallback_write).await.unwrap(),
+        ObservationPersistOutcome::ExactDuplicate(_)
+    ));
+    assert_eq!(
+        table_count(&runtime, "observations").await,
+        2,
+        "the positional fallback must persist exactly once"
+    );
+
+    let (_, stale_primary_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash",
+        3,
+        "stale third occurrence",
+        "receipt.identity-collision.positional.stale",
+        committed_cursor,
+    );
+    let stale_error = store
+        .persist_observation(stale_primary_write.with_identity_collision_disposition(
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(stale_error, ObservationStoreError::CursorConflict { .. }),
+        "a retryable identity verdict may not hide a lost cursor CAS: {stale_error:?}"
+    );
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+    assert_eq!(table_count(&runtime, "observations").await, 2);
+}
+
+#[tokio::test]
+async fn exhausted_positional_fallback_settles_terminal_collision_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.identity-collision.positional-exhausted").unwrap();
+    let (legacy, legacy_write) = collision_candidate_at(
+        &session_id,
+        "record.legacy-content-hash.exhausted",
+        1,
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(0, 1).unwrap(),
+        ),
+        "retained legacy identity",
+        "receipt.identity-collision.exhausted.legacy",
+        None,
+    );
+    store.persist_observation(legacy_write).await.unwrap();
+    let after_legacy = store
+        .get_source_cursor(legacy.source(), legacy.scope())
+        .await
+        .unwrap();
+    let (positional, positional_write) = collision_candidate_at(
+        &session_id,
+        "record.positional-occurrence.exhausted",
+        1,
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ),
+        "retained positional identity",
+        "receipt.identity-collision.exhausted.positional",
+        after_legacy,
+    );
+    store.persist_observation(positional_write).await.unwrap();
+    let committed_cursor = store
+        .get_source_cursor(positional.source(), positional.scope())
+        .await
+        .unwrap();
+
+    let (_, primary_write) = collision_candidate(
+        &session_id,
+        "record.legacy-content-hash.exhausted",
+        2,
+        "new primary contents",
+        "receipt.identity-collision.exhausted.primary",
+        committed_cursor.clone(),
+    );
+    let primary_error = store
+        .persist_observation(primary_write.with_identity_collision_disposition(
+            ObservationIdentityCollisionDispositionV1::RetryWithAlternateIdentity,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        primary_error,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    assert_eq!(admission_refusal_rows(&runtime).await, Vec::new());
+    assert_eq!(identity_collision_advance_total(&runtime).await, 0);
+    assert_eq!(
+        store
+            .get_source_cursor(positional.source(), positional.scope())
+            .await
+            .unwrap(),
+        committed_cursor
+    );
+
+    let (_, fallback_write) = collision_candidate(
+        &session_id,
+        "record.positional-occurrence.exhausted",
+        2,
+        "new fallback contents",
+        "receipt.identity-collision.exhausted.fallback",
+        committed_cursor,
+    );
+    let fallback_error = store
+        .persist_observation(fallback_write.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        fallback_error,
+        ObservationStoreError::ObservationCollision {
+            outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+            ..
+        }
+    ));
+    assert_eq!(admission_refusal_rows(&runtime).await.len(), 1);
+    assert_eq!(identity_collision_advance_total(&runtime).await, 1);
+    assert_eq!(
+        store
+            .get_source_cursor(positional.source(), positional.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(fallback_write.next_cursor()),
+        "the exhausted fallback owns terminal coverage and advances the cursor"
+    );
+    assert_eq!(table_count(&runtime, "observations").await, 2);
 }
 
 /// Once the collision is durably terminal, a re-admitted candidate (late
