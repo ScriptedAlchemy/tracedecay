@@ -1023,11 +1023,17 @@ fn sort_hits(hits: &mut [LcmGrepHit], sort: LcmGrepSort) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
 
     use tracedecay_runtime_core::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Row, Rows, TestConnection,
-        Value, params,
+        Value, params, params_from_iter,
     };
 
     use super::*;
@@ -1035,7 +1041,7 @@ mod tests {
     struct CountingQuery<'a> {
         inner: &'a TestConnection,
         queries: Cell<usize>,
-        rows_visited: Cell<usize>,
+        executed_queries: RefCell<Vec<(String, Vec<Value>)>>,
     }
 
     impl<'a> CountingQuery<'a> {
@@ -1043,7 +1049,7 @@ mod tests {
             Self {
                 inner,
                 queries: Cell::new(0),
-                rows_visited: Cell::new(0),
+                executed_queries: RefCell::new(Vec::new()),
             }
         }
     }
@@ -1054,7 +1060,11 @@ mod tests {
             P: IntoParams,
         {
             self.queries.set(self.queries.get() + 1);
-            let mut rows = self.inner.query(sql, params).await?;
+            let values = params.into_params()?;
+            self.executed_queries
+                .borrow_mut()
+                .push((sql.to_string(), values.clone()));
+            let mut rows = self.inner.query(sql, params_from_iter(values)).await?;
             let columns = (0..rows.column_count())
                 .map(|index| rows.column_name(index).unwrap_or_default().to_string())
                 .collect::<Vec<_>>();
@@ -1068,8 +1078,6 @@ mod tests {
                 }
                 replay.push(Row::from_values(values));
             }
-            self.rows_visited
-                .set(self.rows_visited.get().saturating_add(replay.len()));
             Ok(Rows::from_parts(columns, replay))
         }
     }
@@ -1099,6 +1107,78 @@ mod tests {
         .await
         .expect("session fixture");
         (temp, conn)
+    }
+
+    async fn query_plan_lines(conn: &TestConnection, sql: &str, values: Vec<Value>) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                &format!("EXPLAIN QUERY PLAN {sql}"),
+                params_from_iter(values),
+            )
+            .await
+            .expect("explain query plan");
+        let mut lines = Vec::new();
+        while let Some(row) = rows.next().await.expect("read query plan row") {
+            lines.push(row.get::<String>(3).expect("query plan detail"));
+        }
+        assert!(!lines.is_empty(), "query plan must not be empty");
+        lines
+    }
+
+    fn raw_like_candidate_query(counted: &CountingQuery<'_>) -> (String, Vec<Value>) {
+        counted
+            .executed_queries
+            .borrow()
+            .iter()
+            .find(|(sql, _)| sql.contains("SELECT r.store_id"))
+            .cloned()
+            .expect("unsafe LIKE grep must admit indexed raw candidates first")
+    }
+
+    fn sqlite_value(value: &Value) -> rusqlite::types::Value {
+        match value {
+            Value::Null => rusqlite::types::Value::Null,
+            Value::Integer(value) => rusqlite::types::Value::Integer(*value),
+            Value::Real(value) => rusqlite::types::Value::Real(*value),
+            Value::Text(value) => rusqlite::types::Value::Text(value.clone()),
+            Value::Blob(value) => rusqlite::types::Value::Blob(value.clone()),
+        }
+    }
+
+    /// Counts actual SQLite virtual-machine steps for the exact candidate SQL,
+    /// rather than the rows materialized by the engine test adapter.
+    fn candidate_vm_steps(database_path: &Path, sql: &str, values: &[Value]) -> usize {
+        let connection = rusqlite::Connection::open(database_path)
+            .expect("open native SQLite connection for candidate measurement");
+        let steps = Arc::new(AtomicUsize::new(0));
+        let counted_steps = Arc::clone(&steps);
+        connection
+            .progress_handler(
+                1,
+                Some(move || {
+                    counted_steps.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .expect("install SQLite VM progress handler");
+        {
+            let mut statement = connection
+                .prepare(sql)
+                .expect("prepare candidate measurement statement");
+            let native_values = values.iter().map(sqlite_value).collect::<Vec<_>>();
+            let mut rows = statement
+                .query(rusqlite::params_from_iter(native_values))
+                .expect("execute candidate measurement statement");
+            while rows
+                .next()
+                .expect("advance candidate measurement statement")
+                .is_some()
+            {}
+        }
+        connection
+            .progress_handler(1, None::<fn() -> bool>)
+            .expect("clear SQLite VM progress handler");
+        steps.load(Ordering::Relaxed)
     }
 
     async fn insert_query_test_raw(
@@ -1131,6 +1211,75 @@ mod tests {
         rollback.disarm();
     }
 
+    fn production_grep_fixture_rows() -> i64 {
+        std::env::var("TRACEDECAY_LCM_GREP_FIXTURE_ROWS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|rows| *rows > 0)
+            .unwrap_or(244_016)
+    }
+
+    async fn seed_production_grep_corpus(conn: &TestConnection, rows: i64) {
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES
+                ('cursor', 'session-direct-user', '/p', '/p'),
+                ('cursor', 'session-single', '/p', '/p')",
+            (),
+        )
+        .await
+        .expect("production grep sessions");
+        let mut seeded = 0_i64;
+        while seeded < rows {
+            let batch = 25_000.min(rows - seeded);
+            conn.execute(
+                &format!(
+                    "WITH RECURSIVE fixture(value) AS (
+                         SELECT {start} UNION ALL
+                         SELECT value + 1 FROM fixture WHERE value < {end}
+                     )
+                     INSERT INTO lcm_raw_messages (
+                         provider, message_id, session_id, role, ordinal, timestamp,
+                         content, content_hash, storage_kind, snippet_text, index_text
+                     )
+                     SELECT 'cursor',
+                            printf('background-%09d', value),
+                            'session-a',
+                            'assistant',
+                            value,
+                            value,
+                            'retained background history',
+                            printf('hash-%09d', value),
+                            'inline',
+                            'retained background history',
+                            'retained background history'
+                     FROM fixture",
+                    start = seeded + 1,
+                    end = seeded + batch,
+                ),
+                (),
+            )
+            .await
+            .expect("production grep raw batch");
+            seeded += batch;
+        }
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, snippet_text, index_text
+             ) VALUES
+                ('cursor', 'direct-user-match', 'session-direct-user', 'user', ?1, ?1,
+                 'unique:needle direct user', 'direct-user-hash', 'inline',
+                 'unique:needle direct user', 'unique:needle direct user'),
+                ('cursor', 'single-session-match', 'session-single', 'assistant', ?2, ?2,
+                 'unique:needle single session', 'single-session-hash', 'inline',
+                 'unique:needle single session', 'unique:needle single session')",
+            params![rows + 1, rows + 2],
+        )
+        .await
+        .expect("production grep matches");
+    }
+
     fn summary_source(store_id: i64) -> LcmExpandedSummarySource {
         LcmExpandedSummarySource {
             source_ref: LcmSourceRef::RawMessage { store_id },
@@ -1155,9 +1304,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn like_fallback_visits_only_the_outer_rerank_candidate_budget() {
+    async fn unsafe_like_fallback_reads_only_the_bounded_scope_candidate_set() {
         let (_temp, conn) = query_test_store().await;
-        for ordinal in 0..100_i64 {
+        for ordinal in 0..8_i64 {
             let message_id = format!("message-{ordinal}");
             conn.execute(
                 "INSERT INTO lcm_raw_messages (
@@ -1165,7 +1314,8 @@ mod tests {
                     content, content_hash, storage_kind, snippet_text, index_text
                  ) VALUES (
                     'cursor', ?1, 'session-a', 'assistant', ?2, ?2,
-                    '雪 candidate', 'hash', 'inline', '雪 candidate', '雪 candidate'
+                    'alert:marker candidate', 'hash', 'inline',
+                    'alert:marker candidate', 'alert:marker candidate'
                  )",
                 params![message_id, ordinal],
             )
@@ -1178,7 +1328,7 @@ mod tests {
             &counted,
             LcmGrepRequest {
                 provider: "cursor".to_string(),
-                query: "雪".to_string(),
+                query: "alert:marker".to_string(),
                 scope: LcmScope::Session,
                 session_id: Some("session-a".to_string()),
                 include_summaries: false,
@@ -1194,15 +1344,457 @@ mod tests {
             None,
         )
         .await
-        .expect("LIKE grep");
+        .expect("unsafe LIKE grep");
 
         assert_eq!(outcome.hits.len(), 2);
-        assert_eq!(counted.queries.get(), 1);
+        assert_eq!(counted.queries.get(), 2);
+        let (candidate_sql, candidate_values) = counted
+            .executed_queries
+            .borrow()
+            .first()
+            .cloned()
+            .expect("scope candidate query");
         assert!(
-            counted.rows_visited.get() <= rerank_fetch_limit(2),
-            "LIKE fallback visited {} rows for {} returned hits",
-            counted.rows_visited.get(),
-            outcome.hits.len()
+            !candidate_sql.contains("LIKE"),
+            "candidate admission must not read retained message text: {candidate_sql}"
+        );
+        let plan = query_plan_lines(&conn, &candidate_sql, candidate_values).await;
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_lcm_raw_session_order")),
+            "single-session candidate must use the maintained session index; plan: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_direct_user_grep_uses_bounded_candidates_before_exact_matching() {
+        let (_temp, conn) = query_test_store().await;
+        for ordinal in 0..16_i64 {
+            let message_id = format!("message-{ordinal}");
+            let (role, text) = match ordinal {
+                12 => ("user", "alert:marker exact user match"),
+                13 => ("user", "prealertness keeps LIKE infix recall"),
+                _ => ("assistant", "alert marker assistant context"),
+            };
+            conn.execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, snippet_text, index_text
+                 ) VALUES (
+                    'cursor', ?1, 'session-a', ?2, ?3, ?3,
+                    ?4, 'hash', 'inline', ?4, ?4
+                 )",
+                params![message_id, role, ordinal, text],
+            )
+            .await
+            .expect("raw candidate");
+        }
+
+        let counted = CountingQuery::new(&conn);
+        let outcome = grep(
+            &counted,
+            LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "alert:marker".to_string(),
+                scope: LcmScope::All,
+                session_id: None,
+                include_summaries: false,
+                limit: 2,
+                sort: LcmGrepSort::Recency,
+                source: None,
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            },
+            LcmGrepFilters {
+                relationship_scope: crate::SessionSearchScope::All,
+                message_type: crate::SessionMessageType::DirectUser,
+            },
+            None,
+        )
+        .await
+        .expect("unsafe direct-user grep");
+
+        assert_eq!(
+            outcome
+                .hits
+                .iter()
+                .filter_map(|hit| hit.message_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["message-13", "message-12"],
+            "candidate selection must preserve punctuation and infix LIKE recall"
+        );
+        let (candidate_sql, candidate_values) = raw_like_candidate_query(&counted);
+        assert!(
+            !candidate_sql.contains("LIKE"),
+            "direct-user candidate admission must not read retained message text: {candidate_sql}"
+        );
+        assert!(
+            !candidate_sql.contains("metadata_json")
+                && !candidate_sql.contains("json_each")
+                && !candidate_sql.contains("EXISTS"),
+            "direct-user candidate admission must use only the indexed user-role superset: {candidate_sql}"
+        );
+        let plan = query_plan_lines(&conn, &candidate_sql, candidate_values).await;
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_lcm_raw_direct_user_candidate")),
+            "direct-user candidate must use the maintained user-role index; plan: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_like_source_filter_refuses_before_unbounded_candidate_admission() {
+        let (_temp, conn) = query_test_store().await;
+        let counted = CountingQuery::new(&conn);
+
+        let result = grep(
+            &counted,
+            LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "alert:marker".to_string(),
+                scope: LcmScope::All,
+                session_id: None,
+                include_summaries: false,
+                limit: 1,
+                sort: LcmGrepSort::Recency,
+                source: Some("cursor".to_string()),
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            },
+            LcmGrepFilters::default(),
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LcmError::BudgetExhausted)));
+        assert_eq!(
+            counted.queries.get(),
+            0,
+            "source metadata uses json_extract/LIKE and must refuse before any raw-corpus candidate scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_direct_user_grep_refuses_when_its_candidate_index_is_unavailable() {
+        let (_temp, conn) = query_test_store().await;
+        conn.execute_batch("DROP INDEX idx_lcm_raw_direct_user_candidate;")
+            .await
+            .expect("remove candidate index from fixture");
+        let counted = CountingQuery::new(&conn);
+
+        let result = grep(
+            &counted,
+            LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "alert:marker".to_string(),
+                scope: LcmScope::All,
+                session_id: None,
+                include_summaries: false,
+                limit: 1,
+                sort: LcmGrepSort::Recency,
+                source: None,
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            },
+            LcmGrepFilters {
+                relationship_scope: crate::SessionSearchScope::All,
+                message_type: crate::SessionMessageType::DirectUser,
+            },
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LcmError::BudgetExhausted)));
+        assert_eq!(counted.queries.get(), 1);
+        let (candidate_sql, _) = raw_like_candidate_query(&counted);
+        assert!(
+            candidate_sql.contains("INDEXED BY idx_lcm_raw_direct_user_candidate"),
+            "candidate admission must fail closed rather than let SQLite choose a table scan: {candidate_sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_like_relationship_scope_without_indexed_authority_refuses_before_query() {
+        let (_temp, conn) = query_test_store().await;
+        let counted = CountingQuery::new(&conn);
+
+        let result = grep(
+            &counted,
+            LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "alert:marker".to_string(),
+                scope: LcmScope::All,
+                session_id: None,
+                include_summaries: false,
+                limit: 1,
+                sort: LcmGrepSort::Recency,
+                source: None,
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            },
+            LcmGrepFilters {
+                relationship_scope: crate::SessionSearchScope::ParentsOnly,
+                message_type: crate::SessionMessageType::All,
+            },
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LcmError::BudgetExhausted)));
+        assert_eq!(
+            counted.queries.get(),
+            0,
+            "relationship EXISTS must not become an all-corpus candidate admission scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_like_candidate_retains_a_lossless_content_tail_match() {
+        let (_temp, conn) = query_test_store().await;
+        let content = format!(
+            "{}alert:marker lossless tail",
+            "filler ".repeat(crate::MAX_DERIVED_TEXT_CHARS)
+        );
+        let index_text = crate::derived_text_for_index(&content);
+        assert!(
+            !index_text.contains("alert:marker"),
+            "fixture must place the exact term beyond the FTS-derived text cap"
+        );
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, snippet_text, index_text
+             ) VALUES (
+                'cursor', 'tail-match', 'session-a', 'assistant', 1, 1,
+                ?1, 'hash', 'inline', ?2, ?3
+             )",
+            params![
+                content,
+                crate::retrieval_content::derived_text_for_snippet(&index_text),
+                index_text
+            ],
+        )
+        .await
+        .expect("lossless raw fixture");
+
+        let outcome = grep(
+            &conn,
+            LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "alert:marker".to_string(),
+                scope: LcmScope::Session,
+                session_id: Some("session-a".to_string()),
+                include_summaries: false,
+                limit: 1,
+                sort: LcmGrepSort::Recency,
+                source: None,
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            },
+            LcmGrepFilters::default(),
+            None,
+        )
+        .await
+        .expect("unsafe lossless-tail grep");
+
+        assert_eq!(
+            outcome
+                .hits
+                .iter()
+                .filter_map(|hit| hit.message_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["tail-match"],
+            "a complete scope candidate set must preserve exact lossless-tail recall"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsafe_like_scope_overflow_is_a_typed_budget_refusal() {
+        let (_temp, conn) = query_test_store().await;
+        for ordinal in 0..17_i64 {
+            conn.execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, snippet_text, index_text
+                 ) VALUES (
+                    'cursor', ?1, 'session-a', 'assistant', ?2, ?2,
+                    '雪 candidate', 'hash', 'inline', '雪 candidate', '雪 candidate'
+                 )",
+                params![format!("message-{ordinal}"), ordinal],
+            )
+            .await
+            .expect("overflow candidate");
+        }
+        let counted = CountingQuery::new(&conn);
+        let result = grep(
+            &counted,
+            LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "雪".to_string(),
+                scope: LcmScope::Session,
+                session_id: Some("session-a".to_string()),
+                include_summaries: false,
+                limit: 1,
+                sort: LcmGrepSort::Recency,
+                source: None,
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            },
+            LcmGrepFilters::default(),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(LcmError::BudgetExhausted)),
+            "an incomplete scope must refuse rather than scan the full corpus"
+        );
+        assert_eq!(
+            counted.queries.get(),
+            1,
+            "overflow must stop after candidate admission, before exact LIKE verification"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "production-sized retained corpus; run explicitly"]
+    async fn production_sized_unsafe_grep_is_candidate_bounded() {
+        let (temp, conn) = query_test_store().await;
+        seed_production_grep_corpus(&conn, production_grep_fixture_rows()).await;
+
+        let direct_user = CountingQuery::new(&conn);
+        let direct_outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            grep(
+                &direct_user,
+                LcmGrepRequest {
+                    provider: "cursor".to_string(),
+                    query: "unique:needle".to_string(),
+                    scope: LcmScope::All,
+                    session_id: None,
+                    include_summaries: false,
+                    limit: 1,
+                    sort: LcmGrepSort::Recency,
+                    source: None,
+                    role: None,
+                    start_time: None,
+                    end_time: None,
+                    git_filter: Default::default(),
+                },
+                LcmGrepFilters {
+                    relationship_scope: crate::SessionSearchScope::All,
+                    message_type: crate::SessionMessageType::DirectUser,
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("direct-user candidate grep must be cancellable within five seconds")
+        .expect("direct-user candidate grep");
+        assert_eq!(
+            direct_outcome
+                .hits
+                .iter()
+                .filter_map(|hit| hit.message_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["direct-user-match"]
+        );
+        assert_eq!(direct_user.queries.get(), 2);
+        let (direct_candidate_sql, direct_candidate_values) =
+            raw_like_candidate_query(&direct_user);
+        let direct_candidate_plan = query_plan_lines(
+            &conn,
+            &direct_candidate_sql,
+            direct_candidate_values.clone(),
+        )
+        .await;
+        assert!(
+            direct_candidate_plan
+                .iter()
+                .any(|line| line.contains("idx_lcm_raw_direct_user_candidate")),
+            "direct-user candidate must seek the maintained user-role index: {direct_candidate_plan:?}"
+        );
+        let direct_candidate_steps = candidate_vm_steps(
+            &temp.path().join("sessions.db"),
+            &direct_candidate_sql,
+            &direct_candidate_values,
+        );
+        let direct_candidate_limit = rerank_fetch_limit(rerank_fetch_limit(1)) + 1;
+        assert!(
+            direct_candidate_steps <= direct_candidate_limit * 32,
+            "direct-user candidate used {direct_candidate_steps} SQLite VM steps for {direct_candidate_limit} admitted rows; it must be bounded by the indexed candidate set"
+        );
+
+        let single_session = CountingQuery::new(&conn);
+        let session_outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            grep(
+                &single_session,
+                LcmGrepRequest {
+                    provider: "cursor".to_string(),
+                    query: "unique:needle".to_string(),
+                    scope: LcmScope::Session,
+                    session_id: Some("session-single".to_string()),
+                    include_summaries: false,
+                    limit: 1,
+                    sort: LcmGrepSort::Recency,
+                    source: None,
+                    role: None,
+                    start_time: None,
+                    end_time: None,
+                    git_filter: Default::default(),
+                },
+                LcmGrepFilters::default(),
+                None,
+            ),
+        )
+        .await
+        .expect("single-session candidate grep must be cancellable within five seconds")
+        .expect("single-session candidate grep");
+        assert_eq!(
+            session_outcome
+                .hits
+                .iter()
+                .filter_map(|hit| hit.message_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["single-session-match"]
+        );
+        assert_eq!(single_session.queries.get(), 2);
+        let (session_candidate_sql, session_candidate_values) =
+            raw_like_candidate_query(&single_session);
+        let session_candidate_plan = query_plan_lines(
+            &conn,
+            &session_candidate_sql,
+            session_candidate_values.clone(),
+        )
+        .await;
+        assert!(
+            session_candidate_plan
+                .iter()
+                .any(|line| line.contains("idx_lcm_raw_session_order")),
+            "single-session candidate must seek the maintained session index: {session_candidate_plan:?}"
+        );
+        let session_candidate_steps = candidate_vm_steps(
+            &temp.path().join("sessions.db"),
+            &session_candidate_sql,
+            &session_candidate_values,
+        );
+        let session_candidate_limit = rerank_fetch_limit(rerank_fetch_limit(1)) + 1;
+        assert!(
+            session_candidate_steps <= session_candidate_limit * 32,
+            "single-session candidate used {session_candidate_steps} SQLite VM steps for {session_candidate_limit} admitted rows; it must be bounded by the indexed candidate set"
         );
     }
 

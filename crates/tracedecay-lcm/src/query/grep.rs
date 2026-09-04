@@ -2,6 +2,7 @@ use crate::SessionMessageType;
 use crate::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, is_inventory_text,
 };
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 
 use super::*;
 
@@ -334,14 +335,32 @@ async fn raw_like_grep_hits(
     if query_plan.like_terms.is_empty() {
         return Ok(Vec::new());
     }
-    // The caller owns the fetch budget (see `grep`'s `rerank_fetch_limit`), and
-    // it is spent exactly once. The FTS siblings already bind `limit` straight
-    // to the SQL `LIMIT`; expanding it a second time here made the rows a page
-    // costs depend on which index path SQLite happened to take, and every row
-    // past `limit` was discarded by the truncation below anyway.
-    let fetch_limit = limit;
+    // The existing FTS authority is token based, but LIKE has infix semantics.
+    // A token prefilter can therefore omit a matching `pre<term>post` row.
+    // First admit a complete, bounded set from the structured scope instead;
+    // then exact LIKE verification preserves the established recall contract.
+    // One row beyond the re-rank budget distinguishes a complete candidate set
+    // from an incomplete one, which is a typed refusal rather than a partial
+    // answer or a full retained-corpus text scan.
+    let candidate_limit = rerank_fetch_limit(limit);
+    let candidate_ids = raw_like_scope_candidate_ids(
+        conn,
+        request,
+        retrieval_filters,
+        session_id,
+        git_scope_session_ids,
+        candidate_limit,
+    )
+    .await?;
+    if candidate_ids.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let mut values = Vec::new();
+    let mut values = candidate_ids
+        .iter()
+        .copied()
+        .map(Value::Integer)
+        .collect::<Vec<_>>();
     let mut filters = Vec::new();
     push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
     push_raw_grep_filters(
@@ -366,7 +385,7 @@ async fn raw_like_grep_hits(
         }
     }
 
-    values.push(Value::Integer(fetch_limit as i64));
+    values.push(Value::Integer(limit as i64));
     let order_by = grep_order_by(
         request.sort,
         RAW_GREP_RECENCY_EXPR,
@@ -378,9 +397,15 @@ async fn raw_like_grep_hits(
                 COALESCE(s.is_subagent, 0), 0.0 AS rank
          FROM lcm_raw_messages r
          LEFT JOIN sessions s ON s.provider = r.provider AND s.session_id = r.session_id
-         WHERE {}
+         WHERE r.store_id IN ({})
+           AND {}
          ORDER BY {order_by}
          LIMIT ?",
+        candidate_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", "),
         filters.join(" AND "),
     );
     let mut rows = conn.query(&sql, values).await?;
@@ -393,6 +418,139 @@ async fn raw_like_grep_hits(
         hits.truncate(limit);
     }
     Ok(hits)
+}
+
+/// Select a complete indexed candidate authority before applying exact filters.
+///
+/// This intentionally does not use FTS: the maintained raw-message FTS index
+/// is token based, whereas LIKE must retain infix matches in lossless content.
+/// Session identity and direct-user role each have maintained candidate
+/// indexes. Metadata/source, relationship, and temporal predicates remain
+/// exact filters after those candidates are proved complete; placing any of
+/// them in admission would make SQLite scan retained rows before `LIMIT`.
+async fn raw_like_scope_candidate_ids(
+    conn: &(impl QueryExecutor + ?Sized),
+    request: &LcmGrepRequest,
+    retrieval_filters: &LcmGrepFilters,
+    session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
+    candidate_limit: usize,
+) -> Result<Vec<i64>, LcmError> {
+    if matches!(git_scope_session_ids, LcmGitScopeSessions::Scoped(session_ids) if session_ids.is_empty())
+    {
+        return Ok(Vec::new());
+    }
+    let RawLikeCandidateAuthority {
+        filters,
+        mut values,
+        index,
+    } = raw_like_indexed_candidate_filters(
+        request,
+        *retrieval_filters,
+        session_id,
+        git_scope_session_ids,
+    )?;
+    let filter_sql = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", filters.join(" AND "))
+    };
+    let overflow_limit = candidate_limit
+        .checked_add(1)
+        .ok_or(LcmError::BudgetExhausted)?;
+    values.push(Value::Integer(
+        i64::try_from(overflow_limit).map_err(|_| LcmError::BudgetExhausted)?,
+    ));
+    let sql = format!(
+        "SELECT r.store_id
+         FROM lcm_raw_messages r INDEXED BY {index}
+         WHERE 1 = 1
+           {filter_sql}
+         LIMIT ?"
+    );
+    let mut rows = conn
+        .query(&sql, values)
+        .await
+        .map_err(|error| candidate_authority_error(error, index))?;
+    let mut candidate_ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        candidate_ids.push(row.get(0)?);
+    }
+    if candidate_ids.len() > candidate_limit {
+        return Err(LcmError::BudgetExhausted);
+    }
+    Ok(candidate_ids)
+}
+
+struct RawLikeCandidateAuthority {
+    filters: Vec<String>,
+    values: Vec<Value>,
+    index: &'static str,
+}
+
+/// Builds the only raw LIKE candidate predicates allowed to run before the
+/// `LIMIT + 1` completeness check. Every selected row must qualify directly
+/// from one maintained index, with no JSON, relationship, or text evaluation
+/// needed to decide admission.
+fn raw_like_indexed_candidate_filters(
+    request: &LcmGrepRequest,
+    retrieval_filters: LcmGrepFilters,
+    session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
+) -> Result<RawLikeCandidateAuthority, LcmError> {
+    // The canonical Git authority returns a bounded session set, but a raw
+    // LIKE candidate query would still have to walk that set before it could
+    // establish a global LIMIT. Keep the unsupported broad composition typed
+    // instead of letting SQLite turn it into a retained-corpus scan. An empty
+    // authoritative set needs no query at all and is handled by its caller.
+    if matches!(git_scope_session_ids, LcmGitScopeSessions::Scoped(_)) {
+        return Err(LcmError::BudgetExhausted);
+    }
+
+    let direct_user = matches!(
+        retrieval_filters.message_type,
+        crate::SessionMessageType::DirectUser
+    );
+    let requested_user_role = request
+        .role
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|role| role == "user");
+    let mut values = Vec::new();
+    let mut filters = Vec::new();
+    push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
+
+    let index = if let Some(session_id) = session_id {
+        filters.push("r.session_id = ?".to_string());
+        values.push(Value::Text(session_id.to_string()));
+        if grep_provider_filter(request).is_some() {
+            "idx_lcm_raw_session_order"
+        } else {
+            "idx_lcm_raw_session_id"
+        }
+    } else if direct_user || requested_user_role {
+        // This literal must remain structurally identical to
+        // `idx_lcm_raw_direct_user_candidate`'s partial-index predicate.
+        // Exact metadata/tool-result and relationship predicates are applied
+        // only after the candidate cap proves this user-role superset complete.
+        filters.push("r.role = 'user'".to_string());
+        "idx_lcm_raw_direct_user_candidate"
+    } else {
+        return Err(LcmError::BudgetExhausted);
+    };
+
+    Ok(RawLikeCandidateAuthority {
+        filters,
+        values,
+        index,
+    })
+}
+
+fn candidate_authority_error(error: EngineError, index: &str) -> LcmError {
+    match &error {
+        EngineError::Sqlite { message, .. } if message.contains(index) => LcmError::BudgetExhausted,
+        _ => error.into(),
+    }
 }
 
 async fn summary_like_grep_hits(
