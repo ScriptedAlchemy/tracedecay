@@ -1209,37 +1209,29 @@ fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
 
 /// Whether the store holds any content-addressed segment file at all.
 ///
-/// A bounded directory listing: no manifest is opened, so this is the only
-/// segment question a metadata-only census may answer. An empty or absent
-/// directory proves there is nothing to collect; anything else stays typed
-/// unknown until the mark-and-sweep runs.
+/// A one-entry directory observation: no manifest is opened, so this is the
+/// only segment question a metadata-only census may answer. An empty or absent
+/// directory proves there is nothing to collect; any observed entry, including
+/// unrecognized crash debris, stays typed unknown until the mark-and-sweep
+/// runs. Classifying names here would let arbitrary debris turn an operator
+/// diagnostic into an exhaustive directory scan.
 fn store_holds_generation_segments(
     store_root: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    let entries = match std::fs::read_dir(store_root.join(GENERATION_SEGMENTS_DIRECTORY)) {
+    let mut entries = match std::fs::read_dir(store_root.join(GENERATION_SEGMENTS_DIRECTORY)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(storage(error)),
     };
-    for entry in entries {
-        if observe_cancel(is_cancelled) {
-            return Err(CodeGenerationRetentionErrorV1::Cancelled);
-        }
-        let entry = entry.map_err(storage)?;
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if file_name
-            .strip_prefix("segment-")
-            .and_then(|name| name.strip_suffix(".json"))
-            .is_some_and(|digest| is_lowercase_hex(digest, 64))
-        {
-            return Ok(true);
-        }
+    if observe_cancel(is_cancelled) {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    Ok(false)
+    entries
+        .next()
+        .transpose()
+        .map(|entry| entry.is_some())
+        .map_err(storage)
 }
 
 fn has_unreferenced_generation_segments(
