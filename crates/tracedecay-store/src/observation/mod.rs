@@ -413,9 +413,23 @@ impl ObservationCoverageReason {
 }
 
 /// The wire form did not name a known [`ObservationCoverageReason`] variant.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("unknown observation coverage reason: {0:?}")]
-pub struct UnknownObservationCoverageReason(pub String);
+///
+/// Unknown wire text can originate in corrupt or legacy durable rows. Keep
+/// only a fixed-size fingerprint so error and serialization boundaries cannot
+/// disclose that text while still correlating repeated unknown values.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq, thiserror::Error)]
+#[serde(transparent)]
+#[error("unknown observation coverage reason: {fingerprint}")]
+pub struct UnknownObservationCoverageReason {
+    fingerprint: CursorAdvanceLedgerOpaqueValueHashV1,
+}
+
+impl UnknownObservationCoverageReason {
+    /// Fixed-size identity for the unrecognized wire value.
+    pub fn fingerprint(&self) -> &CursorAdvanceLedgerOpaqueValueHashV1 {
+        &self.fingerprint
+    }
+}
 
 impl TryFrom<&str> for ObservationCoverageReason {
     type Error = UnknownObservationCoverageReason;
@@ -434,7 +448,9 @@ impl TryFrom<&str> for ObservationCoverageReason {
             "sanitizer_quarantined" => Ok(Self::SanitizerQuarantined),
             "admission_refused" => Ok(Self::AdmissionRefused),
             "observation_identity_collision" => Ok(Self::ObservationIdentityCollision),
-            other => Err(UnknownObservationCoverageReason(other.to_string())),
+            other => Err(UnknownObservationCoverageReason {
+                fingerprint: CursorAdvanceLedgerOpaqueValueHashV1::for_raw_value(other),
+            }),
         }
     }
 }
@@ -461,6 +477,12 @@ impl CursorAdvanceLedgerOpaqueValueHashV1 {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Display for CursorAdvanceLedgerOpaqueValueHashV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 

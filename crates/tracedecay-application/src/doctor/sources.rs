@@ -29,10 +29,12 @@
 //! - storage retention/size → [`DoctorFindingFamilyV1::Storage`] (producers in
 //!   [`crate::storage::findings`]; this port collects their typed findings)
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CodeGenerationId, FeedbackCycleId, FeedbackCycleTerminationV1, FeedbackFindingId,
     FeedbackFindingLifecycleV1, FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1,
@@ -1371,8 +1373,8 @@ pub fn observability_finding(
 pub struct IngestRefusalCountV1 {
     /// Session provider that produced the refused records (e.g. `cursor`).
     pub provider: String,
-    /// Durable coverage reason recorded when coverage advanced past the
-    /// records (e.g. `admission_refused`, `unsupported_fact`).
+    /// Known durable coverage reason or an opaque SHA-256 fingerprint of an
+    /// unrecognized value. Doctor never formats arbitrary reason text.
     pub reason: String,
     /// Refused source records carried under this provider/reason pair.
     pub count: u64,
@@ -1394,6 +1396,38 @@ pub enum IngestRefusalCensusReadV1 {
     Observed { refusals: Vec<IngestRefusalCountV1> },
     /// The ledger could not be consulted.
     Unknown,
+}
+
+/// Render only a known durable reason code or a previously established opaque
+/// fingerprint. The Doctor port accepts strings across crate boundaries, so
+/// this last presentation boundary conservatively fingerprints unexpected
+/// input instead of formatting it into a public finding.
+fn doctor_visible_refusal_reason(reason: &str) -> Cow<'_, str> {
+    const KNOWN_REASON_CODES: &[&str] = &[
+        "blank_frame",
+        "out_of_scope",
+        "malformed_frame",
+        "oversized_frame",
+        "unknown_version",
+        "unsupported_fact",
+        "duplicate_observation",
+        "canonical_payload_revision",
+        "sanitizer_rejected",
+        "sanitizer_quarantined",
+        "admission_refused",
+        "observation_identity_collision",
+    ];
+    if KNOWN_REASON_CODES.contains(&reason)
+        || tracedecay_domain::canonical_text::is_tagged_lowercase_hex(reason, "sha256:", 64)
+    {
+        return Cow::Borrowed(reason);
+    }
+    Cow::Owned(
+        tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
+            "sha256:",
+            &Sha256::digest(reason.as_bytes()),
+        ),
+    )
 }
 
 /// Map the durable refusal census into its `Observability` finding.
@@ -1420,7 +1454,14 @@ pub fn ingest_refusal_finding(
             let mut breakdown: Vec<String> = ordered
                 .iter()
                 .take(MAX_LISTED_PAIRS)
-                .map(|entry| format!("{} {}={}", entry.provider, entry.reason, entry.count))
+                .map(|entry| {
+                    format!(
+                        "{} {}={}",
+                        entry.provider,
+                        doctor_visible_refusal_reason(&entry.reason),
+                        entry.count
+                    )
+                })
                 .collect();
             if ordered.len() > MAX_LISTED_PAIRS {
                 breakdown.push(format!("+{} more", ordered.len() - MAX_LISTED_PAIRS));
@@ -1771,6 +1812,35 @@ mod tests {
                 .statement()
                 .contains("cursor observation_identity_collision=1"),
             "Doctor must retain the bounded terminal refusal reason"
+        );
+    }
+
+    #[test]
+    fn corrupt_refusal_reasons_never_reach_doctor_output() {
+        let short_secret = "provider-private-transcript-secret";
+        let long_secret = format!("provider-private-transcript-{}", "x".repeat(16 * 1024));
+        let finding = ingest_refusal_finding(&IngestRefusalCensusReadV1::Observed {
+            refusals: vec![
+                IngestRefusalCountV1 {
+                    provider: "cursor".to_owned(),
+                    reason: short_secret.to_owned(),
+                    count: 1,
+                },
+                IngestRefusalCountV1 {
+                    provider: "cursor".to_owned(),
+                    reason: long_secret.clone(),
+                    count: 1,
+                },
+            ],
+        })
+        .expect("finding");
+
+        let serialized = serde_json::to_string(&finding).expect("serialize finding");
+        assert!(!serialized.contains(short_secret));
+        assert!(!serialized.contains(&long_secret));
+        assert!(
+            finding.coverage().statement().contains("sha256:"),
+            "Doctor must retain an opaque corruption classification"
         );
     }
 
