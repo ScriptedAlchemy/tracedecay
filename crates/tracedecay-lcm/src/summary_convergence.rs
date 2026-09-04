@@ -74,19 +74,41 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_insert
 CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
     AFTER UPDATE OF provider, session_id, content_hash, storage_kind,
                     payload_ref, metadata_json ON lcm_raw_messages
-    WHEN OLD.provider IS NOT NEW.provider
-      OR OLD.session_id IS NOT NEW.session_id
-      OR OLD.content_hash IS NOT NEW.content_hash
-      OR OLD.storage_kind IS NOT NEW.storage_kind
-      OR OLD.payload_ref IS NOT NEW.payload_ref
-      OR CASE
-           WHEN json_valid(NEW.metadata_json)
-           THEN json_extract(
-               NEW.metadata_json,
-               '$.ingest_protection.sanitization_receipt'
-           ) IS NULL
-           ELSE 1
-         END
+    WHEN NOT (
+        OLD.provider IS NEW.provider
+        AND OLD.session_id IS NEW.session_id
+        AND CASE
+              WHEN json_valid(OLD.metadata_json)
+              THEN json_extract(
+                  OLD.metadata_json,
+                  '$.ingest_protection.sanitization_receipt'
+              ) IS NULL
+              ELSE 1
+            END
+        AND CASE
+              WHEN json_valid(NEW.metadata_json)
+              THEN json_extract(
+                  NEW.metadata_json,
+                  '$.ingest_protection.sanitization_receipt'
+              ) IS NOT NULL
+              ELSE 0
+            END
+      )
+      AND (
+        OLD.provider IS NOT NEW.provider
+        OR OLD.session_id IS NOT NEW.session_id
+        OR OLD.content_hash IS NOT NEW.content_hash
+        OR OLD.storage_kind IS NOT NEW.storage_kind
+        OR OLD.payload_ref IS NOT NEW.payload_ref
+        OR CASE
+             WHEN json_valid(NEW.metadata_json)
+             THEN json_extract(
+                 NEW.metadata_json,
+                 '$.ingest_protection.sanitization_receipt'
+             ) IS NULL
+             ELSE 1
+           END
+      )
     BEGIN
         INSERT INTO lcm_summary_convergence_queue (
             provider, session_id, newest_raw_store_id,
@@ -247,7 +269,7 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
         ),
         (
             "lcm_summary_convergence_raw_unprotected_update",
-            "OLD.content_hash",
+            "json_valid(OLD.metadata_json)",
         ),
     ] {
         let mut rows = conn
@@ -422,9 +444,10 @@ pub async fn record_outcome(
     failure_code: Option<&str>,
     failure_count: u32,
     next_attempt_at_ms: i64,
-) -> Result<(), LcmError> {
-    conn.execute(
-        "UPDATE lcm_summary_convergence_queue
+) -> Result<bool, LcmError> {
+    let affected = conn
+        .execute(
+            "UPDATE lcm_summary_convergence_queue
          SET attempted_raw_store_id = ?3,
              state = CASE WHEN newest_raw_store_id > ?3 THEN 'pending' ELSE ?4 END,
              failure_code = CASE WHEN newest_raw_store_id > ?3 THEN NULL ELSE ?5 END,
@@ -434,18 +457,44 @@ pub async fn record_outcome(
              stale_from_store_id = NULL
          WHERE provider = ?1 AND session_id = ?2
            AND raw_revision_generation = ?8",
-        params![
-            candidate.provider.as_str(),
-            candidate.session_id.as_str(),
-            candidate.newest_raw_store_id,
-            state.as_str(),
-            failure_code,
-            i64::from(failure_count),
-            next_attempt_at_ms,
-            candidate.raw_revision_generation,
-        ],
-    )
-    .await?;
+            params![
+                candidate.provider.as_str(),
+                candidate.session_id.as_str(),
+                candidate.newest_raw_store_id,
+                state.as_str(),
+                failure_code,
+                i64::from(failure_count),
+                next_attempt_at_ms,
+                candidate.raw_revision_generation,
+            ],
+        )
+        .await?;
+    Ok(affected == 1)
+}
+
+pub async fn require_candidate_revision(
+    conn: &(impl QueryExecutor + ?Sized),
+    candidate: &LcmSummaryConvergenceCandidate,
+) -> Result<(), LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT raw_revision_generation
+             FROM lcm_summary_convergence_queue
+             WHERE provider = ?1 AND session_id = ?2",
+            params![candidate.provider.as_str(), candidate.session_id.as_str()],
+        )
+        .await?;
+    let actual = rows
+        .next()
+        .await?
+        .map(|row| row.get::<i64>(0))
+        .transpose()?;
+    if actual != Some(candidate.raw_revision_generation) {
+        return Err(LcmError::StaleRawRevision {
+            expected: candidate.raw_revision_generation,
+            actual,
+        });
+    }
     Ok(())
 }
 

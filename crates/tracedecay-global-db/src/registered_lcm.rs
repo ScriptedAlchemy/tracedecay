@@ -317,8 +317,7 @@ impl RegisteredGlobalDb {
         request: LcmCompressionRequest,
         control: &ExecutionControl,
         before_commit: F,
-        row_limit: usize,
-        byte_limit: u64,
+        guard: compression::RetainedCompressionGuard,
         convergence_candidate: Option<
             &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
         >,
@@ -340,6 +339,13 @@ impl RegisteredGlobalDb {
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
+        if let Some(candidate) = convergence_candidate {
+            tracedecay_lcm::summary_convergence::require_candidate_revision(
+                &transaction,
+                candidate,
+            )
+            .await?;
+        }
         if let Some(stale_from_store_id) =
             convergence_candidate.and_then(|candidate| candidate.stale_from_store_id)
         {
@@ -347,7 +353,7 @@ impl RegisteredGlobalDb {
                 &transaction,
                 request.session_id.as_str(),
                 stale_from_store_id,
-                row_limit.max(1),
+                guard.row_limit.max(1),
             )
             .await?;
             transaction
@@ -391,8 +397,7 @@ impl RegisteredGlobalDb {
             storage_root,
             request,
             &mut payload_rollback,
-            row_limit,
-            byte_limit,
+            guard,
         )
         .await?;
         if bounded.response.status != "needs_summary"
@@ -403,7 +408,7 @@ impl RegisteredGlobalDb {
             } else {
                 tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Current
             };
-            tracedecay_lcm::summary_convergence::record_outcome(
+            let settled = tracedecay_lcm::summary_convergence::record_outcome(
                 &transaction,
                 candidate,
                 state,
@@ -412,6 +417,16 @@ impl RegisteredGlobalDb {
                 0,
             )
             .await?;
+            if !settled {
+                tracedecay_lcm::summary_convergence::require_candidate_revision(
+                    &transaction,
+                    candidate,
+                )
+                .await?;
+                return Err(LcmError::Db(
+                    "retained convergence queue settlement affected no row".to_string(),
+                ));
+            }
         }
         check_execution(control)?;
         before_commit()?;

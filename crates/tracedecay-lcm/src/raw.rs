@@ -345,8 +345,9 @@ async fn upsert_inline_raw_message(
     let snippet = derived_text_for_snippet(text);
     let index = derived_text_for_index(text);
     let content_hash = projected_content_hash(text);
-    conn.execute(
-        "INSERT INTO lcm_raw_messages (
+    let affected = conn
+        .execute(
+            "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref, snippet_text,
             index_text, legacy_source, legacy_truncated, metadata_json
@@ -365,21 +366,70 @@ async fn upsert_inline_raw_message(
             index_text = excluded.index_text,
             legacy_source = 0,
             legacy_truncated = 0,
-            metadata_json = excluded.metadata_json",
-        params![
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            message.session_id.as_str(),
-            message.role.as_str(),
-            message.ordinal,
-            message.timestamp,
-            text,
-            content_hash.as_str(),
-            LcmStorageKind::Inline.as_str(),
-            snippet.as_str(),
-            index.as_str(),
-            metadata_json,
-        ],
+            metadata_json = excluded.metadata_json
+         WHERE lcm_raw_messages.session_id = excluded.session_id",
+            params![
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                message.session_id.as_str(),
+                message.role.as_str(),
+                message.ordinal,
+                message.timestamp,
+                text,
+                content_hash.as_str(),
+                LcmStorageKind::Inline.as_str(),
+                snippet.as_str(),
+                index.as_str(),
+                metadata_json,
+            ],
+        )
+        .await?;
+    if affected != 1 {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    }
+    Ok(())
+}
+
+async fn persist_raw_predecessor_range(
+    conn: &(impl Executor + ?Sized),
+    message: &SessionMessageRecord,
+) -> Result<(), LcmError> {
+    // Capture the exact preceding raw interval in the same ingest transaction.
+    // Host recognizers decide whether this row is native compaction evidence;
+    // the generic raw authority only preserves its bounded provenance.
+    conn.execute(
+        "INSERT INTO lcm_raw_predecessor_ranges (
+             provider, message_id, session_id, from_store_id, to_store_id
+         )
+         SELECT current.provider, current.message_id, current.session_id,
+                first.store_id, prior.store_id
+         FROM lcm_raw_messages AS current
+         JOIN lcm_raw_messages AS first
+           ON first.store_id = (
+                SELECT candidate.store_id
+                FROM lcm_raw_messages AS candidate
+                WHERE candidate.provider = current.provider
+                  AND candidate.session_id = current.session_id
+                  AND candidate.store_id < current.store_id
+                ORDER BY candidate.store_id
+                LIMIT 1
+           )
+         JOIN lcm_raw_messages AS prior
+           ON prior.store_id = (
+                SELECT candidate.store_id
+                FROM lcm_raw_messages AS candidate
+                WHERE candidate.provider = current.provider
+                  AND candidate.session_id = current.session_id
+                  AND candidate.store_id < current.store_id
+                ORDER BY candidate.store_id DESC
+                LIMIT 1
+           )
+         WHERE current.provider = ?1 AND current.message_id = ?2
+         ON CONFLICT(provider, message_id) DO UPDATE SET
+             session_id = excluded.session_id,
+             from_store_id = excluded.from_store_id,
+             to_store_id = excluded.to_store_id",
+        params![message.provider.as_str(), message.message_id.as_str()],
     )
     .await?;
     Ok(())
@@ -502,14 +552,16 @@ pub async fn commit_staged_raw_message(
             staged.prepared.metadata_json.as_deref(),
         )
         .await?;
+        persist_raw_predecessor_range(conn, message).await?;
         return Ok(RawMessageUpsert {
             projection_text,
             projection_metadata_json: staged.prepared.metadata_json,
         });
     };
     payload::upsert_payload_metadata(conn, &whole_message.payload_ref).await?;
-    conn.execute(
-        "INSERT INTO lcm_raw_messages (
+    let affected = conn
+        .execute(
+            "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref, snippet_text,
             index_text, legacy_source, legacy_truncated, metadata_json
@@ -528,23 +580,28 @@ pub async fn commit_staged_raw_message(
             index_text = excluded.index_text,
             legacy_source = 0,
             legacy_truncated = 0,
-            metadata_json = excluded.metadata_json",
-        params![
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            message.session_id.as_str(),
-            message.role.as_str(),
-            message.ordinal,
-            message.timestamp,
-            whole_message.payload_ref.content_hash.as_str(),
-            LcmStorageKind::External.as_str(),
-            whole_message.payload_ref.payload_ref.as_str(),
-            whole_message.placeholder.as_str(),
-            whole_message.placeholder.as_str(),
-            whole_message.metadata_json.as_str(),
-        ],
-    )
-    .await?;
+            metadata_json = excluded.metadata_json
+         WHERE lcm_raw_messages.session_id = excluded.session_id",
+            params![
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                message.session_id.as_str(),
+                message.role.as_str(),
+                message.ordinal,
+                message.timestamp,
+                whole_message.payload_ref.content_hash.as_str(),
+                LcmStorageKind::External.as_str(),
+                whole_message.payload_ref.payload_ref.as_str(),
+                whole_message.placeholder.as_str(),
+                whole_message.placeholder.as_str(),
+                whole_message.metadata_json.as_str(),
+            ],
+        )
+        .await?;
+    if affected != 1 {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    }
+    persist_raw_predecessor_range(conn, message).await?;
     Ok(RawMessageUpsert {
         projection_text: whole_message.placeholder,
         projection_metadata_json: Some(whole_message.metadata_json),
