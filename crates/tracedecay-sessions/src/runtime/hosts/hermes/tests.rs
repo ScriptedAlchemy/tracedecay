@@ -1417,12 +1417,40 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(!journal.exists());
 }
 
+/// Report whether `directory`'s filesystem accepts a file name that is not
+/// valid UTF-8.
+///
+/// `cfg(unix)` is a compile gate, not a filesystem capability: APFS refuses
+/// such a name outright with `EILSEQ`, so a macOS run failed at the fixture
+/// instead of exercising the reader. Probing keeps the coverage everywhere the
+/// bytes are really accepted and makes the skip visible where they are not.
+#[cfg(unix)]
+fn non_utf8_file_names_supported(directory: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStringExt;
+
+    let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn hermes_reader_supports_non_utf8_database_paths() {
     use std::os::unix::ffi::OsStringExt;
 
     let dir = tempfile::tempdir().unwrap();
+    if !non_utf8_file_names_supported(dir.path()) {
+        println!(
+            "skipping hermes_reader_supports_non_utf8_database_paths: \
+             this filesystem refuses non-UTF-8 file names"
+        );
+        return;
+    }
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir
         .path()
