@@ -722,30 +722,34 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
     blocker.commit().await.expect("release registered writer");
 
     let mut next_id = 4_u64;
-    let mut later_enqueued = false;
-    for _ in 0..1_024 {
-        match producer
-            .try_emit(envelope(
-                &scope,
-                "boot:carried-drops",
-                next_id,
-                i64::try_from(next_id).expect("small event id"),
-            ))
-            .expect("bounded emission")
-        {
-            ObservabilityEmissionOutcomeV1::Enqueued => {
-                later_enqueued = true;
-                break;
-            }
-            ObservabilityEmissionOutcomeV1::DroppedAtCapacity => {
-                dropped = dropped.saturating_add(1);
-                next_id = next_id.saturating_add(1);
-                tokio::task::yield_now().await;
+    // The reopened slot is a wall-clock condition, not an iteration count:
+    // the worker only frees the queued observation once its previously
+    // blocked write actually lands. Retry under a real deadline and park
+    // between attempts — a `yield_now` spin keeps this runtime thread hot
+    // and starves the very write it is waiting for on a loaded host.
+    let later_enqueued = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match producer
+                .try_emit(envelope(
+                    &scope,
+                    "boot:carried-drops",
+                    next_id,
+                    i64::try_from(next_id).expect("small event id"),
+                ))
+                .expect("bounded emission")
+            {
+                ObservabilityEmissionOutcomeV1::Enqueued => break,
+                ObservabilityEmissionOutcomeV1::DroppedAtCapacity => {
+                    dropped = dropped.saturating_add(1);
+                    next_id = next_id.saturating_add(1);
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
             }
         }
-    }
+    })
+    .await;
     assert!(
-        later_enqueued,
+        later_enqueued.is_ok(),
         "worker must reopen a bounded data slot after the writer is released"
     );
     let summary = producer.shutdown().await.expect("shutdown producer");
