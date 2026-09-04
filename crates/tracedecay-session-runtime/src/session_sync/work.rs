@@ -389,6 +389,35 @@ impl DaemonSessionSyncService {
     }
 }
 
+fn import_transcript_stats(
+    imported: tracedecay_sessions::TranscriptIngestStats,
+    git: Option<&tracedecay_global_db::GitEvidenceConvergenceStats>,
+) -> SessionSyncStatsV1 {
+    let mut stats = SessionSyncStatsV1 {
+        sessions_imported: imported.sessions_upserted,
+        messages_imported: imported.messages_upserted,
+        ..SessionSyncStatsV1::default()
+    };
+    if let Some(git) = git {
+        stats.sessions_scanned = saturating_usize_to_u64(git.backfill.sessions_scanned);
+        stats.spans_written = saturating_usize_to_u64(git.backfill.spans_written);
+        stats.commits_attributed = saturating_usize_to_u64(git.backfill.commits_attributed);
+        stats.skipped = saturating_usize_to_u64(git.backfill.skipped_total());
+    }
+    stats
+}
+
+fn git_convergence_deferred_units(
+    convergence: &tracedecay_global_db::GitEvidenceConvergenceStats,
+) -> u64 {
+    convergence
+        .pending_publications
+        .saturating_add(u64::from(convergence.backfill_page_saturated))
+        .saturating_add(saturating_usize_to_u64(
+            convergence.backfill.skipped_git_error,
+        ))
+}
+
 impl SessionSyncProjectContext {
     #[hotpath::skip]
     pub(super) async fn source_frontiers_for(
@@ -541,26 +570,14 @@ impl SessionSyncProjectContext {
                         .await,
                 )
             };
-            let mut project_stats = SessionSyncStatsV1 {
-                sessions_imported: project.stats.sessions_upserted,
-                messages_imported: project.stats.messages_upserted,
-                ..SessionSyncStatsV1::default()
-            };
+            let project_stats = import_transcript_stats(
+                project.stats,
+                git_convergence
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok()),
+            );
             let git_deferred_units = match git_convergence.as_ref() {
-                Some(Ok(convergence)) => {
-                    project_stats.sessions_scanned =
-                        saturating_usize_to_u64(convergence.backfill.sessions_scanned);
-                    project_stats.spans_written =
-                        saturating_usize_to_u64(convergence.backfill.spans_written);
-                    project_stats.commits_attributed =
-                        saturating_usize_to_u64(convergence.backfill.commits_attributed);
-                    project_stats.skipped =
-                        saturating_usize_to_u64(convergence.backfill.skipped_total());
-                    convergence
-                        .pending_publications
-                        .saturating_add(u64::from(convergence.backfill_page_saturated))
-                        .saturating_add(project_stats.skipped)
-                }
+                Some(Ok(convergence)) => git_convergence_deferred_units(convergence),
                 Some(Err(error)) => {
                     tracing::warn!(%error, "startup session Git convergence failed");
                     1
@@ -594,9 +611,9 @@ impl SessionSyncProjectContext {
             let project_progress_failed = project_progress.is_err();
             let project_frontiers = project_progress.unwrap_or_default();
             let git_convergence_committed = git_convergence.as_ref().is_some_and(|result| {
-                result
-                    .as_ref()
-                    .is_ok_and(|convergence| convergence.replayed_publications > 0)
+                result.as_ref().is_ok_and(
+                    tracedecay_global_db::GitEvidenceConvergenceStats::committed_progress,
+                )
             });
 
             let profile_sweep_satisfied = {
@@ -644,11 +661,12 @@ impl SessionSyncProjectContext {
             let combined = user
                 .as_ref()
                 .map_or(project.stats, |user| project.stats.merge(user.stats));
-            let stats = SessionSyncStatsV1 {
-                sessions_imported: combined.sessions_upserted,
-                messages_imported: combined.messages_upserted,
-                ..SessionSyncStatsV1::default()
-            };
+            let stats = import_transcript_stats(
+                combined,
+                git_convergence
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok()),
+            );
             let mut coverage = project_coverage;
             coverage.push(user.as_ref().map_or_else(
                 || {
@@ -1022,5 +1040,45 @@ pub(super) fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) 
         && !error.is_cancelled()
     {
         tracing::warn!(%error, "session sync worker join failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saturated_git_only_import_preserves_committed_partial_receipt_evidence() {
+        let convergence = tracedecay_global_db::GitEvidenceConvergenceStats {
+            replayed_publications: 0,
+            pending_publications: 0,
+            backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
+                sessions_scanned: 50,
+                spans_written: 2,
+                commits_attributed: 3,
+                skipped_not_worktree: 4,
+                frontier_advanced: true,
+                ..tracedecay_sessions::runtime::git_correlation::BackfillStats::default()
+            },
+            backfill_page_saturated: true,
+        };
+
+        let stats = import_transcript_stats(
+            tracedecay_sessions::TranscriptIngestStats::default(),
+            Some(&convergence),
+        );
+
+        assert_eq!(stats.sessions_imported, 0);
+        assert_eq!(stats.messages_imported, 0);
+        assert_eq!(stats.sessions_scanned, 50);
+        assert_eq!(stats.spans_written, 2);
+        assert_eq!(stats.commits_attributed, 3);
+        assert_eq!(stats.skipped, 4);
+        assert_eq!(git_convergence_deferred_units(&convergence), 1);
+        assert!(convergence.committed_progress());
+        assert_eq!(
+            completion_termination(None, true, &stats, false, true),
+            OperationTermination::Partial
+        );
     }
 }

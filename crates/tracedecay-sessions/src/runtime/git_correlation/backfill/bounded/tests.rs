@@ -10,8 +10,10 @@ use tracedecay_runtime_core::db::engine::{
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 
 use super::*;
-use crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction;
 use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
+use crate::runtime::git_correlation::{
+    ensure_git_correlation_receipt_schema_in_transaction, read_meta_value,
+};
 
 impl GitCorrelationWriteTxn for Transaction {
     async fn commit(self) -> Result<(), GitCorrelationError> {
@@ -219,6 +221,72 @@ async fn prepare_store(path: &Path, project_path: &Path) -> TestStore {
         .await
         .unwrap();
     store
+}
+
+#[tokio::test]
+async fn incremental_publication_failure_holds_frontier_until_retry_succeeds() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store.graph.fail_next_publication();
+
+    let failed = run_incremental_backfill(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert_eq!(failed.sessions_scanned, 1);
+    assert_eq!(failed.skipped_git_error, 1);
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        None,
+        "a transient graph failure must not settle the source tuple"
+    );
+
+    let retried = run_incremental_backfill(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert_eq!(retried.sessions_scanned, 1);
+    assert_eq!(retried.skipped_git_error, 0);
+    assert!(retried.spans_written > 0);
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(i64::MAX)
+    );
+    assert_eq!(
+        run_incremental_backfill(&store, &SystemGit, 1)
+            .await
+            .unwrap()
+            .sessions_scanned,
+        0
+    );
+}
+
+#[tokio::test]
+async fn incremental_permanent_exclusion_advances_frontier() {
+    let plain_directory = tempfile::tempdir().unwrap();
+    let database_directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(
+        &database_directory.path().join("sessions.db"),
+        plain_directory.path(),
+    )
+    .await;
+
+    let excluded = run_incremental_backfill(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(excluded.sessions_scanned, 1);
+    assert_eq!(excluded.skipped_not_worktree, 1);
+    assert!(excluded.frontier_advanced);
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(i64::MAX)
+    );
 }
 
 async fn scalar(store: &TestStore, sql: &str) -> i64 {

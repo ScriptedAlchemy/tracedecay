@@ -250,6 +250,8 @@ pub struct BackfillStats {
     pub skipped_no_window: usize,
     pub skipped_not_worktree: usize,
     pub skipped_git_error: usize,
+    /// Whether this pass durably advanced the incremental session tuple.
+    pub frontier_advanced: bool,
 }
 
 impl BackfillStats {
@@ -371,7 +373,7 @@ where
         .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
     let mut stats = BackfillStats::default();
-    backfill_rows(
+    let _ = backfill_rows(
         session_store,
         git,
         opts,
@@ -399,10 +401,12 @@ pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
 /// invocation.
 ///
 /// The watermark ([`AUTO_BACKFILL_WATERMARK_KEY`]) records the highest session
-/// activity timestamp already attempted. Each pass reads up to `limit_sessions`
+/// activity timestamp already settled. Each pass reads up to `limit_sessions`
 /// sessions strictly newer than the watermark, oldest-first, backfills them
-/// (span/commit writes are idempotent), then advances the watermark to the
-/// newest activity in the batch. Fresh sessions recorded after a pass are
+/// (span/commit writes are idempotent), then advances the watermark through
+/// the contiguous prefix whose publications succeeded or whose exclusion is
+/// permanent. A transient Git or graph failure holds the tuple before that
+/// session so it remains retryable. Fresh sessions recorded after a pass are
 /// picked up by a later pass; a fully-drained store scans nothing.
 ///
 /// Analytics timestamps are not consulted here. Canonical history indexing
@@ -450,11 +454,16 @@ where
     };
     if !rows.is_empty() {
         let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
-        backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
+        let settled_prefix_len =
+            backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
 
         // Advance both tuple components together so equal activity timestamps
-        // resume at the exact unprocessed session row.
-        let new_frontier = page.last();
+        // resume at the exact unprocessed session row. Never advance beyond a
+        // transient failure: later idempotent successes are replayed after the
+        // unresolved tuple settles.
+        let new_frontier = settled_prefix_len
+            .checked_sub(1)
+            .and_then(|index| page.get(index));
         if let Some(new_frontier) = new_frontier
             && (new_frontier.activity_timestamp, new_frontier.source_rowid)
                 > (watermark, rowid_frontier)
@@ -469,6 +478,7 @@ where
             )
             .await?;
             GitCorrelationWriteTxn::commit(transaction).await?;
+            stats.frontier_advanced = true;
         }
     }
 
@@ -568,7 +578,7 @@ async fn backfill_rows<S, E, G: GitReflogSource + ?Sized>(
     rows: &[SessionActivityRow],
     analytics_events: &[E],
     stats: &mut BackfillStats,
-) -> Result<(), GitCorrelationError>
+) -> Result<usize, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
     E: AnalyticsSessionTimestampSource,
@@ -585,24 +595,27 @@ where
         }
     }
 
-    for row in rows {
+    let mut settled_prefix_len = 0;
+    let mut transient_failure_seen = false;
+    for (index, row) in rows.iter().enumerate() {
         stats.sessions_scanned += 1;
-        let mut committed = false;
-        if let Err(reason) = backfill_one_session(
-            session_store,
-            git,
-            opts,
-            row,
-            &analytics_ts,
-            stats,
-            &mut committed,
-        )
-        .await
-        {
-            stats.record_skip(reason);
+        match backfill_one_session(session_store, git, opts, row, &analytics_ts, stats).await {
+            Ok(()) => {
+                if !transient_failure_seen {
+                    settled_prefix_len = index.saturating_add(1);
+                }
+            }
+            Err(reason) => {
+                if reason == BackfillSkipReason::GitError {
+                    transient_failure_seen = true;
+                } else if !transient_failure_seen {
+                    settled_prefix_len = index.saturating_add(1);
+                }
+                stats.record_skip(reason);
+            }
         }
     }
-    Ok(())
+    Ok(settled_prefix_len)
 }
 
 async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource + ?Sized>(
@@ -612,7 +625,6 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
     row: &SessionActivityRow,
     analytics_ts: &std::collections::HashMap<(String, String), Vec<i64>>,
     stats: &mut BackfillStats,
-    committed: &mut bool,
 ) -> Result<(), BackfillSkipReason> {
     let (mut win_start, win_end) = row.window().ok_or(BackfillSkipReason::NoActivityWindow)?;
     if win_end < opts.since {
@@ -721,7 +733,6 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
         .map_err(|_| BackfillSkipReason::GitError)?;
         stats.spans_written = stats.spans_written.saturating_add(spans_written);
         stats.commits_attributed = stats.commits_attributed.saturating_add(commits_attributed);
-        *committed = true;
     }
     Ok(())
 }
