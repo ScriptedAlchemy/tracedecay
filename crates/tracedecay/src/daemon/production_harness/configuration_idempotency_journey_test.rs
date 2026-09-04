@@ -579,11 +579,17 @@ async fn credential_effect_uses_the_durable_request_operation_digest() {
         )
         .expect("idempotency key"),
     };
+    // Application-surface tools render markdown unless the caller asks for
+    // JSON; `format` is a transport key the surface strips before the reviewed
+    // request schema sees it. This journey asserts on the typed effect record,
+    // so it requests the machine-readable presentation explicitly.
+    let mut arguments = serde_json::to_value(&request).expect("credential request");
+    arguments["format"] = serde_json::json!("json");
     let response = harness
         .call_tool(
             &project,
             "tracedecay_configuration_write_credential",
-            serde_json::to_value(&request).expect("credential request"),
+            arguments,
         )
         .await
         .expect("credential effect");
