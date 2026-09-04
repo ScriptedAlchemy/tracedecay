@@ -60,7 +60,9 @@ use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
     GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
 };
-use crate::code_index::production::{CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1};
+use crate::code_index::production::{
+    CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexPublicationStoreErrorV1,
+};
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::exact::{
@@ -1157,6 +1159,49 @@ fn code_generation_retention_preserves_every_pointer_addressable_generation() {
             "retention must preserve every generation still named by the pointer"
         );
     }
+}
+
+#[test]
+fn sealed_replay_binding_resolves_an_exact_superseded_generation() {
+    let fixture = GitFixture::new(RETAINED_REVISION_0);
+    let store = TempDir::new().expect("store root");
+    let generations = retention_generations(&fixture, store.path(), 2);
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let pointer = scheduler
+        .publication
+        .read_publication_pointer()
+        .expect("read publication pointer")
+        .expect("published generation pointer");
+    let superseded = &generations[0];
+    assert_ne!(pointer.generation_id, superseded.as_str());
+    let entry = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == superseded.as_str())
+        .expect("superseded generation remains pointer-addressable");
+
+    let binding = scheduler
+        .publication
+        .sealed_replay_binding(superseded)
+        .expect("bind the exact superseded sealed replay");
+
+    assert_eq!(
+        binding.sealed_state_digest.as_str(),
+        entry.state_digest,
+        "the replay binding must retain the requested generation's sealed identity",
+    );
+
+    let unknown = CodeGenerationId::new("generation.not-retained").expect("unknown generation");
+    assert!(matches!(
+        scheduler.publication.sealed_replay_binding(&unknown),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(message))
+            if message.contains(unknown.as_str())
+                && message.contains("not retained in the publication index")
+    ));
 }
 
 #[test]
