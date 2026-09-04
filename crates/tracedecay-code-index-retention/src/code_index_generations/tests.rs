@@ -1065,7 +1065,7 @@ fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
     }
 
     let cancellation_observations = std::cell::Cell::new(0_usize);
-    let holds_segments = store_holds_generation_segments(store.path(), &|| {
+    let holds_segments = store_may_hold_generation_segments(store.path(), &|| {
         cancellation_observations.set(cancellation_observations.get() + 1);
         cancellation_observations.get() > 1
     })
@@ -1098,11 +1098,12 @@ fn metadata_only_segment_census_distinguishes_empty_and_cancelled() {
     std::fs::create_dir_all(&segments_root).expect("create segment root");
 
     assert!(
-        !store_holds_generation_segments(store.path(), &|| false).expect("empty segment directory")
+        !store_may_hold_generation_segments(store.path(), &|| false)
+            .expect("empty segment directory")
     );
 
     std::fs::write(segments_root.join("crash-debris"), b"debris").expect("write crash debris");
-    let error = store_holds_generation_segments(store.path(), &|| true)
+    let error = store_may_hold_generation_segments(store.path(), &|| true)
         .expect_err("cancellation wins before an observed entry is accepted");
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
 }
