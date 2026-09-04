@@ -23,6 +23,62 @@ impl HostAdmissionFacade<'_> {
             })
     }
 
+    #[hotpath::measure(
+        label = "usecases.admission.existing_session_message_ids",
+        future = true
+    )]
+    pub(super) async fn existing_session_message_ids(
+        &self,
+        scope: &ObservationScopeV1,
+        provider: &str,
+        message_ids: Vec<String>,
+    ) -> Result<Vec<String>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .existing_session_message_ids(provider, &message_ids)
+            .await
+            .map_err(|error| unavailable("read message identity batch", error))
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn read_session_backfill_state(
+        &self,
+        scope: &ObservationScopeV1,
+        key: &str,
+    ) -> Result<Option<String>, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        database
+            .read_session_sync_journal(key)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "registered host backfill-state read failed");
+                HostAdmissionOutcome::registered_authority_unavailable()
+            })
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn compare_and_swap_session_backfill_state(
+        &self,
+        scope: &ObservationScopeV1,
+        key: &str,
+        expected: Option<&str>,
+        replacement: &str,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        let database = self.discovery_database(scope)?;
+        let result = match expected {
+            Some(expected) => {
+                database
+                    .compare_and_swap_session_sync_journal(key, expected, replacement)
+                    .await
+            }
+            None => database.insert_session_sync_journal(key, replacement).await,
+        };
+        result.map_err(|error| {
+            tracing::warn!(%error, "registered host backfill-state CAS failed");
+            HostAdmissionOutcome::registered_authority_unavailable()
+        })
+    }
+
     #[hotpath::measure(label = "usecases.admission.get_parse_offset", future = true)]
     pub(super) async fn get_parse_offset(
         &self,

@@ -73,6 +73,22 @@ pub(super) const MAX_COMPOSER_SQLITE_KEY_BYTES: u64 = 512;
 /// original indexed prefix scan while keeping at most one page in memory.
 pub(super) const COMPOSER_KEY_SCAN_PAGE: usize = 1024;
 
+pub(super) const COMPOSER_KEY_SCAN_AFTER_SQL: &str = "SELECT key, octet_length(value) AS nbytes
+     FROM cursorDiskKV
+     WHERE key > ?1 AND key < 'composerData;'
+       AND typeof(key) = 'text' AND value IS NOT NULL
+       AND octet_length(key) <= ?2
+     ORDER BY key
+     LIMIT ?3";
+
+const COMPOSER_KEY_SCAN_FROM_START_SQL: &str = "SELECT key, octet_length(value) AS nbytes
+     FROM cursorDiskKV
+     WHERE key >= ?1 AND key < 'composerData;'
+       AND typeof(key) = 'text' AND value IS NOT NULL
+       AND octet_length(key) <= ?2
+     ORDER BY key
+     LIMIT ?3";
+
 /// Shared foreign-store read handle (see [`crate::runtime::shared`]),
 /// aliased locally for the Cursor composer reader signatures.
 pub(super) use crate::runtime::shared::SqliteReadConn as CursorConn;
@@ -118,26 +134,8 @@ pub(super) async fn scan_composer_keys_page(
     let after = after.map(str::to_string);
     conn.with(move |conn| {
         let (sql, lower) = match &after {
-            Some(last) => (
-                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
-                 FROM cursorDiskKV \
-                 WHERE key > ?1 AND key < 'composerData;' \
-                   AND typeof(key) = 'text' AND value IS NOT NULL \
-                   AND length(CAST(key AS BLOB)) <= ?2 \
-                 ORDER BY key \
-                 LIMIT ?3",
-                last.as_str(),
-            ),
-            None => (
-                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
-                 FROM cursorDiskKV \
-                 WHERE key >= ?1 AND key < 'composerData;' \
-                   AND typeof(key) = 'text' AND value IS NOT NULL \
-                   AND length(CAST(key AS BLOB)) <= ?2 \
-                 ORDER BY key \
-                 LIMIT ?3",
-                "composerData:",
-            ),
+            Some(last) => (COMPOSER_KEY_SCAN_AFTER_SQL, last.as_str()),
+            None => (COMPOSER_KEY_SCAN_FROM_START_SQL, "composerData:"),
         };
         let mut stmt = conn
             .prepare_cached(sql)
@@ -179,8 +177,8 @@ fn fetch_kv_text_bounded_sync(
 ) -> BoundedSqliteValue<String> {
     let effective_cap = effective_sqlite_cap(max_bytes, remaining);
     let Ok(mut stmt) = conn.prepare_cached(
-        "SELECT length(CAST(value AS BLOB)) AS nbytes, \
-         CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
+        "SELECT octet_length(value) AS nbytes, \
+         CASE WHEN octet_length(value) <= ?1 THEN value ELSE NULL END AS payload \
          FROM cursorDiskKV WHERE key = ?2",
     ) else {
         return BoundedSqliteValue::Corrupt;

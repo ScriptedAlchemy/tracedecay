@@ -42,6 +42,17 @@ impl RegisteredGlobalDb {
     }
 
     #[hotpath::skip]
+    pub async fn existing_session_message_ids(
+        &self,
+        provider: &str,
+        message_ids: &[String],
+    ) -> Result<Vec<String>, String> {
+        SessionStoreAccess::new(self)
+            .existing_session_message_ids(provider, message_ids)
+            .await
+    }
+
+    #[hotpath::skip]
     pub async fn session_message_count(&self) -> Result<i64, String> {
         SessionStoreAccess::new(self).session_message_count().await
     }

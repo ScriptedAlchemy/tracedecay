@@ -468,6 +468,48 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         ))
     }
 
+    fn existing_session_message_ids<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        message_ids: Vec<String>,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Vec<String>> {
+        Box::pin(HostAdmissionFacade::existing_session_message_ids(
+            self,
+            scope,
+            provider,
+            message_ids,
+        ))
+    }
+
+    fn read_session_backfill_state<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<String>> {
+        Box::pin(HostAdmissionFacade::read_session_backfill_state(
+            self, scope, key,
+        ))
+    }
+
+    fn compare_and_swap_session_backfill_state<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        key: &'a str,
+        expected: Option<&'a str>,
+        replacement: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, bool> {
+        Box::pin(
+            HostAdmissionFacade::compare_and_swap_session_backfill_state(
+                self,
+                scope,
+                key,
+                expected,
+                replacement,
+            ),
+        )
+    }
+
     fn get_parse_offset<'a>(
         &'a self,
         scope: &'a ObservationScopeV1,
