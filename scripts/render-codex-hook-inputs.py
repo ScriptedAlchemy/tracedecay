@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Render Codex JSONL cases where hook text changed model-visible input.
 
-Codex rollouts contain both user-facing events (`event_msg.user_message`) and
-model-visible message records (`response_item` messages). This script compares
-them and prints compact Markdown cases showing hook-added developer/user text.
+Codex rollouts contain both user-facing events (`event_msg.item_completed`
+`UserMessage`, or legacy `event_msg.user_message`) and model-visible message
+records (`response_item` messages). This script compares them and prints compact
+Markdown cases showing hook-added developer/user text.
 """
 
 from __future__ import annotations
@@ -117,6 +118,7 @@ def text_from_content(content: object) -> str:
 def parse_file(path: Path) -> tuple[list[Record], list[Record]]:
     model_messages: list[Record] = []
     submitted_users: list[Record] = []
+    submitted_user_item_ids: set[str] = set()
     try:
         handle = path.open("r", encoding="utf-8")
     except OSError:
@@ -131,12 +133,27 @@ def parse_file(path: Path) -> tuple[list[Record], list[Record]]:
             if not isinstance(payload, dict):
                 continue
             timestamp = str(record.get("timestamp", ""))
-            if record.get("type") == "event_msg" and payload.get("type") == "user_message":
-                message = payload.get("message")
-                if isinstance(message, str):
-                    submitted_users.append(
-                        Record(path, line_no, timestamp, "user", message)
-                    )
+            if record.get("type") == "event_msg":
+                if payload.get("type") == "user_message":
+                    message = payload.get("message")
+                    if isinstance(message, str):
+                        submitted_users.append(
+                            Record(path, line_no, timestamp, "user", message)
+                        )
+                    continue
+                if payload.get("type") == "item_completed":
+                    item = payload.get("item")
+                    if not isinstance(item, dict) or item.get("type") != "UserMessage":
+                        continue
+                    item_id = item.get("id")
+                    if not isinstance(item_id, str) or not item_id:
+                        continue
+                    message = text_from_content(item.get("content"))
+                    if message and item_id not in submitted_user_item_ids:
+                        submitted_users.append(
+                            Record(path, line_no, timestamp, "user", message)
+                        )
+                        submitted_user_item_ids.add(item_id)
                 continue
             if record.get("type") != "response_item" or payload.get("type") != "message":
                 continue

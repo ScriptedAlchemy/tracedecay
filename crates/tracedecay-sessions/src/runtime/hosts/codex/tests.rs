@@ -797,6 +797,132 @@ mod goal_event_tests {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+mod message_record_tests {
+    use std::path::Path;
+
+    use serde_json::{Value, json};
+
+    use super::super::records::message_from_line;
+    use super::CodexMeta;
+
+    fn meta() -> CodexMeta {
+        CodexMeta {
+            cwd: "/tmp/project".into(),
+            session_id: "session-1".to_string(),
+            model: None,
+            git: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            agent_nickname: None,
+            agent_role: None,
+            thread_source: None,
+        }
+    }
+
+    #[test]
+    fn current_user_message_item_becomes_one_canonical_user_row() {
+        let record = json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "user-item-1",
+                    "client_id": "client-1",
+                    "content": [{
+                        "type": "text",
+                        "text": "Find the callers of publish_generation.",
+                        "text_elements": []
+                    }]
+                }
+            }
+        });
+
+        let message = message_from_line(
+            &record,
+            &meta(),
+            Some("gpt-5.6-sol"),
+            Path::new("/tmp/rollout.jsonl"),
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(message.role, "user");
+        assert_eq!(message.message_id, "session-1:user-item-1");
+        assert!(
+            message
+                .text
+                .contains("Find the callers of publish_generation.")
+        );
+        let metadata: Value =
+            serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["source"], "codex_rollout");
+        assert_eq!(metadata["source_event"], "item_completed");
+    }
+
+    #[test]
+    fn malformed_duplicate_source_and_non_user_items_are_not_messages() {
+        let current_response_duplicate = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "same prompt"}]
+            }
+        });
+        let missing_item_id = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "content": [{"type": "text", "text": "no stable identity"}]
+                }
+            }
+        });
+        let agent_item = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "agent-item-1",
+                    "content": [{"type": "Text", "text": "assistant reply"}]
+                }
+            }
+        });
+        let no_visible_text = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "image-only-item",
+                    "content": [{"type": "image", "image_url": "redacted"}]
+                }
+            }
+        });
+
+        for record in [
+            current_response_duplicate,
+            missing_item_id,
+            agent_item,
+            no_visible_text,
+        ] {
+            assert!(
+                message_from_line(&record, &meta(), None, Path::new("/tmp/rollout.jsonl"), 42,)
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod source_matcher_cache_tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
