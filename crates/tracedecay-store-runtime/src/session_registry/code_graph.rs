@@ -436,6 +436,79 @@ impl CodeGraphShardPublicationLocksV1 {
     }
 }
 
+/// Returns the arenas a finished publication emptied back to the operating
+/// system.
+///
+/// A corpus-sized publish frees hundreds of megabytes as it unwinds, but
+/// glibc keeps freed pages in the per-thread arena that allocated them, and
+/// each publishing worktree scope publishes on its own thread. Measured on
+/// the 600-file harness at four scopes, arena retention alone accounted for
+/// 0.24 GB of the 0.60 GB that each additional scope added to peak RSS —
+/// memory that was already dead, held only because nothing asked for it back.
+/// Asking here, at the permit boundary, is what turns "freed" into "not
+/// resident" for the next scope's build.
+///
+/// Best effort by construction: a build with a non-glibc allocator (the
+/// daemon's optional jemalloc and mimalloc lanes purge on their own) simply
+/// does nothing, and a failed trim only means the pages stay where they were.
+/// Reports what one staging-release attempt decided, at info.
+///
+/// Retention was previously invisible: only a hard error was logged, so a
+/// sweep that answered `Retained` for every generation looked identical to one
+/// that had nothing to do. On the live daemon that difference was 8.6 GB of
+/// staging container and a 20+ GB open, with 13 release-queue entries pending
+/// for a day and no way to see why.
+fn observe_sealed_staging_release(
+    stage: &'static str,
+    projection: &GraphProjectionIdentityV1,
+    outcome: tracedecay_graph_db::SealedStagingRelease,
+) {
+    match outcome {
+        tracedecay_graph_db::SealedStagingRelease::Released {
+            entities,
+            relations,
+        } => tracing::info!(
+            event = "graph_staging_rows_released",
+            stage,
+            namespace = projection.namespace.as_str(),
+            projection = projection.projection.as_str(),
+            entities,
+            relations,
+            "released a sealed generation's duplicate staging rows"
+        ),
+        tracedecay_graph_db::SealedStagingRelease::AlreadyReleased => tracing::debug!(
+            event = "graph_staging_rows_already_released",
+            stage,
+            namespace = projection.namespace.as_str(),
+            projection = projection.projection.as_str(),
+            "sealed generation had already released its staging rows"
+        ),
+        tracedecay_graph_db::SealedStagingRelease::Retained(reason) => tracing::info!(
+            event = "graph_staging_rows_retained",
+            stage,
+            namespace = projection.namespace.as_str(),
+            projection = projection.projection.as_str(),
+            reason = reason.as_str(),
+            "sealed generation kept its duplicate staging rows"
+        ),
+    }
+}
+
+fn release_publish_transient_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` takes no pointers and no ownership; it only
+        // asks the allocator to return unused top-of-arena pages. It is safe
+        // to call at any time from any thread.
+        let released = unsafe { libc::malloc_trim(0) };
+        tracing::debug!(
+            event = "graph_publish_arena_trim",
+            released = released == 1,
+            "returned publication arenas to the operating system"
+        );
+    }
+}
+
 pub(crate) struct RetainedCodeGraphRuntimeV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_manifest_provider: Arc<super::code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
@@ -1173,7 +1246,26 @@ impl RetainedCodeGraphRuntimeV1 {
             publication_key,
             request_cancelled,
         };
-        self.publish_prepared_sealed_generation(&prepared, &probe, &context)
+        let mut staging_release = None;
+        let published = self.publish_prepared_sealed_generation(
+            &prepared,
+            &probe,
+            &context,
+            &mut staging_release,
+        );
+        // Everything corpus-sized this publication built — the projection
+        // manifest, the staged relational rows, the sealed copy buffers — is
+        // dead by here. Free it, release the duplicate staging rows the seal
+        // made redundant, and return the emptied arenas to the OS *before*
+        // the build permit goes to the next scope. Deferring any of that past
+        // the permit is what made peak RSS grow with the number of published
+        // worktree scopes even though the builds never overlapped (#830).
+        drop(prepared);
+        if let Some(projection) = staging_release {
+            self.release_sealed_staging_rows(projection);
+        }
+        release_publish_transient_memory();
+        published
     }
 
     /// Seat the exact durable code-graph head without rebuilding its projection
@@ -1399,22 +1491,28 @@ impl RetainedCodeGraphRuntimeV1 {
         )
     }
 
-    fn schedule_sealed_staging_release(&self, projection: GraphProjectionIdentityV1) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(
-                event = "graph_generation_staging_release_not_scheduled",
-                projection = projection.projection.as_str(),
-                reason = "async_runtime_unavailable",
-                "sealed generation staging release will be retried by maintenance"
-            );
-            return;
-        };
+    /// Releases the duplicate staging rows this publication's seal made
+    /// redundant, on the publishing thread, before the build permit is
+    /// handed to the next scope.
+    ///
+    /// This used to be a `spawn_blocking` task. Two things were wrong with
+    /// that for the retention this fixes. It ran *after* the permit was
+    /// released, so the next corpus build started on top of rows that were
+    /// already redundant; and it silently did not run at all off a Tokio
+    /// thread, which is exactly how the publication measurement harness
+    /// calls this path — the release was warned about and left to
+    /// maintenance. Running it here makes "released when the permit is
+    /// released" a property of the code rather than of the caller's runtime.
+    fn release_sealed_staging_rows(&self, projection: GraphProjectionIdentityV1) {
         let graph_registry = self.graph_registry.clone();
         let project_database = Arc::clone(&self.project_database);
         let authority: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
         let lifecycle_cancelled = Arc::clone(&self.lifecycle_cancelled);
-        let _release = runtime.spawn_blocking(move || {
-            let release = (|| {
+        {
+            let release: std::result::Result<
+                tracedecay_graph_db::SealedStagingRelease,
+                GraphDbError,
+            > = (|| {
                 let deadline_at = Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET;
                 let lifecycle_cancellation =
                     graph_lifecycle_cancellation(&lifecycle_cancelled, None);
@@ -1459,12 +1557,14 @@ impl RetainedCodeGraphRuntimeV1 {
                 let mut storage = project_database
                     .graph_publication_storage()
                     .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-                graph_registry.release_sealed_generation_staging_rows(
+                let outcome = graph_registry.release_sealed_generation_staging_rows(
                     registration,
                     &mut storage,
                     &context,
                     &projection,
-                )
+                )?;
+                observe_sealed_staging_release("publish", &projection, outcome);
+                Ok(outcome)
             })();
             if let Err(error) = release {
                 tracing::warn!(
@@ -1474,7 +1574,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     "sealed generation staging release will be retried by maintenance"
                 );
             }
-        });
+        }
     }
 
     /// The classification gate slice: observe the typed interruption first
@@ -1564,6 +1664,7 @@ impl RetainedCodeGraphRuntimeV1 {
         prepared: &PreparedSealedPublicationV1,
         probe: &GraphPublicationProbeV1,
         context: &GraphPublicationOperationContextV1<'_>,
+        staging_release: &mut Option<GraphProjectionIdentityV1>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         // A request cancelled or expired before publication starts must
         // answer its typed interruption before touching the publication
@@ -1828,9 +1929,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 ) {
                     Ok(publication) => {
                         self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
-                        self.schedule_sealed_staging_release(
-                            prepared.relational_projection.clone(),
-                        );
+                        *staging_release = Some(prepared.relational_projection.clone());
                         return Ok(publication.snapshot);
                     }
                     // Resuming this publication's own journaled replay
@@ -2010,7 +2109,7 @@ impl RetainedCodeGraphRuntimeV1 {
             ),
         )?;
         self.commit_sealed_read_bundle(staged_bundle, &bundle_identity);
-        self.schedule_sealed_staging_release(prepared.relational_projection.clone());
+        *staging_release = Some(prepared.relational_projection.clone());
         Ok(publication.snapshot)
     }
 
@@ -2583,12 +2682,13 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ))),
                 deadline: deadline_at,
             };
-            graph_registry.release_sealed_generation_staging_rows(
+            let outcome = graph_registry.release_sealed_generation_staging_rows(
                 registration,
                 &mut storage,
                 &context,
                 &projection,
             )?;
+            observe_sealed_staging_release("sweep", &projection, outcome);
             Ok(Some(projection))
         })
         .await
