@@ -119,6 +119,9 @@ pub(super) fn response_item_goal_context_from_line(
     if payload.get("type").and_then(Value::as_str) != Some("message") {
         return None;
     }
+    if payload.get("role").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
     let text = collect_response_item_text(payload.get("content").unwrap_or(payload));
     let goal_context = codex_goal_context_from_text(&text)?;
     let mut metadata = message_metadata(payload, Some(&goal_context));
