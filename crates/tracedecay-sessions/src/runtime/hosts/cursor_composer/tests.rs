@@ -1122,89 +1122,6 @@ async fn composer_key_frontier_converges_tail_then_wraps_for_pre_frontier_insert
     }
 }
 
-#[cfg(unix)]
-#[test]
-fn immutable_open_rejects_path_replacement_after_opening_old_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("state.vscdb");
-    let replacement = tmp.path().join("replacement.vscdb");
-    for (database, text) in [(&path, "from-a"), (&replacement, "from-b")] {
-        let connection = rusqlite::Connection::open(database).unwrap();
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode=DELETE;
-                 CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
-                rusqlite::params![
-                    "composerData:same-id",
-                    json!({
-                        "composerId": "same-id",
-                        "fullConversationHeadersOnly": [{ "bubbleId": "same-bubble" }],
-                        "marker": text,
-                    })
-                    .to_string()
-                ],
-            )
-            .unwrap();
-    }
-
-    let opened = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let replaced = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let replacer = {
-        let path = path.clone();
-        let replacement = replacement.clone();
-        let opened = std::sync::Arc::clone(&opened);
-        let replaced = std::sync::Arc::clone(&replaced);
-        std::thread::spawn(move || {
-            opened.wait();
-            std::fs::rename(replacement, path).unwrap();
-            replaced.wait();
-        })
-    };
-
-    let result = open_readonly_immutable_verified_sync(&path, |opened_path| {
-        let connection = tracedecay_rusqlite_runtime::open_immutable_reader(opened_path)
-            .map_err(|error| error.to_string())?;
-        opened.wait();
-        replaced.wait();
-        let retained = connection
-            .query_row(
-                "SELECT value FROM cursorDiskKV WHERE key = 'composerData:same-id'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(|error| error.to_string())?;
-        assert!(
-            retained.contains("from-a"),
-            "opened descriptor did not retain A"
-        );
-        Ok(connection)
-    });
-    replacer.join().unwrap();
-    let Err(error) = result else {
-        panic!("an old descriptor must not be paired with the replacement path identity");
-    };
-    assert!(error.contains("replaced during immutable open"), "{error}");
-    let replacement_reader =
-        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
-    let replacement_value = replacement_reader
-        .query_row(
-            "SELECT value FROM cursorDiskKV WHERE key = 'composerData:same-id'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap();
-    assert!(
-        replacement_value.contains("from-b"),
-        "replacement pathname did not resolve to B"
-    );
-}
-
 fn seed_large_frontier_fixture(
     state_db: &std::path::Path,
     project: &std::path::Path,
@@ -1369,6 +1286,138 @@ async fn composer_frontier_retries_capture_error_before_growing_tail() {
         .await
         .unwrap();
     assert_eq!(observation_count(&admission, "000000:bubble"), 1);
+}
+
+#[tokio::test]
+async fn malformed_overlength_bubble_reference_does_not_block_valid_tail() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "composerData:000000",
+                json!({
+                    "composerId": "000000",
+                    "workspaceIdentifier": {
+                        "uri": { "fsPath": project.path().to_string_lossy() }
+                    },
+                    "fullConversationHeadersOnly": [{ "bubbleId": "x".repeat(600) }]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    insert_composer_fixture(&connection, "000001", project.path());
+    drop(connection);
+
+    let admission = MemoryHostAdmission::default();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            ProjectId::new("project.cursor-composer-malformed-key").unwrap(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(observation_count(&admission, "000001:bubble"), 1);
+}
+
+#[tokio::test]
+async fn missing_bubble_retries_before_tail_after_it_becomes_visible() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "composerData:000000",
+                json!({
+                    "composerId": "000000",
+                    "workspaceIdentifier": {
+                        "uri": { "fsPath": project.path().to_string_lossy() }
+                    },
+                    "fullConversationHeadersOnly": [{ "bubbleId": "late" }]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    insert_composer_fixture(&connection, "000001", project.path());
+    drop(connection);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-late-bubble").unwrap();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:late"), 0);
+    assert_eq!(observation_count(&admission, "000001:bubble"), 0);
+
+    let connection = rusqlite::Connection::open(&state_db).unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "bubbleId:000000:late",
+                json!({ "type": 1, "text": "visible later" }).to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:late"), 1);
+    assert_eq!(observation_count(&admission, "000001:bubble"), 1);
 }
 
 #[tokio::test]

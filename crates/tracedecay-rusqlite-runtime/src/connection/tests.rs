@@ -5,8 +5,9 @@ use tempfile::NamedTempFile;
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 use super::{
-    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, open, open_immutable_reader,
-    open_writer, with_progress_cancellation,
+    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedImmutableReaderError,
+    open, open_immutable_reader, open_verified_immutable_reader_with_hooks, open_writer,
+    with_progress_cancellation,
 };
 
 fn database() -> NamedTempFile {
@@ -441,6 +442,78 @@ fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {
         pinned.verify_connection(&connection, &path),
         Err(OpenedDatabaseFileError::Replaced)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn verified_immutable_reader_never_binds_transient_b_to_restored_a_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.db");
+    let replacement = directory.path().join("identity.replacement.db");
+    let retired = directory.path().join("identity.retired.db");
+    for (candidate, marker) in [(&path, "a"), (&replacement, "b")] {
+        let connection = Connection::open(candidate).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE identity(composer_id TEXT, bubble_id TEXT, marker TEXT);\
+                 INSERT INTO identity VALUES ('same-composer', 'same-bubble', '{marker}');"
+            ))
+            .unwrap();
+    }
+    let expected_a = OpenedDatabaseFile::pin(&path).unwrap().identity();
+
+    let pinned = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let swapped = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let opened = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let restored = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let replacer = {
+        let path = path.clone();
+        let replacement = replacement.clone();
+        let retired = retired.clone();
+        let pinned = std::sync::Arc::clone(&pinned);
+        let swapped = std::sync::Arc::clone(&swapped);
+        let opened = std::sync::Arc::clone(&opened);
+        let restored = std::sync::Arc::clone(&restored);
+        std::thread::spawn(move || {
+            pinned.wait();
+            std::fs::rename(&path, &retired).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            swapped.wait();
+            opened.wait();
+            std::fs::rename(&path, &replacement).unwrap();
+            std::fs::rename(&retired, &path).unwrap();
+            restored.wait();
+        })
+    };
+
+    let result = open_verified_immutable_reader_with_hooks(
+        &path,
+        || {
+            pinned.wait();
+            swapped.wait();
+        },
+        || {
+            opened.wait();
+            restored.wait();
+        },
+    );
+    replacer.join().unwrap();
+
+    match result {
+        Ok(reader) => {
+            assert_eq!(reader.file_identity(), expected_a);
+            assert_eq!(
+                reader
+                    .connection()
+                    .query_row("SELECT marker FROM identity", [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "a"
+            );
+        }
+        Err(VerifiedImmutableReaderError::Identity(OpenedDatabaseFileError::Replaced)) => {}
+        Err(error) => panic!("unexpected verified immutable open failure: {error}"),
+    }
 }
 
 #[cfg(windows)]

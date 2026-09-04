@@ -491,6 +491,58 @@ impl std::error::Error for ConnectionPolicyError {
     }
 }
 
+#[derive(Debug)]
+pub enum VerifiedImmutableReaderError {
+    Resolve(io::Error),
+    Identity(OpenedDatabaseFileError),
+    Policy(ConnectionPolicyError),
+}
+
+impl fmt::Display for VerifiedImmutableReaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Resolve(error) => write!(
+                formatter,
+                "could not resolve immutable SQLite path: {error}"
+            ),
+            Self::Identity(error) => write!(formatter, "immutable SQLite identity failed: {error}"),
+            Self::Policy(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for VerifiedImmutableReaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Resolve(error) => Some(error),
+            Self::Identity(error) => Some(error),
+            Self::Policy(error) => Some(error),
+        }
+    }
+}
+
+/// Immutable foreign-database reader bound to the physical file actually
+/// opened by SQLite rather than a later pathname observation.
+pub struct VerifiedImmutableReader {
+    connection: Connection,
+    canonical_path: PathBuf,
+    file_identity: u64,
+}
+
+impl VerifiedImmutableReader {
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub const fn file_identity(&self) -> u64 {
+        self.file_identity
+    }
+
+    pub fn into_parts(self) -> (Connection, PathBuf, u64) {
+        (self.connection, self.canonical_path, self.file_identity)
+    }
+}
+
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
     let (connection, fresh_writer) = open_raw(path, mode)?;
     finish_open(connection, mode, fresh_writer)
@@ -580,6 +632,39 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
         connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
         install_authorizer(&connection, ConnectionMode::Reader)?;
         Ok(connection)
+    })
+}
+
+pub fn open_verified_immutable_reader(
+    path: &Path,
+) -> Result<VerifiedImmutableReader, VerifiedImmutableReaderError> {
+    open_verified_immutable_reader_with_hooks(path, || {}, || {})
+}
+
+fn open_verified_immutable_reader_with_hooks(
+    path: &Path,
+    after_pin: impl FnOnce(),
+    after_open: impl FnOnce(),
+) -> Result<VerifiedImmutableReader, VerifiedImmutableReaderError> {
+    let canonical_path = path
+        .canonicalize()
+        .map_err(VerifiedImmutableReaderError::Resolve)?;
+    let pinned =
+        OpenedDatabaseFile::pin(&canonical_path).map_err(VerifiedImmutableReaderError::Identity)?;
+    let open_path = pinned
+        .reader_open_path(&canonical_path)
+        .map_err(VerifiedImmutableReaderError::Identity)?;
+    after_pin();
+    let connection =
+        open_immutable_reader(&open_path).map_err(VerifiedImmutableReaderError::Policy)?;
+    after_open();
+    pinned
+        .verify_connection(&connection, &canonical_path)
+        .map_err(VerifiedImmutableReaderError::Identity)?;
+    Ok(VerifiedImmutableReader {
+        connection,
+        canonical_path,
+        file_identity: pinned.identity(),
     })
 }
 
