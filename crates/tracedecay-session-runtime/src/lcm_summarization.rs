@@ -4,7 +4,7 @@ use serde_json::Value;
 use tracedecay_domain::CanonicalObservationEnvelopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_lcm::{LcmError, LcmSummaryRequest};
+use tracedecay_lcm::{LcmError, LcmSummaryRequest, LcmSummarySourceRange};
 use tracedecay_runtime_core::db::engine::params;
 
 mod cursor_agent;
@@ -17,6 +17,7 @@ use provider_capabilities::{
 pub(super) struct AuthoritativeSummary {
     pub(super) text: String,
     pub(super) route: String,
+    pub(super) source_range: Option<LcmSummarySourceRange>,
 }
 
 pub(super) async fn resolve_authoritative_summary(
@@ -25,8 +26,12 @@ pub(super) async fn resolve_authoritative_summary(
     session_id: &str,
     request: LcmSummaryRequest,
     timeout: Duration,
+    required_native_source_range: Option<&LcmSummarySourceRange>,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
-    if let Some(summary) = native_summary_evidence(database, provider, session_id).await? {
+    if let Some(summary) = native_summary_evidence(database, provider, session_id).await?
+        && required_native_source_range
+            .is_none_or(|required| summary.source_range.as_ref() == Some(required))
+    {
         return Ok(summary);
     }
     generate_provider_summary(provider, request, timeout).await
@@ -122,9 +127,14 @@ pub(super) async fn native_summary_evidence(
             }
         }
         if let Some(route) = route {
+            let source_range = metadata
+                .get("tracedecay_lcm_source_range")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
             return Ok(Some(AuthoritativeSummary {
                 text,
                 route: route.to_string(),
+                source_range,
             }));
         }
     }
