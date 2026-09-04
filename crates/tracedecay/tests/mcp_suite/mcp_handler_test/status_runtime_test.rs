@@ -268,8 +268,9 @@ async fn test_status_no_scope_prefix() {
 /// `tracedecay_runtime` must surface process + DB telemetry so users hitting
 /// unexpected CPU/RAM can capture a structured snapshot without leaving the
 /// chat session. The process sample is served from the background cache, so
-/// the first response may be the typed `not_yet_sampled` state and never a
-/// fabricated zero snapshot.
+/// the first response may be the typed `not_yet_sampled` state. A cached value
+/// outside its freshness interval is explicitly `stale` with its age; it must
+/// never be serialized as a current `sampled` value.
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -291,11 +292,22 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
             );
         }
         Some("sampled") => {}
+        Some("stale") => {
+            assert!(
+                parsed["process"]["sampled_at"].as_u64().unwrap_or(0) > 0,
+                "a stale process value must retain its source timestamp"
+            );
+            assert!(
+                parsed["process"]["age_millis"].is_u64(),
+                "a stale process value must state its explicit age"
+            );
+        }
         other => panic!("unexpected process sample state before warm-up: {other:?}"),
     }
 
-    // The handler only reads the sampler cache; poll until the background
-    // sample completes and the sampled payload appears.
+    // The handler only reads the sampler cache; poll until it can return a
+    // completed payload. A concurrent refresh may correctly make that payload
+    // stale rather than falsely label the retained observation as current.
     let proc = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
@@ -303,7 +315,10 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
                 .unwrap();
             let parsed: serde_json::Value =
                 serde_json::from_str(extract_text(&result.value)).unwrap();
-            if parsed["process"]["state"] == "sampled" {
+            if matches!(
+                parsed["process"]["state"].as_str(),
+                Some("sampled" | "stale")
+            ) {
                 break parsed["process"].clone();
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -322,8 +337,19 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     );
     assert!(
         proc["sampled_at"].as_u64().unwrap_or(0) > 0,
-        "sampled payload must expose its sample timestamp"
+        "completed process payload must expose its sample timestamp"
     );
+    if proc["state"] == "stale" {
+        assert!(
+            proc["age_millis"].is_u64(),
+            "a retained process value must expose its explicit age"
+        );
+    } else {
+        assert!(
+            proc.get("age_millis").is_none(),
+            "only a stale process value carries an age"
+        );
+    }
     assert!(proc["system_cpu_count"].as_u64().unwrap_or(0) >= 1);
     assert!(proc["system_total_memory_bytes"].as_u64().unwrap_or(0) > 0);
 
