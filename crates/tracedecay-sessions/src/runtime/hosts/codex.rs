@@ -95,6 +95,25 @@ use crate::runtime::source::{
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     stream_new_jsonl,
 };
+
+/// Semantic goal payload plus whether the row came from Codex's authoritative
+/// current `item_completed` event rather than its preceding `response_item`.
+fn goal_context_dedup_projection(
+    message: &crate::runtime::SessionMessageRecord,
+) -> Option<(serde_json::Value, bool)> {
+    if message.kind.as_deref() != Some("goal_context") {
+        return None;
+    }
+    let metadata =
+        serde_json::from_str::<serde_json::Value>(message.metadata_json.as_deref()?).ok()?;
+    Some((
+        metadata.get("codex_goal")?.clone(),
+        metadata
+            .get("source_event")
+            .and_then(serde_json::Value::as_str)
+            == Some("item_completed"),
+    ))
+}
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
@@ -2661,6 +2680,24 @@ impl TranscriptSource for CodexSource {
                               cwd: Option<&Path>,
                               git: Option<&serde_json::Value>| {
             context::annotate_message(&mut message, cwd, git, &self.project_matchers);
+            if let Some(previous) = messages.last_mut()
+                && let (
+                    Some((previous_goal, previous_is_current)),
+                    Some((message_goal, message_is_current)),
+                ) = (
+                    goal_context_dedup_projection(previous),
+                    goal_context_dedup_projection(&message),
+                )
+                && previous_goal == message_goal
+                && (previous_is_current
+                    || message_is_current
+                    || previous.message_id == message.message_id)
+            {
+                if message_is_current && !previous_is_current {
+                    *previous = message;
+                }
+                return;
+            }
             messages.push(message);
         };
         for line in &new.lines {

@@ -801,6 +801,139 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     outcome
 }
 
+#[tokio::test]
+async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = ProjectId::new("project.codex-current-user-pair").unwrap();
+    assert!(
+        Command::new(git_program())
+            .arg("init")
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let facade = runtime.facade();
+    let transcript = tmp.path().join("codex-current-user-pair.jsonl");
+    let prompt = "Find the callers of publish_generation.";
+    let lines = [
+        json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "session-current-user-pair", "cwd": project}
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-user-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}]
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "user-item-1",
+                    "content": [{"type": "text", "text": prompt}]
+                }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:02.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "content": [{"type": "text", "text": "missing stable identity"}]
+                }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:03.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "image-only-item",
+                    "content": [{"type": "image", "image_url": "redacted"}]
+                }
+            }
+        }),
+    ];
+    std::fs::write(
+        &transcript,
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+        &transcript,
+        &project,
+        project_id.clone(),
+        &facade,
+        None,
+    )
+    .await
+    .unwrap();
+    let scope = ObservationScopeV1::Project { project_id };
+    let projection = facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
+        .await
+        .unwrap();
+
+    assert_eq!(projection.projected_outputs, 1);
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        1
+    );
+    let messages = runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Project,
+            "codex",
+            None,
+            "publish_generation",
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message.message_id, "user-item-1");
+}
+
 fn encode_workspace_path(path: &Path) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::new();
