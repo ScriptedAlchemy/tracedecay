@@ -413,21 +413,6 @@ jobs:
         shell: pwsh
         run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
 
-      # Preserve both feature resolutions as named artifacts before nextest
-      # builds the ordinary feature-off workspace and packages the pair.
-      - name: Build controlled-workload hotpath parity executables
-        shell: pwsh
-        run: |
-          $helperDir = Join-Path "target" "controlled-workload-hotpath"
-          $example = Join-Path "target" "debug/examples/emit_controlled_workload_reports.exe"
-          New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
-          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item -Force $example (Join-Path $helperDir "hotpath-off.exe")
-          cargo build -p tracedecay-search-eval --profile test --example emit_controlled_workload_reports --locked --features controlled-workload-hotpath
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item -Force $example (Join-Path $helperDir "hotpath-on.exe")
-
       - name: Build nextest archive
         shell: pwsh
         run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"

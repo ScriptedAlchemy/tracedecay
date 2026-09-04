@@ -574,7 +574,15 @@ mod tests {
         assert!(cursor.operations.iter().all(|operation| operation.ok));
     }
 
+    // The parity executables are a second, feature-on build of this crate's
+    // dependency graph. The Windows archive job cannot afford that rebuild
+    // inside its bound (it spent 18 of its 62 minutes on it), and the
+    // property is platform-independent, so the Linux lane carries it.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "hotpath parity executables are built on the Linux test lane only"
+    )]
     fn hotpath_off_vs_on_durable_results_are_identical() {
         let scratch = tempfile::tempdir().expect("identity scratch");
         let off_dir = scratch.path().join("off");
