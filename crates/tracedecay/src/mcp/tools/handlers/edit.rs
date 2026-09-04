@@ -663,6 +663,13 @@ mod tests {
     async fn fixture_graph(
         project_root: &Path,
     ) -> (TraceDecay, tracedecay_runtime_core::db::DaemonDatabaseScope) {
+        // `init_with_registered_configuration` resolves the Hook
+        // repository/worktree scope through
+        // `tracedecay_agent_hosts::ports::hook_runtime`, whose slot only the
+        // composition root fills. Without this the fixture fails closed with
+        // `cannot resolve Hook repository/worktree scope: no Hook scope
+        // resolver is registered`. Registration is first-wins and idempotent.
+        crate::register_runtime_ports_without_mcp_tool_catalog();
         let profile_root = project_root.join(".tracedecay-test-profile");
         let open_options = TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
