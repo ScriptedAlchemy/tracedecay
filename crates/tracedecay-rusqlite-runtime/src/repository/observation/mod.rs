@@ -8,12 +8,13 @@
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{
     CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ObservationSourceCursorV1,
-    ProjectionGenerationId, classify_observation_collision,
+    ProjectionGenerationId, SanitizationReceiptV1, classify_observation_collision,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
-    ObservationReadOperationV1, ObservationReadResultV1, ProjectionRebuildProgressV1,
-    ProjectionRebuildStateV1, SESSION_MESSAGE_PROJECTOR_VERSION,
+    AnchoredObservationWrite, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
+    ObservationCoverageReason, ObservationCursorAdvance, ObservationReadOperationV1,
+    ObservationReadResultV1, ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
+    SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
 use crate::operation::StorageOperationError;
@@ -28,7 +29,9 @@ use authority::{
     cursor_advance_receipt_matches, persist_repository_provenance, persist_retrieval_anchor,
     persist_sanitization_receipt, read_cursor, verify_observation_authority,
 };
-use cursor_authority::{COMMIT_SOURCE_CURSOR_SQL, RECORD_CURSOR_ADVANCE_SQL};
+use cursor_authority::{
+    COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, RECORD_CURSOR_ADVANCE_SQL,
+};
 use rows::{
     OBSERVATION_ROW_PROJECTION, decode_nonnegative, decode_observation_row, encoded_observation_row,
 };
@@ -173,10 +176,17 @@ impl ObservationExecutor {
         let scope_json = encode(advance.next_cursor().scope())?;
         let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
         if actual_cursor.as_ref() == Some(advance.next_cursor()) {
+            if let Some(disagreement) =
+                cursor_advance_ledger_disagreement(savepoint, &source_json, &scope_json, advance)?
+            {
+                return Err(disagreement);
+            }
             if cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
                 return Ok(());
             }
-            return Err(invalid("source cursor advance identity collision").into());
+            return Err(
+                invalid("source cursor advance sanitization receipt identity collision").into(),
+            );
         }
         if actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(observation_source_cursor_conflict(
@@ -200,8 +210,15 @@ impl ObservationExecutor {
                     .map(|receipt| receipt.receipt().receipt_id().as_str()),
             ],
         )?;
+        if let Some(disagreement) =
+            cursor_advance_ledger_disagreement(savepoint, &source_json, &scope_json, advance)?
+        {
+            return Err(disagreement);
+        }
         if !cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
-            return Err(invalid("source cursor advance identity collision").into());
+            return Err(
+                invalid("source cursor advance sanitization receipt identity collision").into(),
+            );
         }
         savepoint.execute(
             COMMIT_SOURCE_CURSOR_SQL,
@@ -373,6 +390,82 @@ impl ObservationExecutor {
             }
         }
     }
+}
+
+fn cursor_advance_ledger_disagreement(
+    savepoint: &Savepoint<'_>,
+    source_json: &str,
+    scope_json: &str,
+    advance: &ObservationCursorAdvance,
+) -> Result<Option<StorageOperationError>, StorageOperationError> {
+    let stored = savepoint
+        .query_row(
+            READ_CURSOR_ADVANCE_SQL,
+            params![source_json, scope_json, encode(&advance.coverage())?],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((stored_reason, stored_receipt_id)) = stored else {
+        return Ok(None);
+    };
+    let candidate_receipt_id = advance
+        .sanitization_receipt()
+        .map(|receipt| receipt.receipt().receipt_id().as_str());
+    if stored_reason == advance.reason().as_str()
+        && stored_receipt_id.as_deref() == candidate_receipt_id
+    {
+        return Ok(None);
+    }
+    let authority_receipt = canonical_ledger_receipt(savepoint, stored_receipt_id.as_deref())?;
+    let stored = CursorAdvanceLedgerIdentityV1::from_stored_row_with_authority_receipt(
+        &stored_reason,
+        stored_receipt_id.as_deref(),
+        authority_receipt.as_ref(),
+    );
+    let candidate = advance.ledger_identity();
+    Ok(Some(
+        StorageOperationError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(CursorAdvanceLedgerDisagreementV1::new(
+                advance.next_cursor().source().clone(),
+                advance.next_cursor().scope().clone(),
+                advance.coverage(),
+                stored,
+                candidate,
+            )),
+        },
+    ))
+}
+
+/// Resolve a ledger receipt through the canonical receipt authority.
+///
+/// The ledger identifier alone is untrusted storage text. A receipt is safe to
+/// expose only when a matching, canonically encoded authority record exists.
+fn canonical_ledger_receipt(
+    savepoint: &Savepoint<'_>,
+    stored_receipt_id: Option<&str>,
+) -> rusqlite::Result<Option<SanitizationReceiptV1>> {
+    let Some(stored_receipt_id) = stored_receipt_id else {
+        return Ok(None);
+    };
+    let receipt_json = savepoint
+        .query_row(
+            "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
+            [stored_receipt_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(receipt_json) = receipt_json else {
+        return Ok(None);
+    };
+    let Ok(receipt) = serde_json::from_str::<SanitizationReceiptV1>(&receipt_json) else {
+        return Ok(None);
+    };
+    if receipt.receipt().receipt_id().as_str() != stored_receipt_id
+        || encode(&receipt).ok().as_deref() != Some(receipt_json.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(Some(receipt))
 }
 
 fn observation_source_cursor_conflict(

@@ -84,6 +84,9 @@ fn map_operation_error(error: StorageOperationError) -> StorageRuntimeErrorV1 {
         StorageOperationError::ObservationSourceCursorConflict { expected, actual } => {
             StorageRuntimeErrorV1::ObservationSourceCursorConflict { expected, actual }
         }
+        StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } => {
+            StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement }
+        }
         error => infrastructure(format!("closed native operation: {error}")),
     }
 }
@@ -97,7 +100,14 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
-    use tracedecay_store::RepositoryWritePayloadV1;
+    use tracedecay_domain::{
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
+    };
+    use tracedecay_store::{
+        CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
+        ObservationCoverageReason, ObservationCoverageV1, RepositoryWritePayloadV1,
+    };
 
     use super::*;
     use crate::test_support::{metadata, request};
@@ -117,6 +127,48 @@ mod tests {
             savepoint.execute("INSERT INTO operation_marker(value) VALUES (1)", [])?;
             Ok(())
         }
+    }
+
+    #[test]
+    fn immutable_cursor_advance_ledger_disagreement_survives_runtime_error_mapping() {
+        let source = ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("cursor").unwrap(),
+            SessionId::new("session.fixture").unwrap(),
+        )
+        .unwrap();
+        let coverage = ObservationCoverageV1::new(
+            ObservationSourceGenerationV1::new(7).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+        );
+        let disagreement = CursorAdvanceLedgerDisagreementV1::new(
+            source,
+            ObservationScopeV1::Profile,
+            coverage,
+            CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::BlankFrame, None),
+            CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::OutOfScope, None),
+        );
+
+        let mapped = map_operation_error(StorageOperationError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(disagreement),
+        });
+
+        assert!(matches!(
+            mapped,
+            StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { disagreement }
+                if matches!(
+                    disagreement.stored().reason(),
+                    tracedecay_store::CursorAdvanceLedgerReasonV1::Known(
+                        ObservationCoverageReason::BlankFrame
+                    )
+                ) && matches!(
+                    disagreement.candidate().reason(),
+                    tracedecay_store::CursorAdvanceLedgerReasonV1::Known(
+                        ObservationCoverageReason::OutOfScope
+                    )
+                )
+                    && disagreement.coverage() == coverage
+        ));
     }
 
     #[test]
