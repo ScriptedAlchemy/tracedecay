@@ -616,6 +616,13 @@ harness = false
 required-features = ["rmcp-benchmark"]
 test = false
 
+[[bench]]
+name = "mcp_server_construction"
+path = "benches/mcp_server_construction.rs"
+harness = false
+required-features = ["rmcp-benchmark"]
+test = false
+
 [[test]]
 name = "runtime_acceptance_suite"
 path = "tests/runtime_acceptance_suite/main.rs"
