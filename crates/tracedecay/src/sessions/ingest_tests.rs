@@ -41,6 +41,12 @@ struct IngestTestRuntime {
     /// Owned only by runtimes with a throwaway profile; restart-shaped tests
     /// keep the profile root alive in the test body and reopen it.
     _profile: Option<tempfile::TempDir>,
+    /// Project runs only: a project sessions store carries its verified graph
+    /// runtime once its project-memory owner is mounted, and Git evidence
+    /// convergence — which every project catch-up pass finalizes through —
+    /// refuses to publish without one. Holding the memory database keeps that
+    /// owner mounted for the whole pass, the way the daemon does.
+    _memory: Option<std::sync::Arc<tracedecay_runtime_core::db::Database>>,
 }
 
 impl IngestTestRuntime {
@@ -92,6 +98,7 @@ async fn profile_test_runtime() -> IngestTestRuntime {
         _registry: registry,
         _scope: scope,
         _profile: Some(profile),
+        _memory: None,
     }
 }
 
@@ -102,6 +109,10 @@ async fn project_test_runtime(project_root: &Path, project_id: ProjectId) -> Ing
         project_id.as_str(),
     )
     .unwrap();
+    let memory = registry
+        .project_memory(project_id.clone(), [project_root.to_path_buf()])
+        .await
+        .unwrap();
     let database = registry
         .project_sessions(project_id, [project_root.to_path_buf()])
         .await
@@ -111,6 +122,7 @@ async fn project_test_runtime(project_root: &Path, project_id: ProjectId) -> Ing
         _registry: registry,
         _scope: scope,
         _profile: Some(profile),
+        _memory: Some(memory),
     }
 }
 
@@ -677,6 +689,10 @@ async fn project_catch_up_resumes_from_the_persisted_frontier_after_restart() {
 
     let reopen = || async {
         let (_, scope, registry) = open_registry_at(&profile_root, "rotation-restart").await;
+        let memory = registry
+            .project_memory(project_id.clone(), [project.clone()])
+            .await
+            .unwrap();
         let database = registry
             .project_sessions(project_id.clone(), [project.clone()])
             .await
@@ -686,6 +702,7 @@ async fn project_catch_up_resumes_from_the_persisted_frontier_after_restart() {
             _registry: registry,
             _scope: scope,
             _profile: None,
+            _memory: Some(memory),
         }
     };
 

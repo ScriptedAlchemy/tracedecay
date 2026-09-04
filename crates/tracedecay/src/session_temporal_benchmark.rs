@@ -286,6 +286,9 @@ struct PreparedRepetition {
     complete_request: SessionRefreshCompletionRequestV1,
     rebuild_activate_ns: u64,
     root_record_count: usize,
+    /// Keeps the project-memory owner mounted for the whole repetition so the
+    /// sessions store retains its verified graph runtime.
+    _memory: std::sync::Arc<tracedecay_runtime_core::db::Database>,
     _daemon_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     _env: IsolatedBenchmarkEnv,
 }
@@ -748,6 +751,14 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let session_registry = DaemonSessionRuntimeRegistryV1::open(profile_identity)
         .await
         .map_err(|error| format!("open benchmark session registry: {error}"))?;
+    // The canonical projection drain converges Git evidence, which publishes
+    // through the project sessions store's verified graph runtime. That runtime
+    // is bound only once the project-memory owner is mounted too, so the
+    // benchmark mounts the same pair the daemon does.
+    let memory = session_registry
+        .project_memory(project_id.clone(), [project.clone()])
+        .await
+        .map_err(|error| format!("mount benchmark project memory: {error}"))?;
     let registered = session_registry
         .project_sessions(project_id.clone(), [project.clone()])
         .await
@@ -844,6 +855,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         complete_request: root_fixture.anchor_complete_request,
         rebuild_activate_ns,
         root_record_count: root_fixture.record_count,
+        _memory: memory,
         _daemon_scope,
         _env: env,
     })
