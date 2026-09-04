@@ -21,6 +21,12 @@ use crate::runtime::source::TranscriptSource;
 mod goal_event_tests {
     use super::*;
     use serde_json::json;
+    use tracedecay_domain::{CanonicalObservationEnvelopeV1, ObservationScopeV1};
+
+    use crate::admission::HostAdmission;
+    use crate::admission::test_support::MemoryHostAdmission;
+    use crate::observation::ObservationCancellation;
+    use crate::runtime::codex::try_admit_codex_jsonl_observations_for_project_with_admission;
 
     fn goal_event_line(objective: &str, status: &str) -> Value {
         json!({
@@ -793,6 +799,93 @@ mod goal_event_tests {
             }
         ));
     }
+
+    #[tokio::test]
+    async fn current_user_message_reaches_project_admission_and_projection() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let lines = [
+            json!({
+                "timestamp": "2026-09-04T12:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "session-current-user", "cwd": project}
+            }),
+            json!({
+                "timestamp": "2026-09-04T12:00:01.004Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "item": {
+                        "type": "UserMessage",
+                        "id": "user-item-1",
+                        "content": [{
+                            "type": "text",
+                            "text": "Find the callers of publish_generation."
+                        }]
+                    }
+                }
+            }),
+        ];
+        std::fs::write(
+            &transcript,
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let project_id = ProjectId::new("project-current-user").unwrap();
+        let admission = MemoryHostAdmission::default();
+
+        let progress = try_admit_codex_jsonl_observations_for_project_with_admission(
+            &transcript,
+            &project,
+            project_id.clone(),
+            &admission,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(progress.frames_persisted, 2);
+        let observations = admission.observations();
+        let message = observations.iter().find_map(|stored| {
+            serde_json::from_value::<CanonicalObservationEnvelopeV1>(
+                stored.observation().payload().clone(),
+            )
+            .ok()
+            .filter(|envelope| {
+                envelope.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::User,
+                            content,
+                            ..
+                        } if content.to_string().contains("publish_generation")
+                    )
+                })
+            })
+        });
+        assert!(
+            message.is_some(),
+            "current UserMessage must survive admission"
+        );
+        let scope = ObservationScopeV1::Project { project_id };
+        let projected = admission
+            .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 8)
+            .await
+            .unwrap();
+        assert_eq!(projected.projected, 2);
+        assert_eq!(admission.pending_projection_count(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -803,7 +896,7 @@ mod message_record_tests {
     use serde_json::{Value, json};
 
     use super::super::records::message_from_line;
-    use super::CodexMeta;
+    use super::{CodexMeta, CodexSource, StoredCursor, TranscriptSource};
 
     fn meta() -> CodexMeta {
         CodexMeta {
@@ -918,6 +1011,79 @@ mod message_record_tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn current_goal_context_keeps_item_identity_and_collapses_paired_shapes() {
+        let goal = concat!(
+            "<codex_internal_context source=\"goal\">",
+            "<objective>finish the canonical admission fix</objective>\n",
+            "Token budget: 12000\nTokens remaining: 11000",
+            "</codex_internal_context>"
+        );
+        let current = json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "goal-user-item-1",
+                    "content": [{"type": "text", "text": goal}]
+                }
+            }
+        });
+        let message =
+            message_from_line(&current, &meta(), None, Path::new("/tmp/rollout.jsonl"), 42)
+                .unwrap();
+        assert_eq!(message.kind.as_deref(), Some("goal_context"));
+        assert_eq!(message.message_id, "session-1:goal-user-item-1");
+
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let response = json!({
+            "timestamp": "2026-09-04T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-goal-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": goal}]
+            }
+        });
+        let lines = [
+            json!({
+                "timestamp": "2026-09-04T12:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "session-1", "cwd": project}
+            }),
+            response,
+            current.clone(),
+            current,
+        ];
+        std::fs::write(
+            &transcript,
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let parsed = CodexSource::with_home(temp.path())
+            .parse_new(&transcript, StoredCursor::default(), &project, None)
+            .unwrap();
+        let goal_rows = parsed
+            .messages
+            .iter()
+            .filter(|message| message.kind.as_deref() == Some("goal_context"))
+            .collect::<Vec<_>>();
+        assert_eq!(goal_rows.len(), 1);
+        assert_eq!(goal_rows[0].message_id, "session-1:goal-user-item-1");
     }
 }
 

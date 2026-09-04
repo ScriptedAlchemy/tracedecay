@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracedecay_capture::codex::{codex_current_user_message, codex_message_visible_text};
 
 use super::PROVIDER;
 use super::goals::{CodexGoalContext, codex_goal_context_from_text};
@@ -39,22 +40,18 @@ pub(super) fn message_from_line(
             "user_message" => ("user", payload.get("message")?, None, None, payload),
             "agent_message" => ("assistant", payload.get("message")?, None, None, payload),
             "item_completed" => {
-                let item = payload.get("item")?;
-                if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
-                    return None;
-                }
-                let item_id = item
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|item_id| !item_id.is_empty())?;
-                let content = item.get("content")?;
-                if collect_response_item_text(content).trim().is_empty() {
-                    return None;
-                }
-                ("user", content, Some(item_id), Some("item_completed"), item)
+                let message = codex_current_user_message(payload)?;
+                (
+                    "user",
+                    message.content,
+                    Some(message.item_id),
+                    Some("item_completed"),
+                    payload.get("item")?,
+                )
             }
             _ => return None,
         };
+    let visible_text = collect_response_item_text(content);
     let (text, tool_names) =
         content_storage_text_and_tools(content, metadata_payload.get("tool_calls"));
     if text.trim().is_empty() {
@@ -72,13 +69,16 @@ pub(super) fn message_from_line(
     };
 
     let timestamp = timestamp_from_record(record);
-    if let Some(goal_context) = codex_goal_context_from_text(&text) {
+    if let Some(goal_context) = codex_goal_context_from_text(&visible_text) {
         let metadata = metadata(Some(&goal_context));
         return Some(goal_context_message(
             meta,
             model,
-            path,
-            offset,
+            GoalContextRecordSource {
+                path,
+                offset,
+                item_id: source_item_id,
+            },
             timestamp,
             &goal_context,
             &metadata,
@@ -135,8 +135,14 @@ pub(super) fn response_item_goal_context_from_line(
     Some(goal_context_message(
         meta,
         model,
-        path,
-        offset,
+        GoalContextRecordSource {
+            path,
+            offset,
+            item_id: payload
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|item_id| !item_id.is_empty()),
+        },
         timestamp_from_record(record),
         &goal_context,
         &metadata,
@@ -343,54 +349,42 @@ pub(super) fn response_item_tool_metadata(
     Value::Object(metadata)
 }
 
+struct GoalContextRecordSource<'a> {
+    path: &'a Path,
+    offset: i64,
+    item_id: Option<&'a str>,
+}
+
 fn goal_context_message(
     meta: &CodexMeta,
     model: Option<&str>,
-    path: &Path,
-    offset: i64,
+    source: GoalContextRecordSource<'_>,
     timestamp: Option<i64>,
     goal_context: &CodexGoalContext,
     metadata: &Value,
 ) -> SessionMessageRecord {
     SessionMessageRecord {
         provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
+        message_id: source.item_id.map_or_else(
+            || format!("{}:{}", meta.session_id, source.offset),
+            |item_id| format!("{}:{item_id}", meta.session_id),
+        ),
         session_id: meta.session_id.clone(),
         role: "system".to_string(),
         timestamp,
-        ordinal: offset,
+        ordinal: source.offset,
         text: goal_context.storage_text(),
         kind: Some("goal_context".to_string()),
         model: model.map(str::to_string),
         tool_names: None,
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
+        source_path: Some(source.path.to_string_lossy().to_string()),
+        source_offset: Some(source.offset),
         metadata_json: serde_json::to_string(&metadata).ok(),
     }
 }
 
 pub(super) fn collect_response_item_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(collect_response_item_text)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                return text.to_string();
-            }
-            ["content", "message", "item"]
-                .iter()
-                .filter_map(|key| map.get(*key))
-                .map(collect_response_item_text)
-                .find(|text| !text.is_empty())
-                .unwrap_or_default()
-        }
-        _ => String::new(),
-    }
+    codex_message_visible_text(value)
 }
 
 pub(super) fn timestamp_from_record(record: &Value) -> Option<i64> {
