@@ -155,6 +155,28 @@ pub(super) async fn reconcile_graph_replay_releases(
         hotpath::gauge!("daemon.git.maintenance.replay_release_deferred_total").inc(1_u64);
         return ReconcileOutcome::Deferred;
     }
+    let staging_cursor = observations.graph_staging_release_cursor(project_root);
+    let staging_release = graph
+        .store_runtime_registry()
+        .release_one_sealed_generation_staging_rows(
+            project_id.clone(),
+            graph.db(),
+            cancellation,
+            staging_cursor,
+        )
+        .await;
+    match staging_release {
+        Ok(continuation) => {
+            observations.record_graph_staging_release_cursor(project_root, continuation);
+        }
+        Err(error) => {
+            log_code_generation_retention_degraded_with_error(
+                observations,
+                "graph_staging_release_failed",
+                &error,
+            );
+        }
+    }
     // One bounded page per pass, resumed from the durable-queue cursor of the
     // previous attempt. Retained releases fall behind the cursor instead of
     // blocking every later page, and a backlog drains across short-cadence

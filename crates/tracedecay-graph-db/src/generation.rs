@@ -324,6 +324,9 @@ pub enum GraphReplayCollectionOutcome {
     Retired(Box<GraphGenerationReplaySource>),
     Retained,
     Absent,
+    /// Relational retirement can proceed, but native row delete needs the
+    /// staging engine already resident. The release-queue entry stays queued.
+    RetentionPending,
 }
 
 impl GraphGenerationManifest {

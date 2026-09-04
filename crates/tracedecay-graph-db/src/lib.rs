@@ -44,6 +44,7 @@ pub use generation::{
     GraphProjectorRevision, GraphRelationRef, GraphReplayCollectionOutcome,
     SealedCodeGenerationReplay, SealedGraphStateDigest, SemanticVectorGenerationReplay,
 };
+pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
 pub use limits::{
     MAX_GRAPH_BATCH_CANONICAL_BYTES, MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS,

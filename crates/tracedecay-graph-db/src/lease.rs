@@ -73,6 +73,7 @@ pub(crate) struct VerifiedGenerationState {
     pub(crate) known: BTreeMap<GenerationLocator, std::sync::Weak<VerifiedGenerationLease>>,
     pub(crate) quarantined: BTreeSet<GenerationLocator>,
     pub(crate) stored: BTreeMap<GenerationLocator, Vec<GenerationLocator>>,
+    pub(crate) sealed_only: BTreeSet<GenerationLocator>,
     pub(crate) retiring: BTreeSet<GenerationLocator>,
     pub(crate) collected: BTreeSet<GenerationLocator>,
 }
@@ -353,7 +354,14 @@ impl VerifiedGraphSnapshot {
     ) -> Result<GraphProjectionPage, GraphDbError> {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.read_projection(request))
+        self.with_operation(|| {
+            if self.head.dependency_identities.is_empty()
+                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
+            {
+                return sealed.database().read_projection(request);
+            }
+            self.database.read_projection(request)
+        })
     }
 
     #[hotpath::measure(
@@ -366,7 +374,14 @@ impl VerifiedGraphSnapshot {
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.projection_telemetry(request))
+        self.with_operation(|| {
+            if self.head.dependency_identities.is_empty()
+                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
+            {
+                return sealed.database().projection_telemetry(request);
+            }
+            self.database.projection_telemetry(request)
+        })
     }
 
     pub fn traverse(
@@ -401,7 +416,14 @@ impl VerifiedGraphSnapshot {
     ) -> Result<VectorSearchResult, GraphDbError> {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.vector_search(request))
+        self.with_operation(|| {
+            if self.head.dependency_identities.is_empty()
+                && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
+            {
+                return sealed.database().vector_search(request);
+            }
+            self.database.vector_search(request)
+        })
     }
 
     /// Typed coverage of the vector index serving this snapshot's head
@@ -417,7 +439,9 @@ impl VerifiedGraphSnapshot {
     ) -> Result<GraphVectorIndexStatus, GraphDbError> {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
-        self.with_operation(|| self.database.vector_index_status(request))
+        self.with_operation(|| {
+            self.with_head_database(|database| database.vector_index_status(request))
+        })
     }
 
     #[hotpath::measure(
@@ -432,13 +456,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.outgoing_relation_ids(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                max_relations,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.outgoing_relation_ids(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -461,13 +487,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.incoming_relation_ids(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                max_relations,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.incoming_relation_ids(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -484,14 +512,16 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.outgoing_relation_ids_page(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                after,
-                limit,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.outgoing_relation_ids_page(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    after,
+                    limit,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -508,14 +538,16 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.incoming_relation_ids_page(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                after,
-                limit,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.incoming_relation_ids_page(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    after,
+                    limit,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -535,13 +567,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.outgoing_relations(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                max_relations,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.outgoing_relations(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -559,13 +593,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.outgoing_relations_truncated(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                max_relations,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.outgoing_relations_truncated(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -581,13 +617,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<crate::GraphRelationTarget>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.outgoing_relation_targets(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                max_relations,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.outgoing_relation_targets(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -599,13 +637,15 @@ impl VerifiedGraphSnapshot {
         visitor: &mut dyn FnMut(crate::GraphRelationTarget),
     ) -> Result<usize, GraphDbError> {
         self.with_operation(|| {
-            self.database.visit_outgoing_relation_targets(
-                &self.head.locator.physical_namespace()?,
-                start,
-                relation_kinds,
-                cancellation,
-                visitor,
-            )
+            self.with_head_database(|database| {
+                database.visit_outgoing_relation_targets(
+                    &self.head.locator.physical_namespace()?,
+                    start,
+                    relation_kinds,
+                    cancellation,
+                    visitor,
+                )
+            })
         })
     }
 
@@ -622,13 +662,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.incoming_relations(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                max_relations,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.incoming_relations(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -646,13 +688,15 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
         self.with_operation(|| {
-            self.database.incoming_relations_truncated(
-                &self.head.locator.physical_namespace()?,
-                starts,
-                relation_kinds,
-                max_relations,
-                cancellation,
-            )
+            self.with_head_database(|database| {
+                database.incoming_relations_truncated(
+                    &self.head.locator.physical_namespace()?,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    cancellation,
+                )
+            })
         })
     }
 
@@ -699,6 +743,18 @@ impl VerifiedGraphSnapshot {
             || self.database.inner.snapshot_gate.read_arc(),
         );
         operation()
+    }
+
+    fn with_head_database<T>(
+        &self,
+        operation: impl FnOnce(&crate::GraphDb) -> Result<T, GraphDbError>,
+    ) -> Result<T, GraphDbError> {
+        if self.head.dependency_identities.is_empty()
+            && let Some(sealed) = self.database.sealed_generation_reader(&self.head.locator)
+        {
+            return operation(sealed.database());
+        }
+        operation(&self.database)
     }
 
     pub(crate) fn namespace_projection_map(
@@ -830,6 +886,24 @@ mod tests {
         assert!(
             !state.known.contains_key(&locator),
             "remembering another generation must sweep the dead predecessor Weak"
+        );
+    }
+
+    #[test]
+    fn sealed_only_installed_head_remains_retained_by_its_lease() {
+        let (locator, lease) = test_lease("generation.sealed-only-head");
+        let mut state = VerifiedGenerationState::default();
+        state.install(lease).expect("install verified head");
+        state.stored.remove(&locator);
+        state.sealed_only.insert(locator.clone());
+
+        assert!(
+            state.retains(&locator),
+            "an installed head retains its generation after staging rows are released"
+        );
+        assert!(
+            !state.stored.contains_key(&locator),
+            "sealed-only retention must not depend on the durable-row ledger"
         );
     }
 }

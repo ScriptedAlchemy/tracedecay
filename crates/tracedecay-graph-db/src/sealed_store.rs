@@ -11,13 +11,14 @@
 //! `CompactStore` section, and proven against the generation's recovered
 //! digest before it serves a single read.
 //!
-//! The sealed store is a **derived artifact**: the WAL-backed staging database
-//! remains the replay and fallback authority, every sealed store is digest-
-//! verified after durable reopen before installation, and any later failure
-//! to open one falls back to the staging database. When the artifact is
-//! available during publication, that post-reopen proof is also the durable
-//! generation proof; repeating a close/reopen proof over the accumulated
-//! staging database would verify the same rows while rewriting older ones.
+//! Every sealed store is digest-verified after durable reopen before
+//! installation. Once a dependency-free generation's relational head is
+//! seated, that immutable store is its serving authority and the duplicate
+//! staging rows may be released; losing the artifact then requires canonical
+//! republishing instead of falling back to absent staging rows. Dependency-
+//! bearing generations retain staging because their edges cross physical
+//! namespaces. Before release, and for configurations without an installed
+//! sealed store, the WAL-backed staging database remains authoritative.
 //! Retirement deletes the artifact directory with the generation; quarantine
 //! discards it. Nothing ever writes to a sealed store after compaction — the
 //! handle is marked read-only and refuses writes with a typed error.
@@ -25,7 +26,7 @@
 //! On-disk layout, next to the staging database file:
 //!
 //! ```text
-//! graph.grafeo                  <- staging database (authority)
+//! graph.grafeo                  <- mutable staging database
 //! graph.sealed/
 //!   <physical-namespace-hex>/
 //!     generation.grafeo         <- compacted single-generation store
@@ -232,6 +233,8 @@ pub(crate) enum SealedStoreInstall {
 pub(crate) struct SealedGenerationStore {
     locator: GenerationLocator,
     recovered_digest: String,
+    entity_count: usize,
+    relation_count: usize,
     /// Canonical bytes hashed by the post-reopen digest proof — the size of
     /// the exact row stream `recovered_digest` covers.
     canonical_bytes: u64,
@@ -259,9 +262,13 @@ impl SealedGenerationStore {
         &self.recovered_digest
     }
 
-    /// Best-effort teardown of the artifact: close the handle and remove the
-    /// directory. The staging database remains the authority, so failures are
-    /// swallowed after marking the handle closed.
+    pub(crate) fn row_counts(&self) -> (usize, usize) {
+        (self.entity_count, self.relation_count)
+    }
+
+    /// Best-effort teardown used only when the generation is quarantined or
+    /// retired, or before staging rows become releasable. A sealed-only head
+    /// is never discarded through this path while it remains serveable.
     fn discard(&self) {
         let _ = self.database.close();
         remove_sealed_directory(&self.directory);
@@ -477,6 +484,25 @@ impl GraphDb {
         })
     }
 
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn discard_sealed_generation_reader(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+    ) -> Result<(), GraphDbError> {
+        let locator =
+            GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+        let removed = self
+            .inner
+            .sealed_generations
+            .write()
+            .map_err(|_| GraphDbError::unavailable("sealed generation store lock is poisoned"))?
+            .remove(&locator);
+        if let Some(store) = removed {
+            store.database().close()?;
+        }
+        Ok(())
+    }
+
     /// Ensures the sealed compacted store for `identity` exists, is
     /// digest-verified, and is installed for reads. Builds it from this
     /// staging database's verified rows when missing.
@@ -568,6 +594,26 @@ impl GraphDb {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn open_installed_sealed_generation_store_if_present(
+        &self,
+        lease: &crate::lease::VerifiedGenerationLease,
+    ) -> Result<(), GraphDbError> {
+        if self.sealed_generation_reader(&lease.locator).is_some() {
+            return Ok(());
+        }
+        let Some(commit) = self.generation_commit(&lease.locator)? else {
+            return Ok(());
+        };
+        let identity = GraphGenerationManifestIdentity::new(
+            lease.locator.projection.clone(),
+            lease.locator.generation.clone(),
+            commit.source_generation,
+            commit.watermark,
+            lease.dependency_identities.clone(),
+        );
+        self.open_sealed_generation_store_if_present(&identity, &lease.head.recovered_digest)
     }
 
     fn install_sealed_generation_store(
@@ -1083,6 +1129,8 @@ fn open_sealed_store(
     Ok(Some(Arc::new(SealedGenerationStore {
         locator: GenerationLocator::new(identity.projection.clone(), identity.generation.clone()),
         recovered_digest: expected.as_str().to_owned(),
+        entity_count: receipt.entities,
+        relation_count: receipt.relations,
         canonical_bytes,
         directory: directory.to_path_buf(),
         database,

@@ -31,7 +31,7 @@ hotpath-cpu = [
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
 ]
-test-helpers = []
+test-helpers = ["graph-sealed-store"]
 eval-helpers = []
 
 # Opt-in tiered graph storage (never in `default`).
