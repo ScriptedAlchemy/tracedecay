@@ -651,7 +651,10 @@ while True:
         break
     if message.get("method") == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {"textDocumentSync": 1}}})
-    elif message.get("method") == "textDocument/didChange":
+    elif message.get("method") in ("textDocument/didOpen", "textDocument/didChange"):
+        # The analyzer client opens a document it has not seen with a single
+        # didOpen and no redundant didChange, so a server that publishes only
+        # for didChange never reports on the first refresh.
         uri = message["params"]["textDocument"]["uri"]
         send({
             "jsonrpc": "2.0",

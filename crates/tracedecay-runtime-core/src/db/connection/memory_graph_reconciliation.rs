@@ -938,14 +938,38 @@ mod tests {
         (owner, cancelled)
     }
 
+    /// Waits for a coordinator state transition, bounded by wall clock.
+    ///
+    /// Some of these tests drive a multi-threaded runtime, so the transition is
+    /// completed by a reconciliation worker on a *different* thread. A bound
+    /// counted in `yield_now()` polls measures nothing about that thread's
+    /// progress: the waiting task burns hundreds of yields in microseconds
+    /// while the worker is merely waiting to be scheduled, which reports a
+    /// descheduled runtime as a stuck state machine whenever the host is
+    /// contended. Yield first so an uncontended run stays instant, then fall
+    /// back to short sleeps that leave the core to the worker.
     async fn wait_until(mut predicate: impl FnMut() -> bool) {
-        for _ in 0..256 {
+        const YIELD_ATTEMPTS: usize = 256;
+        const WAIT_LIMIT: Duration = Duration::from_secs(10);
+
+        let deadline = std::time::Instant::now() + WAIT_LIMIT;
+        let mut yields = 0_usize;
+        loop {
             if predicate() {
                 return;
             }
-            tokio::task::yield_now().await;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "memory graph reconciliation task did not reach expected state \
+                 within {WAIT_LIMIT:?}"
+            );
+            if yields < YIELD_ATTEMPTS {
+                yields += 1;
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
-        panic!("memory graph reconciliation task did not reach expected state");
     }
 
     fn reconciliation_retirement_is_admissible(
