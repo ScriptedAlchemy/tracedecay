@@ -51,6 +51,16 @@ pub struct GitEvidenceConvergenceStats {
     pub backfill_page_saturated: bool,
 }
 
+impl GitEvidenceConvergenceStats {
+    /// Whether this pass durably changed Git evidence or its session frontier.
+    pub fn committed_progress(&self) -> bool {
+        self.replayed_publications > 0
+            || self.backfill.frontier_advanced
+            || self.backfill.spans_written > 0
+            || self.backfill.commits_attributed > 0
+    }
+}
+
 fn shared_git_evidence_publication_lock(
     runtime: &VerifiedGraphRuntimeWeakProxyV1,
 ) -> Result<Arc<GitEvidencePublicationLock>, String> {
