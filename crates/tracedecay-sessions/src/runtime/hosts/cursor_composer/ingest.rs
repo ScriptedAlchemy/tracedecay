@@ -161,6 +161,7 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
     .map_err(|error| format!("invalid Cursor composer source: {error}"))
 }
 
+#[cfg(windows)]
 pub(super) fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
     let identity = tracedecay_runtime_core::db::sqlite_generation_identity(path).ok()?;
     ObservationSourceGenerationV1::new(identity).ok()
@@ -415,14 +416,8 @@ impl CursorComposerSource {
             }
         };
         let conn = &ro.conn;
-        let Some(state_generation) = hotpath::measure_block!(
-            "sessions.hosts.cursor_composer.state_generation_blocking",
-            run_blocking_transcript_section(|| snapshot_generation(&self.state_db_path))
-        ) else {
-            byte_budget.defer();
-            return;
-        };
-        let frontier_key = match composer_scan_frontier_key(&self.state_db_path, state_generation) {
+        let state_generation = ro.generation;
+        let frontier_key = match composer_scan_frontier_key(&ro.canonical_path, state_generation) {
             Ok(key) => key,
             Err(error) => {
                 tracing::debug!(
@@ -555,8 +550,8 @@ impl CursorComposerSource {
                 if !byte_budget.try_consume(nbytes) {
                     break 'scan;
                 }
-                last_scanned_key = Some(key.clone());
                 let Ok(envelope) = serde_json::from_str::<Value>(&value) else {
+                    last_scanned_key = Some(key);
                     continue;
                 };
                 let Some(composer_id) = envelope
@@ -566,9 +561,11 @@ impl CursorComposerSource {
                     .map(str::to_string)
                     .or_else(|| composer_id_from_envelope_key(&key).map(str::to_string))
                 else {
+                    last_scanned_key = Some(key);
                     continue;
                 };
                 let Some(project) = envelope_project(&envelope) else {
+                    last_scanned_key = Some(key);
                     continue;
                 };
                 if let Some(ws_hash) = workspace_hash(&envelope) {
@@ -582,18 +579,25 @@ impl CursorComposerSource {
                         byte_budget.defer();
                     }
                 }
-                // `Unknown` (bounded git timeout) skips the envelope without
-                // advancing its watermark, so the next sweep re-resolves the
-                // membership instead of misfiling the session.
-                let project_matches = hotpath::measure_block!(
+                // `Unknown` (bounded git timeout) stops before the envelope's
+                // watermark, so the next sweep re-resolves membership instead
+                // of misfiling or starving the session behind a growing tail.
+                let project_membership = hotpath::measure_block!(
                     "sessions.hosts.cursor_composer.envelope_scope_blocking",
-                    run_blocking_transcript_section(|| {
-                        scope_matcher.membership(Some(Path::new(&project.path)))
-                            == ProjectMembership::Match
-                    })
+                    run_blocking_transcript_section(
+                        || scope_matcher.membership(Some(Path::new(&project.path)))
+                    )
                 );
-                if !project_matches {
-                    continue;
+                match project_membership {
+                    ProjectMembership::Match => {}
+                    ProjectMembership::NoMatch => {
+                        last_scanned_key = Some(key);
+                        continue;
+                    }
+                    ProjectMembership::Unknown => {
+                        byte_budget.defer();
+                        break 'scan;
+                    }
                 }
                 let selected_project = ComposerProject {
                     path: context.scoped_project_label(&project.path),
@@ -615,7 +619,7 @@ impl CursorComposerSource {
                 if ingested_this_pass >= envelope_cap {
                     // Deferred to a later pass; still owned so JSONL stands down.
                     byte_budget.defer();
-                    continue;
+                    break 'scan;
                 }
                 let mut message_ids = headers
                     .iter()
@@ -649,18 +653,25 @@ impl CursorComposerSource {
                     }
                 }
                 if !identity_lookup_available {
-                    continue;
+                    break 'scan;
                 }
                 let generation = state_generation;
                 let mut session_accepted = false;
                 if composer_todos_have_admittable_items(&envelope)
                     && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
                     && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
-                    && let Ok(envelope_expected_cursor) = context
+                {
+                    let envelope_expected_cursor = match context
                         .facade
                         .get_source_cursor(&envelope_source, &context.scope)
                         .await
-                {
+                    {
+                        Ok(cursor) => cursor,
+                        Err(_) => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
+                    };
                     // Same generation + position is not enough: envelope todos mutate
                     // in place. Skip only when the stored resume fingerprint still
                     // matches the current todo checkpoint.
@@ -683,10 +694,14 @@ impl CursorComposerSource {
                             )
                     {
                         match context.facade.capture_observation(request).await {
-                            Ok(CaptureObservationOutcome::Persisted { .. }) => {
+                            Ok(CaptureObservationOutcome::Persisted { .. })
+                            | Ok(CaptureObservationOutcome::AcceptedForReplay { .. }) => {
                                 session_accepted = true;
                             }
-                            Err(_) => byte_budget.defer(),
+                            Err(_) => {
+                                byte_budget.defer();
+                                break 'scan;
+                            }
                             _ => {}
                         }
                     }
@@ -711,7 +726,7 @@ impl CursorComposerSource {
                         .await
                     else {
                         byte_budget.defer();
-                        break;
+                        break 'scan;
                     };
                     let position = expected_cursor.as_ref().map_or(header_position, |cursor| {
                         if cursor.generation() == generation {
@@ -722,7 +737,7 @@ impl CursorComposerSource {
                     });
                     if byte_budget.exhausted() {
                         byte_budget.defer();
-                        break;
+                        break 'scan;
                     }
                     match fetch_bubble_bounded(
                         conn,
@@ -732,10 +747,13 @@ impl CursorComposerSource {
                     )
                     .await
                     {
-                        BoundedSqliteValue::Missing => {}
+                        BoundedSqliteValue::Missing => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
                         BoundedSqliteValue::Oversized { byte_len } => {
                             if !byte_budget.try_consume(composer_source_charge(byte_len)) {
-                                break;
+                                break 'scan;
                             }
                             if advance_composer_coverage(
                                 ComposerCoverageContext {
@@ -753,12 +771,12 @@ impl CursorComposerSource {
                             .await
                             .is_err()
                             {
-                                break;
+                                break 'scan;
                             }
                         }
                         BoundedSqliteValue::Malformed { byte_len } => {
                             if !byte_budget.try_consume(composer_source_charge(byte_len)) {
-                                break;
+                                break 'scan;
                             }
                             if advance_composer_coverage(
                                 ComposerCoverageContext {
@@ -776,16 +794,16 @@ impl CursorComposerSource {
                             .await
                             .is_err()
                             {
-                                break;
+                                break 'scan;
                             }
                         }
                         BoundedSqliteValue::BudgetExceeded { .. } => {
                             byte_budget.defer();
-                            break;
+                            break 'scan;
                         }
                         BoundedSqliteValue::Corrupt => {
                             byte_budget.defer();
-                            break;
+                            break 'scan;
                         }
                         BoundedSqliteValue::Ready {
                             byte_len,
@@ -794,7 +812,7 @@ impl CursorComposerSource {
                             if !byte_budget
                                 .try_consume(byte_len.max(composer_budget_bytes(&bubble)))
                             {
-                                break;
+                                break 'scan;
                             }
                             let request = build_cursor_composer_capture_request_for_project(
                                 &composer_id,
@@ -825,7 +843,7 @@ impl CursorComposerSource {
                                 .await
                                 .is_err()
                                 {
-                                    break;
+                                    break 'scan;
                                 }
                                 continue;
                             };
@@ -851,7 +869,7 @@ impl CursorComposerSource {
                                     .await
                                     .is_err()
                                     {
-                                        break;
+                                        break 'scan;
                                     }
                                 }
                                 Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
@@ -871,12 +889,12 @@ impl CursorComposerSource {
                                     .await
                                     .is_err()
                                     {
-                                        break;
+                                        break 'scan;
                                     }
                                 }
                                 Err(_) => {
                                     byte_budget.defer();
-                                    break;
+                                    break 'scan;
                                 }
                             }
                         }
@@ -885,6 +903,10 @@ impl CursorComposerSource {
                 if session_accepted {
                     ingested_this_pass += 1;
                 }
+                // All headers are now durable duplicates, persisted, or covered by
+                // a terminal disposition. Transient exits above leave this key as
+                // the next pass's first candidate.
+                last_scanned_key = Some(key);
             }
             if !page_full {
                 reached_end = true;
@@ -1020,12 +1042,7 @@ impl CursorComposerSource {
             return;
         }
 
-        let Some(generation) = hotpath::measure_block!(
-            "sessions.hosts.cursor_composer.store_generation_blocking",
-            run_blocking_transcript_section(|| snapshot_generation(store_path))
-        ) else {
-            return;
-        };
+        let generation = ro.generation;
         let Ok(source) = cursor_composer_source(&session_id) else {
             return;
         };

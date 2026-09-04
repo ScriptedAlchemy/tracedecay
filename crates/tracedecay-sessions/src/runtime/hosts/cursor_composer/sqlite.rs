@@ -6,9 +6,10 @@
 //! blocking thread via [`CursorConn::with`], so async ingest callers never
 //! block the executor and futures holding a [`CursorConn`] stay `Send`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_domain::ObservationSourceGenerationV1;
 
 use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
 use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
@@ -93,29 +94,78 @@ const COMPOSER_KEY_SCAN_FROM_START_SQL: &str = "SELECT key, octet_length(value) 
 /// aliased locally for the Cursor composer reader signatures.
 pub(super) use crate::runtime::shared::SqliteReadConn as CursorConn;
 
-/// A read-only connection to a Cursor composer store.
+/// A read-only connection bound to the path and physical identity verified
+/// across its immutable open.
 pub(super) struct ReadOnlyDb {
     pub conn: CursorConn,
+    pub generation: ObservationSourceGenerationV1,
+    pub canonical_path: PathBuf,
+}
+
+pub(super) fn open_readonly_immutable_verified_sync(
+    db_path: &Path,
+    open: impl FnOnce(&Path) -> Result<rusqlite::Connection, String>,
+) -> Result<ReadOnlyDb, String> {
+    let canonical_before = db_path.canonicalize().map_err(|error| {
+        format!(
+            "could not resolve '{}' before immutable open: {error}",
+            db_path.display()
+        )
+    })?;
+    let before = tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_before)
+        .map_err(|_| {
+            format!(
+                "could not identify '{}' before immutable open",
+                db_path.display()
+            )
+        })?;
+    let conn = open(db_path)?;
+    let canonical_after = db_path.canonicalize().map_err(|error| {
+        format!(
+            "could not resolve '{}' after immutable open: {error}",
+            db_path.display()
+        )
+    })?;
+    let after = tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_after).map_err(
+        |_| {
+            format!(
+                "could not identify '{}' after immutable open",
+                db_path.display()
+            )
+        },
+    )?;
+    if before != after || canonical_before != canonical_after {
+        return Err(format!(
+            "SQLite path '{}' was replaced during immutable open",
+            db_path.display()
+        ));
+    }
+    let generation = ObservationSourceGenerationV1::new(before)
+        .map_err(|error| format!("invalid SQLite generation identity: {error}"))?;
+    Ok(ReadOnlyDb {
+        conn: CursorConn::new(conn),
+        generation,
+        canonical_path: canonical_before,
+    })
 }
 
 /// Open a `SQLite` file strictly read-only and immutable (no locking, no
 /// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI. The runtime
 /// helper also pins `busy_timeout = 0` and verifies `query_only = ON`.
 ///
-/// Missing paths and unreadable files are typed `Err` — callers that already
-/// proved the path is a regular file must defer, not treat this as a no-op.
+/// Missing, unreadable, or concurrently replaced paths are typed `Err` —
+/// callers that already proved the path is a regular file must defer, not
+/// treat this as a no-op.
 pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb, String> {
     let path = db_path.to_path_buf();
-    let opened = tokio::task::spawn_blocking(move || {
-        tracedecay_rusqlite_runtime::open_immutable_reader(&path)
+    tokio::task::spawn_blocking(move || {
+        open_readonly_immutable_verified_sync(&path, |path| {
+            tracedecay_rusqlite_runtime::open_immutable_reader(path)
+                .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))
+        })
     })
     .await
-    .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))?;
-    opened
-        .map(|conn| ReadOnlyDb {
-            conn: CursorConn::new(conn),
-        })
-        .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))
+    .map_err(|error| format!("could not open '{}' read-only: {error}", db_path.display()))?
 }
 
 /// One keyset page of `composerData:` keys with their value byte lengths.

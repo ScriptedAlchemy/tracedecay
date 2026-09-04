@@ -1122,6 +1122,255 @@ async fn composer_key_frontier_converges_tail_then_wraps_for_pre_frontier_insert
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn immutable_open_rejects_path_replacement_after_opening_old_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("state.vscdb");
+    let replacement = tmp.path().join("replacement.vscdb");
+    for (database, text) in [(&path, "from-a"), (&replacement, "from-b")] {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE;
+                 CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+                rusqlite::params![
+                    "composerData:same-id",
+                    json!({
+                        "composerId": "same-id",
+                        "fullConversationHeadersOnly": [{ "bubbleId": "same-bubble" }],
+                        "marker": text,
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+    }
+
+    let opened = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let replaced = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let replacer = {
+        let path = path.clone();
+        let replacement = replacement.clone();
+        let opened = std::sync::Arc::clone(&opened);
+        let replaced = std::sync::Arc::clone(&replaced);
+        std::thread::spawn(move || {
+            opened.wait();
+            std::fs::rename(replacement, path).unwrap();
+            replaced.wait();
+        })
+    };
+
+    let result = open_readonly_immutable_verified_sync(&path, |opened_path| {
+        let connection = tracedecay_rusqlite_runtime::open_immutable_reader(opened_path)
+            .map_err(|error| error.to_string())?;
+        opened.wait();
+        replaced.wait();
+        let retained = connection
+            .query_row(
+                "SELECT value FROM cursorDiskKV WHERE key = 'composerData:same-id'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        assert!(
+            retained.contains("from-a"),
+            "opened descriptor did not retain A"
+        );
+        Ok(connection)
+    });
+    replacer.join().unwrap();
+    let Err(error) = result else {
+        panic!("an old descriptor must not be paired with the replacement path identity");
+    };
+    assert!(error.contains("replaced during immutable open"), "{error}");
+    let replacement_reader =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let replacement_value = replacement_reader
+        .query_row(
+            "SELECT value FROM cursorDiskKV WHERE key = 'composerData:same-id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert!(
+        replacement_value.contains("from-b"),
+        "replacement pathname did not resolve to B"
+    );
+}
+
+fn seed_large_frontier_fixture(
+    state_db: &std::path::Path,
+    project: &std::path::Path,
+    unrelated: &std::path::Path,
+    owned_indices: &[usize],
+) {
+    let mut connection = rusqlite::Connection::open(state_db).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..=MAX_COMPOSER_STORE_BLOB_VISITS {
+        let composer_id = format!("{index:06}");
+        let owner = if owned_indices.contains(&index) {
+            project
+        } else {
+            unrelated
+        };
+        insert_composer_fixture(&transaction, &composer_id, owner);
+    }
+    transaction.commit().unwrap();
+}
+
+fn append_frontier_tail(state_db: &std::path::Path, unrelated: &std::path::Path) {
+    let connection = rusqlite::Connection::open(state_db).unwrap();
+    insert_composer_fixture(&connection, "999999", unrelated);
+}
+
+fn observation_count(admission: &MemoryHostAdmission, message_id: &str) -> usize {
+    admission
+        .observations()
+        .iter()
+        .filter(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains(message_id)
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn composer_frontier_retries_early_lookup_failure_before_growing_tail() {
+    let project = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    seed_large_frontier_fixture(&state_db, project.path(), unrelated.path(), &[0]);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-lookup-retry").unwrap();
+    admission.fail_next_session_message_lookups(1);
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 0);
+    append_frontier_tail(&state_db, unrelated.path());
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 1);
+}
+
+#[tokio::test]
+async fn composer_frontier_retries_envelope_cap_before_growing_tail() {
+    let project = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    seed_large_frontier_fixture(&state_db, project.path(), unrelated.path(), &[0, 1]);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-cap-retry").unwrap();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(&admission, project.path(), project_id.clone(), 1, None)
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 1);
+    assert_eq!(observation_count(&admission, "000001:bubble"), 0);
+    append_frontier_tail(&state_db, unrelated.path());
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(&admission, project.path(), project_id, 1, None)
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 1);
+    assert_eq!(observation_count(&admission, "000001:bubble"), 1);
+}
+
+#[tokio::test]
+async fn composer_frontier_retries_capture_error_before_growing_tail() {
+    let project = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let state_db = state_dir.join("state.vscdb");
+    seed_large_frontier_fixture(&state_db, project.path(), unrelated.path(), &[0]);
+
+    let admission = MemoryHostAdmission::default();
+    let project_id = ProjectId::new("project.cursor-composer-capture-retry").unwrap();
+    admission.fail_next_capture();
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 0);
+    append_frontier_tail(&state_db, unrelated.path());
+
+    CursorComposerSource::with_home(home.path())
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(observation_count(&admission, "000000:bubble"), 1);
+}
+
 #[tokio::test]
 async fn composer_key_scan_reports_corrupt_or_incompatible_schema() {
     let tmp = tempfile::TempDir::new().unwrap();
