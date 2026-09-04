@@ -282,6 +282,20 @@ pub struct IncrementalBackfillOutcome {
     pub later_failure: Option<GitCorrelationError>,
 }
 
+fn incremental_backfill_failure(
+    stats: BackfillStats,
+    error: GitCorrelationError,
+) -> Result<IncrementalBackfillOutcome, GitCorrelationError> {
+    if stats.committed_progress() {
+        Ok(IncrementalBackfillOutcome {
+            stats,
+            later_failure: Some(error),
+        })
+    } else {
+        Err(error)
+    }
+}
+
 /// Abstracts the git subprocess surface the backfill needs, so tests can run
 /// the core against a real repo ([`SystemGit`]) or a canned fixture.
 ///
@@ -489,7 +503,10 @@ where
     if !rows.is_empty() {
         let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
         let settled_prefix_len =
-            backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
+            match backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await {
+                Ok(settled_prefix_len) => settled_prefix_len,
+                Err(error) => return incremental_backfill_failure(stats, error),
+            };
 
         // Advance both tuple components together so equal activity timestamps
         // resume at the exact unprocessed session row. Never advance beyond a
@@ -502,16 +519,22 @@ where
             && (new_frontier.activity_timestamp, new_frontier.source_rowid)
                 > (watermark, rowid_frontier)
         {
-            let transaction = session_store.open_write_transaction().await?;
-            advance_history_frontier(
-                &transaction,
-                GitHistoryIndexFrontier {
-                    activity_timestamp: new_frontier.activity_timestamp,
-                    source_rowid: new_frontier.source_rowid,
-                },
-            )
-            .await?;
-            GitCorrelationWriteTxn::commit(transaction).await?;
+            let frontier_result = async {
+                let transaction = session_store.open_write_transaction().await?;
+                advance_history_frontier(
+                    &transaction,
+                    GitHistoryIndexFrontier {
+                        activity_timestamp: new_frontier.activity_timestamp,
+                        source_rowid: new_frontier.source_rowid,
+                    },
+                )
+                .await?;
+                GitCorrelationWriteTxn::commit(transaction).await
+            }
+            .await;
+            if let Err(error) = frontier_result {
+                return incremental_backfill_failure(stats, error);
+            }
             stats.frontier_advanced = true;
         }
     }
