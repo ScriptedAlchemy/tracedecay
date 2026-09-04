@@ -75,6 +75,7 @@ fn sealed_source(
 /// generation, keeping its sequence. The registry selects retirement
 /// candidates by decoding the journaled replay source, so this is what makes a
 /// published generation visible to the code-generation retirement sweep.
+#[allow(clippy::too_many_arguments)]
 fn bind_sealed_source(
     authority: &mut RelationalAuthority,
     binding: &tracedecay_store::StoreRuntimeBindingV1,
@@ -386,10 +387,9 @@ fn a_store_persisted_under_the_legacy_layout_opens_and_drains_its_per_generation
         "a legacy per-generation head is reclaimed by the head-retirement path",
     );
     assert!(
-        authority
+        !authority
             .heads
-            .get(&legacy_record.publication.key.projection)
-            .is_none(),
+            .contains_key(&legacy_record.publication.key.projection),
         "the legacy per-generation head is gone",
     );
     assert_eq!(
