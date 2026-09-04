@@ -137,8 +137,16 @@ fn captured_source_bytes_are_charged_until_the_snapshot_drops() {
     assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
+/// Capture became proportional to the change set: a reconcile over an
+/// unchanged checkout reuses the active generation's rows instead of
+/// re-reading them, so it retains no source Arcs and holds no charge for
+/// bytes it is not keeping resident. This pins the invariant that survived
+/// that change — the charge always equals what the scheduler still retains,
+/// on the build path and on the no-build path alike — rather than the
+/// pre-proportional behaviour where every reconcile re-captured, and so
+/// re-charged, the whole snapshot.
 #[test]
-fn completed_reconcile_retains_the_canonical_snapshot_charge() {
+fn reconcile_charges_exactly_the_snapshot_sources_it_retains() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -168,10 +176,21 @@ fn completed_reconcile_retains_the_canonical_snapshot_charge() {
             .expect("reconcile unchanged source"),
         CodeIndexReconcileOutcomeV1::Noop(_)
     ));
+    let retained_after_no_build = scheduler
+        .retained_snapshot_bytes
+        .iter()
+        .map(|bytes| bytes.len() as u64)
+        .sum::<u64>();
+    assert!(
+        retained_after_no_build <= retained_bytes,
+        "a reuse-only capture never retains more source than the snapshot it reused"
+    );
     assert_eq!(
         authority.snapshot().used_bytes,
-        retained_bytes,
-        "the no-build path retains only the canonical Arc source charge"
+        retained_after_no_build,
+        "the no-build path charges exactly the Arc sources it still retains, so a \
+         reuse-only pass neither strands the previous charge nor holds one for bytes \
+         it released"
     );
 }
 
