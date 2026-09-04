@@ -443,9 +443,16 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             });
         }
         drop(rows);
-        SessionWriteTxn::commit(transaction).await?;
         let has_more = byte_limited || rows_scanned == page_limit.max(1);
         if unprotected.is_empty() {
+            tracedecay_lcm::summary_convergence::record_current_protection_progress(
+                &transaction,
+                provider,
+                session_id,
+                frontier_store_id,
+            )
+            .await?;
+            SessionWriteTxn::commit(transaction).await?;
             return Ok(tracedecay_lcm::summary_convergence::LcmRawProtectionPage {
                 rows_scanned,
                 rows_protected: 0,
@@ -464,13 +471,16 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
                 &mut payload_rollback,
             )?);
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
         for (message, staged) in unprotected.iter().zip(staged) {
             raw::commit_staged_raw_message(&transaction, message, staged).await?;
         }
+        tracedecay_lcm::summary_convergence::record_current_protection_progress(
+            &transaction,
+            provider,
+            session_id,
+            frontier_store_id,
+        )
+        .await?;
         SessionWriteTxn::commit(transaction).await?;
         payload_rollback.disarm();
         Ok(tracedecay_lcm::summary_convergence::LcmRawProtectionPage {
