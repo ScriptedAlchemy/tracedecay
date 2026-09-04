@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
     BrainId, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision, CodeGenerationId,
@@ -11,19 +12,28 @@ use tracedecay_domain::{
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphGenerationDependency, GraphGenerationId,
     GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
-    NeverCancelled,
+    GraphWriteBatch, NeverCancelled, VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_semantic::projector::{ProjectedChunkVectorV1, vector_output_digest};
 use tracedecay_store::{
     CodeShardScopeV1, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationKeyV1,
-    SemanticVectorBuildId, SemanticVectorReconstructionRecipe, SemanticVectorSourceGenerationId,
-    SemanticVectorStagePlan, SemanticVectorWriterFence, StoreRuntimeBindingV1, StoreShardIdV1,
+    GraphVerifiedHeadV1, SemanticVectorBuildId, SemanticVectorPublishedGenerationKey,
+    SemanticVectorPublishedGenerationLookup, SemanticVectorReconstructionRecipe,
+    SemanticVectorSourceGenerationId, SemanticVectorStageBatchReceipt,
+    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
+    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome,
+    SemanticVectorWriterFence, StoreRuntimeBindingV1, StoreShardIdV1,
     semantic_vector_chunk_manifest_digest,
 };
 
 use super::{post_commit_publication_settlement_error, semantic_stage_source_identity};
-use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
+use crate::semantic_runtime::{
+    SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
+    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
+};
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
 use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, PreparedVectorGenerationV1, SemanticVectorStageDescriptorV1,
@@ -213,6 +223,261 @@ async fn restarted_store_supersedes_pending_stage_from_prior_source_generation()
         .await
         .unwrap();
     assert_eq!(publication.checkpoint.source_generation, second_source);
+}
+
+#[tokio::test]
+async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
+    let source = CodeGenerationId::new("code-generation.background-publication").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let (plan, prepared, descriptor) = prepared_generation(
+        &source,
+        "chunk.background-publication",
+        'c',
+        &admitted_embedding(),
+    );
+    store.configure_stage(descriptor).unwrap();
+    let build = store
+        .begin_generation(plan, Arc::clone(&cancellation))
+        .await
+        .unwrap()
+        .build_id()
+        .clone();
+    store
+        .commit_batch(&build, None, prepared, Arc::clone(&cancellation))
+        .await
+        .unwrap();
+    store.runtime = Arc::new(PublicationAuthorityProbeRuntime {
+        inner: Arc::clone(&store.runtime),
+        prepare_deadline: Mutex::new(None),
+    });
+
+    let publication = store
+        .publish_generation(&build, cancellation)
+        .await
+        .unwrap();
+
+    assert_eq!(publication.checkpoint.source_generation, source);
+}
+
+struct PublicationAuthorityProbeRuntime {
+    inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    prepare_deadline: Mutex<Option<Instant>>,
+}
+
+impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
+    fn scope(&self) -> &SemanticVectorGraphScopeV1 {
+        self.inner.scope()
+    }
+
+    fn recover_verified_snapshot(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        self.inner.recover_verified_snapshot(authority)
+    }
+
+    fn recover_verified_generation(
+        &self,
+        publication: &GraphPublicationKeyV1,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.inner
+            .recover_verified_generation(publication, authority)
+    }
+
+    fn staging_binding(&self) -> (&StoreShardIdV1, &StoreRuntimeBindingV1) {
+        self.inner.staging_binding()
+    }
+
+    fn verified_head(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<Option<GraphVerifiedHeadV1>, GraphDbError> {
+        self.inner.verified_head(authority)
+    }
+
+    fn begin_stage(
+        &self,
+        plan: &SemanticVectorStagePlan,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
+        self.inner.begin_stage(plan, authority)
+    }
+
+    fn resume_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStageResumeOutcome, GraphDbError> {
+        self.inner.resume_stage(stage, authority)
+    }
+
+    fn published_semantic_generation(
+        &self,
+        key: &SemanticVectorPublishedGenerationKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorPublishedGenerationLookup, GraphDbError> {
+        self.inner.published_semantic_generation(key, authority)
+    }
+
+    fn append_stage_batch(
+        &self,
+        receipt: &SemanticVectorStageBatchReceipt,
+        batch: GraphWriteBatch,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGenerationBatchCommit, GraphDbError> {
+        self.inner.append_stage_batch(receipt, batch, authority)
+    }
+
+    fn cancel_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStageCancelOutcome, GraphDbError> {
+        self.inner.cancel_stage(stage, authority)
+    }
+
+    fn prepare_publication_from_staged_native(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStagePublicationPrepareOutcome, GraphDbError> {
+        let remaining = authority
+            .deadline()
+            .checked_duration_since(Instant::now())
+            .ok_or(GraphDbError::DeadlineExceeded)?;
+        if remaining < Duration::from_secs(24 * 60 * 60) {
+            return Err(GraphDbError::DeadlineExceeded);
+        }
+        *self.prepare_deadline.lock().unwrap() = Some(authority.deadline());
+        let outcome = self
+            .inner
+            .prepare_publication_from_staged_native(stage, authority)?;
+        Ok(outcome)
+    }
+
+    fn publish_ready_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        let prepare_deadline = self
+            .prepare_deadline
+            .lock()
+            .unwrap()
+            .ok_or_else(|| GraphDbError::conflict("test.publish_without_prepare"))?;
+        if authority.deadline() <= prepare_deadline {
+            return Err(GraphDbError::DeadlineExceeded);
+        }
+        self.inner.publish_ready_stage(stage, authority)
+    }
+
+    fn settle_published(
+        &self,
+        settlement: &SemanticVectorStagePublishSettlement,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStagePublishOutcome, GraphDbError> {
+        self.inner.settle_published(settlement, authority)
+    }
+
+    fn reserve_one_generation(
+        &self,
+        after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionStep, GraphDbError> {
+        self.inner.reserve_one_generation(after, authority)
+    }
+
+    fn finalize_reserved_generation(
+        &self,
+        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
+        authorization: &SemanticVectorRetentionAuthorizationV1,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionAction, GraphDbError> {
+        self.inner
+            .finalize_reserved_generation(reservation, authorization, authority)
+    }
+
+    fn release_reserved_generation(
+        &self,
+        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
+    ) -> Result<(), GraphDbError> {
+        self.inner.release_reserved_generation(reservation)
+    }
+
+    fn source_generation_has_live_reference(
+        &self,
+        generation: &tracedecay_store::SemanticVectorSourceGenerationId,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner
+            .source_generation_has_live_reference(generation, expected_revision, authority)
+    }
+
+    fn source_scope_has_live_reference(
+        &self,
+        source_scope: &StoreShardIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner
+            .source_scope_has_live_reference(source_scope, expected_revision, authority)
+    }
+
+    fn published_generation_dependency(
+        &self,
+        generation: &VectorGenerationIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorPublishedGenerationDependencyLookup, GraphDbError>
+    {
+        self.inner
+            .published_generation_dependency(generation, expected_revision, authority)
+    }
+
+    fn validate_project_census_revision(
+        &self,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<(), GraphDbError> {
+        self.inner
+            .validate_project_census_revision(expected_revision, authority)
+    }
+
+    fn source_scope_binding(
+        &self,
+        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorSourceScopeBindingLookup, GraphDbError> {
+        self.inner
+            .source_scope_binding(code_scope_hash, expected_revision, authority)
+    }
+
+    fn remove_source_scope_binding(
+        &self,
+        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
+        source_scope: &StoreShardIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner.remove_source_scope_binding(
+            code_scope_hash,
+            source_scope,
+            expected_revision,
+            authority,
+        )
+    }
 }
 
 fn admitted_embedding() -> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
