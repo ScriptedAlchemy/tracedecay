@@ -117,6 +117,14 @@ NODE
   fi
   "$TRACEDECAY_BIN" disable-upload-counter >/dev/null 2>&1 || true
 
+  # Resolve and cache the inspector package before any timed call: on a cold
+  # runner `npx` spends its first invocation downloading the package, and
+  # that install time must not count against a single call's budget.
+  if ! (cd "$fixture" && timeout 300 \
+      npx -y "@modelcontextprotocol/inspector@$INSPECTOR_VERSION" --cli --help >/dev/null 2>&1); then
+    echo "warning: inspector warm-up did not complete; timed calls include the install" >&2
+  fi
+
   # 1. tools/list succeeds through the SDK client (implies the full initialize
   #    handshake + version negotiation + Zod validation of every tool schema).
   tools_a="$work_dir/tools-a.json"
