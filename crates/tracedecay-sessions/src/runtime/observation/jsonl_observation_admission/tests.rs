@@ -939,11 +939,7 @@ fn rollout_fixture() -> (tempfile::TempDir, PathBuf, u64) {
 }
 
 async fn stored_cursor(spy: &SeamSpyAdmission) -> Option<ObservationSourceCursorV1> {
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
-        SessionId::new(SESSION_ID).unwrap(),
-    )
-    .unwrap();
+    let source = crate::runtime::codex::codex_observation_source_v2(SESSION_ID).unwrap();
     spy.get_source_cursor(&source, &ObservationScopeV1::Profile)
         .await
         .unwrap()

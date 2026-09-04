@@ -21,11 +21,17 @@ use crate::runtime::source::TranscriptSource;
 mod goal_event_tests {
     use super::*;
     use serde_json::json;
-    use tracedecay_domain::{CanonicalObservationEnvelopeV1, ObservationScopeV1};
+    use tracedecay_domain::{
+        CanonicalObservationEnvelopeV1, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+        ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
+    };
+    use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+    use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
     use crate::admission::HostAdmission;
     use crate::admission::test_support::MemoryHostAdmission;
-    use crate::observation::ObservationCancellation;
+    use crate::observation::{CaptureObservationRequest, ObservationCancellation};
     use crate::runtime::codex::try_admit_codex_jsonl_observations_for_project_with_admission;
 
     fn goal_event_line(objective: &str, status: &str) -> Value {
@@ -889,6 +895,157 @@ mod goal_event_tests {
         assert_eq!(projected.projected, 2);
         assert_eq!(admission.pending_projection_count(), 0);
     }
+
+    #[tokio::test]
+    async fn legacy_current_message_migration_records_receipted_duplicate_coverage() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let session_id = "session-legacy-current";
+        let session_meta = json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": project}
+        })
+        .to_string();
+        let current = json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session_id,
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "user-item-legacy",
+                    "content": [{"type": "text", "text": "recover this prompt"}]
+                }
+            }
+        });
+        let current_line = current.to_string();
+        std::fs::write(&transcript, format!("{session_meta}\n{current_line}\n")).unwrap();
+
+        let source = ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("codex").unwrap(),
+            SessionId::new(session_id).unwrap(),
+        )
+        .unwrap();
+        let project_id = ProjectId::new("project-legacy-current").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let scanned = crate::runtime::source::try_stream_new_jsonl_raw_strict_with_resume(
+            &transcript,
+            StoredCursor::default(),
+            None,
+            crate::runtime::source::MAX_JSONL_RECORD_BYTES,
+            None,
+        )
+        .unwrap();
+        assert_eq!(scanned.frames.len(), 2);
+        let generation = ObservationSourceGenerationV1::new(scanned.new_cursor.file_id).unwrap();
+        let meta_end = u64::try_from(session_meta.len() + 1).unwrap();
+        let current_end = u64::try_from(session_meta.len() + 1 + current_line.len() + 1).unwrap();
+        let meta_range = ObservationSourceRangeV1::new(0, meta_end).unwrap();
+        let current_range = ObservationSourceRangeV1::new(meta_end, current_end).unwrap();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        admission
+            .advance_non_durable_source_cursor(
+                ObservationCursorAdvance::new(
+                    source.clone(),
+                    scope.clone(),
+                    generation,
+                    None,
+                    meta_range,
+                    ObservationCoverageReason::UnsupportedFact,
+                )
+                .unwrap()
+                .with_resume_checkpoint(
+                    scanned.file_identity,
+                    scanned.frames[0].resume_fingerprint,
+                ),
+                cancellation.clone(),
+            )
+            .await
+            .unwrap();
+
+        let native_record_id = codex_native_record_id(session_id, &current).unwrap();
+        let envelope = normalize_codex_observation(
+            &current,
+            session_id,
+            Some(session_id),
+            native_record_id.clone(),
+            current_range,
+        )
+        .unwrap();
+        let parsed = parse_normalized_observation_record_v1(
+            format!("{current_line}\n").as_bytes(),
+            current_range,
+            ObservationOrderingDomainV1::FileBytes,
+            |_| Ok(envelope),
+        )
+        .unwrap();
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            scope.clone(),
+            generation,
+            current_range,
+            ObservationOrderingDomainV1::FileBytes,
+            native_record_id,
+        )
+        .unwrap();
+        let expected = admission
+            .get_source_cursor(identity.source(), &scope)
+            .await
+            .unwrap();
+        admission
+            .capture_observation(
+                CaptureObservationRequest::new(
+                    parsed,
+                    identity,
+                    expected,
+                    RetentionClass::new("retention.provider-observation").unwrap(),
+                    cancellation,
+                )
+                .unwrap()
+                .with_resume_checkpoint(
+                    scanned.file_identity,
+                    scanned.frames[1].resume_fingerprint,
+                ),
+            )
+            .await
+            .unwrap();
+        let original = admission.observations();
+        assert_eq!(original.len(), 1);
+        let original_receipt = original[0].observation().receipt().clone();
+
+        let progress = try_admit_codex_jsonl_observations_for_project_with_admission(
+            &transcript,
+            &project,
+            project_id,
+            &admission,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(progress.frames_persisted, 0);
+        assert_eq!(admission.observations().len(), 1);
+        let duplicate_advances = admission
+            .non_durable_advances()
+            .into_iter()
+            .filter(|advance| advance.reason() == ObservationCoverageReason::DuplicateObservation)
+            .collect::<Vec<_>>();
+        assert_eq!(duplicate_advances.len(), 1);
+        assert_eq!(
+            duplicate_advances[0].sanitization_receipt(),
+            Some(&original_receipt)
+        );
+        assert_eq!(duplicate_advances[0].covered(), current_range);
+    }
 }
 
 #[cfg(test)]
@@ -898,7 +1055,7 @@ mod message_record_tests {
 
     use serde_json::{Value, json};
 
-    use super::super::records::message_from_line;
+    use super::super::records::{message_from_line, response_item_goal_context_from_line};
     use super::{CodexMeta, CodexSource, StoredCursor, TranscriptSource};
 
     fn meta() -> CodexMeta {
@@ -1017,7 +1174,7 @@ mod message_record_tests {
     }
 
     #[test]
-    fn current_goal_context_keeps_item_identity_and_collapses_paired_shapes() {
+    fn current_goal_context_keeps_paired_shapes_for_transactional_reconciliation() {
         let goal = concat!(
             "<codex_internal_context source=\"goal\">",
             "<objective>finish the canonical admission fix</objective>\n",
@@ -1085,8 +1242,48 @@ mod message_record_tests {
             .iter()
             .filter(|message| message.kind.as_deref() == Some("goal_context"))
             .collect::<Vec<_>>();
-        assert_eq!(goal_rows.len(), 1);
-        assert_eq!(goal_rows[0].message_id, "session-1:goal-user-item-1");
+        assert_eq!(goal_rows.len(), 3);
+        assert_eq!(goal_rows[0].message_id, "session-1:msg-goal-1");
+        assert_eq!(goal_rows[1].message_id, "session-1:goal-user-item-1");
+        assert_eq!(goal_rows[2].message_id, "session-1:goal-user-item-1");
+    }
+    #[test]
+    fn direct_goal_context_parser_rejects_non_user_response_items() {
+        let native = json!({
+            "timestamp": "2026-01-01T00:00:15.100Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "<codex_internal_context source=\"goal\"><objective>not user input</objective></codex_internal_context>"
+                }]
+            }
+        });
+        let meta = CodexMeta {
+            cwd: std::path::PathBuf::from("/project"),
+            session_id: "codex-role-check".to_owned(),
+            model: None,
+            git: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            agent_nickname: None,
+            agent_role: None,
+            thread_source: None,
+        };
+
+        assert!(
+            response_item_goal_context_from_line(
+                &native,
+                &meta,
+                None,
+                std::path::Path::new("rollout.jsonl"),
+                42,
+            )
+            .is_none()
+        );
     }
 }
 
