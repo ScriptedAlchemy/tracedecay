@@ -319,12 +319,15 @@ impl TraceDecayStorageEnvGuard {
             });
         }
         #[cfg(unix)]
-        fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700)).unwrap_or_else(|err| {
-            panic!(
-                "failed to restrict isolated runtime directory '{}': {err}",
-                runtime_dir.display()
-            )
-        });
+        {
+            let owner_only = fs::Permissions::from_mode(0o700);
+            fs::set_permissions(&runtime_dir, owner_only).unwrap_or_else(|err| {
+                panic!(
+                    "failed to restrict isolated runtime directory '{}': {err}",
+                    runtime_dir.display()
+                )
+            });
+        }
 
         Self {
             home: home.clone(),
@@ -799,7 +802,7 @@ pub fn search_eval_bin(name: &str) -> PathBuf {
         });
     assert!(
         binary.is_file(),
-        "search-eval binary `{name}` is missing at {}; build it with `cargo build -p tracedecay-search-eval --bin {name}` or set {override_env}",
+        "search-eval binary `{name}` is missing at {}; build it with `cargo build --workspace --bins --locked --features tracedecay/test-helpers` or set {override_env}.          A `-p tracedecay-search-eval` build resolves `tracedecay-code-index` without its default language tiers and yields an evaluator that cannot parse Rust, so the package selection must match the test lane's.",
         binary.display()
     );
     binary
