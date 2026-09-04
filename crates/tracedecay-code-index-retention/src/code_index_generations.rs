@@ -976,7 +976,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
             }
         }
         GenerationDigestVerificationV1::MetadataOnly => {
-            if store_holds_generation_segments(store_root, is_cancelled)? {
+            if store_may_hold_generation_segments(store_root, is_cancelled)? {
                 GenerationSegmentCensusV1::Unknown
             } else {
                 GenerationSegmentCensusV1::NoneFound
@@ -1207,7 +1207,7 @@ fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
     })
 }
 
-/// Whether the store holds any content-addressed segment file at all.
+/// Whether the store may hold content-addressed segment work.
 ///
 /// A one-entry directory observation: no manifest is opened, so this is the
 /// only segment question a metadata-only census may answer. An empty or absent
@@ -1215,7 +1215,7 @@ fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
 /// unrecognized crash debris, stays typed unknown until the mark-and-sweep
 /// runs. Classifying names here would let arbitrary debris turn an operator
 /// diagnostic into an exhaustive directory scan.
-fn store_holds_generation_segments(
+fn store_may_hold_generation_segments(
     store_root: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
