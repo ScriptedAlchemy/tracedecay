@@ -61,6 +61,10 @@ impl GitFixture {
     fn path(&self) -> &Path {
         self.root.path()
     }
+
+    fn edit(&self, path: &str, source: &str) {
+        std::fs::write(self.path().join(path), source).expect("edit fixture source");
+    }
 }
 
 fn git(root: &Path, args: &[&str]) {
@@ -361,22 +365,27 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_status_tracks_immediate_settled_and_stale_graph_serving_states() {
-    restart_status_case(false).await;
+    restart_status_case(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn corrupt_graph_restart_stays_pending_then_repairs_in_background() {
-    restart_status_case(true).await;
+    restart_status_case(true, false).await;
 }
 
-async fn restart_status_case(corrupt_graph: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dirty_restart_recovers_the_retained_graph_before_rebuilding_its_successor() {
+    restart_status_case(false, true).await;
+}
+
+async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let (scope, latest, replay_binding, repository_id, worktree_id) = {
+    let (scope, seeded_generation_id, latest, replay_binding, repository_id, worktree_id) = {
         let mut scheduler = scheduler(
             &fixture,
             scoped_store.clone(),
@@ -401,6 +410,7 @@ async fn restart_status_case(corrupt_graph: bool) {
                 snapshot.reference.clone(),
             )
             .expect("resolved scope"),
+            latest.generation().manifest().generation_id.clone(),
             latest,
             replay_binding,
             repository_id,
@@ -517,7 +527,22 @@ async fn restart_status_case(corrupt_graph: bool) {
     .await
     .expect("bound restarted project graph runtime");
 
+    if dirty_before_restart {
+        fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    }
+
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let retained_recovery_gate = if !corrupt_graph {
+        Some(
+            registry
+                .pause_next_retained_graph_recovery_before_successor(
+                    fixture.path().canonicalize().expect("canonical fixture"),
+                )
+                .await,
+        )
+    } else {
+        None
+    };
     let activation_admission = registry
         .background_reconcile_admission()
         .acquire_owned()
@@ -568,16 +593,73 @@ async fn restart_status_case(corrupt_graph: bool) {
     let restart_started = std::time::Instant::now();
     drop(activation_admission);
 
+    if !corrupt_graph {
+        let (recovered, release_successor) =
+            retained_recovery_gate.expect("clean retained graph restart must arm recovery gate");
+        tokio::time::timeout(Duration::from_secs(5), recovered)
+            .await
+            .expect("retained graph recovery did not finish")
+            .expect("retained graph recovery gate dropped before observation");
+        let scheduler = registry
+            .scheduler_handle(fixture.path())
+            .await
+            .expect("mounted scheduler");
+        assert_eq!(
+            scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sealed_decode_count(),
+            0,
+            "the retained revision-7 graph must recover before any partition decode"
+        );
+
+        if dirty_before_restart {
+            let stale_context = graph_request_context(scope.clone(), "restart-dirty-retained");
+            let stale_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let stale_read = port
+                    .open(CodeGraphReadRequest::from_context(
+                        &stale_context,
+                        now_micros(),
+                    ))
+                    .await;
+                if matches!(
+                    stale_read.as_ref().map(|read| read.freshness()),
+                    Ok(CodeGraphReadFreshnessV1::LastCompleteStale { .. })
+                ) {
+                    let retained = registry
+                        .latest_text_serving_for_scope(&scope)
+                        .await
+                        .expect("recovered retained text owner");
+                    assert_eq!(
+                        retained.metadata().manifest().generation_id,
+                        seeded_generation_id,
+                        "the stale graph service must still belong to the retained generation"
+                    );
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() <= stale_deadline,
+                    "dirty restart never served the recovered retained graph as stale: {stale_read:?}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+        release_successor
+            .send(())
+            .expect("release reconcile after retained graph observation");
+    }
+
     let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
+    let settled = loop {
         let observed = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await;
-        if observed
-            .as_ref()
-            .is_some_and(|(latest, current)| *current && latest.interactive_graph_store().is_ok())
+        if let Some((latest, current)) = observed.as_ref()
+            && *current
+            && latest.interactive_graph_store().is_ok()
         {
-            break;
+            break latest.clone();
         }
         assert!(
             std::time::Instant::now() <= settled_deadline,
@@ -589,6 +671,13 @@ async fn restart_status_case(corrupt_graph: bool) {
             ))
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    if dirty_before_restart {
+        assert_ne!(
+            settled.metadata().manifest().generation_id,
+            seeded_generation_id,
+            "releasing the gate must rebuild the dirty checkout into a successor generation"
+        );
     }
     eprintln!(
         "sandbox_restart_to_graph_serving_micros={} corrupt_graph={corrupt_graph}",
@@ -605,7 +694,7 @@ async fn restart_status_case(corrupt_graph: bool) {
         .expect("settled restart graph read");
     assert_eq!(settled_read.freshness(), CodeGraphReadFreshnessV1::Current);
     let settled_census = census().await;
-    if corrupt_graph {
+    if corrupt_graph || dirty_before_restart {
         assert!(matches!(
             settled_census,
             GenerationCensusSnapshot::Observed {
@@ -635,7 +724,7 @@ async fn restart_status_case(corrupt_graph: bool) {
             sealed_decode_count > 0,
             "corrupt Grafeo state must enter canonical background replay"
         );
-    } else {
+    } else if !dirty_before_restart {
         assert_eq!(
             sealed_decode_count, 0,
             "clean restart must seat the verified graph head without replaying partition segments"
