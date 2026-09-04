@@ -638,6 +638,7 @@ impl ProductionSemanticRuntimeV1 {
     ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
         self.prepare_evaluation_generation_with_cache(
             generation,
+            None,
             Arc::new(SemanticEvaluationProjectionBatchCacheV1::new()),
             cancellation,
         )
@@ -661,12 +662,14 @@ impl ProductionSemanticRuntimeV1 {
         ))
     }
 
-    /// Prepare one evaluator generation with a cache retained by the daemon's
-    /// enclosing evaluation request. The cache is never attached to the
-    /// runtime, lifecycle, or durable vector state.
+    /// Prepare one evaluator generation with authorities retained by the
+    /// daemon's enclosing evaluation request. The optional query factory owns
+    /// the one shared model runtime; the batch cache remains detached from the
+    /// lifecycle and durable vector state.
     pub fn prepare_evaluation_generation_with_cache(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
+        query_factory: Option<&SemanticEvaluationQueryFactoryV1>,
         projection_batch_cache: Arc<SemanticEvaluationProjectionBatchCacheV1>,
         cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
@@ -687,16 +690,19 @@ impl ProductionSemanticRuntimeV1 {
         let request = semantic_projection_request(generation, &projection, None)?;
         let projection_input_bytes = projection_input_bytes(generation.chunks().chunks())?;
         let started = std::time::Instant::now();
-        let prepared = prepare_semantic_evaluation_projection(
-            artifact,
-            request,
-            generation.chunks().chunks(),
-            embedding_documents(generation),
-            evaluation_projection_resources(execution),
-            projection_batch_cache.as_ref(),
-            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
-            Arc::clone(&cancellation),
-        )?;
+        let prepared = hotpath::measure_block!("search_eval.projection.case.clean.prepare", {
+            prepare_semantic_evaluation_projection(
+                artifact,
+                query_factory,
+                request,
+                generation.chunks().chunks(),
+                embedding_documents(generation),
+                evaluation_projection_resources(execution),
+                projection_batch_cache.as_ref(),
+                SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+                Arc::clone(&cancellation),
+            )
+        })?;
         PreparedSemanticEvaluationGenerationV1::new(
             generation.clone(),
             prepared,
@@ -754,16 +760,19 @@ impl ProductionSemanticRuntimeV1 {
             self.document_composition,
         )?;
         let started = std::time::Instant::now();
-        let prepared = prepare_semantic_evaluation_projection(
-            artifact,
-            request,
-            &chunks,
-            embedding_documents(generation),
-            evaluation_projection_resources(self.resources),
-            current.projection_batch_cache.as_ref(),
-            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
-            Arc::clone(&current.cancellation),
-        )?;
+        let prepared = hotpath::measure_block!("search_eval.projection.incremental.prepare", {
+            prepare_semantic_evaluation_projection(
+                artifact,
+                Some(&current.query_factory),
+                request,
+                &chunks,
+                embedding_documents(generation),
+                evaluation_projection_resources(self.resources),
+                current.projection_batch_cache.as_ref(),
+                SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+                Arc::clone(&current.cancellation),
+            )
+        })?;
         if prepared.prepared.request.changes.from_generation.as_ref()
             != Some(&current.source_generation)
             || prepared.prepared.request.changes.to_generation
@@ -808,15 +817,17 @@ impl ProductionSemanticRuntimeV1 {
             Arc::new(SemanticEvaluationGraphCancellationV1 {
                 evaluation: Arc::clone(&clean.cancellation),
             });
-        let graph = isolated_semantic_evaluation_graph(
-            &[
-                &clean.code,
-                sources.one_symbol,
-                sources.no_op,
-                sources.deletion,
-            ],
-            graph_cancellation,
-        )
+        let graph = hotpath::measure_block!("search_eval.projection.case_graph.materialize", {
+            isolated_semantic_evaluation_graph(
+                &[
+                    &clean.code,
+                    sources.one_symbol,
+                    sources.no_op,
+                    sources.deletion,
+                ],
+                graph_cancellation,
+            )
+        })
         .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         self.measure_evaluation_projection_cases_in_store(&graph, clean, sources)
             .await
@@ -849,12 +860,14 @@ impl ProductionSemanticRuntimeV1 {
             .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let cancellation = Arc::clone(clean_retained.cancellation());
         let store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
-        let clean_build = store
-            .rebuild_generation(clean_plan.clone(), Arc::clone(&cancellation))
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
-            .build_id()
-            .clone();
+        let clean_build = hotpath::future!(
+            store.rebuild_generation(clean_plan.clone(), Arc::clone(&cancellation)),
+            label = "search_eval.projection.case.clean.graph_begin"
+        )
+        .await
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?
+        .build_id()
+        .clone();
 
         // Replay workload: the first writer begins the durable
         // stage and dies before committing; a fresh store partition recovers
@@ -881,18 +894,23 @@ impl ProductionSemanticRuntimeV1 {
                 ));
             }
         };
-        commit_evaluation_prepared_generation(
-            &replay_store,
-            &replay_build,
-            clean_prepared,
-            clean.code.chunks().chunks(),
-            Arc::clone(&cancellation),
+        hotpath::future!(
+            commit_evaluation_prepared_generation(
+                &replay_store,
+                &replay_build,
+                clean_prepared,
+                clean.code.chunks().chunks(),
+                Arc::clone(&cancellation),
+            ),
+            label = "search_eval.projection.case.clean.graph_commit"
         )
         .await?;
-        let clean_publication = replay_store
-            .publish_generation(&replay_build, Arc::clone(&cancellation))
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+        let clean_publication = hotpath::future!(
+            replay_store.publish_generation(&replay_build, Arc::clone(&cancellation)),
+            label = "search_eval.projection.case.clean.graph_publish"
+        )
+        .await
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         if !replay_store
             .published_generation_is_visible(
                 &clean_publication.generation_id,
@@ -909,10 +927,12 @@ impl ProductionSemanticRuntimeV1 {
         // generation without re-doing any work.
         let idempotent_store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
         let idempotent_started = std::time::Instant::now();
-        let idempotent = idempotent_store
-            .begin_generation(clean_plan, Arc::clone(&cancellation))
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+        let idempotent = hotpath::future!(
+            idempotent_store.begin_generation(clean_plan, Arc::clone(&cancellation)),
+            label = "search_eval.projection.case.idempotency.graph_observe"
+        )
+        .await
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         if !matches!(
             idempotent,
             VectorGenerationBeginOutcomeV1::AlreadyPublished {
@@ -954,22 +974,29 @@ impl ProductionSemanticRuntimeV1 {
             source_generation: clean_prepared.request.changes.to_generation.clone(),
             projection_key: clean_prepared.request.target_projection_key.clone(),
         };
-        let (one_symbol, one_symbol_elapsed, one_symbol_input) = self.prepare_projection_case(
-            sources.one_symbol,
-            Some(&clean_pointer),
-            &clean.projection_batch_cache,
-            &clean.cancellation,
+        let (one_symbol, one_symbol_elapsed, one_symbol_input) = hotpath::measure_block!(
+            "search_eval.projection.case.one_symbol.prepare",
+            self.prepare_projection_case(
+                sources.one_symbol,
+                Some(&clean_pointer),
+                &clean.query_factory,
+                &clean.projection_batch_cache,
+                &clean.cancellation,
+            )
         )?;
         let one_symbol_retained = graph
             .retained(&one_symbol.request.changes.to_generation)
             .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let one_symbol_store = evaluation_projection_case_store(&one_symbol_retained, &one_symbol)?;
-        let one_symbol_publication = publish_evaluation_projection_case_isolated(
-            &one_symbol_store,
-            &cancellation,
-            sources.one_symbol,
-            &one_symbol,
-            Some(clean_publication.generation_id.clone()),
+        let one_symbol_publication = hotpath::future!(
+            publish_evaluation_projection_case_isolated(
+                &one_symbol_store,
+                &cancellation,
+                sources.one_symbol,
+                &one_symbol,
+                Some(clean_publication.generation_id.clone()),
+            ),
+            label = "search_eval.projection.case.one_symbol.graph_publish"
         )
         .await?;
         samples.insert(
@@ -987,22 +1014,29 @@ impl ProductionSemanticRuntimeV1 {
             source_generation: one_symbol.request.changes.to_generation.clone(),
             projection_key: one_symbol.request.target_projection_key.clone(),
         };
-        let (no_op, no_op_elapsed, no_op_input) = self.prepare_projection_case(
-            sources.no_op,
-            Some(&one_symbol_pointer),
-            &clean.projection_batch_cache,
-            &clean.cancellation,
+        let (no_op, no_op_elapsed, no_op_input) = hotpath::measure_block!(
+            "search_eval.projection.case.no_op.prepare",
+            self.prepare_projection_case(
+                sources.no_op,
+                Some(&one_symbol_pointer),
+                &clean.query_factory,
+                &clean.projection_batch_cache,
+                &clean.cancellation,
+            )
         )?;
         let no_op_retained = graph
             .retained(&no_op.request.changes.to_generation)
             .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let no_op_store = evaluation_projection_case_store(&no_op_retained, &no_op)?;
-        let no_op_publication = publish_evaluation_projection_case_isolated(
-            &no_op_store,
-            &cancellation,
-            sources.no_op,
-            &no_op,
-            Some(one_symbol_publication.generation_id.clone()),
+        let no_op_publication = hotpath::future!(
+            publish_evaluation_projection_case_isolated(
+                &no_op_store,
+                &cancellation,
+                sources.no_op,
+                &no_op,
+                Some(one_symbol_publication.generation_id.clone()),
+            ),
+            label = "search_eval.projection.case.no_op.graph_publish"
         )
         .await?;
         samples.insert(
@@ -1020,22 +1054,29 @@ impl ProductionSemanticRuntimeV1 {
             source_generation: no_op.request.changes.to_generation.clone(),
             projection_key: no_op.request.target_projection_key.clone(),
         };
-        let (deletion, deletion_elapsed, deletion_input) = self.prepare_projection_case(
-            sources.deletion,
-            Some(&no_op_pointer),
-            &clean.projection_batch_cache,
-            &clean.cancellation,
+        let (deletion, deletion_elapsed, deletion_input) = hotpath::measure_block!(
+            "search_eval.projection.case.deletion.prepare",
+            self.prepare_projection_case(
+                sources.deletion,
+                Some(&no_op_pointer),
+                &clean.query_factory,
+                &clean.projection_batch_cache,
+                &clean.cancellation,
+            )
         )?;
         let deletion_retained = graph
             .retained(&deletion.request.changes.to_generation)
             .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let deletion_store = evaluation_projection_case_store(&deletion_retained, &deletion)?;
-        let _deletion_publication = publish_evaluation_projection_case_isolated(
-            &deletion_store,
-            &cancellation,
-            sources.deletion,
-            &deletion,
-            Some(no_op_publication.generation_id.clone()),
+        let _deletion_publication = hotpath::future!(
+            publish_evaluation_projection_case_isolated(
+                &deletion_store,
+                &cancellation,
+                sources.deletion,
+                &deletion,
+                Some(no_op_publication.generation_id.clone()),
+            ),
+            label = "search_eval.projection.case.deletion.graph_publish"
         )
         .await?;
         samples.insert(
@@ -1098,10 +1139,12 @@ impl ProductionSemanticRuntimeV1 {
             generation_identity_digest(&cancellation_plan)
                 .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
         );
-        let cancellation_build = cancellation_store
-            .begin_generation(cancellation_plan, Arc::clone(&cancellation))
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+        let cancellation_build = hotpath::future!(
+            cancellation_store.begin_generation(cancellation_plan, Arc::clone(&cancellation)),
+            label = "search_eval.projection.case.cancellation.graph_begin"
+        )
+        .await
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let VectorGenerationBeginOutcomeV1::ReplayFromStart {
             build_id: cancellation_build,
         } = cancellation_build
@@ -1115,20 +1158,24 @@ impl ProductionSemanticRuntimeV1 {
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
-        let cancellation_measurement = measure_semantic_evaluation_projection_cancellation(
-            cancellation_artifact,
-            cancellation_request.clone(),
-            &cancellation_chunks,
-            embedding_documents(sources.deletion),
-            evaluation_projection_resources(self.resources).max_sessions,
-            self.resources.max_resident_bytes,
-            clean.projection_batch_cache.as_ref(),
-            Arc::clone(&clean.cancellation),
+        let cancellation_measurement = hotpath::measure_block!(
+            "search_eval.projection.case.cancellation.prepare",
+            measure_semantic_evaluation_projection_cancellation(
+                cancellation_artifact,
+                &clean.query_factory,
+                cancellation_request.clone(),
+                &cancellation_chunks,
+                embedding_documents(sources.deletion),
+                clean.projection_batch_cache.as_ref(),
+                Arc::clone(&clean.cancellation),
+            )
         );
-        if !cancellation_store
-            .cancel_generation(&cancellation_build, Arc::clone(&cancellation))
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
+        if !hotpath::future!(
+            cancellation_store.cancel_generation(&cancellation_build, Arc::clone(&cancellation),),
+            label = "search_eval.projection.case.cancellation.graph_cancel"
+        )
+        .await
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -1175,13 +1222,16 @@ impl ProductionSemanticRuntimeV1 {
             },
         );
 
-        let (incompatible, incompatible_elapsed, incompatible_input) = self
-            .prepare_projection_case(
+        let (incompatible, incompatible_elapsed, incompatible_input) = hotpath::measure_block!(
+            "search_eval.projection.case.incompatible.prepare",
+            self.prepare_projection_case(
                 sources.one_symbol,
                 None,
+                &clean.query_factory,
                 &clean.projection_batch_cache,
                 &clean.cancellation,
-            )?;
+            )
+        )?;
         if incompatible.request.changes.from_generation.is_some()
             || incompatible.request.previous_projection_key.is_some()
             || incompatible.request.replay_reason
@@ -1193,24 +1243,31 @@ impl ProductionSemanticRuntimeV1 {
             evaluation_projection_plan(sources.one_symbol, &incompatible, None)?;
         let incompatible_store =
             evaluation_projection_case_store(&one_symbol_retained, &incompatible)?;
-        let incompatible_build = incompatible_store
-            .rebuild_generation(incompatible_plan, Arc::clone(&cancellation))
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
-            .build_id()
-            .clone();
-        commit_evaluation_prepared_generation(
-            &incompatible_store,
-            &incompatible_build,
-            &incompatible,
-            sources.one_symbol.chunks().chunks(),
-            Arc::clone(&cancellation),
+        let incompatible_build = hotpath::future!(
+            incompatible_store.rebuild_generation(incompatible_plan, Arc::clone(&cancellation),),
+            label = "search_eval.projection.case.incompatible.graph_begin"
+        )
+        .await
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?
+        .build_id()
+        .clone();
+        hotpath::future!(
+            commit_evaluation_prepared_generation(
+                &incompatible_store,
+                &incompatible_build,
+                &incompatible,
+                sources.one_symbol.chunks().chunks(),
+                Arc::clone(&cancellation),
+            ),
+            label = "search_eval.projection.case.incompatible.graph_commit"
         )
         .await?;
-        if !incompatible_store
-            .cancel_generation(&incompatible_build, Arc::clone(&cancellation))
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
+        if !hotpath::future!(
+            incompatible_store.cancel_generation(&incompatible_build, Arc::clone(&cancellation),),
+            label = "search_eval.projection.case.incompatible.graph_cancel"
+        )
+        .await
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -1242,6 +1299,7 @@ impl ProductionSemanticRuntimeV1 {
         &self,
         generation: &CodeIndexPublishedGenerationV1,
         current: Option<&SemanticGenerationPointerV1>,
+        query_factory: &SemanticEvaluationQueryFactoryV1,
         projection_batch_cache: &Arc<SemanticEvaluationProjectionBatchCacheV1>,
         cancellation: &Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<(PreparedVectorGenerationV1, u64, u64), SemanticRuntimeScheduleFailureV1> {
@@ -1273,6 +1331,7 @@ impl ProductionSemanticRuntimeV1 {
         let started = std::time::Instant::now();
         let prepared = prepare_semantic_evaluation_projection(
             artifact,
+            Some(query_factory),
             request,
             &chunks,
             embedding_documents(generation),
@@ -2364,10 +2423,9 @@ impl PreparedSemanticEvaluationGenerationV1 {
             batch_size: execution.max_batch_size,
             sequence_length,
             load_deadline_ms: execution.load_deadline_ms,
-            // A shared projection-batch cache can prepare this generation
-            // without opening its fresh query runtime. The genuine query pass
-            // below opens it; `generation_resources` observes the resulting
-            // cold-load duration before publication evidence is accepted.
+            // Vector preparation or the first genuine query opens the one
+            // request-scoped runtime. `generation_resources` observes that
+            // shared runtime's cold-load duration before evidence is accepted.
             cold_model_load_micros: 0,
             vector_bytes,
             index_bytes: 0,
@@ -2432,6 +2490,10 @@ impl PreparedSemanticEvaluationGenerationV1 {
 
     pub fn projection(&self) -> &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
         &self.projection
+    }
+
+    pub fn query_factory(&self) -> &SemanticEvaluationQueryFactoryV1 {
+        &self.query_factory
     }
 
     pub fn with_query_inputs(
