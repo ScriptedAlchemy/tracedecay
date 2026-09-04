@@ -21,6 +21,9 @@ use tokio::sync::{RwLock, Semaphore};
 
 use tracedecay_mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
+use super::dispatch_envelope::{
+    McpDispatchParams, McpDispatchRequest, dispatch_is_independent_read,
+};
 use super::{ConnectionRouteState, McpServer};
 
 /// Per-RMCP-connection handoff from handler completion to the transport write.
@@ -305,8 +308,8 @@ impl RmcpConnectionAdapter {
     async fn dispatch(
         &self,
         context: RequestContext<RoleServer>,
-        method: &str,
-        params: Option<Value>,
+        method: &'static str,
+        params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let queued_at = std::time::Instant::now();
         let queued = RmcpQueueDepthGuard::enter();
@@ -339,20 +342,16 @@ impl RmcpConnectionAdapter {
     async fn dispatch_admitted(
         &self,
         context: RequestContext<RoleServer>,
-        method: &str,
-        params: Option<Value>,
+        method: &'static str,
+        params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
-        let request_id = context.id;
+        // The wire identity is the one value internal dispatch genuinely keys
+        // on (cancellation identity, response leases, delivery settlement), so
+        // it is converted once, infallibly, and never re-derived.
+        let id = context.id.into_json_value();
         let request_cancellation = context.ct;
-        let id = serde_json::to_value(request_id)
-            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: Some(id.clone()),
-            method: method.to_owned(),
-            params,
-        };
-        if super::connection::request_is_independent_read(&request) {
+        let request = McpDispatchRequest::typed(id.clone(), method, params);
+        if dispatch_is_independent_read(request.method_class(), request.tool_name()) {
             let ordering_guard = self.connection.read().await;
             let mut request_connection = ordering_guard.fork_for_independent_read();
             let result = self
@@ -374,7 +373,7 @@ impl RmcpConnectionAdapter {
     #[hotpath::measure(label = "mcp.server.rmcp.dispatch_request", future = true)]
     async fn dispatch_request_with_connection(
         &self,
-        request: JsonRpcRequest,
+        request: McpDispatchRequest<'_>,
         id: Value,
         request_cancellation: tokio_util::sync::CancellationToken,
         connection: &mut ConnectionRouteState,
@@ -383,17 +382,13 @@ impl RmcpConnectionAdapter {
         let response = if pre_cancelled {
             Some(
                 self.server
-                    .handle_request_for_connection(&request, self.timings_enabled, connection, true)
+                    .dispatch_envelope(request, self.timings_enabled, connection, true)
                     .await,
             )
         } else {
             await_dispatch_with_cancellation(
-                self.server.handle_request_for_connection(
-                    &request,
-                    self.timings_enabled,
-                    connection,
-                    false,
-                ),
+                self.server
+                    .dispatch_envelope(request, self.timings_enabled, connection, false),
                 request_cancellation.cancelled(),
                 || {
                     self.server
@@ -435,6 +430,8 @@ impl RmcpConnectionAdapter {
 
     #[hotpath::measure(label = "mcp.server.rmcp.notification", future = true)]
     async fn dispatch_notification(&self, method: String, params: Option<Value>) {
+        // Custom notifications (hook events, cancellations) have no typed
+        // `rmcp` DTO: their params arrive as JSON and stay JSON.
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
             id: None,
@@ -450,7 +447,7 @@ impl RmcpConnectionAdapter {
 
     fn cancel_request(&self, request_id: Option<rmcp::model::RequestId>) -> bool {
         request_id
-            .and_then(|request_id| serde_json::to_value(request_id).ok())
+            .map(rmcp::model::RequestId::into_json_value)
             .is_some_and(|request_id| {
                 self.server
                     .cancel_application_surface_request(&request_id, &self.memory_request_scope)
@@ -487,9 +484,13 @@ impl ServerHandler for RmcpConnectionAdapter {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
-        let params = serde_json::to_value(request)
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-        let mut response = self.dispatch(context, "initialize", Some(params)).await?;
+        let mut response = self
+            .dispatch(
+                context,
+                "initialize",
+                McpDispatchParams::Initialize(&request),
+            )
+            .await?;
         if let Some(decorate) = &self.initialize_response_decorator {
             decorate(&mut response);
         }
@@ -502,7 +503,10 @@ impl ServerHandler for RmcpConnectionAdapter {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Self::response_result(self.dispatch(context, "tools/list", None).await?)
+        Self::response_result(
+            self.dispatch(context, "tools/list", McpDispatchParams::TypedEmpty)
+                .await?,
+        )
     }
 
     #[hotpath::skip]
@@ -511,10 +515,9 @@ impl ServerHandler for RmcpConnectionAdapter {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let params = serde_json::to_value(request)
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         Self::response_result::<CallToolResult>(
-            self.dispatch(context, "tools/call", Some(params)).await?,
+            self.dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
+                .await?,
         )
         .map(Into::into)
     }
@@ -525,7 +528,10 @@ impl ServerHandler for RmcpConnectionAdapter {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Self::response_result(self.dispatch(context, "resources/list", None).await?)
+        Self::response_result(
+            self.dispatch(context, "resources/list", McpDispatchParams::TypedEmpty)
+                .await?,
+        )
     }
 
     #[hotpath::skip]
@@ -534,11 +540,13 @@ impl ServerHandler for RmcpConnectionAdapter {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        let params = serde_json::to_value(request)
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         Self::response_result::<ReadResourceResult>(
-            self.dispatch(context, "resources/read", Some(params))
-                .await?,
+            self.dispatch(
+                context,
+                "resources/read",
+                McpDispatchParams::ResourcesRead(&request),
+            )
+            .await?,
         )
         .map(Into::into)
     }
@@ -869,6 +877,26 @@ mod tests {
             .expect("RMCP resources/read");
         fixture.assert_last_response_matches_legacy(false).await;
 
+        let unknown_resource = fixture
+            .client
+            .read_resource(ReadResourceRequestParams::new(
+                "tracedecay://not-a-resource",
+            ))
+            .await
+            .expect_err("an unknown resource URI must be a JSON-RPC error");
+        fixture.assert_last_response_matches_legacy(false).await;
+        assert_eq!(
+            fixture.last_response()["error"]["code"],
+            json!(-32602),
+            "the typed resources/read refusal keeps the legacy invalid-params code",
+        );
+        assert!(
+            unknown_resource
+                .to_string()
+                .contains("unknown resource URI: tracedecay://not-a-resource"),
+            "the typed rmcp client must receive the handler's own refusal text",
+        );
+
         for index in 0..8 {
             fixture
                 .client
@@ -929,6 +957,95 @@ mod tests {
             "large response must retain a typed retrieval handle",
         );
         fixture.shutdown().await;
+    }
+
+    /// The legacy raw JSON-RPC transport must stay byte-for-byte what it was
+    /// before the typed envelope: the envelope is an internal representation,
+    /// never a wire change. These are the shapes a host actually parses —
+    /// method refusals, param refusals, the trivial ack, and a resource body —
+    /// pinned as exact serialized frames rather than as structural matches.
+    #[tokio::test]
+    async fn legacy_json_rpc_wire_frames_are_unchanged_by_the_typed_envelope() {
+        crate::product_runtime::register_fixture_product_runtime();
+        let (cg, _repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered legacy wire server");
+
+        for (request_line, expected) in [
+            (
+                r#"{"jsonrpc":"2.0","id":1,"method":"nope"}"#,
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found: nope"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"missing 'uri' in resources/read params"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"tracedecay://nope"}}"#,
+                r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"unknown resource URI: tracedecay://nope"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call"}"#,
+                r#"{"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"missing params for tools/call"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"arguments":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"missing 'name' in tools/call params"}}"#,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":"ack","method":"ping"}"#,
+                r#"{"jsonrpc":"2.0","id":"ack","result":{}}"#,
+            ),
+        ] {
+            let request: JsonRpcRequest =
+                serde_json::from_str(request_line).expect("legacy request line");
+            let response = server
+                .handle_request(&request)
+                .await
+                .expect("legacy response");
+            assert_eq!(
+                serde_json::to_string(&response).expect("serialize legacy response"),
+                expected,
+                "legacy wire frame changed for {request_line}",
+            );
+        }
+
+        // A resource body is too large to pin whole; its frame *shape* — field
+        // order included — is the part hosts depend on.
+        let schema_request: JsonRpcRequest = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"tracedecay://schema"}}"#,
+        )
+        .expect("legacy request line");
+        let schema = serde_json::to_string(
+            &server
+                .handle_request(&schema_request)
+                .await
+                .expect("legacy response"),
+        )
+        .expect("serialize legacy response");
+        assert!(
+            schema.starts_with(
+                r#"{"jsonrpc":"2.0","id":6,"result":{"contents":[{"mimeType":"text/markdown","text":"#
+            ) && schema.ends_with(r#","uri":"tracedecay://schema"}]}}"#),
+            "legacy resources/read frame shape changed: {schema}",
+        );
+
+        // Notifications stay responseless on the legacy transport.
+        for notification in [
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
+        ] {
+            let request: JsonRpcRequest =
+                serde_json::from_str(notification).expect("legacy notification line");
+            assert!(
+                server.handle_request(&request).await.is_none(),
+                "legacy notification produced a response: {notification}",
+            );
+        }
+        server.shutdown().await;
     }
 
     #[tokio::test]
