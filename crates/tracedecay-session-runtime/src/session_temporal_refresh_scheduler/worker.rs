@@ -4,6 +4,7 @@ use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use tracedecay_lcm::LcmError;
 use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
     SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
@@ -41,6 +42,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     policy: SessionTemporalRefreshPolicy,
 ) {
     let mut retry_attempt = 0u32;
+    let mut summary_retry_attempt = 0u32;
     let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
     state.mark_running();
     loop {
@@ -119,12 +121,81 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             if state.cancelled.load(Ordering::Acquire) {
                 return;
             }
+            let (
+                summary_convergence_made_progress,
+                summary_convergence_has_more,
+                summary_retry_delay,
+                summary_admission_deferred,
+            ) = match history_admission.try_acquire() {
+                Ok(_permit) => {
+                    let page = crate::lcm_summary_convergence::run_summary_convergence_page(
+                        database.clone(),
+                        crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
+                    );
+                    tokio::pin!(page);
+                    let result = tokio::select! {
+                        biased;
+                        () = hotpath::future!(
+                            state.wait_for_cancellation(),
+                            label = "daemon.scheduler.lcm_summary.cancel"
+                        ) => return,
+                        result = &mut page => result,
+                    };
+                    match result {
+                        Ok(page) => {
+                            summary_retry_attempt = 0;
+                            (
+                                !page.sessions.is_empty() || page.backfill_rows_scanned > 0,
+                                page.has_more,
+                                page.next_retry_delay,
+                                false,
+                            )
+                        }
+                        Err(LcmError::Cancelled) => return,
+                        Err(error @ LcmError::ProfileResetRequired { .. }) => {
+                            tracing::error!(
+                                %error,
+                                "retained LCM summary convergence is permanently blocked"
+                            );
+                            (false, false, None, false)
+                        }
+                        Err(error) => {
+                            let class = if matches!(error, LcmError::DeadlineExceeded) {
+                                SessionTemporalRefreshRetryClass::Deadline
+                            } else {
+                                SessionTemporalRefreshRetryClass::Storage
+                            };
+                            summary_retry_attempt = summary_retry_attempt.saturating_add(1);
+                            tracing::warn!(
+                                %error,
+                                ?class,
+                                "retained LCM summary convergence page will retry"
+                            );
+                            (
+                                false,
+                                false,
+                                Some(session_refresh_retry_delay(class, summary_retry_attempt)),
+                                false,
+                            )
+                        }
+                    }
+                }
+                Err(_) => {
+                    hotpath::gauge!("session_temporal_refresh_history_admission_deferrals")
+                        .inc(1.0);
+                    (false, false, None, true)
+                }
+            };
+            if state.cancelled.load(Ordering::Acquire) {
+                return;
+            }
             let made_progress = report.begun > 0
                 || report.projected_batches > 0
                 || report.completed > 0
                 || report.failed > 0
                 || report.cancelled > 0
-                || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress);
+                || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress)
+                || summary_convergence_made_progress;
             let history_needs_another_pass =
                 history_outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass);
             observe_pass_report(
@@ -157,7 +228,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         label = "daemon.scheduler.session_temporal.retry_wait"
                     ) => {}
                 }
-            } else if history_needs_another_pass {
+            } else if history_needs_another_pass || summary_admission_deferred {
                 state.mark_running();
                 retry_attempt = 0;
                 state.update_history_retry_state(true);
@@ -171,9 +242,26 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     || report.begun > 0
                     || report.saturated
                     || report.projected_batches > 0
+                    || summary_convergence_has_more
                 {
                     state.requeue_projection();
                     tokio::task::yield_now().await;
+                } else if let Some(delay) = summary_retry_delay {
+                    state.requeue_projection();
+                    tokio::select! {
+                        () = hotpath::future!(
+                            state.wait_for_cancellation(),
+                            label = "daemon.scheduler.lcm_summary.retry_cancel"
+                        ) => return,
+                        () = hotpath::future!(
+                            state.wake.notified(),
+                            label = "daemon.scheduler.lcm_summary.retry_wake"
+                        ) => {}
+                        () = hotpath::future!(
+                            tokio::time::sleep(delay),
+                            label = "daemon.scheduler.lcm_summary.retry_wait"
+                        ) => {}
+                    }
                 }
             }
         }
