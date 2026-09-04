@@ -441,7 +441,14 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let project = scratch.path().join("project");
     let (_commit_text, commit) = initialize_project(&home, &project);
     let project = project.canonicalize().expect("canonical project root");
-    let semantic_fixture = task_session::install_semantic_fixture(&home);
+    let Some(semantic_fixture) = task_session::install_semantic_fixture(&home) else {
+        eprintln!(
+            "skipping the mounted fan-out Work journey; prepare the \
+             distribution-acceptance package and set \
+             TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"
+        );
+        return;
+    };
 
     let mut daemon = spawn_project_daemon(&home, &project);
     run(
