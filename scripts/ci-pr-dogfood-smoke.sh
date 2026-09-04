@@ -178,17 +178,25 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
       "$binary" status --json "$project_root" \
       >"$output_dir/status.probe.json" 2>"$output_dir/status.probe.stderr" || command_status=$?
     probe_ms="$(elapsed_ms "$probe_started_ms")"
-    if ((command_status == 0)) && [[ -s "$output_dir/status.probe.json" ]]; then
-      mv -f "$output_dir/status.probe.json" "$output_dir/status.json"
-      mv -f "$output_dir/status.probe.stderr" "$output_dir/status.stderr"
-    fi
     validation_status=1
-    if ((command_status == 0)); then
+    if ((command_status == 0)) && [[ -s "$output_dir/status.probe.json" ]]; then
+      # Validate the complete JSON document before replacing the last known
+      # good payload. Strict readiness remains a separate check so a valid
+      # status that is still warming up is retained as useful evidence.
       validation_status=0
-      python3 -S "$OUTPUT_VALIDATOR" --kind status --strict \
-        --input "$output_dir/status.json" \
+      python3 -S "$OUTPUT_VALIDATOR" --kind status \
+        --input "$output_dir/status.probe.json" \
         >"$output_dir/status.validation.stdout" \
         2>"$output_dir/status.validation.stderr" || validation_status=$?
+      if ((validation_status == 0)); then
+        mv -f "$output_dir/status.probe.json" "$output_dir/status.json"
+        mv -f "$output_dir/status.probe.stderr" "$output_dir/status.stderr"
+        validation_status=0
+        python3 -S "$OUTPUT_VALIDATOR" --kind status --strict \
+          --input "$output_dir/status.json" \
+          >"$output_dir/status.validation.stdout" \
+          2>"$output_dir/status.validation.stderr" || validation_status=$?
+      fi
     fi
     printf 'attempt=%s elapsed_ms=%s probe_ms=%s status_rc=%s validation_rc=%s %s\n' \
       "$attempts" "$(elapsed_ms "$started_ms")" "$probe_ms" "$command_status" \
