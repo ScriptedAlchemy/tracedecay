@@ -700,24 +700,27 @@ mod projectless_admission_tests {
             &administration,
         )
         .await;
-        assert!(
-            response.error.is_none(),
-            "Hermes receipt failed: {response:?}"
-        );
 
         let pinned_automation_root =
             tracedecay_automation_runtime::automation::runner::user_automation_root(&real_root);
         let foreign_automation_root =
             tracedecay_automation_runtime::automation::runner::user_automation_root(&foreign_root);
+        let pinned_receipt_exists = pinned_automation_root.join("host_receipts.json").is_file();
+        let foreign_receipt_exists = foreign_automation_root.join("host_receipts.json").exists();
+        administration.shutdown_host_admission_replay().await;
+
         assert!(
-            pinned_automation_root.join("host_receipts.json").is_file(),
+            response.error.is_none(),
+            "Hermes receipt failed: {response:?}"
+        );
+        assert!(
+            pinned_receipt_exists,
             "durable Hermes receipt must remain under the admitted profile"
         );
         assert!(
-            !foreign_automation_root.join("host_receipts.json").exists(),
+            !foreign_receipt_exists,
             "retargeting the client symlink must never redirect durable receipt writes"
         );
-        administration.shutdown_host_admission_replay().await;
     }
 
     #[tokio::test]
@@ -746,11 +749,8 @@ mod projectless_admission_tests {
 
         std::fs::remove_file(linked_root.parent().expect("linked profile parent"))
             .expect("remove client profile symlink after admission");
-        assert_eq!(connection.client_identity.profile_root, real_root);
-        assert_eq!(
-            connection.client_identity.global_db_path,
-            connection.client_identity.profile_root.join("global.db")
-        );
+        let retained_profile_root = connection.client_identity.profile_root.clone();
+        let retained_global_db_path = connection.client_identity.global_db_path.clone();
 
         let response = projectless_hook_runtime_response(
             json!(2),
@@ -762,14 +762,18 @@ mod projectless_admission_tests {
             &administration,
         )
         .await;
+        let terminal_shutdown = runtime_registry.shutdown_terminal_tasks().await;
+        administration.shutdown_host_admission_replay().await;
+
+        assert_eq!(retained_profile_root, real_root);
+        assert_eq!(
+            retained_global_db_path,
+            retained_profile_root.join("global.db")
+        );
         assert!(
             response.error.is_none(),
             "retained Codex stop failed after client symlink removal: {response:?}"
         );
-        runtime_registry
-            .shutdown_terminal_tasks()
-            .await
-            .expect("join retained Codex task");
-        administration.shutdown_host_admission_replay().await;
+        terminal_shutdown.expect("join retained Codex task");
     }
 }
