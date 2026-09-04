@@ -426,6 +426,8 @@ mod tests {
     };
 
     const BUILD_IDENTITY_FILE: &str = "controlled-workload-build-identity.json";
+    const HOTPATH_OFF_BIN_ENV: &str = "TRACEDECAY_CONTROLLED_WORKLOAD_HOTPATH_OFF_BIN";
+    const HOTPATH_ON_BIN_ENV: &str = "TRACEDECAY_CONTROLLED_WORKLOAD_HOTPATH_ON_BIN";
 
     #[test]
     fn framed_log_workload_recovers_the_first_frame_and_verifies_publish() {
@@ -577,9 +579,10 @@ mod tests {
         let scratch = tempfile::tempdir().expect("identity scratch");
         let off_dir = scratch.path().join("off");
         let on_dir = scratch.path().join("on");
+        let (off_executable, on_executable) = controlled_workload_executable_pair();
 
-        emit_reports_via_cargo(&off_dir, false);
-        emit_reports_via_cargo(&on_dir, true);
+        emit_reports(&off_executable, &off_dir);
+        emit_reports(&on_executable, &on_dir);
 
         let off_build = load_build_identity(&off_dir);
         let on_build = load_build_identity(&on_dir);
@@ -667,43 +670,51 @@ mod tests {
         assert!(comparison.durable_results_identical());
     }
 
-    fn emit_reports_via_cargo(report_dir: &Path, hotpath_on: bool) {
-        std::fs::create_dir_all(report_dir).expect("report dir");
-        let mut command = Command::new(env!("CARGO"));
-        command
-            .current_dir(workspace_root())
-            .env("CARGO_TERM_COLOR", "never")
-            .args([
-                "run",
-                "-p",
-                "tracedecay-search-eval",
-                "--profile",
-                "test",
-                "--example",
-                "emit_controlled_workload_reports",
-                "--locked",
-                "--offline",
-                "--quiet",
-            ]);
-        if hotpath_on {
-            command.args(["--features", "controlled-workload-hotpath"]);
+    fn controlled_workload_executable_pair() -> (PathBuf, PathBuf) {
+        let configured_off = std::env::var_os(HOTPATH_OFF_BIN_ENV).map(PathBuf::from);
+        let configured_on = std::env::var_os(HOTPATH_ON_BIN_ENV).map(PathBuf::from);
+        let pair = match (configured_off, configured_on) {
+            (Some(off), Some(on)) => (off, on),
+            (None, None) => {
+                let current_executable = std::env::current_exe().expect("current test executable");
+                let target_root = current_executable
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::parent)
+                    .expect("test executable must be under target/<profile>/deps");
+                let helpers = target_root.join("controlled-workload-hotpath");
+                (
+                    helpers.join(format!("hotpath-off{}", std::env::consts::EXE_SUFFIX)),
+                    helpers.join(format!("hotpath-on{}", std::env::consts::EXE_SUFFIX)),
+                )
+            }
+            _ => {
+                panic!("{HOTPATH_OFF_BIN_ENV} and {HOTPATH_ON_BIN_ENV} must be configured together")
+            }
+        };
+        for executable in [&pair.0, &pair.1] {
+            assert!(
+                executable.is_file(),
+                "controlled-workload parity executable is missing at {}; prebuild both feature modes before running tests",
+                executable.display()
+            );
         }
-        command.arg("--").arg(report_dir);
-        let output = command.output().expect("spawn cargo");
+        pair
+    }
+
+    fn emit_reports(executable: &Path, report_dir: &Path) {
+        std::fs::create_dir_all(report_dir).expect("report dir");
+        let output = Command::new(executable)
+            .arg(report_dir)
+            .output()
+            .unwrap_or_else(|error| panic!("spawn {}: {error}", executable.display()));
         assert!(
             output.status.success(),
-            "cargo run emit example failed (hotpath_on={hotpath_on}): status={:?}\nstdout:\n{}\nstderr:\n{}",
+            "controlled-workload helper {} failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
+            executable.display(),
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-    }
-
-    fn workspace_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root above crates/<crate>")
-            .to_owned()
     }
 }
