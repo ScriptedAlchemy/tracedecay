@@ -93,9 +93,10 @@ Drafts text only — `git commit` / `gh pr create` stay with the user.
 
 - Deferred: one ToolSearch call —
   `select:tracedecay_diff_context,tracedecay_pr_context,tracedecay_simplify_scan,tracedecay_redundancy,tracedecay_unsafe_patterns,tracedecay_test_risk,tracedecay_feedback_advisory_cycle,tracedecay_stack_snapshot,tracedecay_worktree_inventory`.
-- MCP error: `tracedecay tool pr_context --base-ref main --head-ref HEAD` etc.
-  (see `tracedecay:using-the-cli`). gh being unauthenticated or offline is NOT
-  a blocker — pr_context/diff_context never touch the network.
+- MCP transport error: use the equivalent CLI tool only while the daemon
+  remains available (see `tracedecay:using-the-cli`). Preserve an unavailable
+  or intentionally held daemon; report the gap and use bounded local diff
+  evidence instead of retrying or changing lifecycle.
 
 ## Deliverable
 

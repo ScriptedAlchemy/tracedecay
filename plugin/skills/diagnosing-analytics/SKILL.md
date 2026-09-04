@@ -81,6 +81,9 @@ store databases directly.
   those tools are deferred, load once with ToolSearch —
   `select:tracedecay_lcm_status,tracedecay_lcm_doctor,tracedecay_observatory_read,tracedecay_analytics` — or just use the CLI
   form shown above (see `tracedecay:using-the-cli`).
+- These commands are passive clients, not lifecycle authority. If the daemon
+  is unavailable or intentionally held, report that state instead of retrying
+  or starting it.
 
 ## Deliverable
 

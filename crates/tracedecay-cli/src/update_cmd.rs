@@ -130,8 +130,9 @@ fn refresh_generated_plugins_at(
     Ok(())
 }
 
-/// Rewrites and restarts the installed daemon service, returning the service
-/// path and its socket, or `None` when no service is installed.
+/// Rewrites the installed daemon service while preserving its captured
+/// lifecycle state, returning the service path and socket or `None` when no
+/// service is installed.
 fn refresh_daemon_service(
     previous_state: daemon_control::DaemonServiceState,
 ) -> tracedecay_domain::errors::Result<Option<(PathBuf, PathBuf)>> {

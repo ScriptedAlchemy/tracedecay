@@ -16,9 +16,12 @@ Read-only exploration subagent. Investigate the repository and return findings.
 3. Trace with `tracedecay_callers` / `tracedecay_callees` / `tracedecay_call_chain`; assess reach with `tracedecay_impact`.
 4. Fall back to Grep/Read only for non-indexed content or after TraceDecay pinpoints files.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
-discover and run the equivalent `tracedecay tool <name> --help` command. This
-agent must not execute shell commands. Never query `.tracedecay` databases directly.
+MCP is optional. If only MCP transport is unavailable while the daemon remains
+available, ask the parent to run the equivalent
+`tracedecay tool <name> --help` command. If the daemon is unavailable or
+intentionally held, report that state; do not ask for retries or lifecycle
+changes. This agent must not
+execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

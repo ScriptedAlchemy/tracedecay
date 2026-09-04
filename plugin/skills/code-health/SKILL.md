@@ -113,9 +113,11 @@ and the specific scans the user asked for — don't run every tool by reflex.
 - Deferred (names listed without schemas): load once with ToolSearch —
   `select:tracedecay_health,tracedecay_gini,tracedecay_dsm,tracedecay_status,tracedecay_active_project,tracedecay_project_list,tracedecay_project_search,tracedecay_project_context`
   (one batched call, add others needed) — then call normally.
-- MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
-  query `.tracedecay` databases directly; never abandon the graph over transport.
+- MCP transport error/timeout/disconnect: use the same tool and args via the
+  CLI only while the daemon remains available (see
+  `tracedecay:using-the-cli`). Preserve an unavailable or intentionally held
+  daemon; report the gap instead of retrying or changing lifecycle. Never
+  query `.tracedecay` databases directly.
 
 ## Deliverable
 

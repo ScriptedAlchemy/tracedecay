@@ -1,14 +1,18 @@
 ---
 name: using-the-cli
-description: 'Use when MCP is intentionally absent or unavailable, a host or subagent has shell access without MCP, or a tracedecay MCP call fails, times out, or disconnects.'
+description: 'Use when MCP transport is intentionally absent or unavailable while an existing TraceDecay daemon is available, or when preflighting tool arguments without dispatch.'
 ---
 
 # Using the tracedecay CLI
 
 MCP is optional. The `tracedecay` binary exposes every MCP tool as a first-class
 shell command with the same project store, arguments, and payloads. Use the CLI
-directly when MCP is intentionally unavailable, or switch to it after a
-transport failure, and keep following whatever `tracedecay:*` skill you were in.
+when only MCP transport is unavailable and keep following the active
+`tracedecay:*` skill. The CLI is a client of the same daemon, not an
+availability fallback: it never starts a missing or stopped service. If the
+daemon is unavailable or intentionally held, report the typed state and use
+scoped native tools. Do not retry or change daemon lifecycle unless the
+operator explicitly asks for that action.
 
 ## The one rule for arguments
 
@@ -81,9 +85,11 @@ identically over MCP (`tracedecay_retrieve`) and the CLI
 - The tracedecay MCP server is not configured in this host but `tracedecay` is on `PATH`.
 - A subagent or hook context has shell access but no MCP access.
 
-For a transport failure, diagnose the MCP side with `tracedecay doctor` and
-`tracedecay tool runtime`. When CLI-only operation is intentional, do not treat
-the missing MCP transport as an error.
+For a transport-only failure, `tracedecay doctor` and `tracedecay tool runtime`
+can diagnose the MCP side without changing service lifecycle. When CLI-only
+operation is intentional, do not treat the missing MCP transport as an error.
+When Doctor or the CLI reports a missing, stopped, or unavailable daemon, stop
+there: the service may be intentionally held.
 
 ## Corrective errors are the feedback loop
 
@@ -94,24 +100,27 @@ If a call is rejected, the error message tells you exactly how to fix it — rea
 - Wrong type for a field → names the expected JSON type and shows the `--args -` heredoc form for non-scalars.
 - Missing required → names the parameter and gives a one-line usage example.
 
-Fix the call per the message and retry; do not abandon the CLI fallback for raw DB access or broad Grep.
+Fix a deterministic argument error per the message and retry that corrected
+call once. An availability, transport, or lifecycle error is not an argument
+correction: report it instead of retrying or starting the daemon. Never use raw
+database access as a fallback.
 
 ## Guardrails
 
 - Never query `.tracedecay/*.db` with sqlite3 or scripts — schemas are internal and change without notice. The CLI is the supported fallback, not raw DB access.
-- Do not abandon tracedecay for broad Grep/file reads just because MCP transport failed; the CLI answers the same graph, memory, and session questions.
+- After an MCP transport-only failure, use the CLI while the daemon remains available. If the daemon is unavailable or intentionally held, use only the scoped native reads needed for the task and state why TraceDecay evidence is unavailable.
 - CLI editing tools (`str_replace`, `replace_symbol`, …) mutate the working tree exactly like their MCP twins — apply the same care as `tracedecay:editing-safely`. Pre-flight with `--dry-run` when the payload is non-trivial.
-- If the CLI also fails (binary missing or project not initialised), fall back to plain tools and suggest `tracedecay init` / `tracedecay doctor` to the user.
+- If the CLI also fails, classify the result. A missing binary or uninitialised project may justify suggesting setup; a stopped, missing, or unavailable daemon may be an intentional hold and must not trigger setup, retry, start, restart, or install advice without an explicit operator request.
 
 ## If tools are deferred or MCP fails
 
-- This skill *is* the MCP-failure path: run `tracedecay tool <name>` (see *The one rule for arguments* above) for any tool whose MCP call errored, timed out, or was never configured.
+- This skill is the MCP-*transport* failure path: run `tracedecay tool <name>` only while an existing daemon is available. A daemon availability failure ends this fallback; report it and preserve lifecycle state.
 - Deferred (names listed without schemas) but MCP otherwise healthy: load once
   with ToolSearch — `select:tracedecay_retrieve,tracedecay_runtime` (add the
   tools the parent skill needs) — then call normally instead of shelling out.
 
 ## Deliverable
 
-Do not end this workflow without: the same result the MCP tool would have
-returned, plus a note that the CLI fallback was used and why. Report any
-`tracedecay_metrics:` line to the user.
+Return either the same result the MCP tool would have returned, or the typed
+daemon-unavailable result plus the scoped native evidence used instead. Note
+why the CLI fallback was attempted and report any `tracedecay_metrics:` line.

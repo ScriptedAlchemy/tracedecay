@@ -198,14 +198,14 @@ fn service_status_reports_connectable_socket() {
 }
 
 #[test]
-fn after_update_restore_heals_stopped_installed_units() {
+fn after_update_restore_preserves_every_captured_service_state() {
     assert_eq!(
         DaemonServiceState::StoppedEnabled.expected_after_update(),
-        DaemonServiceState::RunningEnabled
+        DaemonServiceState::StoppedEnabled
     );
     assert_eq!(
         DaemonServiceState::StoppedDisabled.expected_after_update(),
-        DaemonServiceState::RunningEnabled
+        DaemonServiceState::StoppedDisabled
     );
     assert_eq!(
         DaemonServiceState::RunningEnabled.expected_after_update(),
@@ -226,7 +226,7 @@ fn after_update_restore_heals_stopped_installed_units() {
 }
 
 #[test]
-fn unavailable_socket_advice_names_stopped_disabled_enable_now() {
+fn unavailable_socket_advice_keeps_stopped_disabled_lifecycle_operator_owned() {
     let socket = PathBuf::from("/tmp/tracedecay.sock");
     let advice =
         super::unavailable_daemon_socket_advice(&socket, Some(DaemonServiceState::StoppedDisabled));
@@ -235,18 +235,16 @@ fn unavailable_socket_advice_names_stopped_disabled_enable_now() {
         "advice must distinguish stopped+disabled, got: {advice}"
     );
     assert!(
-        advice.contains("tracedecay daemon install-service"),
-        "advice must name install-service, got: {advice}"
+        advice.contains("may be intentionally held"),
+        "advice must preserve operator intent, got: {advice}"
     );
-    if cfg!(target_os = "linux") {
-        assert!(
-            advice.contains("systemctl --user enable --now tracedecay.service"),
-            "advice must name enable --now, got: {advice}"
-        );
-    }
     assert!(
-        !advice.contains("ensure the service is running"),
-        "installed-but-dead must not keep the generic ensure-running text, got: {advice}"
+        advice.contains("tracedecay daemon start"),
+        "advice may name the explicit lifecycle command, got: {advice}"
+    );
+    assert!(
+        !advice.contains("enable --now") && !advice.contains("install-service"),
+        "an installed held service must not be rewritten or enabled by diagnostic advice, got: {advice}"
     );
 }
 
@@ -268,8 +266,8 @@ fn unavailable_socket_advice_without_state_uses_unit_file_presence() {
         "absent unit keeps install-service, got: {missing}"
     );
     assert!(
-        missing.contains("ensure the service is running"),
-        "absent unit keeps generic ensure-running text, got: {missing}"
+        missing.contains("only if you want a managed daemon"),
+        "absent-unit advice must leave installation intentional, got: {missing}"
     );
 
     let service_path = super::service_unit_path().expect("service unit path");
@@ -286,15 +284,15 @@ fn unavailable_socket_advice_without_state_uses_unit_file_presence() {
         "present unit must be named, got: {installed}"
     );
     assert!(
-        installed.contains("tracedecay daemon install-service"),
-        "present unit must name install-service, got: {installed}"
+        installed.contains("may be intentionally held"),
+        "present unit must preserve operator intent, got: {installed}"
     );
-    if cfg!(target_os = "linux") {
-        assert!(
-            installed.contains("systemctl --user enable --now tracedecay.service"),
-            "present unit must name enable --now, got: {installed}"
-        );
-    }
+    assert!(
+        installed.contains("tracedecay daemon start")
+            && !installed.contains("enable --now")
+            && !installed.contains("install-service"),
+        "present-unit advice must offer only explicit lifecycle control, got: {installed}"
+    );
 }
 
 #[test]
@@ -1671,13 +1669,12 @@ fn refresh_installed_service_preserves_existing_socket_path() {
                 "--user is-enabled tracedecay.service",
                 "--user stop tracedecay.service",
                 "--user daemon-reload",
-                "--user enable tracedecay.service",
                 "--user daemon-reload",
                 "--user enable tracedecay.service",
                 "--user start tracedecay.service",
             ]
         ),
-        "refresh+restore must stop, reload, enable, and start in order, got:\n{commands}"
+        "refresh must only reload; restore of the previously running-enabled state must reload, enable, and start, got:\n{commands}"
     );
 }
 
@@ -1810,7 +1807,7 @@ fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn restore_after_update_starts_a_dead_installed_unit() {
+fn restore_after_update_does_not_activate_a_held_stopped_unit() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().expect("temp dir");
     let config_home = dir.path().join("config");
@@ -1842,36 +1839,89 @@ fn restore_after_update_starts_a_dead_installed_unit() {
         custom_socket.display()
     );
     std::fs::write(&service_path, &original_unit).expect("existing service unit");
-    let listener = UnixListener::bind(&custom_socket).expect("bind managed daemon socket");
-    let served = serve_identity_probes(listener, vec![TEST_BUILD_VERSION]);
-
     super::restore_installed_service_after_update_with_runner(
         &runner,
         DaemonServiceState::StoppedDisabled,
         TEST_BUILD_VERSION,
     )
-    .expect("heal dead installed service");
+    .expect("preserve held stopped service");
 
     assert_eq!(
         std::fs::read_to_string(service_path).expect("service unit"),
         original_unit,
-        "heal must start the existing unit without rewriting it"
+        "restore must not rewrite a held stopped unit"
     );
     assert!(
-        served.load(Ordering::SeqCst) >= 1,
-        "heal success must be backed by an authenticated identity answer"
+        !log.exists()
+            || std::fs::read_to_string(&log)
+                .expect("systemctl log")
+                .is_empty(),
+        "restore of a held stopped unit must not invoke systemctl"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn no_start_install_then_refresh_and_restore_has_no_activation_commands() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let config_home = dir.path().join("config");
+    let fake_bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let systemctl = fake_bin.join("systemctl");
+    let log = dir.path().join("systemctl.log");
+    std::fs::write(
+        &systemctl,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\ncase \"$2\" in start|restart|enable) exit 99;; esac\nexit 0\n",
+    )
+    .expect("fake systemctl");
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+        .expect("systemctl permissions");
+    let runner = ServiceRunner::systemd(&systemctl).expect("fixture systemd runner");
+
+    let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    let _home_guard = EnvVarGuard::set("HOME", &home);
+    let _data_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, dir.path().join("profile"));
+    let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+    let service_path = config_home.join("systemd/user").join(crate::SERVICE_NAME);
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    std::fs::write(
+        &service_path,
+        "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n",
+    )
+    .expect("existing service unit");
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+        socket_path: PathBuf::from("/custom/tracedecay.sock"),
+        data_dir_override: None,
+        remote_tls: None,
+    };
+
+    runner
+        .install(&service_path, false, &spec.socket_path, TEST_BUILD_VERSION)
+        .expect("install service without starting it");
+    super::refresh_installed_service_with_state_and_runner(
+        &runner,
+        &spec,
+        Some(DaemonServiceState::StoppedDisabled),
+        TEST_BUILD_VERSION,
+    )
+    .expect("refresh held service");
+    super::restore_installed_service_after_update_with_runner(
+        &runner,
+        DaemonServiceState::StoppedDisabled,
+        TEST_BUILD_VERSION,
+    )
+    .expect("preserve no-start install");
+
     let commands = std::fs::read_to_string(log).expect("systemctl log");
-    assert!(
-        systemctl_log_contains_sequence(
-            &commands,
-            &[
-                "--user daemon-reload",
-                "--user enable tracedecay.service",
-                "--user start tracedecay.service",
-            ]
-        ),
-        "heal of a dead installed unit must enable and start, got:\n{commands}"
+    assert_eq!(
+        commands.lines().collect::<Vec<_>>(),
+        vec!["--user daemon-reload", "--user daemon-reload"],
+        "install --no-start plus update/post-update may reload units but must not start, restart, enable, or enable --now"
     );
 }
 
@@ -2170,7 +2220,7 @@ fn refresh_installed_service_preserves_stopped_state() {
     let log = dir.path().join("systemctl.log");
     std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && exit 3\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && exit 3\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
         )
         .expect("fake systemctl");
     std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -2211,7 +2261,10 @@ fn refresh_installed_service_preserves_stopped_state() {
 
     let commands = std::fs::read_to_string(log).expect("systemctl log");
     assert!(commands.contains("--user is-active --quiet tracedecay.service"));
-    assert!(!commands.contains("enable tracedecay.service"));
+    assert!(
+        !commands.contains("enable tracedecay.service"),
+        "a stopped-enabled service is already enabled; refresh must not mutate its lifecycle"
+    );
     assert!(!commands.contains("restart tracedecay.service"));
 }
 

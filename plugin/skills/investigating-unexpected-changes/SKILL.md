@@ -85,14 +85,15 @@ the next session inherits it — see `tracedecay:project-memory`.
 - Deferred (names listed without schemas): load once with ToolSearch —
   `select:tracedecay_sessions_for,tracedecay_commit_context,tracedecay_diff_context,tracedecay_branch_diff,tracedecay_message_search,tracedecay_lcm_grep`
   (one batched call) — then call normally.
-- MCP error / timeout / disconnect: same tools via shell —
+- MCP transport error / timeout / disconnect: use the same tools via shell
+  only while the daemon remains available —
   `tracedecay tool sessions_for --args '{"git_ref":"commit","value":"<sha>"}'`,
   `tracedecay tool commit_context`, `tracedecay tool diff_context`,
   `tracedecay tool branch_diff`,
   `tracedecay tool message_search`, `tracedecay tool lcm_grep` (see
-  `tracedecay:using-the-cli`). Never query `.tracedecay` databases directly;
-  never fall back to blind git archaeology when the correlation index can name
-  the actor.
+  `tracedecay:using-the-cli`). Preserve an unavailable or intentionally held
+  daemon; report the gap and use bounded Git evidence instead of retrying or
+  changing lifecycle. Never query `.tracedecay` databases directly.
 
 ## Deliverable
 

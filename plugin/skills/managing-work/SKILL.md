@@ -66,7 +66,10 @@ Preview duplicates with `tracedecay_work_prepare_duplicate_adjudication`, then
 
 - Deferred: one ToolSearch call —
   `select:tracedecay_work_generate_proposal,tracedecay_work_create,tracedecay_work_start_attempt,tracedecay_work_attempt_status,tracedecay_work_views`.
-- MCP error: `tracedecay tool <name>` (see `tracedecay:using-the-cli`).
+- MCP transport error: use `tracedecay tool <name>` only while the daemon
+  remains available (see `tracedecay:using-the-cli`). Preserve an unavailable
+  or intentionally held daemon; report the gap instead of retrying or changing
+  lifecycle.
 
 ## Deliverable
 

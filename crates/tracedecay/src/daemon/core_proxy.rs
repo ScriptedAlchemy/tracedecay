@@ -33,12 +33,13 @@ use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///
-/// A missing socket usually means "no daemon", but `tracedecay update`
-/// restarts the daemon service and shutdown unlinks the socket before the new
-/// daemon rebinds it; a serve process starting inside that window would
-/// otherwise silently commit to in-process mode for its whole lifetime. When
-/// a daemon service is installed for this socket, wait out that window with
-/// the same grace used for per-request connects before falling back.
+/// A missing socket usually means "no daemon", but an explicit restart or an
+/// update of a service that was already running unlinks the socket before the
+/// replacement daemon rebinds it. A serve process starting inside that window
+/// would otherwise silently commit to in-process mode for its whole lifetime.
+/// When a service unit names this exact socket, wait for one bounded restart
+/// grace before falling back. This probe never starts or changes the service;
+/// an intentionally stopped service remains stopped.
 #[cfg(unix)]
 pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
     let installed_socket = tracedecay_daemon_control::installed_service_socket_path()

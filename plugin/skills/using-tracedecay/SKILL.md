@@ -35,9 +35,14 @@ their schemas load. First need → ONE batched ToolSearch call:
 `select:tracedecay_context,tracedecay_search,tracedecay_grep,tracedecay_outline,tracedecay_body`
 (add project/session tools such as `tracedecay_project_list`,
 `tracedecay_project_search`, `tracedecay_project_context`, or
-`tracedecay_message_search` when the moment needs them). If any MCP call
-errors or times out, the same tool runs as `tracedecay tool <name> --args '<json>'` — see
-`tracedecay:using-the-cli`. Transport failure never justifies grep.
+`tracedecay_message_search` when the moment needs them). If MCP transport
+errors or times out while the daemon remains available, the same tool can run
+as `tracedecay tool <name> --args '<json>'` — see
+`tracedecay:using-the-cli`. The CLI is another client of the same daemon, not
+an availability guarantee. When the daemon is missing, unavailable, or
+intentionally held, report that state and use scoped native tools; do not retry
+or activate the daemon unless the operator explicitly requests a lifecycle
+change.
 
 ## Moment to mandatory action
 
@@ -65,7 +70,7 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | Registering or running a Workflow definition | `tracedecay:managing-workflows` |
 | Querying several registered roots as one frozen scope | `tracedecay_multi_root_scope_set_read` / `tracedecay_multi_root_scope_set_compare_and_swap` then `tracedecay_multi_root_execute` |
 | Architecture, tech debt, index/project status | `tracedecay:code-health` |
-| An MCP call just failed | `tracedecay:using-the-cli` — never abandon over transport |
+| MCP transport failed but the daemon is available | `tracedecay:using-the-cli`; if the daemon itself is unavailable or intentionally held, report it and use scoped native tools without changing lifecycle |
 
 ## Red flags — these thoughts mean STOP, you are rationalizing
 
@@ -78,7 +83,7 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | "I made one context call; now I'll bash around" | One call is discovery, not license. Stay on the skill's ladder; pass `seen_node_ids` forward and narrow — don't switch to grep. |
 | "I'll jot this in MEMORY.md" | Durable facts go to `fact_store` (add) — searchable, trust-ranked, cross-session. MEMORY.md is not memory. |
 | "The index might be stale — I should sync first" | Hooks auto-sync on every session and edit. Never run manual sync; every search/context response opens with a `freshness:` verdict — `possibly_stale` names the indexing state inline, so report that instead of preflighting `tracedecay_status`. |
-| "The MCP call might fail / just failed" | `tracedecay tool <name>` always works. Transport ≠ capability. |
+| "The MCP call failed, so I should keep retrying or start the daemon" | The CLI may fail against the same unavailable daemon. Preserve intentional holds; report the state and use scoped native tools unless the operator asks for lifecycle control. |
 | "This is a simple lookup" | Simple lookups are exactly what the graph is for. |
 | "I already know this codebase" | The graph is fresher than your memory. Check it. |
 | "I'll explore first, then use the skill" | The skills tell you HOW to explore. Check first. |

@@ -101,9 +101,11 @@ of falling back to a different project or worktree.
 - Deferred (names listed without schemas): load once with ToolSearch —
   `select:tracedecay_context,tracedecay_search,tracedecay_grep,tracedecay_outline,tracedecay_body,tracedecay_read,tracedecay_redundancy`
   (one batched call, add others needed) — then call normally.
-- MCP error/timeout/disconnect: same tool, same args, via shell:
-  `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
-  query `.tracedecay` databases directly; never abandon the graph over transport.
+- MCP transport error/timeout/disconnect: use the same tool and args via the
+  CLI only while the daemon remains available (see
+  `tracedecay:using-the-cli`). Preserve an unavailable or intentionally held
+  daemon; report the gap and use scoped native reads instead of retrying or
+  changing lifecycle. Never query `.tracedecay` databases directly.
 
 ## Deliverable
 
