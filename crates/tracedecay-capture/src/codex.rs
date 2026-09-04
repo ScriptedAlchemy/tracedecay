@@ -115,6 +115,7 @@ pub fn normalize_codex_observation(
         stable_record_id,
         range,
         None,
+        None,
     )
 }
 
@@ -132,6 +133,31 @@ pub fn normalize_codex_observation_with_location(
     range: tracedecay_domain::ObservationSourceRangeV1,
     location: CodexObservationLocation<'_>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    normalize_codex_observation_with_location_and_pair(
+        native,
+        session_id,
+        native_thread_id,
+        stable_record_id,
+        range,
+        location,
+        None,
+    )
+}
+
+/// Normalize a Codex record while recording the exact precursor paired by the
+/// bounded admission page. Cross-page reconciliation can then distinguish an
+/// already-paired current item from a later current item whose precursor was
+/// projected by an earlier admission.
+#[allow(clippy::too_many_arguments)]
+pub fn normalize_codex_observation_with_location_and_pair(
+    native: &Value,
+    session_id: &str,
+    native_thread_id: Option<&str>,
+    stable_record_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    location: CodexObservationLocation<'_>,
+    paired_response_id: Option<ObservationId>,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     normalize_codex_observation_inner(
         native,
         session_id,
@@ -139,6 +165,7 @@ pub fn normalize_codex_observation_with_location(
         stable_record_id,
         range,
         Some(location),
+        paired_response_id,
     )
 }
 
@@ -152,6 +179,7 @@ fn normalize_codex_observation_inner(
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
     location: Option<CodexObservationLocation<'_>>,
+    paired_response_id: Option<ObservationId>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Codex rollouts order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
@@ -163,6 +191,7 @@ fn normalize_codex_observation_inner(
         stable_record_id,
         range,
         location,
+        paired_response_id,
     );
     if envelope.is_err() {
         hotpath::gauge!("capture.codex.normalize_failures").inc(1u64);
@@ -179,6 +208,7 @@ fn normalize_codex_record(
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
     location: Option<CodexObservationLocation<'_>>,
+    paired_response_id: Option<ObservationId>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let native_kind = native
         .get("type")
@@ -216,6 +246,9 @@ fn normalize_codex_record(
     }
     if native_kind == "session_meta" {
         relations = append_codex_session_meta_agent_relations(relations, payload, native_thread_id);
+    }
+    if let Some(paired_response_id) = paired_response_id {
+        relations = relations.with_parent_message_id(paired_response_id);
     }
 
     let mut facts = Vec::new();

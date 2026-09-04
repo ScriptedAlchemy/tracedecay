@@ -6,6 +6,7 @@ use tracedecay_lcm::raw;
 use tracedecay_lcm::retrieval_content::derived_text_for_index;
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
+use super::codex_goal_reconciliation::find_preceding_codex_goal_response;
 use super::types::{TranscriptBatch, TranscriptPersistenceError};
 
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +66,37 @@ async fn flush_transcript_statement_window(
         .map_err(|error| {
             TranscriptPersistenceError::storage("upsert session message projections", error)
         })
+}
+
+async fn reconcile_codex_goal_response(
+    conn: &impl Executor,
+    current: &SessionMessageRecord,
+) -> Result<(), TranscriptPersistenceError> {
+    let Some(response_message_id) = find_preceding_codex_goal_response(conn, current)
+        .await
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("find preceding Codex goal response", error)
+        })?
+    else {
+        return Ok(());
+    };
+    conn.execute(
+        "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+        params![current.provider.as_str(), response_message_id.as_str()],
+    )
+    .await
+    .map_err(|error| {
+        TranscriptPersistenceError::storage("remove paired Codex goal raw message", error)
+    })?;
+    conn.execute(
+        "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+        params![current.provider.as_str(), response_message_id.as_str()],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        TranscriptPersistenceError::storage("remove paired Codex goal projection", error)
+    })
 }
 
 pub async fn get_parse_offset(
@@ -548,6 +580,20 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                     ));
                 }
                 for message in &batch.messages {
+                    if tracedecay_store::codex_goal_context_correlation(
+                        message.kind.as_deref(),
+                        message.metadata_json.as_deref(),
+                    )
+                    .is_some_and(|correlation| {
+                        correlation.source()
+                            == tracedecay_store::CodexGoalContextSource::ItemCompleted
+                    }) {
+                        // Make any response written earlier in this batch
+                        // visible to the bounded correlation query.
+                        flush_transcript_statement_window(&transaction, &mut projection_statements)
+                            .await?;
+                        reconcile_codex_goal_response(&transaction, message).await?;
+                    }
                     match policy {
                         TranscriptWritePolicy::Full { .. } => {
                             let staged = staged_messages.next().ok_or_else(|| {
