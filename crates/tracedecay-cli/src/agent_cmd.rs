@@ -4039,6 +4039,7 @@ esac
 
     #[tokio::test]
     async fn codex_automation_project_initializes_through_daemon() {
+        crate::product_runtime::register_for_tests();
         let project = tempfile::tempdir().unwrap();
         let project_path = project.path().to_path_buf();
         let expected_project_path = project_path.clone();
@@ -4063,6 +4064,9 @@ esac
 
     #[tokio::test]
     async fn unavailable_daemon_does_not_resolve_or_open_local_project() {
+        // Without a registered provider the handshake fails first, and this
+        // test's injected `daemon unavailable` failure never runs.
+        crate::product_runtime::register_for_tests();
         let project = tempfile::tempdir().unwrap();
         let resolved = Arc::new(AtomicBool::new(false));
         let resolver_called = Arc::clone(&resolved);

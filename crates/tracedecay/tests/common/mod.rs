@@ -57,6 +57,26 @@ static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GLOBAL_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
+/// Registers this process's product runtime provider with the canonical test
+/// fixture provider, so an in-process daemon handshake has a truthful binary
+/// version to advertise.
+///
+/// `tracedecay::daemon::handshake_for_current_client` reads the registered
+/// product runtime through `version::build_version`, and answers
+/// `Config { "no product runtime provider is registered; the generating binary
+/// must register one at process start" }` when the entry point never registered
+/// one. Only `tracedecay-cli`'s `main` performs that registration in production,
+/// and no test binary runs it — nextest gives every test its own process, so a
+/// suite fixture that builds a handshake must register the fixture provider
+/// itself.
+///
+/// Registration is a `get_or_init` on one process-global slot, so calling this
+/// from every fixture entry point is safe, idempotent, and always observes the
+/// identical runtime regardless of test order.
+pub fn register_process_product_runtime() {
+    tracedecay::product_runtime::register_fixture_product_runtime();
+}
+
 /// Installs the canonical registered global/session schema installer into the
 /// kernel's fail-closed port before any integration fixture opens a `Database`.
 ///
@@ -178,6 +198,11 @@ pub struct IsolatedEnv {
 
 impl IsolatedEnv {
     fn build(env_lock: tokio::sync::MutexGuard<'static, ()>) -> (Self, PathBuf) {
+        // Every fixture built on top of this guard eventually asks the shipped
+        // daemon for a handshake, which reads the registered product runtime.
+        // Registering here — the single choke point both `acquire` paths share
+        // — keeps that out of every individual suite fixture.
+        register_process_product_runtime();
         let dir = tempdir_or_panic();
         let storage = TraceDecayStorageEnvGuard::for_tempdir(&dir);
         let project = dir.path().join("project");

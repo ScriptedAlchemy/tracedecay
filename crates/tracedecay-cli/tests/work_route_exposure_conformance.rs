@@ -137,6 +137,9 @@ struct ProductionDaemon {
 
 impl ProductionDaemon {
     fn start() -> Self {
+        // `inner_router` builds an in-process daemon handshake, which reads the
+        // registered product runtime; only `main` registers one in production.
+        common::register_process_product_runtime();
         let env_lock = common::lock_global_db_env();
         let home = tempfile::tempdir().expect("isolated home");
         let root = home.path().to_path_buf();
