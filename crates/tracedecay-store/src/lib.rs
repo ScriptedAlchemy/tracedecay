@@ -149,7 +149,9 @@ pub use native_integration::{
     NativeIntegrationStoreError, NativeIntegrationStoreResult, NativeWorktreeCleanupBeginResultV1,
 };
 pub use observation::{
-    AnchoredObservationWrite, CursorAdvanceOutcome, OBSERVATION_CAPTURE_AUTHORITY_V1,
+    AnchoredObservationWrite, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
+    CursorAdvanceLedgerOpaqueValueHashV1, CursorAdvanceLedgerReasonV1,
+    CursorAdvanceLedgerReceiptIdV1, CursorAdvanceOutcome, OBSERVATION_CAPTURE_AUTHORITY_V1,
     ObservationAdmissionPort, ObservationBatchFallbackCause, ObservationBatchPersistOutcome,
     ObservationCaptureSink, ObservationCommitReceipt, ObservationCoverageReason,
     ObservationCoverageV1, ObservationCursorAdvance, ObservationCursorPort,

@@ -3,6 +3,7 @@ use thiserror::Error;
 use tracedecay_domain::ObservationSourceCursorV1;
 
 use super::{DurabilityClassV1, StoreIncarnationV1};
+use crate::observation::CursorAdvanceLedgerDisagreementV1;
 
 /// Validation failures for pure runtime contract DTOs.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -158,6 +159,10 @@ pub enum StorageRuntimeErrorV1 {
     ObservationSourceCursorConflict {
         expected: Box<Option<ObservationSourceCursorV1>>,
         actual: Box<Option<ObservationSourceCursorV1>>,
+    },
+    #[error("observation cursor-advance ledger disagrees with immutable coverage")]
+    ObservationCursorAdvanceLedgerDisagreement {
+        disagreement: Box<CursorAdvanceLedgerDisagreementV1>,
     },
     #[error("duplicate operation {operation_id} is already in the persistent writer")]
     DuplicateOperationInFlight { operation_id: String },

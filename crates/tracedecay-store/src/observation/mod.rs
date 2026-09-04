@@ -3,6 +3,7 @@ use std::error::Error;
 use std::future::Future;
 use std::sync::{LazyLock, RwLock};
 
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationIdV1,
     CapabilityId, CoverageReportV1, DomainError, DurableObservationV1, EvidenceClass,
@@ -12,7 +13,8 @@ use tracedecay_domain::{
     PayloadAccessState, PayloadDigestV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
     PrivacyDomainId, ProjectionGenerationId, ResolutionAuthorizationV1, RetrievalAnchorId,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, UtcMicros, VectorWatermark,
+    SanitizationReceiptId, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
+    UtcMicros, VectorWatermark,
 };
 
 mod anchored_write;
@@ -304,7 +306,8 @@ pub enum ObservedEvidenceAnchorResolution {
 }
 
 /// Fully processed provider evidence that intentionally produces no durable observation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ObservationCoverageReason {
     BlankFrame,
@@ -325,6 +328,11 @@ pub enum ObservationCoverageReason {
     /// Coverage advances so the stream converges; the refusal stays auditable
     /// through the recorded cursor-advance reason.
     AdmissionRefused,
+    /// A provider record's canonical identity resolved to already-retained,
+    /// incompatible evidence. The bounded code lets Doctor distinguish this
+    /// terminal identity defect from another admission refusal without ever
+    /// retaining transcript content in the coverage ledger.
+    ObservationIdentityCollision,
 }
 
 impl ObservationCoverageReason {
@@ -341,6 +349,7 @@ impl ObservationCoverageReason {
             Self::SanitizerRejected => "sanitizer_rejected",
             Self::SanitizerQuarantined => "sanitizer_quarantined",
             Self::AdmissionRefused => "admission_refused",
+            Self::ObservationIdentityCollision => "observation_identity_collision",
         }
     }
 
@@ -357,6 +366,7 @@ impl ObservationCoverageReason {
                 | Self::SanitizerRejected
                 | Self::SanitizerQuarantined
                 | Self::AdmissionRefused
+                | Self::ObservationIdentityCollision
         )
     }
 
@@ -394,7 +404,8 @@ impl ObservationCoverageReason {
                     | Self::OversizedFrame
                     | Self::UnknownVersion
                     | Self::UnsupportedFact
-                    | Self::AdmissionRefused,
+                    | Self::AdmissionRefused
+                    | Self::ObservationIdentityCollision,
                 None
             )
         )
@@ -422,12 +433,150 @@ impl TryFrom<&str> for ObservationCoverageReason {
             "sanitizer_rejected" => Ok(Self::SanitizerRejected),
             "sanitizer_quarantined" => Ok(Self::SanitizerQuarantined),
             "admission_refused" => Ok(Self::AdmissionRefused),
+            "observation_identity_collision" => Ok(Self::ObservationIdentityCollision),
             other => Err(UnknownObservationCoverageReason(other.to_string())),
         }
     }
 }
 
 pub type NonDurableFrameReason = ObservationCoverageReason;
+
+/// Fixed-size opaque fingerprint of corrupt or legacy ledger text.
+///
+/// The error boundary may retain this fingerprint to correlate repeated bad
+/// rows, but never retains the raw database value that produced it.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct CursorAdvanceLedgerOpaqueValueHashV1(String);
+
+impl CursorAdvanceLedgerOpaqueValueHashV1 {
+    fn for_raw_value(value: &str) -> Self {
+        Self(
+            tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
+                "sha256:",
+                &Sha256::digest(value.as_bytes()),
+            ),
+        )
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CursorAdvanceLedgerOpaqueValueHashV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        if tracedecay_domain::canonical_text::is_tagged_lowercase_hex(&value, "sha256:", 64) {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "cursor-advance ledger opaque value hash must be sha256 lowercase hex",
+            ))
+        }
+    }
+}
+
+/// Bounded reason identity exposed from an immutable cursor-advance ledger
+/// row. Unknown database text is represented only by a fingerprint.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CursorAdvanceLedgerReasonV1 {
+    Known(ObservationCoverageReason),
+    Opaque {
+        fingerprint: CursorAdvanceLedgerOpaqueValueHashV1,
+    },
+}
+
+/// Bounded sanitization-receipt identity exposed from an immutable
+/// cursor-advance ledger row. Any database text not proven by the canonical
+/// sanitization-receipt authority is represented only by a fingerprint.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CursorAdvanceLedgerReceiptIdV1 {
+    Absent,
+    Known(SanitizationReceiptId),
+    Opaque {
+        fingerprint: CursorAdvanceLedgerOpaqueValueHashV1,
+    },
+}
+
+/// Content-free identity of one immutable cursor-advance ledger row.
+///
+/// Canonical rows retain typed reasons and authority-proven receipt
+/// identifiers. Corrupt, legacy, or unproven rows retain only fixed-size
+/// opaque fingerprints; no raw ledger text can cross this error boundary.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CursorAdvanceLedgerIdentityV1 {
+    reason: CursorAdvanceLedgerReasonV1,
+    receipt_id: CursorAdvanceLedgerReceiptIdV1,
+}
+
+impl CursorAdvanceLedgerIdentityV1 {
+    pub fn new(
+        reason: ObservationCoverageReason,
+        receipt_id: Option<SanitizationReceiptId>,
+    ) -> Self {
+        Self {
+            reason: CursorAdvanceLedgerReasonV1::Known(reason),
+            receipt_id: match receipt_id {
+                Some(receipt_id) => CursorAdvanceLedgerReceiptIdV1::Known(receipt_id),
+                None => CursorAdvanceLedgerReceiptIdV1::Absent,
+            },
+        }
+    }
+
+    /// Classify values read from the private SQL ledger without retaining
+    /// their raw text in the outward-facing error DTO.
+    ///
+    /// A syntactically valid receipt identifier is not evidence that the
+    /// ledger value is safe to expose. Callers may provide an authority
+    /// receipt only after resolving it from the canonical receipt authority
+    /// and verifying its identifier against the stored ledger value.
+    pub fn from_stored_row_with_authority_receipt(
+        reason: &str,
+        receipt_id: Option<&str>,
+        authority_receipt: Option<&SanitizationReceiptV1>,
+    ) -> Self {
+        Self {
+            reason: match ObservationCoverageReason::try_from(reason) {
+                Ok(reason) => CursorAdvanceLedgerReasonV1::Known(reason),
+                Err(_) => CursorAdvanceLedgerReasonV1::Opaque {
+                    fingerprint: CursorAdvanceLedgerOpaqueValueHashV1::for_raw_value(reason),
+                },
+            },
+            receipt_id: match receipt_id {
+                None => CursorAdvanceLedgerReceiptIdV1::Absent,
+                Some(receipt_id) => match authority_receipt {
+                    Some(authority_receipt)
+                        if authority_receipt.receipt().receipt_id().as_str() == receipt_id =>
+                    {
+                        CursorAdvanceLedgerReceiptIdV1::Known(
+                            authority_receipt.receipt().receipt_id().clone(),
+                        )
+                    }
+                    _ => CursorAdvanceLedgerReceiptIdV1::Opaque {
+                        fingerprint: CursorAdvanceLedgerOpaqueValueHashV1::for_raw_value(
+                            receipt_id,
+                        ),
+                    },
+                },
+            },
+        }
+    }
+
+    pub fn reason(&self) -> &CursorAdvanceLedgerReasonV1 {
+        &self.reason
+    }
+
+    pub fn receipt_id(&self) -> &CursorAdvanceLedgerReceiptIdV1 {
+        &self.receipt_id
+    }
+}
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -460,6 +609,59 @@ impl ObservationCoverageV1 {
 
     pub fn range(self) -> ObservationSourceRangeV1 {
         self.range
+    }
+}
+
+/// Permanent disagreement between an immutable cursor-advance ledger row and
+/// a candidate advance over the same source coverage.
+///
+/// This exposes only the source/scope/coverage coordinate and row identities;
+/// it intentionally omits every transcript locator and payload field.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CursorAdvanceLedgerDisagreementV1 {
+    source: ObservationSourceIdentityV1,
+    scope: ObservationScopeV1,
+    coverage: ObservationCoverageV1,
+    stored: CursorAdvanceLedgerIdentityV1,
+    candidate: CursorAdvanceLedgerIdentityV1,
+}
+
+impl CursorAdvanceLedgerDisagreementV1 {
+    pub fn new(
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+        coverage: ObservationCoverageV1,
+        stored: CursorAdvanceLedgerIdentityV1,
+        candidate: CursorAdvanceLedgerIdentityV1,
+    ) -> Self {
+        Self {
+            source,
+            scope,
+            coverage,
+            stored,
+            candidate,
+        }
+    }
+
+    pub fn source(&self) -> &ObservationSourceIdentityV1 {
+        &self.source
+    }
+
+    pub fn scope(&self) -> &ObservationScopeV1 {
+        &self.scope
+    }
+
+    pub fn coverage(&self) -> ObservationCoverageV1 {
+        self.coverage
+    }
+
+    pub fn stored(&self) -> &CursorAdvanceLedgerIdentityV1 {
+        &self.stored
+    }
+
+    pub fn candidate(&self) -> &CursorAdvanceLedgerIdentityV1 {
+        &self.candidate
     }
 }
 
@@ -624,6 +826,15 @@ impl ObservationCursorAdvance {
 
     pub fn sanitization_receipt(&self) -> Option<&SanitizationReceiptV1> {
         self.sanitization_receipt.as_ref()
+    }
+
+    pub fn ledger_identity(&self) -> CursorAdvanceLedgerIdentityV1 {
+        CursorAdvanceLedgerIdentityV1::new(
+            self.reason,
+            self.sanitization_receipt
+                .as_ref()
+                .map(|receipt| receipt.receipt().receipt_id().clone()),
+        )
     }
 
     #[must_use]
@@ -911,6 +1122,10 @@ pub enum ObservationStoreError {
     },
     #[error("source cursor advance receipt collided with different contents")]
     CursorAdvanceCollision,
+    #[error("source cursor advance ledger disagrees with an immutable coverage record")]
+    CursorAdvanceLedgerDisagreement {
+        disagreement: Box<CursorAdvanceLedgerDisagreementV1>,
+    },
     #[error("source cursor advance reason disagrees with its sanitization receipt")]
     CursorSanitizationReceiptMismatch,
     #[error(

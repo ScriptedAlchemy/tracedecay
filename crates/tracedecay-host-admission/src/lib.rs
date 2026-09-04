@@ -1177,6 +1177,9 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         ObservationStoreError::CursorObservationMismatch => "observation_cursor_mismatch",
         ObservationStoreError::CursorCoverageMismatch => "observation_cursor_coverage_mismatch",
         ObservationStoreError::CursorAdvanceCollision => "observation_cursor_advance_collision",
+        ObservationStoreError::CursorAdvanceLedgerDisagreement { .. } => {
+            "observation_cursor_advance_ledger_disagreement"
+        }
         ObservationStoreError::CursorSanitizationReceiptMismatch => {
             "observation_cursor_sanitization_receipt_mismatch"
         }

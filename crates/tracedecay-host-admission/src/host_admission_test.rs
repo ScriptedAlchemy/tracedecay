@@ -1,7 +1,14 @@
+use tracedecay_domain::{
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
+};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
-use tracedecay_store::ObservationStoreError;
+use tracedecay_store::{
+    CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, ObservationCoverageReason,
+    ObservationCoverageV1, ObservationStoreError,
+};
 
 use super::*;
 
@@ -169,4 +176,43 @@ fn observation_store_failures_keep_privacy_safe_static_reason_codes() {
         assert_eq!(serialized.matches(reason_code).count(), 1);
         assert!(!serialized.contains("provider-private-payload"));
     }
+}
+
+#[test]
+fn immutable_cursor_ledger_disagreement_is_a_permanent_bounded_admission_failure() {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.fixture").unwrap(),
+    )
+    .unwrap();
+    let coverage = ObservationCoverageV1::new(
+        ObservationSourceGenerationV1::new(7).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationSourceRangeV1::new(10, 20).unwrap(),
+    );
+    let disagreement = CursorAdvanceLedgerDisagreementV1::new(
+        source,
+        ObservationScopeV1::Profile,
+        coverage,
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::BlankFrame, None),
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::OutOfScope, None),
+    );
+
+    let outcome = classify_error(&ObservationApplicationError::Store(
+        ObservationStoreError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(disagreement),
+        },
+    ));
+
+    assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
+    assert!(!outcome.retryable);
+    assert_eq!(
+        outcome.reason_code,
+        Some("observation_cursor_advance_ledger_disagreement")
+    );
+    assert!(
+        !serde_json::to_string(&outcome)
+            .unwrap()
+            .contains("session.fixture")
+    );
 }

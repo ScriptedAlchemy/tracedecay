@@ -318,3 +318,45 @@ fn memoized_access_policy_digest_equals_eager_derivation() {
         }
     }
 }
+
+#[test]
+fn observation_identity_collision_is_a_receiptless_refusal_reason() {
+    let reason = ObservationCoverageReason::ObservationIdentityCollision;
+
+    assert_eq!(reason.as_str(), "observation_identity_collision");
+    assert!(reason.is_refusal());
+    assert!(reason.is_receiptless());
+    assert!(reason.disposition_matches(None));
+    assert_eq!(
+        ObservationCoverageReason::try_from("observation_identity_collision").unwrap(),
+        reason
+    );
+}
+
+#[test]
+fn cursor_ledger_identity_keeps_canonical_values_typed() {
+    let receipt = observation("ledger", ObservationScopeV1::Profile)
+        .receipt()
+        .clone();
+    let receipt_id = receipt.receipt().receipt_id().clone();
+    let expected = CursorAdvanceLedgerIdentityV1::new(
+        ObservationCoverageReason::SanitizerRejected,
+        Some(receipt_id.clone()),
+    );
+    let stored = CursorAdvanceLedgerIdentityV1::from_stored_row_with_authority_receipt(
+        "sanitizer_rejected",
+        Some(receipt_id.as_str()),
+        Some(&receipt),
+    );
+
+    assert_eq!(stored, expected);
+    assert!(matches!(
+        stored.reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::SanitizerRejected)
+    ));
+    assert!(matches!(
+        stored.receipt_id(),
+        CursorAdvanceLedgerReceiptIdV1::Known(receipt_id)
+            if receipt_id.as_str() == "receipt.ledger"
+    ));
+}

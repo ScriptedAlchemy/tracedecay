@@ -4,6 +4,7 @@
 
 use super::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
 use crate::tests::harness::RegisteredGlobalDbTestRuntime;
+use tracedecay_store::ObservationCoverageReason;
 
 async fn insert_advance(
     runtime: &RegisteredGlobalDbTestRuntime,
@@ -117,5 +118,37 @@ async fn unknown_reason_strings_stay_visible_in_the_census() {
             }],
         },
         "a reason this binary does not recognize must never be classified as benign"
+    );
+}
+
+#[tokio::test]
+async fn refusal_census_labels_identity_collisions_without_a_generic_admission_bucket() {
+    let temporary = tempfile::TempDir::new().unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
+        .await
+        .expect("profile runtime");
+
+    insert_advance(
+        &runtime,
+        "cursor",
+        0,
+        ObservationCoverageReason::ObservationIdentityCollision.as_str(),
+    )
+    .await;
+
+    let census = runtime
+        .profile_database()
+        .observation_refusal_census()
+        .await;
+
+    assert_eq!(
+        census,
+        ObservationRefusalCensusV1::Observed {
+            refusals: vec![ObservationRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "observation_identity_collision".to_owned(),
+                count: 1,
+            }],
+        }
     );
 }
