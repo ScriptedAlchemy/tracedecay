@@ -23,6 +23,7 @@ pub enum SessionHistoricalIngestOutcome {
     },
     Blocked {
         reason_code: &'static str,
+        made_progress: bool,
     },
     Cancelled,
 }
@@ -40,6 +41,9 @@ impl SessionHistoricalIngestOutcome {
             Self::Pending {
                 made_progress: true
             } | Self::Retryable {
+                made_progress: true,
+                ..
+            } | Self::Blocked {
                 made_progress: true,
                 ..
             }
@@ -265,6 +269,7 @@ fn classify_transcript_ingest_outcome(
     if let Some(failure) = outcome.failures.iter().find(|failure| !failure.retryable) {
         return SessionHistoricalIngestOutcome::Blocked {
             reason_code: failure.reason_code,
+            made_progress,
         };
     }
     if let Some(failure) = outcome.failures.first() {
@@ -337,8 +342,43 @@ mod tests {
             outcome,
             SessionHistoricalIngestOutcome::Blocked {
                 reason_code: "invalid_observation_contract",
+                made_progress: false,
             }
         );
         assert!(!outcome.needs_another_pass());
+    }
+
+    #[test]
+    fn permanent_cursor_failure_preserves_healthy_provider_progress() {
+        let outcome = classify_transcript_ingest_outcome(
+            TranscriptIngestOutcome {
+                stats: tracedecay_sessions::TranscriptIngestStats {
+                    sessions_upserted: 2,
+                    messages_upserted: 4,
+                },
+                failures: vec![TranscriptCatchUpFailure {
+                    provider: "cursor",
+                    source: "observation",
+                    reason_code: "observation_cursor_advance_collision",
+                    retryable: false,
+                    source_locator: None,
+                }],
+                coverage: IngestPassCoverage::Complete,
+                scheduling_state_written: false,
+            },
+            &ObservationCancellation::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            SessionHistoricalIngestOutcome::Blocked {
+                reason_code: "observation_cursor_advance_collision",
+                made_progress: true,
+            }
+        );
+        assert!(
+            outcome.made_progress(),
+            "the healthy Claude and Codex rows must still reach temporal projection"
+        );
     }
 }

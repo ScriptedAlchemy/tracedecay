@@ -83,7 +83,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         "retained historical session ingest pass will retry"
                     );
                 }
-                Some(SessionHistoricalIngestOutcome::Blocked { reason_code }) => {
+                Some(SessionHistoricalIngestOutcome::Blocked { reason_code, .. }) => {
                     tracing::warn!(reason_code, "retained historical session ingest is blocked");
                 }
                 Some(
@@ -93,18 +93,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 )
                 | None => {}
             }
-            let history_requires_projection = match history_outcome {
-                Some(SessionHistoricalIngestOutcome::Complete) => true,
-                Some(
-                    SessionHistoricalIngestOutcome::Pending { made_progress }
-                    | SessionHistoricalIngestOutcome::Retryable { made_progress, .. },
-                ) => made_progress,
-                Some(
-                    SessionHistoricalIngestOutcome::Blocked { .. }
-                    | SessionHistoricalIngestOutcome::Cancelled,
-                )
-                | None => false,
-            };
+            let history_requires_projection = matches!(
+                history_outcome,
+                Some(SessionHistoricalIngestOutcome::Complete)
+            ) || history_outcome
+                .is_some_and(SessionHistoricalIngestOutcome::made_progress);
             let report =
                 if projection_requested || state.has_requests() || history_requires_projection {
                     let pass = hotpath::future!(
