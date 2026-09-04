@@ -56,6 +56,7 @@ use super::{
     },
 };
 
+mod canonical_json;
 mod helpers;
 use helpers::*;
 mod ignored_sources;
