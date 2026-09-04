@@ -17,7 +17,6 @@ pub enum CodexGoalContextSource {
 pub struct CodexGoalContextCorrelation {
     identity: [u8; 32],
     source: CodexGoalContextSource,
-    admission_paired: bool,
 }
 
 impl CodexGoalContextCorrelation {
@@ -29,12 +28,6 @@ impl CodexGoalContextCorrelation {
     /// Native envelope shape that produced the projected message.
     pub fn source(&self) -> CodexGoalContextSource {
         self.source
-    }
-
-    /// Whether canonical page admission already paired and suppressed the
-    /// response precursor for this current item.
-    pub fn admission_paired(&self) -> bool {
-        self.admission_paired
     }
 }
 
@@ -133,11 +126,6 @@ pub fn codex_goal_context_correlation(
     Some(CodexGoalContextCorrelation {
         identity: Sha256::digest(encoded).into(),
         source,
-        admission_paired: metadata
-            .pointer("/relations/parent_message_id")
-            .or_else(|| metadata.get("paired_response_message_id"))
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.is_empty()),
     })
 }
 

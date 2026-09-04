@@ -19,7 +19,6 @@ pub async fn find_preceding_codex_goal_response(
     };
     if current.provider != "codex"
         || current_correlation.source() != CodexGoalContextSource::ItemCompleted
-        || current_correlation.admission_paired()
     {
         return Ok(None);
     }

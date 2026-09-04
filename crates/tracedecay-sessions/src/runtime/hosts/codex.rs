@@ -68,6 +68,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1,
 };
@@ -91,56 +92,16 @@ use crate::runtime::shared::{
     title_from_messages,
 };
 use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
+    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptCursorKey,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     stream_new_jsonl,
 };
 
-/// Semantic goal payload plus whether the row came from Codex's authoritative
-/// current `item_completed` event rather than its preceding `response_item`.
-fn goal_context_dedup_projection(
-    message: &crate::runtime::SessionMessageRecord,
-) -> Option<(serde_json::Value, bool)> {
-    if message.kind.as_deref() != Some("goal_context") {
-        return None;
-    }
-    let metadata =
-        serde_json::from_str::<serde_json::Value>(message.metadata_json.as_deref()?).ok()?;
-    Some((
-        metadata.get("codex_goal")?.clone(),
-        metadata
-            .get("source_event")
-            .and_then(serde_json::Value::as_str)
-            == Some("item_completed"),
-    ))
-}
-
-fn with_paired_response_goal(
-    current: &mut crate::runtime::SessionMessageRecord,
-    response_message_id: &str,
-) -> bool {
-    let Some(metadata_json) = current.metadata_json.as_deref() else {
-        return false;
-    };
-    let Ok(mut metadata) = serde_json::from_str::<serde_json::Value>(metadata_json) else {
-        return false;
-    };
-    let serde_json::Value::Object(fields) = &mut metadata else {
-        return false;
-    };
-    fields.insert(
-        "paired_response_message_id".to_owned(),
-        serde_json::Value::String(response_message_id.to_owned()),
-    );
-    let Ok(metadata_json) = serde_json::to_string(&metadata) else {
-        return false;
-    };
-    current.metadata_json = Some(metadata_json);
-    true
-}
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
+#[cfg(test)]
+pub(crate) use observation::codex_observation_source_v2;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
     try_admit_codex_jsonl_observations_for_profile,
@@ -2632,6 +2593,16 @@ impl TranscriptSource for CodexSource {
             .paths
     }
 
+    fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
+        hash_path(&mut hasher, transcript_path);
+        TranscriptCursorKey::opaque(format!(
+            "codex-v2:{}",
+            encode_lowercase_hex(&hasher.finalize())
+        ))
+    }
+
     fn discover_transcript_paths(
         &self,
         _project_root: &Path,
@@ -2704,28 +2675,6 @@ impl TranscriptSource for CodexSource {
                               cwd: Option<&Path>,
                               git: Option<&serde_json::Value>| {
             context::annotate_message(&mut message, cwd, git, &self.project_matchers);
-            if let Some(previous) = messages.last_mut()
-                && let (
-                    Some((previous_goal, previous_is_current)),
-                    Some((message_goal, message_is_current)),
-                ) = (
-                    goal_context_dedup_projection(previous),
-                    goal_context_dedup_projection(&message),
-                )
-                && previous_goal == message_goal
-                && (previous_is_current
-                    || message_is_current
-                    || previous.message_id == message.message_id)
-            {
-                if message_is_current && !previous_is_current {
-                    if with_paired_response_goal(&mut message, &previous.message_id) {
-                        *previous = message;
-                        return;
-                    }
-                } else {
-                    return;
-                }
-            }
             messages.push(message);
         };
         for line in &new.lines {
