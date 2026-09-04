@@ -590,7 +590,7 @@ fn multi_root_capability_for_tool(
 pub(super) struct DispatchCatalogBinding {
     pub(super) name: String,
     pub(super) group: Option<McpToolDispatchGroup>,
-    pub(super) executable_binding: Option<ExecutableBindingV1>,
+    pub(super) executable_binding: Option<&'static ExecutableBindingV1>,
 }
 
 fn dispatch_catalog_bindings()
@@ -905,7 +905,7 @@ fn build_mcp_dispatch_catalog()
     for binding in dispatch_catalog_bindings()? {
         let application_capability = application_capability_for_tool(&binding.name)?;
         let multi_root_capability = multi_root_capability_for_tool(&binding.name)?;
-        let executable_binding = binding.executable_binding.as_ref();
+        let executable_binding = binding.executable_binding;
         // The multi-root catalog is the sole contract authority for its own
         // tools; every field below prefers it and falls back to the
         // application-surface capability for everything else.
