@@ -1512,17 +1512,6 @@ impl GraphDb {
         Ok(())
     }
 
-    /// Releases against whatever authority this process holds, without a
-    /// caller-supplied head digest. See
-    /// [`Self::release_sealed_generation_staging_rows_with`].
-    pub(crate) fn release_sealed_generation_staging_rows(
-        &self,
-        locator: &GenerationLocator,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<SealedStagingRelease, GraphDbError> {
-        self.release_sealed_generation_staging_rows_with(locator, None, check)
-    }
-
     /// Releases one sealed generation's duplicate staging rows.
     ///
     /// `relational_recovered_digest` is the digest the relational authority
@@ -1628,7 +1617,11 @@ impl GraphDb {
         }
         state.stored.remove(locator);
         state.sealed_only.insert(locator.clone());
-        if (was_sealed_only || now_sealed_only) && !removed_rows {
+        // Absent rows are the durable truth; the process-local sealed-only
+        // flag is lost across hibernation, so it must not decide whether a
+        // repeat sweep reports a release that never happened.
+        let _ = (was_sealed_only, now_sealed_only);
+        if !removed_rows {
             Ok(SealedStagingRelease::AlreadyReleased)
         } else {
             let (entities, relations) = sealed.row_counts();
@@ -2358,21 +2351,6 @@ fn generation_stage_pages_with_limits(
         maximum_mutations,
         maximum_live_bytes,
     )?;
-    // A generation with no rows still owns a projection: the page loop is
-    // what writes the projection state, publication record, and commit
-    // marker, so an empty manifest must apply exactly one empty page.
-    // Without it the staged generation has no projection node, the
-    // post-stage verification reports "recovered generation is missing",
-    // and the projection is quarantined by its own publication (observed
-    // live on a project whose memory graph had zero facts).
-    if pages.is_empty() {
-        pages.push(GenerationStagePage {
-            ordinal: 0,
-            kind: GenerationStagePageKind::Entities,
-            range: 0..0,
-            live_bytes: 0,
-        });
-    }
     Ok(pages)
 }
 
