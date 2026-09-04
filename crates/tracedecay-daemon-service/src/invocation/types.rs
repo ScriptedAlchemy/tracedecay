@@ -334,6 +334,24 @@ impl BoundedHookOrchestratorV1 {
                 },
                 outcome = &mut work_future => Some(outcome),
             };
+            if outcome.is_none()
+                && operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire)
+                && !cancellation.is_cancelled()
+            {
+                // Supersession is not owner retirement: the incumbent's work
+                // already started, its receipt terminal is owed, and the
+                // successor inherits this permit. Both must follow the real
+                // end of that work — including nested blocking work the
+                // future cannot cancel — so join it here instead of dropping
+                // it. Owner retirement still preempts the join.
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {}
+                    _ = &mut work_future => {}
+                }
+            }
             let emit_terminal = match outcome {
                 Some(HookOrchestrationWorkOutcomeV1::Completed) => true,
                 Some(HookOrchestrationWorkOutcomeV1::RetryableFailure) => false,
