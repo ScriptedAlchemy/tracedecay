@@ -2544,13 +2544,15 @@ pub fn classify_observation_collision(
 }
 
 /// Whether `candidate` is the current canonical form of a retained Codex or
-/// Cursor record written before route-only source context was removed.
+/// Cursor record written before route-only source context was removed, or a
+/// Cursor native record replayed from another physical transcript occurrence.
 ///
 /// The compatibility is deliberately directional and field-bounded. It first
 /// binds both payloads to the same native record identity, then permits only
-/// the exact source-context fields those providers formerly synthesized. Any
-/// authored fact, role, content, native timestamp, or unrelated relation still
-/// differs after normalization and therefore remains an identity collision.
+/// the exact source-context fields those providers formerly synthesized and,
+/// for Cursor, the physical evidence range. Any authored fact, role, content,
+/// native timestamp, or unrelated relation still differs after normalization
+/// and therefore remains an identity collision.
 pub fn is_canonical_payload_revision_replay(
     existing: &DurableObservationV1,
     candidate: &DurableObservationV1,
@@ -2702,6 +2704,7 @@ fn normalize_cursor_payload_revision(existing: &mut Value, current: &Value) -> b
     if !current_evidence.contains_key("native_timestamp") {
         changed |= existing_evidence.remove("native_timestamp").is_some();
     }
+    changed |= replace_with_current_field(existing_evidence, current_evidence, "range");
     changed
 }
 

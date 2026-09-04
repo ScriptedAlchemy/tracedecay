@@ -57,6 +57,38 @@ fn cursor_native_message_identity_is_content_independent() {
             "content": "first authored content"
         }
     });
+    let nested_below_invalid_top_level = json!({
+        "id": null,
+        "role": "assistant",
+        "message": {
+            "id": "message-native-42",
+            "content": "changed authored content"
+        }
+    });
+    let nested_below_empty_top_level = json!({
+        "id": "",
+        "role": "assistant",
+        "message": {
+            "id": "message-native-42",
+            "content": "changed authored content again"
+        }
+    });
+    let projected_below_invalid_top_level = cursor::cursor_projected_message_id(
+        &nested_below_invalid_top_level,
+        "cursor-native-session",
+        192,
+        1,
+        false,
+    )
+    .unwrap();
+    let projected_below_empty_top_level = cursor::cursor_projected_message_id(
+        &nested_below_empty_top_level,
+        "cursor-native-session",
+        256,
+        1,
+        false,
+    )
+    .unwrap();
 
     let first = cursor::cursor_observation_identity(
         "cursor-native-session",
@@ -76,11 +108,43 @@ fn cursor_native_message_identity_is_content_independent() {
         ObservationSourceRangeV1::new(128, 192).unwrap(),
     )
     .unwrap();
+    let nested_below_invalid_top_level = cursor::cursor_observation_identity(
+        "cursor-native-session",
+        &nested_below_invalid_top_level,
+        ObservationSourceRangeV1::new(192, 256).unwrap(),
+    )
+    .unwrap();
+    let nested_below_empty_top_level = cursor::cursor_observation_identity(
+        "cursor-native-session",
+        &nested_below_empty_top_level,
+        ObservationSourceRangeV1::new(256, 320).unwrap(),
+    )
+    .unwrap();
 
     assert_eq!(first.primary(), changed.primary());
     assert_eq!(first.primary(), nested.primary());
+    assert_eq!(first.primary(), nested_below_invalid_top_level.primary());
+    assert_eq!(first.primary(), nested_below_empty_top_level.primary());
     assert!(first.collision_disambiguation().is_none());
     assert!(changed.collision_disambiguation().is_none());
+    assert!(
+        nested_below_invalid_top_level
+            .collision_disambiguation()
+            .is_none()
+    );
+    assert!(
+        nested_below_empty_top_level
+            .collision_disambiguation()
+            .is_none()
+    );
+    assert_eq!(
+        projected_below_invalid_top_level.as_str(),
+        "message-native-42"
+    );
+    assert_eq!(
+        projected_below_invalid_top_level,
+        projected_below_empty_top_level
+    );
 }
 
 #[test]
