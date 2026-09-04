@@ -56,11 +56,11 @@ mod terminal_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 #[cfg(any(test, feature = "test-helpers"))]
-use mounts::SessionGraphSettleTestGateState;
+use mounts::SessionGraphPublicationTestGateState;
 use retained_hook_tasks::RetainedHookTasks;
 
 #[cfg(any(test, feature = "test-helpers"))]
-pub use mounts::SessionGraphSettleTestGate;
+pub use mounts::SessionGraphPublicationTestGate;
 
 pub use profile_memory::open_user_memory_db;
 
@@ -3042,10 +3042,10 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     /// session maintenance (background historical schema convergence) for the
     /// shards it attaches. Short-lived CLI/hook processes stay `false`.
     long_lived_session_maintenance: bool,
-    /// Test-only hold applied at the tail of each session relation-graph open
-    /// task, after settlement is published and announced.
+    /// Test-only hold applied immediately after each session relation-graph
+    /// open task publishes its settled state.
     #[cfg(any(test, feature = "test-helpers"))]
-    session_graph_settle_gate: StdMutex<Option<Arc<SessionGraphSettleTestGateState>>>,
+    session_graph_publication_gate: StdMutex<Option<Arc<SessionGraphPublicationTestGateState>>>,
 }
 
 impl DaemonSessionRuntimeRegistryV1 {

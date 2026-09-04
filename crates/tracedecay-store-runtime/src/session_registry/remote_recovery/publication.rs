@@ -734,19 +734,17 @@ mod tests {
         ProjectSessionNativeRetirementV1, ProjectSessionRecoveryPhaseV1,
     };
 
-    /// Settlement of the background session relation-graph open is the
-    /// observable boundary every retirement path awaits before it reserves the
-    /// prior Store owner. The open task holds a counted client lease on that
-    /// same session shard for the duration of the open, so releasing it after
-    /// the settlement announcement — as an incidental drop of the task future
-    /// on another worker — lets a woken retirement observe a `ClientLeases`
-    /// refusal for a lease that is already finished with its job.
+    /// A settled relation-graph state is itself observable: a retirement that
+    /// starts after publication takes `wait_for_session_graph`'s state fast
+    /// path without awaiting the settlement notification. The open task holds
+    /// a counted client lease on the same session shard for the duration of the
+    /// open, so that lease must already be gone when the state becomes visible.
     ///
-    /// The test gate parks the open task at the tail of its body, right after
-    /// it publishes and announces settlement, so whatever the task still owns
-    /// at that instant is deterministic rather than a scheduling race.
+    /// The test gate parks the open task immediately after state publication,
+    /// before notification, so the second worker deterministically takes that
+    /// fast path and reserves both retirement targets while the task is parked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn settled_session_graph_open_task_holds_no_session_client_lease() {
+    async fn published_session_graph_fast_path_holds_no_open_task_lease() {
         let temporary = tempfile::tempdir().expect("temporary project parent");
         let root = temporary
             .path()
@@ -774,7 +772,7 @@ mod tests {
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .expect("session runtime registry");
-        let gate = registry.block_session_graph_settle_for_test();
+        let gate = registry.block_session_graph_publication_for_test();
         let mounted = registry
             .project_sessions(project_id.clone(), [project_root])
             .await
