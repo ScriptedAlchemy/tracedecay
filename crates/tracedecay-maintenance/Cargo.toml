@@ -76,8 +76,17 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
 
-[target.'cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))'.dependencies]
-libc = "0.2"
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_SystemServices",
+] }
 
 [dev-dependencies]
 filetime = "0.2"

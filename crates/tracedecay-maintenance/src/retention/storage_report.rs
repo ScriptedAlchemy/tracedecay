@@ -523,7 +523,7 @@ struct ProjectDirectoryPage {
     entries_scanned: usize,
 }
 
-/// Reads one bounded page in the directory stream's native order.
+/// Reads one bounded result page from the directory's durable snapshot.
 ///
 /// The cursor is opaque: callers must return it unchanged rather than treating
 /// it as a directory name or assuming lexical ordering.
@@ -1133,19 +1133,9 @@ mod tests {
             .unwrap();
     }
 
-    /// A full pass over a directory mutated mid-iteration must miss nothing
-    /// and stay bounded.
-    ///
-    /// Repeat-freedom is deliberately *not* asserted. `read_project_directory_page`
-    /// resumes with `seekdir` on a `telldir` cookie, and its own SAFETY note
-    /// records the contract: a cookie invalidated by a concurrent mutation may
-    /// yield a repeated page. APFS does exactly that, while glibc happens not
-    /// to — so a no-repeats assertion tested the platform, not the contract.
-    /// Deduplicating inside the reader would require carrying every name seen
-    /// so far, which is the unbounded state paging exists to avoid, so the
-    /// tolerance stays in the contract and both consumers absorb it: orphan
-    /// collection re-checks each candidate before acting, and the storage
-    /// report may double-count a directory in one page's estimate.
+    /// A full pass over a directory mutated mid-iteration must miss nothing,
+    /// repeat nothing, and stay bounded. The durable inventory performs at
+    /// most one source scan and one inventory read for each retained entry.
     #[test]
     fn project_directory_pages_cover_every_entry_within_a_bounded_pass() {
         for page_size in [64, 256] {
@@ -1168,6 +1158,7 @@ mod tests {
                 let page =
                     list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
                 entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
+                let returned_any = !page.directories.is_empty();
                 for (name, _) in page.directories {
                     returned = returned.saturating_add(1);
                     observed.insert(name);
@@ -1177,7 +1168,7 @@ mod tests {
                     break;
                 };
                 cursor = next_cursor;
-                if first_page {
+                if first_page && returned_any {
                     first_page = false;
                     std::fs::create_dir_all(projects_dir.join("proj_foreign_added")).unwrap();
                     std::fs::remove_dir(projects_dir.join("proj_0500")).unwrap();
@@ -1193,28 +1184,112 @@ mod tests {
                 observed.is_superset(&expected_without_removed),
                 "page size {page_size} skipped an original directory"
             );
-            // A replay is permitted, an unbounded one is not: the whole pass
-            // must still cost within a constant factor of the directory.
-            assert!(
-                returned <= (expected.len() + 1).saturating_mul(2),
-                "page size {page_size} returned {returned} entries for {} directories",
-                expected.len()
+            assert_eq!(
+                returned,
+                observed.len(),
+                "page size {page_size} replayed an inventory entry"
             );
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             assert!(
-                entries_scanned <= expected.len() + 1,
-                "page size {page_size} rescanned entries: {entries_scanned}"
-            );
-            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-            assert!(
-                entries_scanned <= (expected.len() + 1).saturating_mul(2),
-                "page size {page_size} rescanned directory or inventory entries: {entries_scanned}"
+                entries_scanned <= (expected.len() + 2).saturating_mul(2),
+                "page size {page_size} exceeded one source scan, bounded anchors, and one inventory read: {entries_scanned}"
             );
             assert!(
                 entries_scanned >= observed.len(),
                 "entry accounting must cover every returned directory"
             );
         }
+    }
+
+    /// A native directory offset is not stable across mutation even while the
+    /// directory inode remains unchanged. A resumed page must not translate an
+    /// invalidated cookie into terminal empty success and silently truncate the
+    /// report's orphan-store inventory.
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[test]
+    fn invalid_native_directory_cookie_cannot_end_a_non_empty_report() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects_dir = profile_root.join("projects");
+        for name in ["proj_a", "proj_b", "proj_c"] {
+            std::fs::create_dir_all(projects_dir.join(name)).unwrap();
+        }
+        let metadata = projects_dir.metadata().unwrap();
+        let invalidated_cookie = format!("v1:{}:{}:{}", metadata.dev(), metadata.ino(), i64::MAX);
+
+        let resumed = list_project_directories_page(&profile_root, &invalidated_cookie, 1).unwrap();
+
+        assert_eq!(resumed.directories.len(), 1);
+        assert!(
+            resumed.next_cursor.is_some(),
+            "a non-empty directory must retain continuation after an invalid resume"
+        );
+    }
+
+    #[test]
+    fn invalid_durable_inventory_index_cannot_end_a_non_empty_report() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects_dir = profile_root.join("projects");
+        for name in ["proj_a", "proj_b", "proj_c"] {
+            std::fs::create_dir_all(projects_dir.join(name)).unwrap();
+        }
+        let first = list_project_directories_page(&profile_root, "", 1).unwrap();
+        let cursor = first
+            .next_cursor
+            .expect("three entries require continuation");
+        let (prefix, _) = cursor
+            .rsplit_once(':')
+            .expect("the opaque durable cursor carries an offset");
+        let invalidated_cursor = format!("{prefix}:{}", usize::MAX);
+
+        let resumed = list_project_directories_page(&profile_root, &invalidated_cursor, 1).unwrap();
+
+        assert_eq!(resumed.directories.len(), 1);
+        assert!(
+            resumed.next_cursor.is_some(),
+            "an invalid durable index must restart instead of claiming completion"
+        );
+    }
+
+    #[test]
+    fn missing_durable_inventory_chunk_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects_dir = profile_root.join("projects");
+        for name in ["proj_a", "proj_b", "proj_c"] {
+            std::fs::create_dir_all(projects_dir.join(name)).unwrap();
+        }
+        let first = list_project_directories_page(&profile_root, "", 1).unwrap();
+        let cursor = first
+            .next_cursor
+            .expect("three entries require continuation");
+        let mut fields = cursor.split(':').collect::<Vec<_>>();
+        fields[4] = "9223372036854775807";
+        assert!(list_project_directories_page(&profile_root, &fields.join(":"), 1).is_err());
+    }
+
+    #[test]
+    fn durable_inventory_end_index_cannot_forge_terminal_completion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects_dir = profile_root.join("projects");
+        for name in ["proj_a", "proj_b", "proj_c"] {
+            std::fs::create_dir_all(projects_dir.join(name)).unwrap();
+        }
+        let first = list_project_directories_page(&profile_root, "", 1).unwrap();
+        let cursor = first
+            .next_cursor
+            .expect("three entries require continuation");
+        let (prefix, _) = cursor
+            .rsplit_once(':')
+            .expect("the opaque durable cursor carries an offset");
+        let resumed =
+            list_project_directories_page(&profile_root, &format!("{prefix}:3"), 1).unwrap();
+
+        assert_eq!(resumed.directories, first.directories);
+        assert!(resumed.next_cursor.is_some());
     }
 
     #[test]
@@ -1273,13 +1348,11 @@ mod tests {
                 let elapsed = started.elapsed();
 
                 assert_eq!(observed, directory_count);
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-                assert_eq!(entries_scanned, directory_count);
-                #[cfg(not(any(
-                    all(target_os = "linux", target_env = "gnu"),
-                    target_os = "macos"
-                )))]
-                assert_eq!(entries_scanned, directory_count.saturating_mul(2));
+                assert!(entries_scanned >= directory_count.saturating_mul(2));
+                assert!(
+                    entries_scanned <= directory_count.saturating_add(2).saturating_mul(3),
+                    "directory scan exceeded its bounded source, anchor, and inventory work"
+                );
                 eprintln!(
                     "directories={directory_count} page_size={page_size} \
                      entries_scanned={entries_scanned} elapsed={elapsed:?}"

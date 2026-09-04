@@ -6698,8 +6698,8 @@ dependencies = [
  "cap-std",
  "filetime",
  "hotpath",
- "libc",
  "rusqlite",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6714,6 +6714,7 @@ dependencies = [
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

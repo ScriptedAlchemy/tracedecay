@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -1974,9 +1975,41 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
     );
 }
 
-/// Unregistered projects are an on-disk-only class, but their retention work
-/// still advances through a bounded, resumable page rather than recursing the
-/// entire profile under a single writer admission.
+fn durable_project_inventory_generation_path(profile_root: &Path) -> PathBuf {
+    let mut generations = std::fs::read_dir(
+        profile_root
+            .join("maintenance")
+            .join("unregistered-project-directory-inventory-v3"),
+    )
+    .expect("a page publishes its durable inventory directory")
+    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+    .filter(|path| path.is_dir())
+    .collect::<Vec<_>>();
+    assert_eq!(
+        generations.len(),
+        1,
+        "the fixture publishes one inventory generation"
+    );
+    generations.pop().unwrap()
+}
+
+fn durable_project_inventory_path(profile_root: &Path) -> PathBuf {
+    let generation = durable_project_inventory_generation_path(profile_root);
+    let mut chunks = std::fs::read_dir(generation)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(chunks.len(), 1, "the fixture publishes one complete chunk");
+    chunks.pop().unwrap()
+}
+
+/// Unregistered projects are an on-disk-only class. Their shallow directory
+/// snapshot is delivered through bounded result pages, and each page applies
+/// only the candidates it returned.
 #[tokio::test]
 async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2011,20 +2044,7 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
         .next_cursor
         .clone()
         .expect("a third directory requires a second page");
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-    let portable_inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
-    )
-    .expect("first portable page publishes its durable inventory")
-    .next()
-    .expect("one cursor signature owns the first portable page")
-    .unwrap()
-    .path();
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-    let portable_inventory =
-        std::fs::read(&portable_inventory_path).expect("read first portable inventory state");
+    let portable_inventory_path = durable_project_inventory_path(&profile_root);
 
     let second = sweep_unregistered_store_page(
         &db,
@@ -2036,7 +2056,7 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
             now: base,
             apply: true,
             cancellation: &cancellation,
-            deadline,
+            deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
         },
     )
     .await
@@ -2044,12 +2064,9 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     assert_eq!(second.completion, UnregisteredSweepCompletionV1::Complete);
     assert_eq!(second.outcome.collected.len(), 1);
     assert!(second.next_cursor.is_none());
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-    assert_eq!(
-        std::fs::read(portable_inventory_path)
-            .expect("resumed portable page keeps the prior inventory"),
-        portable_inventory,
-        "the second apply page must resume the durable inventory rather than re-scan after its own deletion"
+    assert!(
+        portable_inventory_path.exists(),
+        "the terminal response must retain inventory authority until stale cleanup can prove the caller no longer needs it"
     );
     assert!(
         !profile_root.join("projects/proj_page_a").exists()
@@ -2059,12 +2076,11 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     );
 }
 
-/// Platforms without a persistent OS directory offset use an append-only
-/// durable inventory. A cancelled admission keeps its partial inventory, and
-/// the next page advances that exact log instead of deleting/rebuilding it.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+/// Cancellation before publication leaves no partial cursor authority. A
+/// later admission publishes one complete snapshot and every resumed page
+/// observes those exact bytes.
 #[test]
-fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
+fn portable_inventory_publication_is_atomic_across_cancellation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     for index in 0..32 {
@@ -2075,89 +2091,713 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
         )
         .unwrap();
     }
-    let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
-    let page =
-        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
-            .unwrap()
-            .expect("first bounded portable page completes");
-    let cursor = page
-        .next_cursor
-        .expect("a bounded first chunk leaves durable continuation work");
-    let inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
+    let inspected = std::cell::Cell::new(0usize);
+    assert!(
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| {
+            inspected.set(inspected.get().saturating_add(1));
+            inspected.get() > 4
+        },)
+        .unwrap()
+        .is_none()
+    );
+    let published_chunks = std::fs::read_dir(
+        profile_root.join("maintenance/unregistered-project-directory-inventory-v3"),
     )
     .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
-    let partial = std::fs::read(&inventory_path).unwrap();
+    .flat_map(|generation| std::fs::read_dir(generation.unwrap().path()).unwrap())
+    .filter_map(Result::ok)
+    .filter(|entry| {
+        entry
+            .path()
+            .extension()
+            .is_some_and(|value| value == "json")
+    })
+    .count();
+    assert_eq!(published_chunks, 0, "cancellation must publish no chunk");
+    assert_eq!(
+        std::fs::read_dir(
+            profile_root.join("maintenance/unregistered-project-directory-inventory-v3"),
+        )
+        .unwrap()
+        .filter_map(Result::ok)
+        .count(),
+        1,
+        "cancellation must retain the generation until the caller can retry or stale cleanup expires it"
+    );
 
-    let cancelled = CancellationToken::new();
-    cancelled.cancel();
-    let interrupted = || cancelled.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let mut cursor = None;
+    let first_result = (0..16)
+        .find_map(|_| {
+            let page = super::unregistered_page::read_project_directory_page(
+                &profile_root,
+                cursor.as_deref(),
+                1,
+                &|| false,
+            )
+            .unwrap()
+            .expect("restart advances one bounded inventory chunk");
+            assert!(!page.entries.is_empty() || page.next_cursor != cursor);
+            cursor = page.next_cursor.clone();
+            (!page.entries.is_empty()).then_some(page)
+        })
+        .expect("bounded chunk publication must reach the first result page");
+    assert_eq!(first_result.entries.len(), 1);
+}
+
+#[test]
+fn durable_inventory_converges_with_fresh_state_before_every_page() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let expected = (0..17)
+        .map(|index| format!("proj_restart_{index}"))
+        .collect::<HashSet<_>>();
+    for project_id in &expected {
+        std::fs::create_dir_all(profile_root.join("projects").join(project_id)).unwrap();
+    }
+    let mut cursor = None;
+    let mut observed = HashSet::new();
+    let mut entries_scanned = 0usize;
+
+    for _ in 0..expected.len().saturating_mul(3) {
+        let page = super::unregistered_page::read_project_directory_page(
+            &profile_root,
+            cursor.as_deref(),
+            1,
+            &|| false,
+        )
+        .unwrap()
+        .expect("an uninterrupted restart remains a complete page attempt");
+        entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
+        assert!(
+            page.entries_scanned <= 9,
+            "one limit-1 admission must bound source, anchor, and result work"
+        );
+        assert!(
+            !page.entries.is_empty() || page.next_cursor != cursor,
+            "a restart must not repeat an empty page at the same cursor"
+        );
+        for entry in page.entries {
+            let ProjectDirectoryWorkV1::Project(project_id) = entry else {
+                panic!("the fixture contains no quarantines");
+            };
+            assert!(observed.insert(project_id), "durable pages must not repeat");
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(observed, expected);
+    assert!(cursor.is_none(), "the durable pass must reach completion");
+    assert!(
+        entries_scanned <= expected.len().saturating_add(2).saturating_mul(3),
+        "fresh readers must stay within one source pass, one anchor per chunk, and one inventory pass: {entries_scanned}"
+    );
+}
+
+#[test]
+fn resumed_terminal_page_survives_cancellation_and_response_loss() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for name in ["proj_terminal_retry_a", "proj_terminal_retry_b"] {
+        std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let cursor = first
+        .next_cursor
+        .expect("the second entry must be resumable");
+
     assert!(
         super::unregistered_page::read_project_directory_page(
             &profile_root,
             Some(&cursor),
             1,
-            &interrupted,
+            &|| true,
         )
         .unwrap()
-        .is_none()
+        .is_none(),
+        "interruption before the terminal result must not consume its cursor"
     );
-    assert_eq!(std::fs::read(&inventory_path).unwrap(), partial);
-
-    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
-
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
-    let hydration_page = super::unregistered_page::read_project_directory_page(
+    let terminal = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&cursor),
         1,
-        &interrupted,
+        &|| false,
     )
     .unwrap()
-    .expect("restart hydrates the durable portable inventory in a bounded slice");
-    let hydration_cursor = hydration_page
-        .next_cursor
-        .expect("partial inventory remains resumable after restart");
-    let replay_page = super::unregistered_page::read_project_directory_page(
+    .unwrap();
+    assert!(terminal.next_cursor.is_none());
+    let terminal_entries = terminal
+        .entries
+        .into_iter()
+        .map(|entry| match entry {
+            ProjectDirectoryWorkV1::Project(project_id) => project_id,
+            ProjectDirectoryWorkV1::Quarantine {
+                quarantine_name, ..
+            } => quarantine_name,
+        })
+        .collect::<Vec<_>>();
+
+    let replayed = super::unregistered_page::read_project_directory_page(
         &profile_root,
-        Some(&hydration_cursor),
+        Some(&cursor),
         1,
-        &interrupted,
+        &|| false,
     )
     .unwrap()
-    .expect("restart replays only a bounded source slice");
-    let replay_cursor = replay_page
-        .next_cursor
-        .expect("replay keeps a typed continuation cursor");
-    let resumed_page = super::unregistered_page::read_project_directory_page(
-        &profile_root,
-        Some(&replay_cursor),
-        1,
-        &interrupted,
-    )
-    .unwrap()
-    .expect("later page resumes the portable inventory");
-    assert!(resumed_page.next_cursor.is_some());
-    assert!(
-        std::fs::read(&inventory_path).unwrap().len() > partial.len(),
-        "a later bounded page appends rather than replacing durable partial progress"
+    .unwrap();
+    assert!(replayed.next_cursor.is_none());
+    let replayed_entries = replayed
+        .entries
+        .into_iter()
+        .map(|entry| match entry {
+            ProjectDirectoryWorkV1::Project(project_id) => project_id,
+            ProjectDirectoryWorkV1::Quarantine {
+                quarantine_name, ..
+            } => quarantine_name,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replayed_entries, terminal_entries,
+        "a lost terminal response must remain exactly retryable"
     );
 }
 
-/// A crash while a first inventory header is being published must not turn the
-/// cursor into a permanent configuration error. The next admission replaces
-/// the uncommitted header before it recreates bounded inventory progress.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 #[test]
-fn portable_inventory_repairs_torn_header_before_restart_resume() {
+fn windows_prefix_partition_converges_with_bounded_disjoint_queries() {
+    let names = [
+        ".tracedecay-orphan-quarantine-proj_q-123-1",
+        "0zero",
+        "PROJ_UPPER",
+        "proj",
+        "proj_a",
+        "proj_b",
+        "proj_c",
+        "proj_d",
+        "~irrelevant_a",
+        "~irrelevant_b",
+        "~irrelevant_c",
+    ];
+    let expected = names
+        .iter()
+        .filter(|name| super::unregistered_page::portable_inventory_entry_is_valid(name))
+        .map(|name| (*name).to_owned())
+        .collect::<HashSet<_>>();
+    let raw_limit = 3usize;
+    for case_sensitive in [false, true] {
+        let mut alphabet = "-.0123456789_abcdefghijklmnopqrstuvwxyz"
+            .chars()
+            .collect::<Vec<_>>();
+        if case_sensitive {
+            alphabet.extend('A'..='Z');
+        }
+        assert!(super::unregistered_page::windows_inventory_prefix_is_valid(
+            "a", &alphabet
+        ));
+        assert_eq!(
+            super::unregistered_page::windows_inventory_prefix_is_valid("A", &alphabet),
+            case_sensitive,
+            "a forged cursor prefix must obey the directory's case authority"
+        );
+        let (_, next_after_undecodable) =
+            super::unregistered_page::windows_partition_inventory_node(
+                "",
+                Vec::new(),
+                raw_limit,
+                Vec::new(),
+                raw_limit,
+                &alphabet,
+            )
+            .unwrap();
+        assert!(
+            next_after_undecodable.is_some(),
+            "raw entries that fail decoding must still force bounded partitioning"
+        );
+        let mut prefix = String::new();
+        let mut observed = HashSet::new();
+        let mut admissions = 0usize;
+        loop {
+            admissions = admissions.saturating_add(1);
+            assert!(
+                admissions <= 1_000,
+                "the production prefix transition must eventually exhaust the finite alphabet"
+            );
+            let matched = names
+                .iter()
+                .copied()
+                .filter(|name| {
+                    if case_sensitive {
+                        name.starts_with(&prefix)
+                    } else {
+                        name.to_ascii_lowercase().starts_with(&prefix)
+                    }
+                })
+                .take(raw_limit)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert!(
+                matched.len() <= raw_limit,
+                "one admission must not inspect an unbounded matching subtree"
+            );
+            let exact = if matched.len() == raw_limit && !prefix.is_empty() {
+                names
+                    .iter()
+                    .find(|name| {
+                        if case_sensitive {
+                            **name == prefix
+                        } else {
+                            name.eq_ignore_ascii_case(&prefix)
+                        }
+                    })
+                    .map(|name| vec![(*name).to_owned()])
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let matched_entries = matched.len();
+            let (emitted, next) = super::unregistered_page::windows_partition_inventory_node(
+                &prefix,
+                matched,
+                matched_entries,
+                exact,
+                raw_limit,
+                &alphabet,
+            )
+            .unwrap();
+            for name in emitted {
+                if super::unregistered_page::portable_inventory_entry_is_valid(&name) {
+                    assert!(observed.insert(name), "partition subtrees must be disjoint");
+                }
+            }
+            let Some(next) = next else {
+                break;
+            };
+            assert!(super::unregistered_page::windows_inventory_prefix_is_valid(
+                &next, &alphabet
+            ));
+            prefix = next;
+        }
+
+        assert_eq!(observed, expected);
+    }
+}
+
+#[test]
+fn windows_directory_name_record_does_not_require_trailing_struct_padding() {
+    let fixed_header_bytes = 12usize;
+    assert!(super::unregistered_page::windows_directory_name_fits(
+        fixed_header_bytes,
+        2,
+        fixed_header_bytes + 2,
+    ));
+    assert!(!super::unregistered_page::windows_directory_name_fits(
+        fixed_header_bytes,
+        2,
+        fixed_header_bytes + 1,
+    ));
+}
+
+#[test]
+fn a_fresh_run_reclaims_an_expired_abandoned_inventory_generation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_abandoned_{index}")),
+        )
+        .unwrap();
+    }
+    super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+        .unwrap()
+        .unwrap();
+    let chunk = durable_project_inventory_path(&profile_root);
+    let abandoned = chunk.parent().unwrap().to_path_buf();
+    filetime::set_file_mtime(
+        &abandoned,
+        filetime::FileTime::from_unix_time(1_700_000_000, 0),
+    )
+    .unwrap();
+
+    super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        !abandoned.exists(),
+        "fresh admission must reclaim an expired abandoned generation"
+    );
+}
+
+#[test]
+fn stale_inventory_cleanup_removes_only_bounded_artifacts_per_admission() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..65 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_cleanup_bound_{index}")),
+        )
+        .unwrap();
+    }
+    let mut cursor = None;
+    let abandoned = loop {
+        let page = super::unregistered_page::read_project_directory_page(
+            &profile_root,
+            cursor.as_deref(),
+            1,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+        cursor = page.next_cursor;
+        if !page.entries.is_empty() {
+            break durable_project_inventory_generation_path(&profile_root);
+        }
+    };
+    let before = std::fs::read_dir(&abandoned).unwrap().count();
+    assert!(before > 8, "the fixture must exceed one cleanup budget");
+    filetime::set_file_mtime(
+        &abandoned,
+        filetime::FileTime::from_unix_time(1_700_000_000, 0),
+    )
+    .unwrap();
+
+    let fresh =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let after = std::fs::read_dir(&abandoned).unwrap().count();
+
+    assert!(fresh.entries_scanned <= 9);
+    assert_eq!(
+        before.saturating_sub(after),
+        1,
+        "one fresh admission must remove only one artifact from a large stale generation"
+    );
+
+    let mut previous = after;
+    for _ in 0..=before {
+        if !abandoned.exists() {
+            break;
+        }
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+        let remaining = if abandoned.exists() {
+            std::fs::read_dir(&abandoned).unwrap().count()
+        } else {
+            0
+        };
+        assert_eq!(
+            previous.saturating_sub(remaining),
+            1,
+            "every admission must make exactly one bounded artifact of cleanup progress"
+        );
+        previous = remaining;
+    }
+    assert!(
+        !abandoned.exists(),
+        "bounded cleanup admissions must eventually remove the drained generation"
+    );
+}
+
+#[test]
+fn invalidated_directory_cookie_restarts_with_a_new_inventory_generation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_invalid_cookie_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .expect("the first admission publishes one bounded build chunk");
+    assert!(first.entries.is_empty());
+    let cursor = first.next_cursor.expect("the build remains resumable");
+    let chunk_path = durable_project_inventory_path(&profile_root);
+    let mut chunk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&chunk_path).unwrap()).unwrap();
+    chunk["next"]["offset"] = serde_json::json!(i64::MAX);
+    std::fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
+
+    let restarted = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&cursor),
+        1,
+        &|| false,
+    )
+    .unwrap()
+    .expect("an invalid seek cookie restarts instead of ending the pass");
+
+    assert!(restarted.entries.is_empty());
+    assert!(restarted.next_cursor.is_some());
+    assert_ne!(restarted.next_cursor, Some(cursor));
+}
+
+#[test]
+fn directory_cookie_must_resume_at_its_exact_anchored_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_anchor_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    let chunk_path = durable_project_inventory_path(&profile_root);
+    let mut chunk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&chunk_path).unwrap()).unwrap();
+    chunk["next"]["anchor"] = serde_json::json!([255]);
+    std::fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
+
+    let restarted = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&cursor),
+        1,
+        &|| false,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(restarted.entries.is_empty());
+    assert_ne!(restarted.next_cursor, Some(cursor));
+}
+
+#[test]
+fn inventory_chunk_link_must_advance_strictly_forward() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_forward_link_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    let chunk_path = durable_project_inventory_path(&profile_root);
+    let mut chunk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&chunk_path).unwrap()).unwrap();
+    chunk["next"]["offset"] = serde_json::json!(0);
+    std::fs::write(&chunk_path, serde_json::to_vec(&chunk).unwrap()).unwrap();
+
+    let restarted = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&cursor),
+        1,
+        &|| false,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(restarted.entries.is_empty());
+    assert_ne!(restarted.next_cursor, Some(cursor));
+}
+
+#[test]
+fn missing_canonical_result_chunk_fails_instead_of_replaying_the_prefix() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_missing_chunk_{index}")),
+        )
+        .unwrap();
+    }
+    let mut cursor = None;
+    let missing_cursor = loop {
+        let page = super::unregistered_page::read_project_directory_page(
+            &profile_root,
+            cursor.as_deref(),
+            1,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+        let next = page
+            .next_cursor
+            .expect("seventeen entries require continuation");
+        let fields = next.split(':').collect::<Vec<_>>();
+        if fields.get(3) == Some(&"page") && fields.get(4) != Some(&"0") {
+            break next;
+        }
+        cursor = Some(next);
+    };
+    let fields = missing_cursor.split(':').collect::<Vec<_>>();
+    let chunk_path = profile_root
+        .join("maintenance/unregistered-project-directory-inventory-v3")
+        .join(fields[1])
+        .join(format!("chunk-{}.json", fields[4]));
+    std::fs::remove_file(chunk_path).unwrap();
+
+    assert!(
+        super::unregistered_page::read_project_directory_page(
+            &profile_root,
+            Some(&missing_cursor),
+            1,
+            &|| false,
+        )
+        .is_err(),
+        "a broken canonical chain must fail closed, never replay chunk zero"
+    );
+}
+
+#[test]
+fn concurrent_inventory_builders_publish_distinct_immutable_generations() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_concurrent_build_{index}")),
+        )
+        .unwrap();
+    }
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let workers = (0..2)
+        .map(|_| {
+            let profile_root = profile_root.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::unregistered_page::read_project_directory_page(
+                    &profile_root,
+                    None,
+                    1,
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap()
+                .next_cursor
+                .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let cursors = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_ne!(cursors[0], cursors[1]);
+    assert_eq!(
+        std::fs::read_dir(
+            profile_root.join("maintenance/unregistered-project-directory-inventory-v3"),
+        )
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .count(),
+        2
+    );
+}
+
+#[test]
+fn replayed_build_cursor_cannot_replace_an_immutable_chunk() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_replayed_build_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    let first_chunk = durable_project_inventory_path(&profile_root);
+    let chunk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&first_chunk).unwrap()).unwrap();
+    let next_offset = chunk["next"]["offset"].as_i64().unwrap();
+    let second_chunk = first_chunk
+        .parent()
+        .unwrap()
+        .join(format!("chunk-{next_offset}.json"));
+
+    super::unregistered_page::read_project_directory_page(&profile_root, Some(&cursor), 1, &|| {
+        false
+    })
+    .unwrap()
+    .unwrap();
+    let immutable_mtime = filetime::FileTime::from_unix_time(1, 0);
+    filetime::set_file_mtime(&second_chunk, immutable_mtime).unwrap();
+
+    super::unregistered_page::read_project_directory_page(&profile_root, Some(&cursor), 1, &|| {
+        false
+    })
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        filetime::FileTime::from_last_modification_time(&second_chunk.metadata().unwrap()),
+        immutable_mtime,
+        "a retried build cursor must reuse, never replace, an existing chunk"
+    );
+}
+
+#[test]
+fn legacy_partial_v2_inventory_is_never_a_v3_completion_authority() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for name in ["proj_legacy_a", "proj_legacy_b", "proj_legacy_c"] {
+        std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
+    }
+    let legacy_root = profile_root.join("maintenance/unregistered-project-directory-inventory-v2");
+    std::fs::create_dir_all(&legacy_root).unwrap();
+    std::fs::write(legacy_root.join("stale.log"), b"v2:stale\nproj_legacy_a\n").unwrap();
+
+    let first =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .expect("v3 builds an independent immutable generation");
+
+    assert!(matches!(
+        first.entries.as_slice(),
+        [ProjectDirectoryWorkV1::Project(_)]
+    ));
+    assert!(
+        first
+            .next_cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with("portable-v3:"))
+    );
+}
+
+/// A malformed immutable chunk is never resumed. Build cursors start a new
+/// generation rather than interpreting partial bytes as directory names.
+#[test]
+fn portable_inventory_abandons_a_torn_build_chunk() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     for index in 0..16 {
@@ -2168,29 +2808,16 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
         )
         .unwrap();
     }
-    let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let interrupted = || false;
     let page =
         super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
             .unwrap()
             .expect("first bounded page creates a resumable inventory");
     let cursor = page
         .next_cursor
-        .expect("the first source slice remains incomplete");
-    let inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
-    std::fs::write(&inventory_path, b"v2:").unwrap();
-    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
-
+        .expect("the snapshot contains more than one result page");
+    let inventory_path = durable_project_inventory_path(&profile_root);
+    std::fs::write(&inventory_path, b"{").unwrap();
     let resumed = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&cursor),
@@ -2198,25 +2825,17 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
         &interrupted,
     )
     .unwrap()
-    .expect("a torn header is replaced before restart resume");
+    .expect("a torn build restarts with a new generation");
 
-    assert_eq!(resumed.entries.len(), 1);
+    assert!(resumed.entries.is_empty());
     assert!(resumed.next_cursor.is_some());
-    let signature = cursor.split(':').nth(1).unwrap();
-    assert!(
-        std::fs::read(&inventory_path)
-            .unwrap()
-            .starts_with(format!("v2:{signature}\n").as_bytes()),
-        "the recovered inventory must have a complete published header"
-    );
+    assert_ne!(resumed.next_cursor, Some(cursor));
 }
 
-/// A final append is committed only by its newline. After a restart, an
-/// unterminated project id is discarded before hydration, so it cannot be
-/// joined with a later append and hide the real project from the page.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+/// Appended bytes cannot become part of an immutable chunk. A fresh build
+/// generation is selected instead of exposing a fabricated record.
 #[test]
-fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
+fn portable_inventory_abandons_a_chunk_with_appended_bytes() {
     use std::io::Write;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2227,141 +2846,72 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
     for project_id in &project_ids {
         std::fs::create_dir_all(profile_root.join("projects").join(project_id)).unwrap();
     }
-    let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let interrupted = || false;
     let page =
         super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
             .unwrap()
-            .expect("first bounded page creates partial inventory");
+            .expect("first result page creates a complete inventory");
     let cursor = page
         .next_cursor
-        .expect("the inventory has unscanned source entries");
-    let inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
-    let inventory_before_torn_append = String::from_utf8(std::fs::read(&inventory_path).unwrap())
-        .expect("the production inventory is UTF-8");
-    let target = project_ids
-        .iter()
-        .find(|project_id| {
-            !inventory_before_torn_append
-                .lines()
-                .skip(1)
-                .any(|recorded| recorded == project_id.as_str())
-        })
-        .expect("the first bounded source slice does not contain every project")
-        .clone();
-    let torn = target[..target.len() - 1].to_owned();
-    assert!(tracedecay_runtime_core::storage::validate_project_id(&torn).is_ok());
+        .expect("the inventory has unread result entries");
+    let inventory_path = durable_project_inventory_path(&profile_root);
     let mut output = std::fs::OpenOptions::new()
         .append(true)
         .open(&inventory_path)
         .unwrap();
-    output.write_all(torn.as_bytes()).unwrap();
+    output.write_all(b"fabricated").unwrap();
     output.sync_data().unwrap();
     drop(output);
-    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
-
-    let _ = super::unregistered_page::read_project_directory_page(
+    let resumed = super::unregistered_page::read_project_directory_page(
         &profile_root,
         Some(&cursor),
-        64,
+        1,
         &interrupted,
     )
     .unwrap()
-    .expect("restart resumes after trimming the torn final record");
+    .expect("malformed immutable bytes restart the build");
 
-    let recovered = String::from_utf8(std::fs::read(&inventory_path).unwrap()).unwrap();
-    assert!(
-        recovered
-            .lines()
-            .any(|recorded| recorded == target.as_str()),
-        "the real project must be re-appended as its own record"
-    );
-    assert!(
-        !recovered.contains(&format!("{torn}{target}")),
-        "a torn record must never be joined with the subsequent append"
-    );
-    assert!(recovered.ends_with('\n'));
+    assert!(resumed.entries.is_empty());
+    assert_ne!(resumed.next_cursor, Some(cursor));
 }
 
-/// The canonical sidecar writer lock is process-safe, rather than merely the
-/// in-process builder map. A competing admission yields without touching the
-/// log and a later admission resumes from the same durable boundary.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+/// Inventory publication is rooted beneath the profile and must fail closed
+/// when a predictable log name is replaced by a symlink.
+#[cfg(unix)]
 #[test]
-fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
+fn portable_inventory_refuses_a_symlinked_log_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     let projects_dir = profile_root.join("projects");
     for index in 0..4 {
         std::fs::create_dir_all(projects_dir.join(format!("proj_writer_lock_{index}"))).unwrap();
     }
-    let signature = super::unregistered_page::portable_directory_signature(&projects_dir).unwrap();
-    let inventory = super::unregistered_page::portable_inventory_path(&profile_root, &signature);
-    std::fs::create_dir_all(inventory.parent().unwrap()).unwrap();
+    let first =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &|| false)
+            .unwrap()
+            .expect("the fixture publishes one complete inventory chunk");
+    let cursor = first
+        .next_cursor
+        .expect("four entries require continuation");
+    let inventory = durable_project_inventory_path(&profile_root);
+    std::fs::remove_file(&inventory).unwrap();
+    let sentinel = tmp.path().join("outside-sentinel");
+    std::fs::write(&sentinel, b"outside bytes").unwrap();
+    symlink(&sentinel, &inventory).unwrap();
 
-    let writer_lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(
-        &tracedecay_runtime_core::storage::append_lock_path(&inventory),
-    )
-    .unwrap();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let worker_profile_root = profile_root.clone();
-    let worker = std::thread::spawn(move || {
-        let cancellation = CancellationToken::new();
-        let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
-        let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
-        started_tx.send(()).unwrap();
+    assert!(
         super::unregistered_page::read_project_directory_page(
-            &worker_profile_root,
-            None,
+            &profile_root,
+            Some(&cursor),
             1,
-            &interrupted,
-        )
-    });
-    started_rx.recv().unwrap();
-    let page = worker
-        .join()
-        .unwrap()
-        .unwrap()
-        .expect("a contending writer must return an incomplete retry page");
-    assert!(page.entries.is_empty());
-    assert_eq!(
-        page.next_cursor,
-        Some(format!("portable-v2:{signature}:0")),
-        "a second process-equivalent writer must yield with an opaque retry cursor"
-    );
-    drop(writer_lock);
-
-    let mut entries_scanned = 0usize;
-    assert_eq!(
-        super::unregistered_page::advance_portable_inventory(
-            &projects_dir,
-            &inventory,
-            &signature,
-            8,
-            &mut entries_scanned,
             &|| false,
         )
-        .unwrap(),
-        Some(true)
+        .is_err(),
+        "a symlinked cursor authority must be rejected"
     );
-    let records = String::from_utf8(std::fs::read(&inventory).unwrap()).unwrap();
-    assert!(records.ends_with('\n'));
-    assert!(
-        records
-            .lines()
-            .skip(1)
-            .all(super::unregistered_page::portable_inventory_entry_is_valid)
-    );
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside bytes");
 }
 
 /// Cancellation is a typed page result and must prevent both inspection and
