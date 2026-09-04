@@ -11,8 +11,7 @@ use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
 use super::{
     CodeGraphProjectionError, CodeGraphServingAuthorityV1, CodeIndexProductionErrorV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    DaemonCodeIndexPublicationStoreV1, DurablePublicationPointerV1, LatestCodeTextGenerationV1,
-    LatestCompleteCodeIndexV1,
+    DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
 };
 use crate::code_graph_seat::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
@@ -486,32 +485,30 @@ impl DaemonCodeIndexPublicationStoreV1 {
         &self,
         generation_id: &tracedecay_domain::CodeGenerationId,
     ) -> Result<CodeGraphReplayBindingV1, CodeIndexPublicationStoreErrorV1> {
-        let pointer_bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
-        let pointer: DurablePublicationPointerV1 =
-            serde_json::from_slice(&pointer_bytes).map_err(|error| {
+        let pointer = self.read_publication_pointer()?.ok_or_else(|| {
+            Self::unavailable("code-generation replay binding has no publication pointer")
+        })?;
+        let entry = pointer
+            .generation_index
+            .iter()
+            .find(|entry| entry.generation_id == generation_id.as_str())
+            .ok_or_else(|| {
                 Self::unavailable(format!(
-                    "active code-generation pointer is corrupt: {error}"
+                    "code generation {generation_id} is not retained in the publication index"
                 ))
             })?;
-        Self::validate_generation_file(&pointer.generation_file)?;
-        if pointer.generation_id != generation_id.as_str() {
-            return Err(Self::unavailable(format!(
-                "active code-generation pointer names {} instead of {}",
-                pointer.generation_id, generation_id
-            )));
-        }
-        let digest = pointer
+        let digest = entry
             .state_digest
             .strip_prefix("sha256:")
-            .ok_or_else(|| Self::unavailable("active code-generation digest is not sha256"))?;
-        if pointer.generation_file != format!("generation-{digest}.json") {
+            .ok_or_else(|| Self::unavailable("code-generation replay digest is not sha256"))?;
+        if entry.generation_file != format!("generation-{digest}.json") {
             return Err(Self::unavailable(
-                "active code-generation filename does not match its state digest",
+                "code-generation replay filename does not match its state digest",
             ));
         }
         Ok(CodeGraphReplayBindingV1 {
             generations_root: self.generations_root.clone(),
-            sealed_state_digest: SealedGraphStateDigest::try_from(pointer.state_digest)
+            sealed_state_digest: SealedGraphStateDigest::try_from(entry.state_digest.clone())
                 .map_err(Self::unavailable)?,
         })
     }
