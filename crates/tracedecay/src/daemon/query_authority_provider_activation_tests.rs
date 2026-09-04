@@ -275,6 +275,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         )
         .await
         .expect("install query rollback");
+    drop(prepared);
     assert_eq!(
         registry
             .query_authority_installation_for_scope(&scope)
