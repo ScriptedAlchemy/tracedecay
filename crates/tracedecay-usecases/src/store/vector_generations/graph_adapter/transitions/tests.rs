@@ -134,7 +134,7 @@ fn semantic_plan_keeps_code_scope_and_projects_dependency_through_project_shard(
 }
 
 #[tokio::test]
-async fn restarted_store_supersedes_pending_stage_from_prior_source_generation() {
+async fn same_binding_store_preserves_an_active_pending_stage() {
     let first_source = CodeGenerationId::new("code-generation.superseded").unwrap();
     let second_source = CodeGenerationId::new("code-generation.current").unwrap();
     let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
@@ -182,21 +182,20 @@ async fn restarted_store_supersedes_pending_stage_from_prior_source_generation()
         .clone();
     drop(first_store);
 
-    let (second_plan, second_prepared, second_descriptor) =
+    let (second_plan, _second_prepared, second_descriptor) =
         prepared_generation(&second_source, "chunk.current", 'b', &embedding);
     let second_retained = graph.retained(&second_source).unwrap();
     let second_store = GraphVectorGenerationStoreV1::open(&second_retained).unwrap();
     second_store.configure_stage(second_descriptor).unwrap();
-    let second_build = match second_store
+    let error = second_store
         .begin_generation(second_plan, Arc::clone(&cancellation))
         .await
-        .unwrap()
-    {
-        VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id } => build_id,
-        VectorGenerationBeginOutcomeV1::AlreadyPublished { .. } => {
-            panic!("current source generation must begin after supersession")
-        }
-    };
+        .expect_err("a pending stage owned by this binding is active concurrency");
+    assert!(matches!(
+        error,
+        VectorGenerationStoreErrorV1::ConcurrentMutation(ref context)
+            if context.site == "usecases.store.begin_generation.occupied_stage_active_writer"
+    ));
     let authority = SemanticGraphExecutionAuthorityV1::new(
         Arc::clone(&cancellation),
         std::time::Instant::now() + std::time::Duration::from_secs(30),
@@ -206,23 +205,9 @@ async fn restarted_store_supersedes_pending_stage_from_prior_source_generation()
             .runtime()
             .resume_stage(&first_stage, &authority)
             .unwrap(),
-        tracedecay_store::SemanticVectorStageResumeOutcome::Cancelled(record)
+        tracedecay_store::SemanticVectorStageResumeOutcome::Pending(record)
             if record.plan.key == first_stage
     ));
-    second_store
-        .commit_batch(
-            &second_build,
-            None,
-            second_prepared,
-            Arc::clone(&cancellation),
-        )
-        .await
-        .unwrap();
-    let publication = second_store
-        .publish_generation(&second_build, cancellation)
-        .await
-        .unwrap();
-    assert_eq!(publication.checkpoint.source_generation, second_source);
 }
 
 #[tokio::test]
