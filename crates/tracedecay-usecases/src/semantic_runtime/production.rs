@@ -2776,7 +2776,6 @@ fn evaluation_projection_resources(
     configured: SemanticResourceCeilings,
 ) -> SemanticEvaluationProjectionResourcesV1 {
     SemanticEvaluationProjectionResourcesV1 {
-        max_sessions: configured.max_concurrent_sessions as usize,
         memory_ceiling_bytes: configured.max_resident_bytes,
     }
 }
@@ -4378,25 +4377,6 @@ mod tests {
         assert_eq!(requirement.resident_bytes, configured.max_resident_bytes);
         assert_eq!(requirement.threads, configured.max_threads);
         assert!(configured_resource_ceiling_covers(&configured, requirement));
-    }
-
-    #[test]
-    fn evaluator_projection_inherits_configured_session_width() {
-        let configured = SemanticResourceCeilings {
-            max_model_bytes: 700,
-            max_tokenizer_bytes: 64,
-            max_resident_bytes: 2_048,
-            max_threads: 8,
-            max_concurrent_sessions: 4,
-            max_batch_size: 32,
-            max_sequence_length: 512,
-            load_deadline_ms: 30_000,
-        };
-
-        let resources = evaluation_projection_resources(configured);
-
-        assert_eq!(resources.max_sessions, 4);
-        assert_eq!(resources.memory_ceiling_bytes, 2_048);
     }
 
     #[test]
