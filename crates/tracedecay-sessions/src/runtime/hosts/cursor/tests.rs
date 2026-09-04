@@ -36,6 +36,59 @@ fn native_record_identity_is_stable_across_json_formatting() {
 }
 
 #[test]
+fn no_id_collision_retry_is_bound_to_the_exact_source_occurrence() {
+    let native = json!({
+        "role": "assistant",
+        "message": {"content": "identical no-id record"}
+    });
+    let first_range = tracedecay_domain::ObservationSourceRangeV1::new(0, 80).unwrap();
+    let repeated_range = tracedecay_domain::ObservationSourceRangeV1::new(80, 160).unwrap();
+
+    let (first_primary, first_eligible) =
+        cursor_admission_record_id(&native, "session-repeat", first_range, false).unwrap();
+    let (repeated_primary, repeated_eligible) =
+        cursor_admission_record_id(&native, "session-repeat", repeated_range, false).unwrap();
+    let (first_retry, first_retry_eligible) =
+        cursor_admission_record_id(&native, "session-repeat", first_range, true).unwrap();
+    let (repeated_retry, repeated_retry_eligible) =
+        cursor_admission_record_id(&native, "session-repeat", repeated_range, true).unwrap();
+
+    assert_eq!(first_primary, repeated_primary);
+    assert!(first_eligible);
+    assert!(repeated_eligible);
+    assert_ne!(first_retry, repeated_retry);
+    assert_ne!(first_retry, first_primary);
+    assert!(!first_retry_eligible);
+    assert!(!repeated_retry_eligible);
+}
+
+#[test]
+fn native_id_content_conflict_has_no_positional_retry() {
+    let first = json!({
+        "id": "cursor-native-conflict",
+        "role": "assistant",
+        "message": {"content": "first content"}
+    });
+    let changed = json!({
+        "id": "cursor-native-conflict",
+        "role": "assistant",
+        "message": {"content": "changed content"}
+    });
+    let first_range = tracedecay_domain::ObservationSourceRangeV1::new(0, 80).unwrap();
+    let changed_range = tracedecay_domain::ObservationSourceRangeV1::new(80, 160).unwrap();
+
+    let (first_id, first_eligible) =
+        cursor_admission_record_id(&first, "session-conflict", first_range, false).unwrap();
+    let (changed_id, changed_eligible) =
+        cursor_admission_record_id(&changed, "session-conflict", changed_range, false).unwrap();
+
+    assert_eq!(first_id, changed_id);
+    assert!(!first_eligible);
+    assert!(!changed_eligible);
+    assert!(cursor_admission_record_id(&changed, "session-conflict", changed_range, true).is_err());
+}
+
+#[test]
 fn canonical_record_is_stable_across_hook_sweep_and_mtime_context() {
     let transcript_path = Path::new("/redacted/project/session.fixture.jsonl");
     let hook_context = cursor_observation_context(
@@ -354,4 +407,33 @@ fn every_batch_of_a_rewritten_transcript_keeps_one_replacement_namespace() {
     // `<session>:<offset>` id and overwrite retained pre-rewrite history.
     assert!(tail.messages[0].message_id.ends_with(&suffix));
     assert_ne!(tail.messages[0].message_id, first.messages[0].message_id);
+}
+
+#[test]
+fn user_scope_selects_one_physical_authority_for_a_mirrored_session() {
+    let home = tempfile::tempdir().unwrap();
+    let first = home
+        .path()
+        .join(".cursor/projects/unregistered-a/agent-transcripts/session-mirrored.jsonl");
+    let second = home
+        .path()
+        .join(".cursor/projects/unregistered-b/agent-transcripts/session-mirrored.jsonl");
+    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+    std::fs::write(&first, "{\"role\":\"user\",\"content\":\"first mirror\"}\n").unwrap();
+    std::fs::write(
+        &second,
+        "{\"role\":\"user\",\"content\":\"second mirror\"}\n",
+    )
+    .unwrap();
+
+    let source = CursorSweepSource::with_home(home.path())
+        .for_user_scope(&[PathBuf::from("/registered/project")]);
+    let paths = source.transcript_paths(Path::new(""));
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(
+        paths[0].file_stem().and_then(|stem| stem.to_str()),
+        Some("session-mirrored")
+    );
 }

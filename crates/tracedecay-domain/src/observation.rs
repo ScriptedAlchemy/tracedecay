@@ -25,6 +25,8 @@ use crate::research::{
 
 const CLAUDE_OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation.v1\0";
 const OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.observation.v1\0";
+const OBSERVATION_POSITIONAL_OCCURRENCE_DOMAIN: &[u8] =
+    b"tracedecay.observation.positional-occurrence.v1\0";
 const LEGACY_IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.claude.idempotency.v1\0";
 const CLAUDE_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.claude.receipt.v1\0";
 const OBSERVATION_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.observation.receipt.v1\0";
@@ -344,6 +346,48 @@ impl<'de> Deserialize<'de> for ObservationSourceRangeV1 {
 }
 
 pub type ClaudeByteRangeV1 = ObservationSourceRangeV1;
+
+/// A collision-only identity refinement for a provider record that has no
+/// native record id.
+///
+/// The primary identity remains the provider's existing content identity.
+/// This value is used only after that primary identity collides with a
+/// different source occurrence, binding the fallback to the exact native
+/// ordering range without weakening ordinary replay identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservationPositionalOccurrenceV1 {
+    position: ObservationSourceRangeV1,
+}
+
+impl ObservationPositionalOccurrenceV1 {
+    pub fn new(position: ObservationSourceRangeV1) -> Self {
+        Self { position }
+    }
+
+    pub fn position(self) -> ObservationSourceRangeV1 {
+        self.position
+    }
+
+    pub fn disambiguate(
+        self,
+        primary: &ObservationId,
+    ) -> Result<ObservationId, ObservationContractError> {
+        #[derive(Serialize)]
+        struct PositionalOccurrence<'a> {
+            primary: &'a ObservationId,
+            position: ObservationSourceRangeV1,
+        }
+
+        ObservationId::new(domain_digest(
+            OBSERVATION_POSITIONAL_OCCURRENCE_DOMAIN,
+            &PositionalOccurrence {
+                primary,
+                position: self.position,
+            },
+        )?)
+        .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)
+    }
+}
 
 /// Stable source evidence used to derive one observation identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

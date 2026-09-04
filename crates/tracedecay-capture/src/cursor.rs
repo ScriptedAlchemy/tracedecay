@@ -4,8 +4,9 @@ use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ProviderId, ProviderUsageCounterSemanticsV1,
-    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
+    ObservationId, ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1, SessionId,
 };
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
@@ -462,12 +463,71 @@ fn append_cursor_git_facts(native: &Value, facts: &mut Vec<CanonicalObservationF
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CursorObservationIdentityV1 {
+    primary: ObservationId,
+    collision_disambiguation: Option<ObservationId>,
+}
+
+impl CursorObservationIdentityV1 {
+    pub fn primary(&self) -> &ObservationId {
+        &self.primary
+    }
+
+    pub fn collision_disambiguation(&self) -> Option<&ObservationId> {
+        self.collision_disambiguation.as_ref()
+    }
+
+    pub fn into_primary(self) -> ObservationId {
+        self.primary
+    }
+
+    pub fn into_collision_disambiguation(self) -> Option<ObservationId> {
+        self.collision_disambiguation
+    }
+}
+
+pub fn cursor_observation_identity(
+    session_id: &str,
+    value: &Value,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+) -> Result<CursorObservationIdentityV1, ObservationRecordParseErrorV1> {
+    let has_native_id = cursor_native_record_id(value).is_some();
+    let primary = observation_native_record_id("cursor", session_id, value)?;
+    let collision_disambiguation = if has_native_id {
+        None
+    } else {
+        Some(
+            ObservationPositionalOccurrenceV1::new(range)
+                .disambiguate(&primary)
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+        )
+    };
+    Ok(CursorObservationIdentityV1 {
+        primary,
+        collision_disambiguation,
+    })
+}
+
 pub fn observation_native_record_id(
     provider: &str,
     session_id: &str,
     value: &Value,
 ) -> Result<ObservationId, ObservationRecordParseErrorV1> {
     let mut hasher = Sha256::new();
+    if let Some(native_id) = cursor_native_record_id(value) {
+        hasher.update(b"tracedecay.provider-native-record.native-id.v1\0");
+        hasher.update(provider.as_bytes());
+        hasher.update([0]);
+        hasher.update(session_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(native_id.as_bytes());
+        return ObservationId::new(format!(
+            "{provider}.native.sha256:{}",
+            hex::encode(hasher.finalize())
+        ))
+        .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed);
+    }
     hasher.update(b"tracedecay.provider-native-record.v1\0");
     hasher.update(provider.as_bytes());
     hasher.update([0]);
@@ -482,6 +542,14 @@ pub fn observation_native_record_id(
         hex::encode(hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+}
+
+fn cursor_native_record_id(value: &Value) -> Option<&str> {
+    value
+        .get("id")
+        .or_else(|| value.pointer("/message/id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
 }
 
 pub fn cursor_projected_message_id(

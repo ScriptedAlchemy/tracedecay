@@ -14,11 +14,11 @@ use tracedecay_domain::{
     MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
     MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
     ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
-    ProviderId, ProviderUsageContractDimensionV1, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, classify_observation_collision,
+    ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectId, ProviderId, ProviderUsageContractDimensionV1, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, classify_observation_collision,
 };
 
 fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
@@ -242,6 +242,29 @@ fn native_record_identity_is_independent_of_generation_and_ordering_position() {
             .receipt_id()
             .as_str()
             .starts_with("privacy.observation.v1.")
+    );
+}
+
+#[test]
+fn positional_occurrence_disambiguation_binds_base_identity_and_exact_range() {
+    let base = ObservationId::new("cursor.native.sha256:fixture").unwrap();
+    let other = ObservationId::new("cursor.native.sha256:other").unwrap();
+    let first =
+        ObservationPositionalOccurrenceV1::new(ObservationSourceRangeV1::new(10, 20).unwrap());
+    let repeated =
+        ObservationPositionalOccurrenceV1::new(ObservationSourceRangeV1::new(30, 40).unwrap());
+
+    assert_eq!(
+        first.disambiguate(&base).unwrap(),
+        first.disambiguate(&base).unwrap()
+    );
+    assert_ne!(
+        first.disambiguate(&base).unwrap(),
+        repeated.disambiguate(&base).unwrap()
+    );
+    assert_ne!(
+        first.disambiguate(&base).unwrap(),
+        first.disambiguate(&other).unwrap()
     );
 }
 

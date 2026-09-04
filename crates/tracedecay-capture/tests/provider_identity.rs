@@ -39,6 +39,82 @@ fn codex_native_record_identity_uses_canonical_native_value() {
 }
 
 #[test]
+fn cursor_native_message_identity_is_content_independent() {
+    let first = json!({
+        "id": "message-native-42",
+        "role": "assistant",
+        "message": {"content": "first authored content"}
+    });
+    let changed = json!({
+        "id": "message-native-42",
+        "role": "assistant",
+        "message": {"content": "changed authored content"}
+    });
+    let nested = json!({
+        "role": "assistant",
+        "message": {
+            "id": "message-native-42",
+            "content": "first authored content"
+        }
+    });
+
+    let first = cursor::cursor_observation_identity(
+        "cursor-native-session",
+        &first,
+        ObservationSourceRangeV1::new(0, 64).unwrap(),
+    )
+    .unwrap();
+    let changed = cursor::cursor_observation_identity(
+        "cursor-native-session",
+        &changed,
+        ObservationSourceRangeV1::new(64, 128).unwrap(),
+    )
+    .unwrap();
+    let nested = cursor::cursor_observation_identity(
+        "cursor-native-session",
+        &nested,
+        ObservationSourceRangeV1::new(128, 192).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(first.primary(), changed.primary());
+    assert_eq!(first.primary(), nested.primary());
+    assert!(first.collision_disambiguation().is_none());
+    assert!(changed.collision_disambiguation().is_none());
+}
+
+#[test]
+fn cursor_no_id_identity_preserves_legacy_hash_and_offers_positional_collision_key() {
+    let native = json!({
+        "role": "assistant",
+        "message": {"content": "same"}
+    });
+    let first = cursor::cursor_observation_identity(
+        "cursor-duplicate",
+        &native,
+        ObservationSourceRangeV1::new(0, 56).unwrap(),
+    )
+    .unwrap();
+    let repeated = cursor::cursor_observation_identity(
+        "cursor-duplicate",
+        &native,
+        ObservationSourceRangeV1::new(56, 112).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        first.primary().as_str(),
+        "cursor.native.sha256:8a105c87deda680477bf876ab286a99aa98fd3ca1a74f0fa0aea7d27ec41774b"
+    );
+    assert_eq!(first.primary(), repeated.primary());
+    assert_ne!(
+        first.collision_disambiguation(),
+        repeated.collision_disambiguation()
+    );
+    assert_ne!(first.collision_disambiguation(), Some(first.primary()));
+}
+
+#[test]
 fn codex_checked_in_fixture_preserves_canonical_envelope() {
     let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/provider_normalization/codex");
