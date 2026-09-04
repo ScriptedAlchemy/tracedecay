@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
@@ -286,330 +288,138 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
     engine: &DaemonEngine,
     run_control: &AutomationRunControl,
 ) -> Result<()> {
-    use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
-    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
-    use tracedecay_automation_runtime::automation::runner::{
-        CombinedReviewAutomationOptions, MemoryCuratorAutomationOptions,
-        SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        registered_project_automation_retrieval,
-        run_memory_curator_with_backend_for_retained_settlement,
-        run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
-        run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
-    };
+    run_automation_scheduler_tick_inner(project_path, cg, handshake, engine, run_control).await
+}
 
-    let control = tracedecay_automation_runtime::automation::scheduler::load_scheduler_control(
-        &cg.store_layout().dashboard_root,
-    )
-    .await?;
-    if control.paused {
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "skipped".to_string()),
-                ("reason", "paused".to_string()),
-            ],
-        );
-        return Ok(());
-    }
-    let configuration = effective_automation_config_for_project(cg).await?;
-    let config = &configuration.settings;
-    if !automation_scheduler_has_work(cg, config).await? {
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "skipped".to_string()),
-                ("reason", "not_configured".to_string()),
-            ],
-        );
-        return Ok(());
-    }
-    if let Ok(profile_database) = engine
-        .store_administration
-        .registered_profile_database()
-        .await
-    {
-        maybe_run_global_retention(
-            &engine.store_administration,
-            profile_database.as_ref(),
-            &cg.get_config().sync.retention,
-        )
-        .await;
-    }
-    let backend = CodexAppServerBackend::from_automation_config(config);
-    let authoritative_project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "automation scheduler requires an authoritative project identity".to_string(),
-        })?;
-    let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "automation scheduler has an invalid authoritative project identity: {error}"
-            ),
-        })?;
-    let session_database = engine
-        .store_administration
-        .registered_project_session_database(project_path, cg.store_layout())
-        .await?;
-    let schedule_activity =
-        tracedecay_automation_runtime::automation::scheduler::load_session_activity(
-            session_database.as_ref(),
-        )
-        .await;
-    let schedule_now_secs = tracedecay_application::now_micros().0.div_euclid(1_000_000);
-    let memory_curator_decision = fixed_task_schedule_decision(
-        &cg.store_layout().dashboard_root,
-        config,
-        AgentTaskKind::MemoryCurator,
-        schedule_activity,
-        schedule_now_secs,
-    )
-    .await?;
-    let session_reflector_decision = fixed_task_schedule_decision(
-        &cg.store_layout().dashboard_root,
-        config,
-        AgentTaskKind::SessionReflector,
-        schedule_activity,
-        schedule_now_secs,
-    )
-    .await?;
-    let skill_writer_decision = fixed_task_schedule_decision(
-        &cg.store_layout().dashboard_root,
-        config,
-        AgentTaskKind::SkillWriter,
-        schedule_activity,
-        schedule_now_secs,
-    )
-    .await?;
-    let profile_identity = engine.store_administration.profile_identity()?.clone();
-    let retrieval =
-        registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
-            .await?;
-    let mut first_error: Option<TraceDecayError> = None;
-
-    let memory_curator_options = MemoryCuratorAutomationOptions {
-        trigger: AutomationTrigger::Scheduler,
-        ..MemoryCuratorAutomationOptions::default()
-    };
-    if let Some(reason) = memory_curator_decision.skip_reason() {
-        log_scheduler_schedule_skip(project_path, AgentTaskKind::MemoryCurator, reason);
-    } else {
-        log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
-        match scheduler_automation_effect(
-            engine,
-            cg,
-            run_control,
-            project_path,
-            &cg.store_layout().dashboard_root,
-            None,
-            configuration.configuration_digest.clone(),
-            |run_id| {
-                tracedecay_automation_runtime::automation::effect_runtime::memory_curator_run_request(
-                    run_id,
-                    memory_curator_options.fact_review_limit,
-                    memory_curator_options.min_confidence,
-                )
-            },
-        )
-        .await
-        {
-            Ok((admission, run_id, effect_run_control)) => match admission {
-                AutomationEffectAdmission::Conflict => {
-                    log_scheduler_admission_conflict(project_path, AgentTaskKind::MemoryCurator);
-                }
-                AutomationEffectAdmission::PreAdmissionProblem(problem) => {
-                    log_scheduler_pre_admission_problem(
-                        project_path,
-                        AgentTaskKind::MemoryCurator,
-                        &problem,
-                    );
-                }
-                AutomationEffectAdmission::Replay(terminal) => {
-                    log_scheduler_automation_replay(
-                        project_path,
-                        AgentTaskKind::MemoryCurator,
-                        &terminal,
-                    );
-                }
-                AutomationEffectAdmission::Execute(effect) => {
-                    let mut options = memory_curator_options;
-                    options.run_id = Some(run_id);
-                    let retained_run = run_memory_curator_with_backend_for_retained_settlement(
-                        cg,
-                        config,
-                        &configuration.configuration_revision_id,
-                        &backend,
-                        options,
-                        &effect_run_control,
-                    )
-                    .await;
-                    if let Some(error) = settle_scheduler_retained_automation(
-                        engine,
-                        &project_id,
-                        project_path,
-                        AgentTaskKind::MemoryCurator,
-                        &effect_run_control,
-                        *effect,
-                        retained_run,
-                        |run| (run.ledger_record, run.committed_receipt),
-                    )
-                    .await
-                    {
-                        first_error.get_or_insert(error);
-                    }
-                }
-            },
-            Err(error) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::MemoryCurator, &error);
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-    // When both the reflector and the skill writer are due in this tick, the
-    // combined path serves them with one backend call. Any other outcome
-    // (combined mode disabled, only one task due, missing evidence) falls
-    // back to the sequential per-task runs below.
-    let mut combined_handled = false;
-    if config.combine_due_tasks
-        && session_reflector_decision.is_due()
-        && skill_writer_decision.is_due()
-    {
-        log_scheduler_task_start(project_path, AgentTaskKind::CombinedReview);
-        let combined_options = CombinedReviewAutomationOptions {
-            skill_writer: SkillWriterAutomationOptions {
-                profile_root: Some(profile_identity.profile_root().to_path_buf()),
-                ..SkillWriterAutomationOptions::default()
-            },
-            ..CombinedReviewAutomationOptions::default()
+/// Body of [`run_automation_scheduler_tick`], boxed at definition so the
+/// instrumented wrapper does not inline every fixed automation effect of a
+/// tick into one scheduler poll frame.
+fn run_automation_scheduler_tick_inner<'a>(
+    project_path: &'a Path,
+    cg: &'a TraceDecay,
+    handshake: &'a DaemonHandshake,
+    engine: &'a DaemonEngine,
+    run_control: &'a AutomationRunControl,
+) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
+        use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+        use tracedecay_automation_runtime::automation::runner::{
+            CombinedReviewAutomationOptions, MemoryCuratorAutomationOptions,
+            SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
+            registered_project_automation_retrieval,
+            run_memory_curator_with_backend_for_retained_settlement,
+            run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
+            run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
         };
-        match super::combined_effect::prepare_combined_effects(
-            engine,
-            cg,
-            run_control,
-            project_path,
+
+        let control = tracedecay_automation_runtime::automation::scheduler::load_scheduler_control(
             &cg.store_layout().dashboard_root,
-            None,
-            configuration.configuration_digest.clone(),
-            &combined_options,
         )
-        .await
-        {
-            Ok(admission) => {
-                combined_handled = super::combined_effect::run_combined_scheduler_effect(
-                    admission,
-                    engine,
-                    cg,
-                    &project_id,
-                    project_path,
-                    config,
-                    &configuration.configuration_revision_id,
-                    &backend,
-                    retrieval.as_ref(),
-                    combined_options,
-                    &mut first_error,
-                )
-                .await
-                .handled();
-            }
-            Err(error) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
-                first_error.get_or_insert(error);
-            }
+        .await?;
+        if control.paused {
+            log_daemon_event(
+                "scheduler_tick",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "skipped".to_string()),
+                    ("reason", "paused".to_string()),
+                ],
+            );
+            return Ok(());
         }
-    }
-    if !combined_handled {
-        if let Some(reason) = session_reflector_decision.skip_reason() {
-            log_scheduler_schedule_skip(project_path, AgentTaskKind::SessionReflector, reason);
-        } else {
-            log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
-            let session_options = SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                ..SessionReflectorAutomationOptions::default()
-            };
-            let session_effect = scheduler_automation_effect(
-                engine,
-                cg,
-                run_control,
-                project_path,
-                &cg.store_layout().dashboard_root,
-                None,
-                configuration.configuration_digest.clone(),
-                |run_id| {
-                    tracedecay_automation_runtime::automation::effect_runtime::session_reflector_run_request(
-                        run_id,
-                        &session_options,
-                    )
-                },
+        let configuration = effective_automation_config_for_project(cg).await?;
+        let config = &configuration.settings;
+        if !automation_scheduler_has_work(cg, config).await? {
+            log_daemon_event(
+                "scheduler_tick",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "skipped".to_string()),
+                    ("reason", "not_configured".to_string()),
+                ],
+            );
+            return Ok(());
+        }
+        if let Ok(profile_database) = engine
+            .store_administration
+            .registered_profile_database()
+            .await
+        {
+            maybe_run_global_retention(
+                &engine.store_administration,
+                profile_database.as_ref(),
+                &cg.get_config().sync.retention,
             )
             .await;
-            match session_effect {
-                Err(error) => {
-                    log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &error);
-                    first_error.get_or_insert(error);
-                }
-                Ok((AutomationEffectAdmission::Conflict, _, _)) => {
-                    log_scheduler_admission_conflict(project_path, AgentTaskKind::SessionReflector);
-                }
-                Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
-                    log_scheduler_pre_admission_problem(
-                        project_path,
-                        AgentTaskKind::SessionReflector,
-                        &problem,
-                    );
-                }
-                Ok((AutomationEffectAdmission::Replay(terminal), _, _)) => {
-                    log_scheduler_automation_replay(
-                        project_path,
-                        AgentTaskKind::SessionReflector,
-                        &terminal,
-                    );
-                }
-                Ok((AutomationEffectAdmission::Execute(effect), run_id, effect_run_control)) => {
-                    let retained_run =
-                        run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                            cg,
-                            config,
-                            &effect_run_control,
-                            &configuration.configuration_revision_id,
-                            &backend,
-                            retrieval.as_ref(),
-                            SessionReflectorAutomationOptions {
-                                run_id: Some(run_id),
-                                ..session_options
-                            },
-                        )
-                        .await;
-                    if let Some(error) = settle_scheduler_retained_automation(
-                        engine,
-                        &project_id,
-                        project_path,
-                        AgentTaskKind::SessionReflector,
-                        &effect_run_control,
-                        *effect,
-                        retained_run,
-                        |run| (run.ledger_record, run.committed_receipt),
-                    )
-                    .await
-                    {
-                        first_error.get_or_insert(error);
-                    }
-                }
-            }
         }
-        if let Some(reason) = skill_writer_decision.skip_reason() {
-            log_scheduler_schedule_skip(project_path, AgentTaskKind::SkillWriter, reason);
+        let backend = CodexAppServerBackend::from_automation_config(config);
+        let authoritative_project_id = cg
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "automation scheduler requires an authoritative project identity"
+                    .to_string(),
+            })?;
+        let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "automation scheduler has an invalid authoritative project identity: {error}"
+                ),
+            })?;
+        let session_database = engine
+            .store_administration
+            .registered_project_session_database(project_path, cg.store_layout())
+            .await?;
+        let schedule_activity =
+            tracedecay_automation_runtime::automation::scheduler::load_session_activity(
+                session_database.as_ref(),
+            )
+            .await;
+        let schedule_now_secs = tracedecay_application::now_micros().0.div_euclid(1_000_000);
+        let memory_curator_decision = fixed_task_schedule_decision(
+            &cg.store_layout().dashboard_root,
+            config,
+            AgentTaskKind::MemoryCurator,
+            schedule_activity,
+            schedule_now_secs,
+        )
+        .await?;
+        let session_reflector_decision = fixed_task_schedule_decision(
+            &cg.store_layout().dashboard_root,
+            config,
+            AgentTaskKind::SessionReflector,
+            schedule_activity,
+            schedule_now_secs,
+        )
+        .await?;
+        let skill_writer_decision = fixed_task_schedule_decision(
+            &cg.store_layout().dashboard_root,
+            config,
+            AgentTaskKind::SkillWriter,
+            schedule_activity,
+            schedule_now_secs,
+        )
+        .await?;
+        let profile_identity = engine.store_administration.profile_identity()?.clone();
+        let retrieval = registered_project_automation_retrieval(
+            session_database,
+            &profile_identity,
+            &project_id,
+        )
+        .await?;
+        let mut first_error: Option<TraceDecayError> = None;
+
+        let memory_curator_options = MemoryCuratorAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            ..MemoryCuratorAutomationOptions::default()
+        };
+        if let Some(reason) = memory_curator_decision.skip_reason() {
+            log_scheduler_schedule_skip(project_path, AgentTaskKind::MemoryCurator, reason);
         } else {
-            log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
-            let skill_options = SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                profile_root: Some(profile_identity.profile_root().to_path_buf()),
-                ..SkillWriterAutomationOptions::default()
-            };
+            log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
             match scheduler_automation_effect(
                 engine,
                 cg,
@@ -619,83 +429,305 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                 None,
                 configuration.configuration_digest.clone(),
                 |run_id| {
-                    tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
+                    tracedecay_automation_runtime::automation::effect_runtime::memory_curator_run_request(
                         run_id,
-                        &skill_options,
+                        memory_curator_options.fact_review_limit,
+                        memory_curator_options.min_confidence,
                     )
                 },
             )
             .await
             {
-                Err(error) => {
-                    log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &error);
-                    first_error.get_or_insert(error);
-                }
-                Ok((AutomationEffectAdmission::Conflict, _, _)) => {
-                    log_scheduler_admission_conflict(project_path, AgentTaskKind::SkillWriter);
-                }
-                Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
-                    log_scheduler_pre_admission_problem(
-                        project_path,
-                        AgentTaskKind::SkillWriter,
-                        &problem,
-                    );
-                }
-                Ok((AutomationEffectAdmission::Replay(terminal), _, _)) => {
-                    log_scheduler_automation_replay(
-                        project_path,
-                        AgentTaskKind::SkillWriter,
-                        &terminal,
-                    );
-                }
-                Ok((AutomationEffectAdmission::Execute(effect), run_id, effect_run_control)) => {
-                    let mut options = skill_options;
-                    options.run_id = Some(run_id);
-                    let retained_run =
-                        run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+                Ok((admission, run_id, effect_run_control)) => match admission {
+                    AutomationEffectAdmission::Conflict => {
+                        log_scheduler_admission_conflict(project_path, AgentTaskKind::MemoryCurator);
+                    }
+                    AutomationEffectAdmission::PreAdmissionProblem(problem) => {
+                        log_scheduler_pre_admission_problem(
+                            project_path,
+                            AgentTaskKind::MemoryCurator,
+                            &problem,
+                        );
+                    }
+                    AutomationEffectAdmission::Replay(terminal) => {
+                        log_scheduler_automation_replay(
+                            project_path,
+                            AgentTaskKind::MemoryCurator,
+                            &terminal,
+                        );
+                    }
+                    AutomationEffectAdmission::Execute(effect) => {
+                        let mut options = memory_curator_options;
+                        options.run_id = Some(run_id);
+                        let retained_run = run_memory_curator_with_backend_for_retained_settlement(
                             cg,
                             config,
                             &configuration.configuration_revision_id,
                             &backend,
-                            retrieval.as_ref(),
                             options,
+                            &effect_run_control,
                         )
                         .await;
-                    if let Some(error) = settle_scheduler_retained_automation(
+                        if let Some(error) = settle_scheduler_retained_automation(
+                            engine,
+                            &project_id,
+                            project_path,
+                            AgentTaskKind::MemoryCurator,
+                            &effect_run_control,
+                            *effect,
+                            retained_run,
+                            |run| (run.ledger_record, run.committed_receipt),
+                        )
+                        .await
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                },
+                Err(error) => {
+                    log_scheduler_task_error(project_path, AgentTaskKind::MemoryCurator, &error);
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        // When both the reflector and the skill writer are due in this tick, the
+        // combined path serves them with one backend call. Any other outcome
+        // (combined mode disabled, only one task due, missing evidence) falls
+        // back to the sequential per-task runs below.
+        let mut combined_handled = false;
+        if config.combine_due_tasks
+            && session_reflector_decision.is_due()
+            && skill_writer_decision.is_due()
+        {
+            log_scheduler_task_start(project_path, AgentTaskKind::CombinedReview);
+            let combined_options = CombinedReviewAutomationOptions {
+                skill_writer: SkillWriterAutomationOptions {
+                    profile_root: Some(profile_identity.profile_root().to_path_buf()),
+                    ..SkillWriterAutomationOptions::default()
+                },
+                ..CombinedReviewAutomationOptions::default()
+            };
+            match super::combined_effect::prepare_combined_effects(
+                engine,
+                cg,
+                run_control,
+                project_path,
+                &cg.store_layout().dashboard_root,
+                None,
+                configuration.configuration_digest.clone(),
+                &combined_options,
+            )
+            .await
+            {
+                Ok(admission) => {
+                    combined_handled = super::combined_effect::run_combined_scheduler_effect(
+                        admission,
                         engine,
+                        cg,
                         &project_id,
                         project_path,
-                        AgentTaskKind::SkillWriter,
-                        &effect_run_control,
-                        *effect,
-                        retained_run,
-                        |run| (run.ledger_record, run.committed_receipt),
+                        config,
+                        &configuration.configuration_revision_id,
+                        &backend,
+                        retrieval.as_ref(),
+                        combined_options,
+                        &mut first_error,
                     )
                     .await
-                    {
+                    .handled();
+                }
+                Err(error) => {
+                    log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if !combined_handled {
+            if let Some(reason) = session_reflector_decision.skip_reason() {
+                log_scheduler_schedule_skip(project_path, AgentTaskKind::SessionReflector, reason);
+            } else {
+                log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
+                let session_options = SessionReflectorAutomationOptions {
+                    trigger: AutomationTrigger::Scheduler,
+                    ..SessionReflectorAutomationOptions::default()
+                };
+                let session_effect = scheduler_automation_effect(
+                    engine,
+                    cg,
+                    run_control,
+                    project_path,
+                    &cg.store_layout().dashboard_root,
+                    None,
+                    configuration.configuration_digest.clone(),
+                    |run_id| {
+                        tracedecay_automation_runtime::automation::effect_runtime::session_reflector_run_request(
+                            run_id,
+                            &session_options,
+                        )
+                    },
+                )
+                .await;
+                match session_effect {
+                    Err(error) => {
+                        log_scheduler_task_error(
+                            project_path,
+                            AgentTaskKind::SessionReflector,
+                            &error,
+                        );
                         first_error.get_or_insert(error);
+                    }
+                    Ok((AutomationEffectAdmission::Conflict, _, _)) => {
+                        log_scheduler_admission_conflict(
+                            project_path,
+                            AgentTaskKind::SessionReflector,
+                        );
+                    }
+                    Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
+                        log_scheduler_pre_admission_problem(
+                            project_path,
+                            AgentTaskKind::SessionReflector,
+                            &problem,
+                        );
+                    }
+                    Ok((AutomationEffectAdmission::Replay(terminal), _, _)) => {
+                        log_scheduler_automation_replay(
+                            project_path,
+                            AgentTaskKind::SessionReflector,
+                            &terminal,
+                        );
+                    }
+                    Ok((
+                        AutomationEffectAdmission::Execute(effect),
+                        run_id,
+                        effect_run_control,
+                    )) => {
+                        let retained_run =
+                            run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+                                cg,
+                                config,
+                                &effect_run_control,
+                                &configuration.configuration_revision_id,
+                                &backend,
+                                retrieval.as_ref(),
+                                SessionReflectorAutomationOptions {
+                                    run_id: Some(run_id),
+                                    ..session_options
+                                },
+                            )
+                            .await;
+                        if let Some(error) = settle_scheduler_retained_automation(
+                            engine,
+                            &project_id,
+                            project_path,
+                            AgentTaskKind::SessionReflector,
+                            &effect_run_control,
+                            *effect,
+                            retained_run,
+                            |run| (run.ledger_record, run.committed_receipt),
+                        )
+                        .await
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
+            }
+            if let Some(reason) = skill_writer_decision.skip_reason() {
+                log_scheduler_schedule_skip(project_path, AgentTaskKind::SkillWriter, reason);
+            } else {
+                log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
+                let skill_options = SkillWriterAutomationOptions {
+                    trigger: AutomationTrigger::Scheduler,
+                    profile_root: Some(profile_identity.profile_root().to_path_buf()),
+                    ..SkillWriterAutomationOptions::default()
+                };
+                match scheduler_automation_effect(
+                    engine,
+                    cg,
+                    run_control,
+                    project_path,
+                    &cg.store_layout().dashboard_root,
+                    None,
+                    configuration.configuration_digest.clone(),
+                    |run_id| {
+                        tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
+                            run_id,
+                            &skill_options,
+                        )
+                    },
+                )
+                .await
+                {
+                    Err(error) => {
+                        log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &error);
+                        first_error.get_or_insert(error);
+                    }
+                    Ok((AutomationEffectAdmission::Conflict, _, _)) => {
+                        log_scheduler_admission_conflict(project_path, AgentTaskKind::SkillWriter);
+                    }
+                    Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
+                        log_scheduler_pre_admission_problem(
+                            project_path,
+                            AgentTaskKind::SkillWriter,
+                            &problem,
+                        );
+                    }
+                    Ok((AutomationEffectAdmission::Replay(terminal), _, _)) => {
+                        log_scheduler_automation_replay(
+                            project_path,
+                            AgentTaskKind::SkillWriter,
+                            &terminal,
+                        );
+                    }
+                    Ok((AutomationEffectAdmission::Execute(effect), run_id, effect_run_control)) => {
+                        let mut options = skill_options;
+                        options.run_id = Some(run_id);
+                        let retained_run =
+                            run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+                                cg,
+                                config,
+                                &configuration.configuration_revision_id,
+                                &backend,
+                                retrieval.as_ref(),
+                                options,
+                            )
+                            .await;
+                        if let Some(error) = settle_scheduler_retained_automation(
+                            engine,
+                            &project_id,
+                            project_path,
+                            AgentTaskKind::SkillWriter,
+                            &effect_run_control,
+                            *effect,
+                            retained_run,
+                            |run| (run.ledger_record, run.committed_receipt),
+                        )
+                        .await
+                        {
+                            first_error.get_or_insert(error);
+                        }
                     }
                 }
             }
         }
-    }
-    run_user_jobs_scheduler_pass(
-        engine,
-        run_control,
-        &project_id,
-        project_path,
-        &handshake.client_identity.profile_root,
-        cg,
-        configuration.configuration_digest.clone(),
-        config,
-        &backend,
-        &mut first_error,
-    )
-    .await;
-    match first_error {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
+        run_user_jobs_scheduler_pass(
+            engine,
+            run_control,
+            &project_id,
+            project_path,
+            &handshake.client_identity.profile_root,
+            cg,
+            configuration.configuration_digest.clone(),
+            config,
+            &backend,
+            &mut first_error,
+        )
+        .await;
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    })
 }
 
 pub(crate) fn scheduler_automation_request_id(

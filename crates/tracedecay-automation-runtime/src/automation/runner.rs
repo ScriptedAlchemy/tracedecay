@@ -566,159 +566,190 @@ async fn run_combined_review_for_retrieval(
     run_control: &AutomationRunControl,
     publication: CombinedReviewPublication<'_>,
 ) -> Result<CombinedReviewDispatch> {
-    let _run = super::scheduler_metrics::RunningGuard::enter();
-    let _duration = super::scheduler_metrics::DurationGuard::run();
-    let AutomationTaskIo { backend, retrieval } = io;
-    let CombinedReviewPublication {
-        ledger: ledger_publication,
-        reflector_guard,
-        skill_guard,
-    } = publication;
-    let reflector_authority = project_curation_authority(
+    run_combined_review_for_retrieval_inner(
         cg,
-        "automation:session-reflector",
+        config,
         configuration_revision_id,
-    )?;
-    let skill_authority =
-        project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
-    if !config.combine_due_tasks {
-        return Ok(CombinedReviewDispatch::NotCombined {
-            reason: "combined_mode_disabled",
-        });
-    }
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let sessions_db = project_automation_sessions(cg).await?;
-    let _reflector_lock = match acquire_combined_task_lock(
-        config,
-        &dashboard_root,
-        sessions_db.as_ref(),
-        AgentTaskKind::SessionReflector,
-        options.trigger,
-        "session_reflector_not_due",
-        reflector_guard,
+        io,
+        options,
+        run_control,
+        publication,
     )
-    .await?
-    {
-        Ok(lock) => lock,
-        Err(dispatch) => return Ok(dispatch),
-    };
-    let _skill_lock = match acquire_combined_task_lock(
-        config,
-        &dashboard_root,
-        sessions_db.as_ref(),
-        AgentTaskKind::SkillWriter,
-        options.trigger,
-        "skill_writer_not_due",
-        skill_guard,
-    )
-    .await?
-    {
-        Ok(lock) => lock,
-        Err(dispatch) => return Ok(dispatch),
-    };
-    let project_memory_db = cg.open_project_store_db().await?;
-    let memory = MemoryApplication::new(
-        cg.project_memory_owner()?,
-        DatabaseFactStore::new(&project_memory_db),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("could not initialize combined review memory authority: {error}"),
-    })?;
-    let started_at = current_timestamp().to_string();
+    .await
+}
 
-    let reflector_bundle =
-        match build_session_reflector_evidence(retrieval, &options.session_reflector).await? {
-            SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
-            SessionReflectorEvidenceOutcome::Skipped { .. } => {
+/// Body of [`run_combined_review_for_retrieval`], boxed at definition so the
+/// instrumented wrapper and every scheduler frame above it hold a pointer
+/// rather than the inlined review state machine.
+#[allow(clippy::too_many_arguments)]
+fn run_combined_review_for_retrieval_inner<'a>(
+    cg: &'a TraceDecay,
+    config: &'a AutomationConfig,
+    configuration_revision_id: &'a ConfigurationRevisionId,
+    io: AutomationTaskIo<'a>,
+    options: CombinedReviewAutomationOptions,
+    run_control: &'a AutomationRunControl,
+    publication: CombinedReviewPublication<'a>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CombinedReviewDispatch>> + Send + 'a>>
+{
+    Box::pin(async move {
+        let _run = super::scheduler_metrics::RunningGuard::enter();
+        let _duration = super::scheduler_metrics::DurationGuard::run();
+        let AutomationTaskIo { backend, retrieval } = io;
+        let CombinedReviewPublication {
+            ledger: ledger_publication,
+            reflector_guard,
+            skill_guard,
+        } = publication;
+        let reflector_authority = project_curation_authority(
+            cg,
+            "automation:session-reflector",
+            configuration_revision_id,
+        )?;
+        let skill_authority =
+            project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
+        if !config.combine_due_tasks {
+            return Ok(CombinedReviewDispatch::NotCombined {
+                reason: "combined_mode_disabled",
+            });
+        }
+        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let sessions_db = project_automation_sessions(cg).await?;
+        let _reflector_lock = match acquire_combined_task_lock(
+            config,
+            &dashboard_root,
+            sessions_db.as_ref(),
+            AgentTaskKind::SessionReflector,
+            options.trigger,
+            "session_reflector_not_due",
+            reflector_guard,
+        )
+        .await?
+        {
+            Ok(lock) => lock,
+            Err(dispatch) => return Ok(dispatch),
+        };
+        let _skill_lock = match acquire_combined_task_lock(
+            config,
+            &dashboard_root,
+            sessions_db.as_ref(),
+            AgentTaskKind::SkillWriter,
+            options.trigger,
+            "skill_writer_not_due",
+            skill_guard,
+        )
+        .await?
+        {
+            Ok(lock) => lock,
+            Err(dispatch) => return Ok(dispatch),
+        };
+        let project_memory_db = cg.open_project_store_db().await?;
+        let memory = MemoryApplication::new(
+            cg.project_memory_owner()?,
+            DatabaseFactStore::new(&project_memory_db),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not initialize combined review memory authority: {error}"),
+        })?;
+        let started_at = current_timestamp().to_string();
+
+        let reflector_bundle =
+            match build_session_reflector_evidence(retrieval, &options.session_reflector).await? {
+                SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
+                SessionReflectorEvidenceOutcome::Skipped { .. } => {
+                    return Ok(CombinedReviewDispatch::NotCombined {
+                        reason: "session_reflector_evidence_unavailable",
+                    });
+                }
+            };
+        let skill_bundle = match build_skill_writer_evidence(
+            retrieval,
+            Some(cg.project_root()),
+            Some(cg.profile_database().as_ref()),
+            options.skill_writer,
+        )
+        .await?
+        {
+            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+            SkillWriterEvidenceOutcome::Skipped { .. } => {
                 return Ok(CombinedReviewDispatch::NotCombined {
-                    reason: "session_reflector_evidence_unavailable",
+                    reason: "skill_writer_evidence_unavailable",
                 });
             }
         };
-    let skill_bundle = match build_skill_writer_evidence(
-        retrieval,
-        Some(cg.project_root()),
-        Some(cg.profile_database().as_ref()),
-        options.skill_writer,
-    )
-    .await?
-    {
-        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-        SkillWriterEvidenceOutcome::Skipped { .. } => {
-            return Ok(CombinedReviewDispatch::NotCombined {
-                reason: "skill_writer_evidence_unavailable",
-            });
+        let evidence_bundles = CombinedReviewEvidence {
+            reflector: &reflector_bundle,
+            skill: &skill_bundle,
+        };
+        if let Err(err) = super::outcomes::refresh_fact_outcomes(
+            &dashboard_root,
+            &memory,
+            current_timestamp(),
+            run_control.read_control(),
+        )
+        .await
+        {
+            tracing::warn!(error = %err, "failed to refresh fact outcomes");
         }
-    };
-    let evidence_bundles = CombinedReviewEvidence {
-        reflector: &reflector_bundle,
-        skill: &skill_bundle,
-    };
-    if let Err(err) = super::outcomes::refresh_fact_outcomes(
-        &dashboard_root,
-        &memory,
-        current_timestamp(),
-        run_control.read_control(),
-    )
-    .await
-    {
-        tracing::warn!(error = %err, "failed to refresh fact outcomes");
-    }
 
-    let run_id = options
-        .run_id
-        .unwrap_or_else(|| generated_run_id("combined_review"));
-    // Canonical automatic-fact receipts bind the admitted outer memory
-    // automation identity. Per-task correlation remains in the combined-run
-    // ledger annotation rather than inventing a second mutation authority ID.
-    let reflector_run_id = run_id.clone();
-    let skill_run_id = format!("{run_id}_skills");
-    let activation_policy = skill_writer_activation_policy();
-    let combined_evidence_hash = Some(canonical_evidence_hash(&json!({
-        "session_reflection_evidence": reflector_bundle.evidence,
-        "skill_writer_evidence": skill_bundle.evidence,
-    }))?);
-    let request = AgentTaskRequest::new(
-        run_id.clone(),
-        AgentTaskKind::CombinedReview,
-        build_combined_review_prompt(&reflector_bundle.evidence, &skill_bundle.evidence),
-        combined_evidence_hash,
-        json!({
+        let run_id = options
+            .run_id
+            .unwrap_or_else(|| generated_run_id("combined_review"));
+        // Canonical automatic-fact receipts bind the admitted outer memory
+        // automation identity. Per-task correlation remains in the combined-run
+        // ledger annotation rather than inventing a second mutation authority ID.
+        let reflector_run_id = run_id.clone();
+        let skill_run_id = format!("{run_id}_skills");
+        let activation_policy = skill_writer_activation_policy();
+        let combined_evidence_hash = Some(canonical_evidence_hash(&json!({
             "session_reflection_evidence": reflector_bundle.evidence,
             "skill_writer_evidence": skill_bundle.evidence,
-            "apply": true,
-            "activation_policy": activation_policy,
-        }),
-    );
-    let input_hash = Some(request.input_hash.clone());
-    let reflector_finalizer = AgentRunFinalizer::new(
-        &dashboard_root,
-        &reflector_run_id,
-        options.trigger,
-        config,
-        AgentTaskKind::SessionReflector,
-        &started_at,
-        input_hash.clone(),
-    )?
-    .with_ledger_publication(ledger_publication)
-    .for_combined_run(run_id.clone());
-    let skill_finalizer = AgentRunFinalizer::new(
-        &dashboard_root,
-        &skill_run_id,
-        options.trigger,
-        config,
-        AgentTaskKind::SkillWriter,
-        &started_at,
-        input_hash,
-    )?
-    .with_ledger_publication(ledger_publication)
-    .for_combined_run(run_id.clone());
+        }))?);
+        let request = AgentTaskRequest::new(
+            run_id.clone(),
+            AgentTaskKind::CombinedReview,
+            build_combined_review_prompt(&reflector_bundle.evidence, &skill_bundle.evidence),
+            combined_evidence_hash,
+            json!({
+                "session_reflection_evidence": reflector_bundle.evidence,
+                "skill_writer_evidence": skill_bundle.evidence,
+                "apply": true,
+                "activation_policy": activation_policy,
+            }),
+        );
+        let input_hash = Some(request.input_hash.clone());
+        let reflector_finalizer = AgentRunFinalizer::new(
+            &dashboard_root,
+            &reflector_run_id,
+            options.trigger,
+            config,
+            AgentTaskKind::SessionReflector,
+            &started_at,
+            input_hash.clone(),
+        )?
+        .with_ledger_publication(ledger_publication)
+        .for_combined_run(run_id.clone());
+        let skill_finalizer = AgentRunFinalizer::new(
+            &dashboard_root,
+            &skill_run_id,
+            options.trigger,
+            config,
+            AgentTaskKind::SkillWriter,
+            &started_at,
+            input_hash,
+        )?
+        .with_ledger_publication(ledger_publication)
+        .for_combined_run(run_id.clone());
 
-    let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-    let mut retry_report = AgentTaskRetryReport::default();
-    let mut response =
-        match run_agent_task_with_retry_report(backend, &request, &retry_policy, &mut retry_report)
-            .await
+        let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+        let mut retry_report = AgentTaskRetryReport::default();
+        let mut response = match run_agent_task_with_retry_report(
+            backend,
+            &request,
+            &retry_policy,
+            &mut retry_report,
+        )
+        .await
         {
             Ok(response) => response,
             Err(err) => {
@@ -764,104 +795,7 @@ async fn run_combined_review_for_retrieval(
             }
         };
 
-    let (mut output, mut facts, mut skills) = match combined_review_output(&response) {
-        Ok(output) => output,
-        Err(err) => {
-            let records = append_combined_failed_records(
-                &reflector_finalizer,
-                &skill_finalizer,
-                &response,
-                &evidence_bundles,
-                None,
-                &err,
-                &retry_report,
-            )
-            .await;
-            return Ok(combined_failure_dispatch(run_id, records, &response, err));
-        }
-    };
-    let mut validation_repairs = Vec::new();
-    loop {
-        let (_, fact_errors) = validate_session_fact_candidates(
-            &memory,
-            run_control,
-            &facts,
-            &reflector_bundle.evidence,
-        )
-        .await?;
-        let skill_errors =
-            validate_skill_proposals(&skill_bundle.profile_root, &skill_run_id, &skills).await?;
-        if fact_errors.is_empty() && skill_errors.is_empty() {
-            break;
-        }
-        let attempt = validation_repairs.len() + 1;
-        validation_repairs.push(json!({
-            "attempt": attempt,
-            "fact_errors": fact_errors,
-            "skill_errors": skill_errors,
-        }));
-        if attempt == 2 {
-            let err = TraceDecayError::Config {
-                message: "combined curation validation repair budget exhausted; output quarantined"
-                    .to_string(),
-            };
-            let records = append_combined_failed_records(
-                &reflector_finalizer,
-                &skill_finalizer,
-                &response,
-                &evidence_bundles,
-                Some(&output),
-                &err,
-                &retry_report,
-            )
-            .await;
-            return Ok(combined_failure_dispatch(run_id, records, &response, err));
-        }
-        let repair_request = AgentTaskRequest::new(
-            run_id.clone(),
-            AgentTaskKind::CombinedReview,
-            "Repair the previous combined curation JSON. Return only {\"facts\": [...], \"skills\": [...]}. Preserve valid intent, fix every validation error, use only the supplied evidence, and do not add unrelated proposals."
-                .to_string(),
-            Some(canonical_evidence_hash(&json!({
-                "session_reflection_evidence": reflector_bundle.evidence,
-                "skill_writer_evidence": skill_bundle.evidence,
-            }))?),
-            json!({
-                "previous_output": output.clone(),
-                "validation_errors": validation_repairs.last(),
-                "session_reflection_evidence": reflector_bundle.evidence.clone(),
-                "skill_writer_evidence": skill_bundle.evidence.clone(),
-                "activation_policy": activation_policy,
-                "apply": true,
-            }),
-        );
-        let mut repair_retry_report = AgentTaskRetryReport::default();
-        response = match run_agent_task_with_retry_report(
-            backend,
-            &repair_request,
-            &retry_policy,
-            &mut repair_retry_report,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                retry_report.append(repair_retry_report);
-                let records = append_combined_failed_records(
-                    &reflector_finalizer,
-                    &skill_finalizer,
-                    &response,
-                    &evidence_bundles,
-                    Some(&output),
-                    &err,
-                    &retry_report,
-                )
-                .await;
-                return Ok(combined_failure_dispatch(run_id, records, &response, err));
-            }
-        };
-        retry_report.append(repair_retry_report);
-        (output, facts, skills) = match combined_review_output(&response) {
+        let (mut output, mut facts, mut skills) = match combined_review_output(&response) {
             Ok(output) => output,
             Err(err) => {
                 let records = append_combined_failed_records(
@@ -877,62 +811,33 @@ async fn run_combined_review_for_retrieval(
                 return Ok(combined_failure_dispatch(run_id, records, &response, err));
             }
         };
-    }
-    let (reflector_report, reflector_record, reflector_committed_receipt) =
-        match finalize_session_reflector_success(
-            &memory,
-            run_control,
-            config,
-            &reflector_authority,
-            &reflector_finalizer,
-            ProposedAgentOutput {
-                response: &response,
-                retry_report: &retry_report,
-                evidence: &reflector_bundle.evidence,
-                evidence_hash: reflector_bundle.evidence_hash.clone(),
-                proposals: &facts,
-            },
-            &validation_repairs,
-        )
-        .await
-        {
-            Ok(SessionReflectorFinalization::Completed {
-                report,
-                record,
-                committed_receipt,
-            }) => (report, record, committed_receipt),
-            Ok(SessionReflectorFinalization::FailedRecorded {
-                run_id: committed_run_id,
-                committed_receipt,
-                record,
-                detail,
-            }) => {
-                let (skill_writer_record, skill_writer_error) = match skill_finalizer
-                    .append_failed_record(
-                        response.model.clone(),
-                        skill_bundle.evidence_hash.clone(),
-                        Some(combined_skill_failure_projection(&output)),
-                        detail.to_owned(),
-                        &retry_report,
-                    )
-                    .await
-                {
-                    Ok(record) => (Some(record), None),
-                    Err(error) => (None, Some(error)),
-                };
-                return Ok(CombinedReviewDispatch::ReflectorPartial(Box::new(
-                    CombinedReflectorPartial {
-                        run_id: committed_run_id,
-                        committed_receipt,
-                        ledger_record: record,
-                        reflector_record_error: None,
-                        skill_writer_record,
-                        skill_writer_error,
-                        detail,
-                    },
-                )));
+        let mut validation_repairs = Vec::new();
+        loop {
+            let (_, fact_errors) = validate_session_fact_candidates(
+                &memory,
+                run_control,
+                &facts,
+                &reflector_bundle.evidence,
+            )
+            .await?;
+            let skill_errors =
+                validate_skill_proposals(&skill_bundle.profile_root, &skill_run_id, &skills)
+                    .await?;
+            if fact_errors.is_empty() && skill_errors.is_empty() {
+                break;
             }
-            Err(err) => {
+            let attempt = validation_repairs.len() + 1;
+            validation_repairs.push(json!({
+                "attempt": attempt,
+                "fact_errors": fact_errors,
+                "skill_errors": skill_errors,
+            }));
+            if attempt == 2 {
+                let err = TraceDecayError::Config {
+                    message:
+                        "combined curation validation repair budget exhausted; output quarantined"
+                            .to_string(),
+                };
                 let records = append_combined_failed_records(
                     &reflector_finalizer,
                     &skill_finalizer,
@@ -945,172 +850,302 @@ async fn run_combined_review_for_retrieval(
                 .await;
                 return Ok(combined_failure_dispatch(run_id, records, &response, err));
             }
+            let repair_request = AgentTaskRequest::new(
+                run_id.clone(),
+                AgentTaskKind::CombinedReview,
+                "Repair the previous combined curation JSON. Return only {\"facts\": [...], \"skills\": [...]}. Preserve valid intent, fix every validation error, use only the supplied evidence, and do not add unrelated proposals."
+                    .to_string(),
+                Some(canonical_evidence_hash(&json!({
+                    "session_reflection_evidence": reflector_bundle.evidence,
+                    "skill_writer_evidence": skill_bundle.evidence,
+                }))?),
+                json!({
+                    "previous_output": output.clone(),
+                    "validation_errors": validation_repairs.last(),
+                    "session_reflection_evidence": reflector_bundle.evidence.clone(),
+                    "skill_writer_evidence": skill_bundle.evidence.clone(),
+                    "activation_policy": activation_policy,
+                    "apply": true,
+                }),
+            );
+            let mut repair_retry_report = AgentTaskRetryReport::default();
+            response = match run_agent_task_with_retry_report(
+                backend,
+                &repair_request,
+                &retry_policy,
+                &mut repair_retry_report,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    retry_report.append(repair_retry_report);
+                    let records = append_combined_failed_records(
+                        &reflector_finalizer,
+                        &skill_finalizer,
+                        &response,
+                        &evidence_bundles,
+                        Some(&output),
+                        &err,
+                        &retry_report,
+                    )
+                    .await;
+                    return Ok(combined_failure_dispatch(run_id, records, &response, err));
+                }
+            };
+            retry_report.append(repair_retry_report);
+            (output, facts, skills) = match combined_review_output(&response) {
+                Ok(output) => output,
+                Err(err) => {
+                    let records = append_combined_failed_records(
+                        &reflector_finalizer,
+                        &skill_finalizer,
+                        &response,
+                        &evidence_bundles,
+                        None,
+                        &err,
+                        &retry_report,
+                    )
+                    .await;
+                    return Ok(combined_failure_dispatch(run_id, records, &response, err));
+                }
+            };
+        }
+        let (reflector_report, reflector_record, reflector_committed_receipt) =
+            match finalize_session_reflector_success(
+                &memory,
+                run_control,
+                config,
+                &reflector_authority,
+                &reflector_finalizer,
+                ProposedAgentOutput {
+                    response: &response,
+                    retry_report: &retry_report,
+                    evidence: &reflector_bundle.evidence,
+                    evidence_hash: reflector_bundle.evidence_hash.clone(),
+                    proposals: &facts,
+                },
+                &validation_repairs,
+            )
+            .await
+            {
+                Ok(SessionReflectorFinalization::Completed {
+                    report,
+                    record,
+                    committed_receipt,
+                }) => (report, record, committed_receipt),
+                Ok(SessionReflectorFinalization::FailedRecorded {
+                    run_id: committed_run_id,
+                    committed_receipt,
+                    record,
+                    detail,
+                }) => {
+                    let (skill_writer_record, skill_writer_error) = match skill_finalizer
+                        .append_failed_record(
+                            response.model.clone(),
+                            skill_bundle.evidence_hash.clone(),
+                            Some(combined_skill_failure_projection(&output)),
+                            detail.to_owned(),
+                            &retry_report,
+                        )
+                        .await
+                    {
+                        Ok(record) => (Some(record), None),
+                        Err(error) => (None, Some(error)),
+                    };
+                    return Ok(CombinedReviewDispatch::ReflectorPartial(Box::new(
+                        CombinedReflectorPartial {
+                            run_id: committed_run_id,
+                            committed_receipt,
+                            ledger_record: record,
+                            reflector_record_error: None,
+                            skill_writer_record,
+                            skill_writer_error,
+                            detail,
+                        },
+                    )));
+                }
+                Err(err) => {
+                    let records = append_combined_failed_records(
+                        &reflector_finalizer,
+                        &skill_finalizer,
+                        &response,
+                        &evidence_bundles,
+                        Some(&output),
+                        &err,
+                        &retry_report,
+                    )
+                    .await;
+                    return Ok(combined_failure_dispatch(run_id, records, &response, err));
+                }
+            };
+
+        // The reflector is a separately admitted memory operation. Publish its
+        // ledger before skill finalization so a later skill failure cannot convert
+        // an already committed memory result into a memory PartialEffect.
+        let reflector_record = match reflector_finalizer
+            .append_success_record(&request, &response, &retry_report, reflector_record)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                if let Some(committed_receipt) = reflector_committed_receipt {
+                    return Ok(CombinedReviewDispatch::ReflectorPartial(Box::new(
+                        CombinedReflectorPartial {
+                            run_id: reflector_run_id,
+                            committed_receipt,
+                            ledger_record: None,
+                            reflector_record_error: Some(error),
+                            skill_writer_record: None,
+                            skill_writer_error: None,
+                            detail: "Automatic facts committed, but the memory automation ledger could not be published; reconcile the committed receipt before another run.",
+                        },
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        let memory_run = SessionReflectorAutomationRun {
+            run_id: reflector_run_id,
+            report: reflector_report,
+            ledger_record: reflector_record,
+            backend_response: Some(response.clone()),
+            committed_receipt: reflector_committed_receipt,
         };
 
-    // The reflector is a separately admitted memory operation. Publish its
-    // ledger before skill finalization so a later skill failure cannot convert
-    // an already committed memory result into a memory PartialEffect.
-    let reflector_record = match reflector_finalizer
-        .append_success_record(&request, &response, &retry_report, reflector_record)
-        .await
-    {
-        Ok(record) => record,
-        Err(error) => {
-            if let Some(committed_receipt) = reflector_committed_receipt {
-                return Ok(CombinedReviewDispatch::ReflectorPartial(Box::new(
-                    CombinedReflectorPartial {
-                        run_id: reflector_run_id,
+        let (skill_report, skill_record, skill_committed_receipt) =
+            match finalize_skill_writer_success(
+                &skill_finalizer,
+                &skill_bundle.profile_root,
+                Some(cg.store_layout().project_root.as_path()),
+                config,
+                &skill_authority,
+                activation_policy,
+                ProposedSkillOutput {
+                    response: &response,
+                    retry_report: &retry_report,
+                    evidence: &skill_bundle.evidence,
+                    evidence_hash: skill_bundle.evidence_hash.clone(),
+                    proposed_ops: &output,
+                    proposals: &skills,
+                    validation_repairs: &validation_repairs,
+                },
+            )
+            .await
+            {
+                Ok(SkillWriterFinalization::Completed {
+                    report,
+                    record,
+                    committed_receipt,
+                }) => (report, record, committed_receipt.map(|receipt| *receipt)),
+                Ok(SkillWriterFinalization::FailedRecorded {
+                    error,
+                    record: skill_record,
+                }) => {
+                    return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
+                        Box::new(CombinedMemoryCompletedSkillFailure {
+                            session_reflector: Box::new(memory_run),
+                            skill_writer_record: Some(skill_record),
+                            skill_writer_record_error: None,
+                            error,
+                        }),
+                    ));
+                }
+                Err(AutomationRunError::Runtime(err)) => {
+                    let failed_record = skill_finalizer
+                        .append_failed_record(
+                            response.model.clone(),
+                            skill_bundle.evidence_hash.clone(),
+                            Some(combined_skill_failure_projection(&output)),
+                            err.to_string(),
+                            &retry_report,
+                        )
+                        .await;
+                    let (skill_writer_record, error, skill_writer_record_error) =
+                        split_skill_runtime_failure(err, failed_record);
+                    return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
+                        Box::new(CombinedMemoryCompletedSkillFailure {
+                            session_reflector: Box::new(memory_run),
+                            skill_writer_record,
+                            skill_writer_record_error,
+                            error,
+                        }),
+                    ));
+                }
+                Err(AutomationRunError::RecordedFailure {
+                    error,
+                    ledger_record,
+                }) => {
+                    return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
+                        Box::new(CombinedMemoryCompletedSkillFailure {
+                            session_reflector: Box::new(memory_run),
+                            skill_writer_record: Some(*ledger_record),
+                            skill_writer_record_error: None,
+                            error,
+                        }),
+                    ));
+                }
+                Err(AutomationRunError::PartialEffect {
+                    run_id,
+                    committed_receipt,
+                    ledger_record,
+                    detail,
+                }) => {
+                    return Ok(CombinedReviewDispatch::SkillPartial(Box::new(
+                        CombinedSkillPartial {
+                            completed_session_reflector: Box::new(memory_run),
+                            run_id,
+                            committed_receipt: *committed_receipt,
+                            ledger_record: ledger_record.map(|record| *record),
+                            skill_writer_record_error: None,
+                            detail,
+                        },
+                    )));
+                }
+            };
+        let skill_record = match skill_finalizer
+            .append_success_record(&request, &response, &retry_report, skill_record)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                let Some(committed_receipt) = skill_committed_receipt.clone() else {
+                    return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
+                        Box::new(CombinedMemoryCompletedSkillFailure {
+                            session_reflector: Box::new(memory_run),
+                            skill_writer_record: None,
+                            skill_writer_record_error: None,
+                            error,
+                        }),
+                    ));
+                };
+                return Ok(CombinedReviewDispatch::SkillPartial(Box::new(
+                    CombinedSkillPartial {
+                        completed_session_reflector: Box::new(memory_run),
+                        run_id: skill_finalizer.run_id().to_owned(),
                         committed_receipt,
                         ledger_record: None,
-                        reflector_record_error: Some(error),
-                        skill_writer_record: None,
-                        skill_writer_error: None,
-                        detail: "Automatic facts committed, but the memory automation ledger could not be published; reconcile the committed receipt before another run.",
+                        skill_writer_record_error: Some(error),
+                        detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
                     },
                 )));
             }
-            return Err(error);
-        }
-    };
-    let memory_run = SessionReflectorAutomationRun {
-        run_id: reflector_run_id,
-        report: reflector_report,
-        ledger_record: reflector_record,
-        backend_response: Some(response.clone()),
-        committed_receipt: reflector_committed_receipt,
-    };
+        };
 
-    let (skill_report, skill_record, skill_committed_receipt) = match finalize_skill_writer_success(
-        &skill_finalizer,
-        &skill_bundle.profile_root,
-        Some(cg.store_layout().project_root.as_path()),
-        config,
-        &skill_authority,
-        activation_policy,
-        ProposedSkillOutput {
-            response: &response,
-            retry_report: &retry_report,
-            evidence: &skill_bundle.evidence,
-            evidence_hash: skill_bundle.evidence_hash.clone(),
-            proposed_ops: &output,
-            proposals: &skills,
-            validation_repairs: &validation_repairs,
-        },
-    )
-    .await
-    {
-        Ok(SkillWriterFinalization::Completed {
-            report,
-            record,
-            committed_receipt,
-        }) => (report, record, committed_receipt.map(|receipt| *receipt)),
-        Ok(SkillWriterFinalization::FailedRecorded {
-            error,
-            record: skill_record,
-        }) => {
-            return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
-                Box::new(CombinedMemoryCompletedSkillFailure {
-                    session_reflector: Box::new(memory_run),
-                    skill_writer_record: Some(skill_record),
-                    skill_writer_record_error: None,
-                    error,
-                }),
-            ));
-        }
-        Err(AutomationRunError::Runtime(err)) => {
-            let failed_record = skill_finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    skill_bundle.evidence_hash.clone(),
-                    Some(combined_skill_failure_projection(&output)),
-                    err.to_string(),
-                    &retry_report,
-                )
-                .await;
-            let (skill_writer_record, error, skill_writer_record_error) =
-                split_skill_runtime_failure(err, failed_record);
-            return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
-                Box::new(CombinedMemoryCompletedSkillFailure {
-                    session_reflector: Box::new(memory_run),
-                    skill_writer_record,
-                    skill_writer_record_error,
-                    error,
-                }),
-            ));
-        }
-        Err(AutomationRunError::RecordedFailure {
-            error,
-            ledger_record,
-        }) => {
-            return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
-                Box::new(CombinedMemoryCompletedSkillFailure {
-                    session_reflector: Box::new(memory_run),
-                    skill_writer_record: Some(*ledger_record),
-                    skill_writer_record_error: None,
-                    error,
-                }),
-            ));
-        }
-        Err(AutomationRunError::PartialEffect {
-            run_id,
-            committed_receipt,
-            ledger_record,
-            detail,
-        }) => {
-            return Ok(CombinedReviewDispatch::SkillPartial(Box::new(
-                CombinedSkillPartial {
-                    completed_session_reflector: Box::new(memory_run),
-                    run_id,
-                    committed_receipt: *committed_receipt,
-                    ledger_record: ledger_record.map(|record| *record),
-                    skill_writer_record_error: None,
-                    detail,
+        Ok(CombinedReviewDispatch::Ran(Box::new(
+            CombinedReviewAutomationRun {
+                run_id,
+                session_reflector: memory_run,
+                skill_writer: SkillWriterAutomationRun {
+                    run_id: skill_run_id,
+                    report: skill_report,
+                    ledger_record: skill_record,
+                    backend_response: Some(response),
+                    committed_receipt: skill_committed_receipt,
                 },
-            )));
-        }
-    };
-    let skill_record = match skill_finalizer
-        .append_success_record(&request, &response, &retry_report, skill_record)
-        .await
-    {
-        Ok(record) => record,
-        Err(error) => {
-            let Some(committed_receipt) = skill_committed_receipt.clone() else {
-                return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure(
-                    Box::new(CombinedMemoryCompletedSkillFailure {
-                        session_reflector: Box::new(memory_run),
-                        skill_writer_record: None,
-                        skill_writer_record_error: None,
-                        error,
-                    }),
-                ));
-            };
-            return Ok(CombinedReviewDispatch::SkillPartial(Box::new(
-                CombinedSkillPartial {
-                    completed_session_reflector: Box::new(memory_run),
-                    run_id: skill_finalizer.run_id().to_owned(),
-                    committed_receipt,
-                    ledger_record: None,
-                    skill_writer_record_error: Some(error),
-                    detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
-                },
-            )));
-        }
-    };
-
-    Ok(CombinedReviewDispatch::Ran(Box::new(
-        CombinedReviewAutomationRun {
-            run_id,
-            session_reflector: memory_run,
-            skill_writer: SkillWriterAutomationRun {
-                run_id: skill_run_id,
-                report: skill_report,
-                ledger_record: skill_record,
-                backend_response: Some(response),
-                committed_receipt: skill_committed_receipt,
             },
-        },
-    )))
+        )))
+    })
 }
 
 fn combined_failed_run(
