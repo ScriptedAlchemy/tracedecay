@@ -203,14 +203,17 @@ pub(super) fn seed_semantic_source(project: &Path) {
     .expect("semantic fixture source");
 }
 
-pub(super) fn install_semantic_fixture(home: &Path) -> InstalledSemanticFixture {
+/// Installs the byte-pinned FastEmbed package this journey needs, or `None`
+/// when the lane never prepared one.
+///
+/// The package comes from distribution acceptance and cannot be synthesized, so
+/// the ordinary test lane has no way to supply it. Callers skip on `None`
+/// rather than fail, the same contract `semantic_availability_journey_test`
+/// uses.
+pub(super) fn install_semantic_fixture(home: &Path) -> Option<InstalledSemanticFixture> {
     let fixture_root = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
         .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-        .expect(
-            "advanced Work TaskSession journey requires the byte-pinned FastEmbed fixture in \
-             TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE",
-        );
+        .filter(|path| path.is_dir())?;
     let profile = home.join(".tracedecay");
     tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
         .expect("private semantic fixture profile");
@@ -234,10 +237,10 @@ pub(super) fn install_semantic_fixture(home: &Path) -> InstalledSemanticFixture 
             artifact_digest,
             install_path,
             ..
-        } => InstalledSemanticFixture {
+        } => Some(InstalledSemanticFixture {
             artifact_digest,
             artifact_path: install_path,
-        },
+        }),
         state => panic!("expected installed production model, got {state:?}"),
     }
 }
