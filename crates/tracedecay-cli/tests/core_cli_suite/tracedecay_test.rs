@@ -138,11 +138,48 @@ fn daemon_tool_searches_the_active_project() {
     );
 }
 
+/// A daemon-owned source edit is a preview-then-apply effect: an apply must
+/// carry a fresh `idempotency_key` and the `expected_state` its own preview
+/// returned, so the write is compare-and-set against the exact bytes the
+/// preview was computed from. Drive that journey end to end from the CLI.
 #[test]
 fn daemon_tool_str_replace_updates_source() {
     let (_home, _project, home_path, project_path) =
         setup_daemon_project("pub fn answer() -> u32 { 1 }\n");
     let project_arg = project_path.to_string_lossy().to_string();
+    let preview = run_tool(
+        &project_path,
+        &home_path,
+        &[
+            "--project",
+            &project_arg,
+            "str_replace",
+            "--json",
+            "--args",
+            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }","dry_run":true,"format":"json"}"#,
+        ],
+    );
+    assert!(
+        preview.status.success(),
+        "daemon-owned source edit preview failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&preview.stdout),
+        String::from_utf8_lossy(&preview.stderr),
+    );
+    assert_eq!(
+        fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
+        "pub fn answer() -> u32 { 1 }\n",
+        "a preview must not write"
+    );
+    let expected_state = source_edit_expected_state(&preview.stdout);
+
+    let apply_args = serde_json::json!({
+        "path": "src/lib.rs",
+        "old_str": "pub fn answer() -> u32 { 1 }",
+        "new_str": "pub fn answer() -> u32 { 2 }",
+        "idempotency_key": "core-cli-suite.source-edit.str-replace",
+        "expected_state": expected_state,
+    })
+    .to_string();
     let output = run_tool(
         &project_path,
         &home_path,
@@ -152,7 +189,7 @@ fn daemon_tool_str_replace_updates_source() {
             "str_replace",
             "--json",
             "--args",
-            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }"}"#,
+            apply_args.as_str(),
         ],
     );
 
@@ -166,6 +203,24 @@ fn daemon_tool_str_replace_updates_source() {
         fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
         "pub fn answer() -> u32 { 2 }\n"
     );
+}
+
+/// Reads `expected_state` out of a `format: "json"` source-edit preview.
+///
+/// `tracedecay tool --json` prints the MCP tool-result envelope; the requested
+/// JSON document travels inside the first content block's text.
+fn source_edit_expected_state(stdout: &[u8]) -> String {
+    let envelope: serde_json::Value =
+        serde_json::from_slice(stdout).expect("source edit preview should print JSON");
+    let text = envelope["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("preview returned no content text: {envelope}"));
+    let document: serde_json::Value =
+        serde_json::from_str(text).expect("preview content should carry the JSON document");
+    document["expected_state"]
+        .as_str()
+        .unwrap_or_else(|| panic!("preview omitted expected_state: {document}"))
+        .to_owned()
 }
 
 #[test]
