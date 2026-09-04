@@ -50,6 +50,10 @@ pub struct RmcpConnectionPipelineMeasurement {
     pub schema_version: u32,
     pub workload: &'static str,
     pub transport: &'static str,
+    /// The catalog is intentionally ready before this benchmark samples the
+    /// connection path, so this result describes steady-state RMCP work rather
+    /// than one process's global catalog construction.
+    pub measurement_scope: &'static str,
     pub persistent_warmup_requests: usize,
     pub persistent_measured_requests: usize,
     pub reconnect_warmup_rounds: usize,
@@ -202,6 +206,14 @@ pub fn run_rmcp_connection_pipeline<'a>(
             .await
             .map_err(|error| format!("bind benchmark RMCP broker listener: {error}"))?;
 
+        // Read-only dispatch classification consults this process-global
+        // catalog before its first route. Warm it outside the Hotpath guard so
+        // the selected dispatch allocation reports steady-state connection
+        // work. Cold catalog construction is intentionally outside this
+        // scope and is measured separately with process profiling.
+        crate::mcp::tools::binding::mcp_dispatch_catalog()
+            .map_err(|error| format!("warm benchmark dispatch catalog: {error}"))?;
+
         before_measurement();
 
         let persistent =
@@ -238,6 +250,7 @@ pub fn run_rmcp_connection_pipeline<'a>(
             schema_version: 1,
             workload: "rmcp-production-broker-connection-pipeline",
             transport: "broker-framing+typed-rmcp-server+shared-dispatch-envelope",
+            measurement_scope: "steady-state typed RMCP after dispatch-catalog prewarm",
             persistent_warmup_requests: PERSISTENT_WARMUP_REQUESTS,
             persistent_measured_requests: persistent_requests,
             reconnect_warmup_rounds: RECONNECT_WARMUP_ROUNDS,
