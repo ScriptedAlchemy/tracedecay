@@ -17,7 +17,7 @@ use tracedecay_domain::configuration::{
     ConfigurationMutationEffectV1, ConfigurationMutationOperationV1, ConfigurationMutationSinkV1,
     ConfigurationRevisionId,
 };
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcomeV1;
 
@@ -127,10 +127,27 @@ impl ProjectSemanticActivationExt for ProjectConfigurationRuntime {
         &self,
         runtime: Arc<ProductionSemanticActivationCoordinatorV1>,
     ) -> Result<()> {
+        if let Some(installed) =
+            self.semantic_activation::<ProductionSemanticActivationCoordinatorV1>()
+        {
+            return if Arc::ptr_eq(&installed, &runtime) {
+                Ok(())
+            } else {
+                Err(TraceDecayError::Config {
+                    message: "semantic activation coordinator identity disagrees with the installed owner"
+                        .to_owned(),
+                })
+            };
+        }
         let inventory = runtime.configuration_inventory_authority();
         self.install_semantic_inventory(inventory);
-        self.install_semantic_activation(runtime);
-        Ok(())
+        self.install_semantic_activation(Arc::clone(&runtime));
+        self.semantic_activation::<ProductionSemanticActivationCoordinatorV1>()
+            .filter(|installed| Arc::ptr_eq(installed, &runtime))
+            .map(|_| ())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "semantic activation coordinator lost its installation race".to_owned(),
+            })
     }
 
     fn semantic_configuration_inventory_authority(

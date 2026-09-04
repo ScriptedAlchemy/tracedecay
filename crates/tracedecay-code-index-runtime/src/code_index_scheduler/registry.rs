@@ -508,6 +508,7 @@ pub struct CodeIndexGenerationPublishedV1 {
 pub struct QueryActivationAttemptV1 {
     revision: ConfigurationRevisionId,
     token: u64,
+    preserves_existing_authority: bool,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -1353,6 +1354,12 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn background_reconcile_admission(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.background_reconcile_admission)
+    }
+
+    /// Share the bounded background scheduler admission with semantic
+    /// evaluation so native model work cannot bypass the project-wide limit.
+    pub fn semantic_evaluation_admission(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.background_reconcile_admission)
     }
 
@@ -4388,9 +4395,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 "query activation scope does not match the mounted worktree".to_owned(),
             ));
         }
+        let mut exact_retry = false;
         if let Some(desired_epoch) = worktree.query_activation_epoch {
             let advances = epoch > desired_epoch;
-            let exact_retry = epoch == desired_epoch
+            exact_retry = epoch == desired_epoch
                 && worktree.query_activation_revision.as_ref() == Some(result_revision)
                 && worktree.query_activation_transition_digest.as_ref() == Some(transition_digest)
                 && worktree.query_activation_redundancy.as_ref() == Some(prepared_redundancy);
@@ -4417,15 +4425,18 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree.query_activation_epoch = Some(epoch);
         worktree.query_activation_transition_digest = Some(transition_digest.clone());
         worktree.query_activation_redundancy = Some(prepared_redundancy.clone());
-        worktree.semantic_query_authority = None;
-        tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
-            project_root,
-            prepared_redundancy,
-            false,
-        );
+        if !exact_retry {
+            worktree.semantic_query_authority = None;
+            tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                project_root,
+                prepared_redundancy,
+                false,
+            );
+        }
         Ok(QueryActivationAttemptV1 {
             revision: result_revision.clone(),
             token: worktree.query_activation_attempt,
+            preserves_existing_authority: exact_retry,
         })
     }
 
@@ -4486,14 +4497,16 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         if let Some(prepared_cache) = prepared_cache {
             if !prepared_cache.commit() {
-                worktree.semantic_query_authority = None;
-                worktree.query_activation_revision =
-                    Some(prepared.configuration_revision().clone());
-                tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
-                    project_root.clone(),
-                    &prepared_redundancy,
-                    false,
-                );
+                if !attempt.preserves_existing_authority {
+                    worktree.semantic_query_authority = None;
+                    worktree.query_activation_revision =
+                        Some(prepared.configuration_revision().clone());
+                    tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                        project_root.clone(),
+                        &prepared_redundancy,
+                        false,
+                    );
+                }
                 return Err(CodeIndexSchedulerErrorV1::Identity(
                     "prepared semantic cache became stale before coherent installation".to_owned(),
                 ));
@@ -4507,13 +4520,16 @@ impl CodeIndexSchedulerRegistryV1 {
             );
         }
         if let Err(error) = commit_prepared() {
-            worktree.semantic_query_authority = None;
-            worktree.query_activation_revision = Some(prepared.configuration_revision().clone());
-            tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
-                project_root.clone(),
-                &prepared_redundancy,
-                false,
-            );
+            if !attempt.preserves_existing_authority {
+                worktree.semantic_query_authority = None;
+                worktree.query_activation_revision =
+                    Some(prepared.configuration_revision().clone());
+                tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                    project_root.clone(),
+                    &prepared_redundancy,
+                    false,
+                );
+            }
             return Err(CodeIndexSchedulerErrorV1::Identity(error));
         }
         tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
@@ -4568,6 +4584,9 @@ impl CodeIndexSchedulerRegistryV1 {
             && failed_redundancy.configuration_revision() == &attempt.revision
             && worktree.query_activation_redundancy.as_ref() == Some(&failed_redundancy)
         {
+            if attempt.preserves_existing_authority {
+                return Ok(false);
+            }
             worktree.semantic_query_authority = None;
             tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
                 project_root.clone(),
@@ -4890,6 +4909,34 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(|error| {
                     Err(CodeIndexSchedulerErrorV1::Identity(format!(
                         "sealed replay-binding read task failed: {error}"
+                    )))
+                }),
+        )
+    }
+
+    /// Load one exact code generation through its durable publication store,
+    /// including a source generation superseded in process-local retention.
+    pub async fn published_generation(
+        &self,
+        project_root: &Path,
+        generation_id: &CodeGenerationId,
+    ) -> Option<Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexSchedulerErrorV1>>
+    {
+        let project_root = project_root.canonicalize().ok()?;
+        let owner = {
+            let mounted = self.mounted.lock().await;
+            mounted
+                .get(&project_root)?
+                .historical_generation_owner
+                .clone()
+        };
+        let generation_id = generation_id.clone();
+        Some(
+            tokio::task::spawn_blocking(move || owner.published_generation(&generation_id))
+                .await
+                .unwrap_or_else(|error| {
+                    Err(CodeIndexSchedulerErrorV1::Identity(format!(
+                        "published-generation read task failed: {error}"
                     )))
                 }),
         )

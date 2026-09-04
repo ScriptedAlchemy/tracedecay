@@ -27,6 +27,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
+    pub(super) configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     pub(super) profile_id: tracedecay_domain::configuration::UserProfileId,
 }
 
@@ -52,6 +53,7 @@ pub(super) fn code_index_activation_mount(
         cancellation,
         graph_runtime,
         graph_publication_database,
+        configuration_runtime,
         profile_id,
     } = inputs;
     let mount: code_index_scheduler::CodeIndexActivationMountV1 = Arc::new(move || {
@@ -68,6 +70,7 @@ pub(super) fn code_index_activation_mount(
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
+        let configuration_runtime = Arc::clone(&configuration_runtime);
         let profile_id = profile_id.clone();
         Box::pin(hotpath::future!(
             async move {
@@ -100,6 +103,14 @@ pub(super) fn code_index_activation_mount(
                     }
                     outcome = mount => outcome.map_err(|error| error.to_string())?,
                 }
+                project_open_owners::install_semantic_activation_runtime_owner(
+                    &invocation,
+                    &project_root,
+                    configuration_runtime,
+                    scope.clone(),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked after code-index mount".to_owned());
                 }
