@@ -416,6 +416,13 @@ jobs:
         shell: pwsh
         run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
 
+      # Acceptance tests execute the ordinary evaluator binaries. Match the
+      # archive's feature resolution so this reuses its dependency artifacts;
+      # nextest's archive.include carries the executables to every shard.
+      - name: Build workspace binaries for the Windows test lane
+        shell: pwsh
+        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+
       - name: Build nextest archive
         shell: pwsh
         run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
