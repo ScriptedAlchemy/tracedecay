@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::NativeGitIndexError;
 use super::patch::ValidatedIndexPatch;
@@ -21,9 +22,15 @@ pub fn joined_patch_bytes(patches: &[ValidatedIndexPatch]) -> Vec<u8> {
     patch_bytes
 }
 
+/// Builds a `git` invocation rooted at `repository_root` with every inherited
+/// `GIT_*` variable stripped.
+///
+/// Every path handed to git is spelled plainly first: this runtime resolves
+/// paths with `fs::canonicalize`, which on Windows returns the `\\?\`
+/// extended-length form that Git for Windows refuses to normalize.
 pub fn git_command(repository_root: &Path) -> Command {
     let mut command = Command::new("git");
-    command.current_dir(repository_root);
+    command.current_dir(plain_host_path(repository_root));
     for (key, _) in env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);

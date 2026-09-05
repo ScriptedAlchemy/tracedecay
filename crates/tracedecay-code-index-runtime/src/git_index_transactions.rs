@@ -25,6 +25,7 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentity, GitRepositoryIdentityOutcome, discover_repository_identity_bounded,
 };
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 pub const GIT_INDEX_ADAPTER_REVISION: &str = "tracedecay.git-index-adapter.v1";
 
@@ -724,19 +725,26 @@ impl FixedGitIndexRunner {
         // runner therefore relies on cwd resolution alone.
         if self.repository_root != self.git_dir {
             command
-                .env("GIT_DIR", &self.git_dir)
-                .env("GIT_COMMON_DIR", &self.common_dir)
-                .env("GIT_WORK_TREE", &self.repository_root);
+                .env("GIT_DIR", plain_host_path(&self.git_dir))
+                .env("GIT_COMMON_DIR", plain_host_path(&self.common_dir))
+                .env("GIT_WORK_TREE", plain_host_path(&self.repository_root));
         }
         command
     }
 
     fn quarantine_command(&self, index_path: &Path, object_path: &Path) -> Command {
         let mut command = self.command();
+        // `GIT_ALTERNATE_OBJECT_DIRECTORIES` is the strictest of the three:
+        // git normalizes every entry before linking it, so a verbatim
+        // `\\?\` path there fails every object-writing command in the
+        // quarantine (`write-tree`, `apply --cached`).
         command
-            .env("GIT_INDEX_FILE", index_path)
-            .env("GIT_OBJECT_DIRECTORY", object_path)
-            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.objects_path);
+            .env("GIT_INDEX_FILE", plain_host_path(index_path))
+            .env("GIT_OBJECT_DIRECTORY", plain_host_path(object_path))
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                plain_host_path(&self.objects_path),
+            );
         command
     }
 

@@ -19,6 +19,7 @@ use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ReapEntryKind;
 use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_runtime_core::path_safety::plain_host_path;
 use tracedecay_runtime_core::storage::{
     default_profile_project_id, repository_identity_path, resolve_layout,
 };
@@ -51,7 +52,10 @@ struct RepoFixture {
 
 fn repo_with_worktrees() -> RepoFixture {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    // `canonicalize` returns the `\\?\` extended-length form on Windows, and
+    // `git worktree add` refuses that spelling, so the fixture names its
+    // worktrees the way any other tool would.
+    let root = plain_host_path(&tmp.path().canonicalize().unwrap());
     let main = root.join("main");
     std::fs::create_dir_all(main.join("packages/app")).unwrap();
     git(&main, &["init", "--quiet"]);
