@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
@@ -382,29 +384,40 @@ impl DaemonSessionRuntimeRegistryV1 {
         runtime: StoreRuntimeClientLease,
         _operation: &'static str,
     ) -> Result<RegisteredGlobalDbOwnerV1> {
-        let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-        let long_lived = self.long_lived_session_maintenance();
-        let (database, convergence) = if long_lived {
-            let (database, convergence) =
-                RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?;
-            (database, Some(convergence))
-        } else {
-            (
-                RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?,
-                None,
-            )
-        };
-        if long_lived {
-            let lease = database.issue_lease().map_err(|error| {
-                session_registry_error(
-                    "issue registered schema convergence client",
-                    format!("{error:?}"),
+        self.attach_registered_inner(runtime).await
+    }
+
+    // Erase the inner state machine before Hotpath wraps it by value. Boxing
+    // only the caller leaves large temporaries in the measured poll frame.
+    fn attach_registered_inner(
+        &self,
+        runtime: StoreRuntimeClientLease,
+    ) -> Pin<Box<dyn Future<Output = Result<RegisteredGlobalDbOwnerV1>> + Send + '_>> {
+        Box::pin(async move {
+            let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
+            let long_lived = self.long_lived_session_maintenance();
+            let (database, convergence) = if long_lived {
+                let (database, convergence) =
+                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database).await?;
+                (database, Some(convergence))
+            } else {
+                (
+                    RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?,
+                    None,
                 )
-            })?;
-            self.registered_schema_convergence
-                .schedule(lease, convergence);
-        }
-        Ok(database)
+            };
+            if long_lived {
+                let lease = database.issue_lease().map_err(|error| {
+                    session_registry_error(
+                        "issue registered schema convergence client",
+                        format!("{error:?}"),
+                    )
+                })?;
+                self.registered_schema_convergence
+                    .schedule(lease, convergence);
+            }
+            Ok(database)
+        })
     }
 
     pub fn begin_foreground_project_open(&self) -> Result<ForegroundProjectOpenAdmission> {
