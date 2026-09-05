@@ -4,13 +4,14 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracedecay_capture::codex::{codex_current_user_message, codex_message_visible_text};
 
 use super::PROVIDER;
-use super::goals::{CodexGoalContext, codex_goal_context_from_text};
 use super::meta::CodexMeta;
 use crate::host_ports::parse_timestamp;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{append_tool_calls_metadata, content_storage_text_and_tools};
+use tracedecay_store::{CodexGoalContext, codex_goal_context_from_text};
 
 /// Threshold above which a tool call's arguments / a tool output is flagged as
 /// truncated in metadata. Raw tool-call arguments and tool outputs are never
@@ -20,8 +21,9 @@ use crate::runtime::shared::{append_tool_calls_metadata, content_storage_text_an
 /// `source_offset`.
 const TOOL_EVENT_PREVIEW_BYTES: usize = 2000;
 
-/// Map one rollout line to a provider-neutral message, or `None` for non-message
-/// events (`response_item`, tool calls, token counts, …).
+/// Map one current or legacy rollout message event to a provider-neutral row,
+/// or `None` for non-message events (`response_item`, tool calls, token counts,
+/// …).
 pub(super) fn message_from_line(
     record: &Value,
     meta: &CodexMeta,
@@ -33,33 +35,62 @@ pub(super) fn message_from_line(
         return None;
     }
     let payload = record.get("payload")?;
-    let role = match payload.get("type").and_then(Value::as_str)? {
-        "user_message" => "user",
-        "agent_message" => "assistant",
-        _ => return None,
-    };
-    let content = payload.get("message")?;
-    let (text, tool_names) = content_storage_text_and_tools(content, payload.get("tool_calls"));
+    let (role, content, source_item_id, source_event, metadata_payload) =
+        match payload.get("type").and_then(Value::as_str)? {
+            "user_message" => ("user", payload.get("message")?, None, None, payload),
+            "agent_message" => ("assistant", payload.get("message")?, None, None, payload),
+            "item_completed" => {
+                let message = codex_current_user_message(payload)?;
+                (
+                    "user",
+                    message.content,
+                    Some(message.item_id),
+                    Some("item_completed"),
+                    payload.get("item")?,
+                )
+            }
+            _ => return None,
+        };
+    let visible_text = collect_response_item_text(content);
+    let (text, tool_names) =
+        content_storage_text_and_tools(content, metadata_payload.get("tool_calls"));
     if text.trim().is_empty() {
         return None;
     }
+    let metadata = |goal_context| {
+        let mut metadata = message_metadata(metadata_payload, goal_context);
+        if let (Some(source_event), Value::Object(map)) = (source_event, &mut metadata) {
+            map.insert(
+                "source_event".to_string(),
+                Value::String(source_event.to_string()),
+            );
+        }
+        metadata
+    };
 
     let timestamp = timestamp_from_record(record);
-    if let Some(goal_context) = codex_goal_context_from_text(&text) {
+    if let Some(goal_context) = codex_goal_context_from_text(&visible_text) {
+        let metadata = metadata(Some(&goal_context));
         return Some(goal_context_message(
             meta,
             model,
-            path,
-            offset,
+            GoalContextRecordSource {
+                path,
+                offset,
+                item_id: source_item_id,
+            },
             timestamp,
             &goal_context,
-            &message_metadata(payload, Some(&goal_context)),
+            &metadata,
         ));
     }
 
     Some(SessionMessageRecord {
         provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
+        message_id: source_item_id.map_or_else(
+            || format!("{}:{offset}", meta.session_id),
+            |item_id| format!("{}:{item_id}", meta.session_id),
+        ),
         session_id: meta.session_id.clone(),
         role: role.to_string(),
         timestamp,
@@ -70,7 +101,7 @@ pub(super) fn message_from_line(
         tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
-        metadata_json: serde_json::to_string(&message_metadata(payload, None)).ok(),
+        metadata_json: serde_json::to_string(&metadata(None)).ok(),
     })
 }
 
@@ -86,6 +117,9 @@ pub(super) fn response_item_goal_context_from_line(
     }
     let payload = record.get("payload")?;
     if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    if payload.get("role").and_then(Value::as_str) != Some("user") {
         return None;
     }
     let text = collect_response_item_text(payload.get("content").unwrap_or(payload));
@@ -104,8 +138,14 @@ pub(super) fn response_item_goal_context_from_line(
     Some(goal_context_message(
         meta,
         model,
-        path,
-        offset,
+        GoalContextRecordSource {
+            path,
+            offset,
+            item_id: payload
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|item_id| !item_id.is_empty()),
+        },
         timestamp_from_record(record),
         &goal_context,
         &metadata,
@@ -312,54 +352,42 @@ pub(super) fn response_item_tool_metadata(
     Value::Object(metadata)
 }
 
+struct GoalContextRecordSource<'a> {
+    path: &'a Path,
+    offset: i64,
+    item_id: Option<&'a str>,
+}
+
 fn goal_context_message(
     meta: &CodexMeta,
     model: Option<&str>,
-    path: &Path,
-    offset: i64,
+    source: GoalContextRecordSource<'_>,
     timestamp: Option<i64>,
     goal_context: &CodexGoalContext,
     metadata: &Value,
 ) -> SessionMessageRecord {
     SessionMessageRecord {
         provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
+        message_id: source.item_id.map_or_else(
+            || format!("{}:{}", meta.session_id, source.offset),
+            |item_id| format!("{}:{item_id}", meta.session_id),
+        ),
         session_id: meta.session_id.clone(),
         role: "system".to_string(),
         timestamp,
-        ordinal: offset,
+        ordinal: source.offset,
         text: goal_context.storage_text(),
         kind: Some("goal_context".to_string()),
         model: model.map(str::to_string),
         tool_names: None,
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
+        source_path: Some(source.path.to_string_lossy().to_string()),
+        source_offset: Some(source.offset),
         metadata_json: serde_json::to_string(&metadata).ok(),
     }
 }
 
 pub(super) fn collect_response_item_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(collect_response_item_text)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                return text.to_string();
-            }
-            ["content", "message", "item"]
-                .iter()
-                .filter_map(|key| map.get(*key))
-                .map(collect_response_item_text)
-                .find(|text| !text.is_empty())
-                .unwrap_or_default()
-        }
-        _ => String::new(),
-    }
+    codex_message_visible_text(value)
 }
 
 pub(super) fn timestamp_from_record(record: &Value) -> Option<i64> {

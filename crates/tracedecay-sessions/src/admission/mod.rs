@@ -19,7 +19,8 @@ use std::pin::Pin;
 
 use serde::Serialize;
 use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    CanonicalObservationIdV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceIdentityV1, SanitizationReceiptV1,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{ObservationBatchFallbackCause, ParseOffset};
@@ -317,6 +318,15 @@ impl HostAdmissionOutcome {
             Some("parse_offset_conflict"),
         )
     }
+
+    #[hotpath::skip]
+    pub const fn observation_point_read_unavailable() -> Self {
+        Self::new(
+            HostAdmissionStatus::Unavailable,
+            true,
+            Some("observation_point_read_unavailable"),
+        )
+    }
 }
 
 pub(crate) fn is_admission_cancellation(
@@ -376,6 +386,19 @@ pub trait HostAdmission: Send + Sync {
         source: &'a ObservationSourceIdentityV1,
         scope: &'a ObservationScopeV1,
     ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>>;
+
+    /// Content-free point existence check for idempotent recovery. The
+    /// default is a typed unavailable state; production composition overrides
+    /// it with the canonical observation authority.
+    fn observation_receipt<'a>(
+        &'a self,
+        _provider: &'a str,
+        _scope: &'a ObservationScopeV1,
+        _observation_id: &'a CanonicalObservationIdV1,
+        _cancellation: &'a ObservationCancellation,
+    ) -> AdmissionFuture<'a, Option<SanitizationReceiptV1>> {
+        Box::pin(async { Err(HostAdmissionOutcome::observation_point_read_unavailable()) })
+    }
 
     /// Drains up to `max` queued projections for one provider.
     fn drain_projection_queue<'a>(
@@ -563,7 +586,8 @@ pub(crate) mod test_support {
     type SessionBackfillPagePause = (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>);
 
     use crate::observation::{
-        AdvanceNonDurableSourceCursorRequest, ObservationApplication, ObservationApplicationError,
+        AdvanceNonDurableSourceCursorRequest, GetObservationRequest, ObservationApplication,
+        ObservationApplicationError,
     };
 
     use super::*;
@@ -647,6 +671,7 @@ pub(crate) mod test_support {
         session_message_failures_remaining: usize,
         session_message_reads: usize,
         session_backfill_state: Vec<(ObservationScopeV1, String, String)>,
+        non_durable_advances: Vec<ObservationCursorAdvance>,
     }
 
     #[derive(Clone, Default)]
@@ -928,6 +953,10 @@ pub(crate) mod test_support {
                 .unwrap_or_else(|error| error.into_inner()) = Some((entered, release));
         }
 
+        pub(crate) fn non_durable_advances(&self) -> Vec<ObservationCursorAdvance> {
+            self.store.state().non_durable_advances.clone()
+        }
+
         fn application(
             &self,
         ) -> Result<ObservationApplication<MemoryObservationStore>, HostAdmissionOutcome> {
@@ -996,13 +1025,16 @@ pub(crate) mod test_support {
             cancellation: ObservationCancellation,
         ) -> AdmissionFuture<'a, CursorAdvanceOutcome> {
             Box::pin(async move {
-                self.application()?
-                    .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
-                        advance,
-                        cancellation,
-                    ))
-                    .await
-                    .map_err(Self::application_error)
+                let recorded = advance.clone();
+                let outcome =
+                    self.application()?
+                        .advance_non_durable_source_cursor(
+                            AdvanceNonDurableSourceCursorRequest::new(advance, cancellation),
+                        )
+                        .await
+                        .map_err(Self::application_error)?;
+                self.store.state().non_durable_advances.push(recorded);
+                Ok(outcome)
             })
         }
 
@@ -1024,6 +1056,28 @@ pub(crate) mod test_support {
                     .get_source_cursor(source, scope)
                     .await
                     .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
+            })
+        }
+
+        fn observation_receipt<'a>(
+            &'a self,
+            _provider: &'a str,
+            _scope: &'a ObservationScopeV1,
+            observation_id: &'a CanonicalObservationIdV1,
+            cancellation: &'a ObservationCancellation,
+        ) -> AdmissionFuture<'a, Option<SanitizationReceiptV1>> {
+            Box::pin(async move {
+                self.application()?
+                    .get_observation(GetObservationRequest::new(
+                        observation_id.clone(),
+                        cancellation.clone(),
+                    ))
+                    .await
+                    .map(|read| {
+                        read.observation()
+                            .map(|stored| stored.observation().receipt().clone())
+                    })
+                    .map_err(Self::application_error)
             })
         }
 

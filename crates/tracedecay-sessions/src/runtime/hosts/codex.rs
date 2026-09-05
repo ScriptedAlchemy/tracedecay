@@ -9,8 +9,11 @@
 //! * `session_meta` — first line; `payload.cwd`, session `id`. Real rollouts
 //!   carry no `model` here (only `model_provider`); the active model is on
 //!   `turn_context` lines and can change mid-session.
-//! * `event_msg` with `payload.type == "user_message"` — a real user prompt
-//!   (`payload.message`).
+//! * `event_msg` with `payload.type == "item_completed"` and
+//!   `payload.item.type == "UserMessage"` — a current Codex user prompt
+//!   (`payload.item.content`). The stable item id is retained as message
+//!   identity. Legacy `payload.type == "user_message"` records remain
+//!   supported through `payload.message`.
 //! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
 //!   (`payload.message`).
 //! * `event_msg` with `payload.type == "token_count"` — provider usage captured
@@ -36,13 +39,14 @@
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
-//! `response_item` entries are intentionally skipped except for Codex goal
-//! context blocks: they usually carry auto-injected synthetic context and
-//! duplicate the `agent_message`/`user_message` turns, so ingesting them would
-//! double-count the conversation. Goal context blocks are cataloged as compact
-//! `goal_context` rows because real rollouts often record them only in
-//! `response_item` form. This append-only JSONL is read with the shared
-//! byte-offset machinery and scoped per turn by the latest Codex cwd context.
+//! Conversational `response_item` entries are intentionally skipped except for
+//! Codex goal context blocks: they usually carry auto-injected synthetic
+//! context and duplicate the `item_completed`/legacy message turns, so
+//! ingesting them would double-count the conversation. Goal context blocks are
+//! cataloged as compact `goal_context` rows because real rollouts often record
+//! them only in `response_item` form. This append-only JSONL is read with the
+//! shared byte-offset machinery and scoped per turn by the latest Codex cwd
+//! context.
 
 mod context;
 mod events;
@@ -64,6 +68,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1,
 };
@@ -87,13 +92,16 @@ use crate::runtime::shared::{
     title_from_messages,
 };
 use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
+    FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptCursorKey,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     stream_new_jsonl,
 };
+
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
+#[cfg(test)]
+pub(crate) use observation::codex_observation_source_v2;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
     try_admit_codex_jsonl_observations_for_profile,
@@ -2583,6 +2591,16 @@ impl TranscriptSource for CodexSource {
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         self.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
             .paths
+    }
+
+    fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
+        hash_path(&mut hasher, transcript_path);
+        TranscriptCursorKey::opaque(format!(
+            "codex-v2:{}",
+            encode_lowercase_hex(&hasher.finalize())
+        ))
     }
 
     fn discover_transcript_paths(

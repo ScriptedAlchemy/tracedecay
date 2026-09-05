@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Render Codex JSONL cases where hook text changed model-visible input.
 
-Codex rollouts contain both user-facing events (`event_msg.user_message`) and
-model-visible message records (`response_item` messages). This script compares
-them and prints compact Markdown cases showing hook-added developer/user text.
+Codex rollouts contain both user-facing events (`event_msg.item_completed`
+`UserMessage`, or legacy `event_msg.user_message`) and model-visible message
+records (`response_item` messages). This script compares them and prints compact
+Markdown cases showing hook-added developer/user text.
 """
 
 from __future__ import annotations
@@ -117,6 +118,7 @@ def text_from_content(content: object) -> str:
 def parse_file(path: Path) -> tuple[list[Record], list[Record]]:
     model_messages: list[Record] = []
     submitted_users: list[Record] = []
+    submitted_user_item_ids: set[str] = set()
     try:
         handle = path.open("r", encoding="utf-8")
     except OSError:
@@ -131,12 +133,27 @@ def parse_file(path: Path) -> tuple[list[Record], list[Record]]:
             if not isinstance(payload, dict):
                 continue
             timestamp = str(record.get("timestamp", ""))
-            if record.get("type") == "event_msg" and payload.get("type") == "user_message":
-                message = payload.get("message")
-                if isinstance(message, str):
-                    submitted_users.append(
-                        Record(path, line_no, timestamp, "user", message)
-                    )
+            if record.get("type") == "event_msg":
+                if payload.get("type") == "user_message":
+                    message = payload.get("message")
+                    if isinstance(message, str):
+                        submitted_users.append(
+                            Record(path, line_no, timestamp, "user", message)
+                        )
+                    continue
+                if payload.get("type") == "item_completed":
+                    item = payload.get("item")
+                    if not isinstance(item, dict) or item.get("type") != "UserMessage":
+                        continue
+                    item_id = item.get("id")
+                    if not isinstance(item_id, str) or not item_id:
+                        continue
+                    message = text_from_content(item.get("content"))
+                    if message and item_id not in submitted_user_item_ids:
+                        submitted_users.append(
+                            Record(path, line_no, timestamp, "user", message)
+                        )
+                        submitted_user_item_ids.add(item_id)
                 continue
             if record.get("type") != "response_item" or payload.get("type") != "message":
                 continue
@@ -179,32 +196,32 @@ def timestamp_delta_seconds(left: str, right: str) -> float | None:
     return abs((left_dt - right_dt).total_seconds())
 
 
-def is_near_record(
-    record: Record,
-    anchor: Record,
-    max_line_delta: int,
-    max_time_delta_seconds: int,
-) -> bool:
-    if abs(record.line_no - anchor.line_no) > max_line_delta:
-        return False
-    delta = timestamp_delta_seconds(record.timestamp, anchor.timestamp)
-    return delta is None or delta <= max_time_delta_seconds
+def user_pair_identity(record: Record) -> str:
+    return canonical_text(extract_wrapped_user(record.text) or record.text)
 
 
-def nearest_submitted_user(
-    users: list[Record],
-    anchor: Record,
-    max_line_delta: int = 5,
-    max_time_delta_seconds: int = 60,
-) -> Record | None:
-    nearby = [
-        record
-        for record in users
-        if is_near_record(record, anchor, max_line_delta, max_time_delta_seconds)
-    ]
-    if not nearby:
-        return None
-    return min(nearby, key=lambda record: abs(record.line_no - anchor.line_no))
+def pair_submitted_users(
+    messages: list[Record], users: list[Record]
+) -> dict[Record, Record]:
+    """Pair exact prompt identities in source order, consuming each event once."""
+    unmatched = [message for message in messages if message.role == "user"]
+    pairs: dict[Record, Record] = {}
+    for submitted in users:
+        identity = canonical_text(submitted.text)
+        match_index = next(
+            (
+                index
+                for index, message in enumerate(unmatched)
+                if message.line_no <= submitted.line_no
+                and user_pair_identity(message) == identity
+            ),
+            None,
+        )
+        if match_index is None:
+            continue
+        message = unmatched.pop(match_index)
+        pairs[message] = submitted
+    return pairs
 
 
 def next_model_user(
@@ -266,6 +283,7 @@ def build_cases(
         stats["files"] += 1
         stats["model_messages"] += len(messages)
         stats["submitted_user_messages"] += len(users)
+        submitted_pairs = pair_submitted_users(messages, users)
         for index, message in enumerate(messages):
             hint_kind = trace_hint_kind(message.text) if message.role == "developer" else None
             if hint_kind:
@@ -287,11 +305,11 @@ def build_cases(
                 hook_text_counts[canonical_text(message.text)] += 1
                 if include_developer:
                     user = next_model_user(messages, index)
-                    submitted = nearest_submitted_user(users, user or message)
+                    submitted = submitted_pairs.get(user) if user else None
                     cases.append(Case(hint_kind, message, user, submitted))
             if message.role == "user" and message.text.lstrip().startswith(USER_PROMPT_HOOK):
                 stats["wrapped_user_hooks"] += 1
-                submitted = nearest_submitted_user(users, message)
+                submitted = submitted_pairs.get(message)
                 cases.append(
                     Case(
                         "wrapped_user_prompt_submit",
