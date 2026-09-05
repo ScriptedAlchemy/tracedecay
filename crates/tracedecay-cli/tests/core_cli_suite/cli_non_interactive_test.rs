@@ -1089,34 +1089,55 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         String::from_utf8_lossy(&disable_output.stderr)
     );
 
-    let mut run = tracedecay_command(home.path(), project.path());
-    // `tracedecay tool` reaches a retained operation over the MCP
-    // compatibility binding, which answers with the tool-result envelope;
-    // `format: "json"` is what makes the retained document travel inside the
-    // content block instead of its elided markdown rendering. `--json` only
-    // decides whether the CLI prints that envelope or joins its text.
-    run.args([
-        "tool",
-        "fact_store_curate",
-        "--json",
-        "--args",
-        r#"{"format":"json"}"#,
-    ]);
-    let run_output = run_with_timeout(run, cli_timeout());
-    assert!(
-        run_output.status.success(),
-        "manual automation run should skip cleanly when its backend is disabled\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&run_output.stdout),
-        String::from_utf8_lossy(&run_output.stderr)
-    );
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&run_output.stdout).expect("fact_store_curate should print JSON");
-    let document = envelope["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("fact_store_curate returned no content text: {envelope}"))
-        .to_owned();
-    let payload: serde_json::Value =
-        serde_json::from_str(&document).expect("content block should carry the document");
+    // The project's own automation scheduler runs beside this manual call and
+    // takes the same curator lock. While it holds it the manual run reports the
+    // legal transient `scheduler_lock_active` terminal instead of the
+    // backend-disabled skip under test, so retry until the lock is free.
+    let payload = {
+        let mut attempts = 0;
+        loop {
+            let mut run = tracedecay_command(home.path(), project.path());
+            // `tracedecay tool` reaches a retained operation over the MCP
+            // compatibility binding, which answers with the tool-result
+            // envelope; `format: "json"` is what makes the retained document
+            // travel inside the content block instead of its elided markdown
+            // rendering. `--json` only decides whether the CLI prints that
+            // envelope or joins its text.
+            run.args([
+                "tool",
+                "fact_store_curate",
+                "--json",
+                "--args",
+                r#"{"format":"json"}"#,
+            ]);
+            let run_output = run_with_timeout(run, cli_timeout());
+            assert!(
+                run_output.status.success(),
+                "manual automation run should skip cleanly when its backend is disabled\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&run_output.stdout),
+                String::from_utf8_lossy(&run_output.stderr)
+            );
+            let envelope: serde_json::Value = serde_json::from_slice(&run_output.stdout)
+                .expect("fact_store_curate should print JSON");
+            let document = envelope["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("fact_store_curate returned no content text: {envelope}"))
+                .to_owned();
+            let payload: serde_json::Value =
+                serde_json::from_str(&document).expect("content block should carry the document");
+            if payload["outcome"]["value"]["payload"]["terminal"]["reason"]
+                != "scheduler_lock_active"
+            {
+                break payload;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 10,
+                "the automation scheduler held the curator lock for every manual attempt: {payload}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    };
     let run = &payload["outcome"]["value"]["payload"];
     assert_eq!(run["task"], "memory_curator");
     assert_eq!(run["terminal"]["status"], "skipped");
