@@ -665,11 +665,18 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         # Codex reads skill files through exec/read tools, without a reliable
         # invocation event in the supported transcript normalizer. Absence of a
         # Claude-style Skill event therefore cannot establish a Codex miss.
-        measured = tr.host == "claude"
+        skills_available = run_meta.get("channel_condition", "full") not in {"no-skills", "bare"}
+        measured = tr.host == "claude" and skills_available
+        if not skills_available:
+            unmeasured_reason = "skills_unavailable_in_condition"
+        elif tr.host != "claude":
+            unmeasured_reason = "host_skill_evidence_unsupported"
+        else:
+            unmeasured_reason = None
         selected = invoked_skills(tr) if measured else None
         details["skill_routing"] = {
             "measured": measured,
-            "unmeasured_reason": None if measured else "host_skill_evidence_unsupported",
+            "unmeasured_reason": unmeasured_reason,
             "expected": expected,
             "allowed": allowed,
             "invoked": selected,
