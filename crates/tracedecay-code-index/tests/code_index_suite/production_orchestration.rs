@@ -2924,6 +2924,93 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
 }
 
 #[test]
+fn historical_partitioned_writer_restores_exact_generation_and_authenticates_segments() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/partitioned_pre_paging");
+    let manifest = std::fs::read(fixture.join("manifest.json")).unwrap();
+    let expected = std::fs::read(fixture.join("expected-generation.json")).unwrap();
+    let provenance: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.join("provenance.json")).unwrap()).unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(&manifest)),
+        provenance["manifest_sha256"]
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(&expected)),
+        provenance["expected_generation_sha256"]
+    );
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            manifest.as_slice()
+        )
+        .unwrap(),
+        Some(identities.clone())
+    );
+    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        let SealedGenerationSegmentReadV1::Whole { digest, size_bytes } = request else {
+            panic!("historical writer emitted whole segments, not pages");
+        };
+        let filename = format!("{}.json", digest.as_str().strip_prefix("sha256:").unwrap());
+        *buffer = std::fs::read(fixture.join("segments").join(filename)).unwrap();
+        assert_eq!(buffer.len() as u64, size_bytes);
+        Ok(())
+    };
+    assert!(CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read).unwrap());
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored.encode_sealed().unwrap(),
+        expected,
+        "all historical file, symbol, chunk, lineage and projection identities remain byte exact"
+    );
+    assert_eq!(
+        restored.manifest().generation_id.as_str(),
+        provenance["generation_id"]
+    );
+    assert_eq!(
+        restored.snapshot().content_identity.as_str(),
+        provenance["snapshot_content_identity"]
+    );
+    for identity in &identities {
+        let corrupt = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+            let digest = match &request {
+                SealedGenerationSegmentReadV1::Whole { digest, .. }
+                | SealedGenerationSegmentReadV1::Range { digest, .. } => *digest,
+            };
+            read(request, buffer)?;
+            if digest == &identity.digest {
+                buffer[0] ^= 1;
+            }
+            Ok(())
+        };
+        assert!(
+            CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, corrupt).is_err()
+        );
+        assert!(
+            CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, corrupt).is_err()
+        );
+    }
+    let evidence_digest = &identities.last().unwrap().digest;
+    let interrupted = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        if matches!(&request, SealedGenerationSegmentReadV1::Whole { digest, .. } if *digest == evidence_digest)
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "historical evidence read interrupted".to_owned(),
+            ));
+        }
+        read(request, buffer)
+    };
+    assert!(
+        matches!(CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, interrupted),
+        Err(CodeIndexProductionErrorV1::Contract(message)) if message == "historical evidence read interrupted")
+    );
+}
+
+#[test]
 fn partitioned_descriptor_readers_share_validation_without_sharing_authentication() {
     let (_, manifest, _) = partitioned_codec_fixture();
     let authenticated = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
@@ -2940,7 +3027,6 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
     for mutation in [
         "empty_pages",
         "null_pages",
-        "missing_pages",
         "duplicate_ordinal",
         "out_of_order",
         "zero_page",
@@ -2956,12 +3042,6 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
         match mutation {
             "empty_pages" => generation["generation_evidence"]["pages"] = serde_json::json!([]),
             "null_pages" => generation["generation_evidence"]["pages"] = serde_json::Value::Null,
-            "missing_pages" => {
-                generation["generation_evidence"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("pages");
-            }
             "duplicate_ordinal" => {
                 let pages = generation["generation_evidence"]["pages"]
                     .as_array_mut()

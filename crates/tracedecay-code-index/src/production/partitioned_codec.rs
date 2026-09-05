@@ -56,6 +56,7 @@ use super::sealed_codec::{
 };
 use super::*;
 
+const CHUNK_ID_MARKER_PREFIX: &str = "$tracedecay:c:";
 const FILE_SEGMENT_FORMAT_REVISION_V1: u32 = 1;
 const GENERATION_ID_MARKER: &str = "$tracedecay:g";
 const FILE_OCCURRENCE_ID_MARKER: &str = "$tracedecay:f";
@@ -85,7 +86,24 @@ struct PartitionedEvidencePageDescriptorV1 {
 struct PartitionedGenerationEvidenceDescriptorV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
+    #[serde(default, deserialize_with = "deserialize_present_evidence_pages")]
     pages: Vec<PartitionedEvidencePageDescriptorV1>,
+}
+
+// Only an absent field identifies the historical unpaged format. Explicit
+// null and empty arrays are malformed modern descriptors, never legacy input.
+fn deserialize_present_evidence_pages<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let pages = Vec::<T>::deserialize(deserializer)?;
+    if pages.is_empty() {
+        return Err(serde::de::Error::custom(
+            "sealed generation evidence has no pages",
+        ));
+    }
+    Ok(pages)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,6 +233,7 @@ struct PartitionedFileSegmentIdentityV1 {
 struct PartitionedEvidenceSegmentIdentityV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
+    #[serde(default, deserialize_with = "deserialize_present_evidence_pages")]
     pages: Vec<PartitionedEvidencePageIdentityV1>,
 }
 
@@ -425,6 +444,143 @@ impl CanonicalPolicyV1 for FileSegmentDecodePolicyV1<'_> {
     fn sorts_object_keys(&self) -> bool {
         false
     }
+}
+
+fn generation_identity_field(key: &str) -> bool {
+    matches!(
+        key,
+        "generation_id"
+            | "from_generation"
+            | "to_generation"
+            | "prior_generation"
+            | "source_generation"
+    )
+}
+
+fn symbol_identity_field(key: &str) -> bool {
+    matches!(
+        key,
+        "occurrence"
+            | "from_occurrence"
+            | "to_occurrence"
+            | "prior_occurrence"
+            | "current_occurrence"
+            | "alternatives"
+            | "symbol_occurrence_id"
+            | "symbol_occurrence_ids"
+    )
+}
+
+fn chunk_identity_field(key: &str) -> bool {
+    matches!(key, "chunk_id" | "chunk_ids" | "parent_chunk_id")
+}
+
+/// Evidence identity classification. The shipped walk keyed on the enclosing
+/// object key with three disjoint key sets, so one classification per key is
+/// equivalent to the original `if`/`else if` chain.
+#[derive(Clone, Copy)]
+enum EvidenceIdentityFieldV1 {
+    Other,
+    Generation,
+    Symbol,
+    Chunk,
+}
+
+fn evidence_identity_field(key: &str) -> EvidenceIdentityFieldV1 {
+    if generation_identity_field(key) {
+        EvidenceIdentityFieldV1::Generation
+    } else if symbol_identity_field(key) {
+        EvidenceIdentityFieldV1::Symbol
+    } else if chunk_identity_field(key) {
+        EvidenceIdentityFieldV1::Chunk
+    } else {
+        EvidenceIdentityFieldV1::Other
+    }
+}
+
+/// Restores generation-evidence identities directly from the segment and file
+/// authorities, without first collecting every marker into a side map.
+struct EvidenceDecodePolicyV1<'a> {
+    generation_id: &'a str,
+    file_segments: &'a [PartitionedFileSegmentDescriptorV1],
+    files: &'a [PersistedFileGenerationArtifactsV1],
+}
+
+impl CanonicalPolicyV1 for EvidenceDecodePolicyV1<'_> {
+    type Field = EvidenceIdentityFieldV1;
+
+    fn root_field(&self) -> Self::Field {
+        EvidenceIdentityFieldV1::Other
+    }
+
+    fn field_for_key(&self, key: &str) -> Self::Field {
+        evidence_identity_field(key)
+    }
+
+    fn rewrite_string(
+        &mut self,
+        field: Self::Field,
+        value: &str,
+        out: &mut Vec<u8>,
+    ) -> Result<bool, CodeIndexProductionErrorV1> {
+        match field {
+            EvidenceIdentityFieldV1::Generation if value == GENERATION_ID_MARKER => {
+                write_json_string(self.generation_id, out)?;
+                Ok(true)
+            }
+            EvidenceIdentityFieldV1::Symbol
+                if value.starts_with(SYMBOL_OCCURRENCE_ID_MARKER_PREFIX) =>
+            {
+                const INVALID: &str = "sealed generation evidence contains an invalid symbol key";
+                let (file_key, symbol_key) =
+                    parse_evidence_marker(value, SYMBOL_OCCURRENCE_ID_MARKER_PREFIX, INVALID)?;
+                let occurrence = self
+                    .file_segments
+                    .get(file_key)
+                    .and_then(|descriptor| descriptor.symbol_occurrences.get(symbol_key))
+                    .ok_or_else(|| CodeIndexProductionErrorV1::Contract(INVALID.to_owned()))?;
+                write_json_string(occurrence.as_str(), out)?;
+                Ok(true)
+            }
+            EvidenceIdentityFieldV1::Chunk if value.starts_with(CHUNK_ID_MARKER_PREFIX) => {
+                const INVALID: &str = "sealed generation evidence contains an invalid chunk key";
+                let (file_key, chunk_key) =
+                    parse_evidence_marker(value, CHUNK_ID_MARKER_PREFIX, INVALID)?;
+                let chunk = self
+                    .files
+                    .get(file_key)
+                    .and_then(|file| file.artifacts.chunks.chunks.get(chunk_key))
+                    .ok_or_else(|| CodeIndexProductionErrorV1::Contract(INVALID.to_owned()))?;
+                write_json_string(chunk.id.as_str(), out)?;
+                Ok(true)
+            }
+            EvidenceIdentityFieldV1::Other
+            | EvidenceIdentityFieldV1::Generation
+            | EvidenceIdentityFieldV1::Symbol
+            | EvidenceIdentityFieldV1::Chunk => Ok(false),
+        }
+    }
+
+    fn sorts_object_keys(&self) -> bool {
+        false
+    }
+}
+
+fn parse_evidence_marker(
+    marker: &str,
+    prefix: &str,
+    invalid_message: &'static str,
+) -> Result<(usize, usize), CodeIndexProductionErrorV1> {
+    marker
+        .strip_prefix(prefix)
+        .and_then(|key| key.split_once(':'))
+        .and_then(|(file_key, item_key)| {
+            Some((
+                file_key.parse::<usize>().ok()?,
+                item_key.parse::<usize>().ok()?,
+            ))
+        })
+        .ok_or_else(|| CodeIndexProductionErrorV1::Contract(invalid_message.to_owned()))
 }
 
 struct PartitionedEvidencePageWriterV1<'a, P> {
@@ -983,13 +1139,57 @@ fn decode_file_segment(
     Ok(file)
 }
 
+fn read_historical_evidence(
+    descriptor: &PartitionedGenerationEvidenceDescriptorV1,
+    mut read_segment: impl FnMut(
+        SealedGenerationSegmentReadV1<'_>,
+        &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    let mut bytes = Vec::new();
+    read_segment(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &descriptor.segment_digest,
+            size_bytes: descriptor.segment_size_bytes,
+        },
+        &mut bytes,
+    )?;
+    verify_segment_identity(
+        &bytes,
+        &descriptor.segment_digest,
+        descriptor.segment_size_bytes,
+        "sealed generation evidence length exceeds u64",
+        "sealed generation evidence byte size does not match its manifest",
+        "sealed generation evidence digest does not match its manifest",
+    )?;
+    Ok(bytes)
+}
+
 fn decode_generation_evidence(
     descriptor: &PartitionedGenerationEvidenceDescriptorV1,
     mut read_segment: impl FnMut(
         SealedGenerationSegmentReadV1<'_>,
         &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
+    generation_id: &CodeGenerationId,
+    file_segments: &[PartitionedFileSegmentDescriptorV1],
+    files: &[PersistedFileGenerationArtifactsV1],
 ) -> Result<PartitionedGenerationEvidenceV1, CodeIndexProductionErrorV1> {
+    if descriptor.pages.is_empty() {
+        let bytes = read_historical_evidence(descriptor, &mut read_segment)?;
+        let mut restored = Vec::new();
+        let mut policy = EvidenceDecodePolicyV1 {
+            generation_id: generation_id.as_str(),
+            file_segments,
+            files,
+        };
+        canonicalize_json_into(&bytes, &mut policy, &mut restored)?;
+        return serde_json::from_slice(&restored).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation evidence payload decoding failed: {error}"
+            ))
+        });
+    }
     let mut reader = PartitionedEvidencePageReaderV1::new(descriptor, &mut read_segment);
     let decoded = serde_json::from_reader(&mut reader);
     if let Some(error) = reader.take_read_error() {
@@ -1035,9 +1235,13 @@ fn validate_evidence_pages(
     segment_size_bytes: u64,
 ) -> Result<(), CodeIndexProductionErrorV1> {
     if pages.len() == 0 {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation evidence has no pages".to_owned(),
-        ));
+        return if segment_size_bytes == 0 {
+            Err(CodeIndexProductionErrorV1::Contract(
+                "historical generation evidence is empty".to_owned(),
+            ))
+        } else {
+            Ok(())
+        };
     }
     let mut evidence_size_bytes = 0_u64;
     for (expected_ordinal, (page_ordinal, page_size_bytes)) in pages.enumerate() {
@@ -1485,7 +1689,13 @@ impl CodeIndexPublishedGenerationV1 {
         }
         drop(restored);
         drop(segment);
-        let evidence = decode_generation_evidence(&generation.generation_evidence, read_segment)?;
+        let evidence = decode_generation_evidence(
+            &generation.generation_evidence,
+            read_segment,
+            &generation.manifest.generation_id,
+            &generation.file_segments,
+            &files,
+        )?;
         assemble_published_generation(StreamingPersistedPublishedGenerationV1 {
             format_revision: super::sealed_codec::CompatibleSealedFormatRevisionV1(
                 generation.format_revision,
@@ -1623,6 +1833,10 @@ impl CodeIndexPublishedGenerationV1 {
                 "sealed generation segment does not match its content address",
                 "sealed generation segment does not match its content address",
             )?;
+        }
+        if generation.generation_evidence.pages.is_empty() {
+            read_historical_evidence(&generation.generation_evidence, &mut read_segment)?;
+            return Ok(true);
         }
         let mut evidence = PartitionedEvidencePageReaderV1::new(
             &generation.generation_evidence,
