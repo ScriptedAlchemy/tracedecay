@@ -4640,7 +4640,19 @@ impl LatestCodeTextGenerationV1 {
                 descriptor.artifact_size_bytes,
                 CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                 control,
-            );
+            )
+            .and_then(|reader| {
+                let expected_metadata = self
+                    .text_projection_metadata()
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+                if reader.metadata() != &expected_metadata {
+                    return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                        "published lexical metadata does not match the current projection"
+                            .to_owned(),
+                    ));
+                }
+                Ok(reader)
+            });
             match reader {
                 Ok(reader) => {
                     let sealed_identity = store.sealed_identity(&generation_id)?;

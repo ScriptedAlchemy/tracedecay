@@ -424,13 +424,23 @@ fn real_lexical_source_fixture_from_sources(
     assert!(!source_inputs.is_empty(), "fixture needs at least one file");
     let repository = id::<RepositoryId>("repository.artifact");
     let sanitizer_revision = id::<SanitizerRevision>("sanitizer.v1");
+    let languages = StaticLanguageRegistry::new();
     let sources = source_inputs
         .into_iter()
         .map(|(file_id, logical_path, source)| {
+            let extension = Path::new(&logical_path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .expect("fixture source extension");
+            let language = languages
+                .descriptor_for_extension(extension)
+                .expect("compiled fixture language descriptor")
+                .language
+                .clone();
             let file = SanitizedCodeFileV1 {
                 file_occurrence_id: id::<FileOccurrenceId>(&file_id),
                 logical_path,
-                language: Some(id("typescript")),
+                language: Some(language),
                 content_digest: content_digest(&source),
                 disposition: SnapshotFileDispositionV1::Present,
             };
@@ -1216,6 +1226,109 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         .retrieve_lexical(&request)
         .expect("one-shot lexical query");
     assert_eq!(artifact, expected);
+}
+
+#[test]
+fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.qualified".to_owned(),
+        "src/qualified.rs".to_owned(),
+        b"pub struct VectorWatermark;\nimpl VectorWatermark { pub fn merge_max(&self) {} }\npub struct UnrelatedContainer;\nimpl UnrelatedContainer { pub fn merge_max(&self) {} }\n".to_vec(),
+    )]);
+    let generation = CodeIndexPublishedGenerationV1::decode_sealed(&fixture.sealed)
+        .expect("restore canonical generation");
+    let allowed_files = fixture.metadata.logical_paths.keys().cloned().collect();
+    let memory = CodeLexicalProjectionAdapterV1::new_published(
+        fixture.metadata.clone(),
+        &generation,
+        &allowed_files,
+    )
+    .expect("generation-backed lexical projection");
+    let directory = tempfile::tempdir().expect("artifact directory");
+    let path = directory.path().join("qualified.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, fixture.metadata.clone())
+        .expect("create artifact");
+    let verified = builder
+        .rebuild_and_finalize(&mut fixture.open_source(128), &control)
+        .expect("build from parser-attested pages");
+    drop(builder);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen qualified-name postings");
+    for (query, expected_name) in [
+        (
+            "VectorWatermark::merge_max",
+            Some("VectorWatermark::merge_max"),
+        ),
+        (
+            "UnrelatedContainer::merge_max",
+            Some("UnrelatedContainer::merge_max"),
+        ),
+        ("WrongQualifier::merge_max", None),
+    ] {
+        let parts = tracedecay_query::retrieval::lexical::lexical_query_parts(query)
+            .expect("canonical query grammar");
+        assert_eq!(parts.whole_terms, vec![query]);
+        assert!(parts.subtokens.is_empty());
+        let mut request = lexical_request(query, &[], &[], &[], 8, 32);
+        request.generation = fixture.metadata.generation.clone();
+        request.whole_terms = parts.whole_terms;
+        request.subtokens = parts.subtokens;
+        request.phrases = parts.phrases;
+        let disk = complete(
+            reader
+                .read_lexical_postings(&request)
+                .expect("artifact query"),
+        );
+        let in_memory = complete(
+            memory
+                .read_lexical_postings(&request)
+                .expect("memory query"),
+        );
+        assert_eq!(disk, in_memory, "{query} must use the same search fields");
+        if let Some(expected_name) = expected_name {
+            assert!(!disk.candidates.is_empty(), "missing {query}");
+            for candidate in &disk.candidates {
+                let evidence = &disk.evidence_by_occurrence[&candidate.source_occurrence_id];
+                assert!(
+                    !evidence
+                        .binding
+                        .matched_term_kinds
+                        .contains(&ExactTechnicalTermKindV1::QualifiedName),
+                    "derived lexical fields must not fabricate source-exact terms"
+                );
+                assert!(evidence.field_scores_micros.iter().any(|(field, score)| {
+                    *field == LexicalFieldV1::QualifiedName && *score > 0
+                }));
+                let occurrence = reader
+                    .occurrence_by_chunk(
+                        evidence
+                            .binding
+                            .occurrence
+                            .chunk
+                            .as_ref()
+                            .expect("chunk binding"),
+                    )
+                    .expect("read canonical occurrence")
+                    .expect("matched occurrence");
+                assert_eq!(
+                    occurrence.qualified_name,
+                    Some(format!("src/qualified.rs::{expected_name}")),
+                    "a method name alone must not match the other containing type"
+                );
+            }
+        } else {
+            assert!(
+                disk.candidates.is_empty(),
+                "wrong qualifier matched loose method tokens"
+            );
+        }
+    }
 }
 
 #[test]

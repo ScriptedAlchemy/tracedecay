@@ -319,6 +319,8 @@ fn build_query_projections(
         )?,
         exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
     };
+    // Keep the generation's weak admission memo alive across every scoped
+    // projection so each scope does not re-admit the complete corpus.
     let admitted = generation
         .admitted_chunks()
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
@@ -335,15 +337,21 @@ fn build_query_projections(
                 .get(file_occurrence_id)
                 .is_some_and(|scope| scope_key.binary_search(scope).is_ok())
         };
-        let scoped_admitted = admitted
+        let allowed_files = generation
+            .snapshot()
+            .files
             .iter()
-            .filter(|chunk| scope_contains(chunk.chunk().anchor.file_occurrence_id.as_str()))
-            .cloned()
+            .filter(|file| scope_contains(file.file_occurrence_id.as_str()))
+            .map(|file| file.file_occurrence_id.clone())
             .collect();
         lexical.insert(
             scope_key.clone(),
-            CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), scoped_admitted)
-                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+            CodeLexicalProjectionAdapterV1::new_published(
+                metadata.clone(),
+                generation,
+                &allowed_files,
+            )
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
         let graph_chunks = generation
             .chunks()
@@ -371,6 +379,7 @@ fn build_query_projections(
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
     }
+    drop(admitted);
     Ok((lexical, graph, semantic_allowed_chunks))
 }
 

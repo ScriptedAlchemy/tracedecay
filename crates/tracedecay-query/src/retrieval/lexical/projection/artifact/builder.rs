@@ -2644,8 +2644,15 @@ fn page_transient_peak_bytes(
     abort_above: usize,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let mut peak = 0usize;
-    for admitted in page.chunks() {
-        peak = peak.max(projected_chunk_transient_bytes(metadata, admitted)?);
+    for (admitted, display) in page.chunks().iter().zip(page.symbol_displays()) {
+        let qualified_name_bytes = display
+            .as_ref()
+            .map_or(0, |display| display.qualified_name().len());
+        peak = peak.max(projected_chunk_transient_bytes(
+            metadata,
+            admitted,
+            qualified_name_bytes,
+        )?);
         if peak > abort_above {
             return Ok(peak);
         }
@@ -2682,17 +2689,25 @@ fn page_prepared_retained_upper_bound_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     page: &VerifiedSealedLexicalPageV1,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    let chunk_bytes = page.chunks().iter().try_fold(0usize, |total, admitted| {
-        total
-            .checked_add(projected_chunk_prepared_retained_upper_bound_bytes(
-                metadata, admitted,
-            )?)
-            .ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "lexical artifact page preparation charge overflowed".to_owned(),
-                )
-            })
-    })?;
+    let chunk_bytes = page.chunks().iter().zip(page.symbol_displays()).try_fold(
+        0usize,
+        |total, (admitted, display)| {
+            let qualified_name_bytes = display
+                .as_ref()
+                .map_or(0, |display| display.qualified_name().len());
+            total
+                .checked_add(projected_chunk_prepared_retained_upper_bound_bytes(
+                    metadata,
+                    admitted,
+                    qualified_name_bytes,
+                )?)
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact page preparation charge overflowed".to_owned(),
+                    )
+                })
+        },
+    )?;
     let record_bytes = page
         .imports()
         .iter()
@@ -2717,8 +2732,9 @@ fn page_prepared_retained_upper_bound_bytes(
 fn projected_chunk_prepared_retained_upper_bound_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     admitted: &ExtractionAdmittedCodeSearchChunkV1,
+    qualified_name_bytes: usize,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    let transient = projected_chunk_transient_bytes(metadata, admitted)?;
+    let transient = projected_chunk_transient_bytes(metadata, admitted, qualified_name_bytes)?;
     let text_bytes = admitted.chunk().sanitized_text.as_str().len();
     let normalized_text_bytes = text_bytes;
     let (_, normalized_scratch) = document_ngram_scratch(normalized_text_bytes)?;
@@ -2807,6 +2823,7 @@ fn prepared_page_authority_upper_bound_bytes(
 fn projected_chunk_transient_bytes(
     metadata: &CodeLexicalProjectionMetadataV1,
     admitted: &ExtractionAdmittedCodeSearchChunkV1,
+    qualified_name_bytes: usize,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let chunk = admitted.chunk();
     let clone_bytes = chunk_owned_bytes(chunk);
@@ -2832,11 +2849,16 @@ fn projected_chunk_transient_bytes(
         total.saturating_add(term.canonical_bytes().len())
     });
     let normalized_text_bytes = text_bytes;
+    // The complete verified display length bounds the qualified chain after
+    // removing its file prefix. Charge its field string, frequency entry and
+    // encoded posting even when the parser name is not a qualified token.
     let field_text_bytes = normalized_text_bytes
+        .saturating_add(qualified_name_bytes)
         .saturating_add(logical_path.len())
         .saturating_add(subtoken_bytes)
         .saturating_add(exact_bytes.saturating_mul(2));
     let field_entries = lexical_token_count(chunk.sanitized_text.as_str())
+        .saturating_add(usize::from(qualified_name_bytes != 0))
         .saturating_add(1)
         .saturating_add(chunk.subtokens.len())
         .saturating_add(chunk.exact_terms.len().saturating_mul(2));

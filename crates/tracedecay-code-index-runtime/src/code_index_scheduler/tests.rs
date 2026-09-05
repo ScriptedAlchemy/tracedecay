@@ -72,7 +72,9 @@ use tracedecay_query::retrieval::exact::{
 };
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::lexical::{
-    LexicalLaneRequest, LexicalRouteKindV1, LexicalRoutingV1,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
+    LexicalRouteKindV1, LexicalRoutingV1,
 };
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
@@ -5061,6 +5063,96 @@ fn incompatible_published_text_artifact_is_withdrawn_and_rebuilt() {
     assert!(
         incompatible_path.is_file(),
         "an incompatible immutable artifact remains bounded orphan evidence for retention"
+    );
+}
+
+#[test]
+fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn migrated() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let control = UninterruptibleCodeIndexControlV1;
+    let previous_path = {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish generation"));
+        let latest = scheduler.latest_complete().expect("latest generation");
+        let generation_id = latest.metadata.manifest().generation_id.clone();
+        let sealed_identity = latest
+            .text_artifact_store
+            .sealed_identity(&generation_id)
+            .expect("sealed identity");
+        let mut source = latest
+            .take_preopened_source_or_open(&sealed_identity, &control)
+            .expect("verified source");
+        let mut metadata = latest.text_projection_metadata().expect("current metadata");
+        metadata.lexical_retriever_revision =
+            ComponentRevision::new("retriever.lexical.daemon.v1").expect("previous revision");
+        let root = store.path().join("code-text-artifacts-v1");
+        tracedecay_private_fs::create_private_directory(&root).expect("private artifacts root");
+        let staging = root.join(".previous-search.staging");
+        let mut builder = CodeLexicalArtifactBuilderV1::create(&staging, metadata)
+            .expect("previous-revision artifact builder");
+        let source_receipt = loop {
+            match source.next_page(&control).expect("verified page") {
+                VerifiedSealedLexicalPageReadV1::Page(page) => {
+                    builder.append_page(&page, &control).expect("append page");
+                }
+                VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
+            }
+        };
+        let verified = loop {
+            match builder
+                .advance_finalization(&source_receipt, 4_096, &control)
+                .expect("finalize previous-revision artifact")
+            {
+                CodeLexicalArtifactFinalizationStepV1::Pending { .. } => {}
+                CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => break receipt,
+            }
+        };
+        drop(builder);
+        // This is a valid artifact with stale search semantics, not corrupt
+        // bytes or an unsupported container format.
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &staging,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        )
+        .expect("historical metadata remains readable");
+        latest
+            .text_artifact_store
+            .publish(&staging, &generation_id, &sealed_identity, &control)
+            .expect("publish previous-revision artifact");
+        active_text_artifact_path(store.path())
+    };
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let latest = scheduler.latest_complete().expect("restored generation");
+    assert!(
+        !latest
+            .advance_text_serving(1)
+            .expect("reject stale search revision"),
+        "an incompatible search artifact must rebuild before serving"
+    );
+    let mut passes = 0;
+    while !latest
+        .advance_text_serving(64)
+        .expect("rebuild current search fields")
+    {
+        passes += 1;
+        assert!(passes < 10_000, "search-revision rebuild did not converge");
+    }
+    assert!(latest.query_owners_are_warm());
+    assert_ne!(active_text_artifact_path(store.path()), previous_path);
+    assert!(
+        previous_path.is_file(),
+        "retention owns the superseded artifact"
     );
 }
 
