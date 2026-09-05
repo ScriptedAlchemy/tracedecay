@@ -348,8 +348,13 @@ jobs:
     # Build every Windows test once, then shard execution from the archive.
     # Keep a bounded guard around the hosted build; Cargo timings are retained
     # below so a slow or failed archive can be attributed instead of treating
-    # the timeout itself as the defect.
-    timeout-minutes: 75
+    # the timeout itself as the defect. Measured 2026-09-05 (run 33954670866,
+    # no parity rebuild): portability compile 31 min, archive still compiling
+    # the root crate's test targets at the 75-minute bound, so the archive
+    # never completed and the compiler caches never seeded. The bound is
+    # widened so one archive can finish and seed them; shrink it back once a
+    # warm run's timings show the real cost.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
 
