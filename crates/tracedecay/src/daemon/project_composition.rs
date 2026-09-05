@@ -58,7 +58,29 @@ async fn release_one_idle_project_server_before_open(
     capacity_admission: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
     let runtime_registry = store_administration.session_runtime_registry().await?;
-    if runtime_registry.has_project_graph_admission_capacity()? {
+    // Two independent bounds share this one release path.
+    //
+    // Graph admission is the original one. The second is the project-server
+    // cache: the code-index scheduler registry is sized to
+    // `MAX_CACHED_PROJECT_SERVERS`, and the bounded route-cache eviction
+    // inside `bind_or_insert_route_bounded` retires only the evicted MCP
+    // server -- it never releases that project's invocation runtime owners, so
+    // the evicted project's code-index worktree holds its scheduler slot for
+    // the life of the daemon. Past `MAX_CACHED_PROJECT_SERVERS` distinct
+    // projects every further project then failed its mount with "code-index
+    // scheduler capacity is exhausted" and served, silently, with no code
+    // indexing at all. Release a whole idle owner here instead: this is the
+    // only path that drains the code-index workers along with the server it
+    // retires.
+    let project_server_cache_saturated = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .servers
+        .len()
+        >= MAX_CACHED_PROJECT_SERVERS;
+    let graph_admission_available = runtime_registry.has_project_graph_admission_capacity()?;
+    if graph_admission_available && !project_server_cache_saturated {
         return Ok(capacity_admission);
     }
     if let Some(error) = store_administration
@@ -79,9 +101,18 @@ async fn release_one_idle_project_server_before_open(
         let mut servers = store_administration.project_servers().lock().await;
         servers.retire_lru_ready_under_graph_pressure(project_server_has_in_flight_response)
     };
-    let Some((retired_owner, retired_servers)) =
-        victim.map_err(|()| project_server_capacity_error())?
-    else {
+    let victim = match victim {
+        Ok(victim) => victim,
+        // Nothing is idle enough to retire. That is terminal only when graph
+        // admission itself is exhausted; a merely saturated project-server
+        // cache still has the bounded route-cache eviction (and the
+        // already-cached-key fast path) behind it, so leave that decision to
+        // the bind below rather than refusing an open this path was not
+        // entered to refuse.
+        Err(()) if graph_admission_available => return Ok(capacity_admission),
+        Err(()) => return Err(project_server_capacity_error()),
+    };
+    let Some((retired_owner, retired_servers)) = victim else {
         return Ok(capacity_admission);
     };
     let prior_owner_retirements = retirement_admission.prior_completions_for_owner(&retired_owner);
