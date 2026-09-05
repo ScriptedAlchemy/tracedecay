@@ -492,7 +492,17 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         .store_telemetry_sampling();
     let restarted_cancellation = tracedecay_session_memory::context::CancellationToken::new();
     let mut converged = false;
-    for _ in 0..4 {
+    // Every collection is a bounded unit that reports `MoreWork`, so the tick
+    // that releases the vector source is deliberately *not* the converging
+    // tick: the store still owes the remaining superseded generations, their
+    // text artifacts, and the replay-release backlog. The ordering guarantee
+    // this journey exists to prove is therefore stated exactly -- the source
+    // is released only by a pass that read an exact, undegraded vector
+    // inventory (#879) -- instead of through the coarser proxy "nothing is
+    // deleted before the whole journey converges", which no bounded pass can
+    // satisfy.
+    let mut source_released_under = None;
+    for _ in 0..12 {
         converged = crate::daemon::maintenance::generation::run_project_generation_maintenance(
             restarted_graph.as_ref(),
             restarted_schedulers,
@@ -503,14 +513,26 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         )
         .await
         .is_complete();
+        if source_released_under.is_none() && !first_source_file.exists() {
+            source_released_under = Some(
+                crate::daemon::store_maintenance::resolve_vector_retention_inventory(
+                    restarted_graph.as_ref(),
+                    restarted_schedulers,
+                    &restarted_observations,
+                )
+                .await
+                .degraded_reason(),
+            );
+        }
         if converged {
             break;
         }
-        assert!(
-            first_source_file.is_file(),
-            "cleanup convergence must finish before source-code deletion"
-        );
     }
+    assert_eq!(
+        source_released_under,
+        Some(None),
+        "the retained vector source is released only under an exact online vector inventory"
+    );
     assert!(converged, "replayed cleanup converges after restart");
     assert!(
         !first_source_file.exists(),

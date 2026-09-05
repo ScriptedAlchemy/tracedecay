@@ -135,9 +135,6 @@ const TRANSACTION_FILE: &str = ".code-generation-retention-transaction-v1.json";
 const TRANSACTION_SCHEMA: &str = "tracedecay.code-generation-retention-transaction.v1";
 /// Write context for the durable index rewrite that precedes every unlink.
 pub(crate) const RETENTION_POINTER_WRITE_CONTEXT: &str = "code-generation-retention-index-rewrite";
-/// Write context for restoring the pre-collection pointer during rollback.
-pub(crate) const RETENTION_POINTER_ROLLBACK_CONTEXT: &str =
-    "code-generation-retention-index-rollback";
 const TEXT_ARTIFACT_RECEIPTS_DIRECTORY: &str = "code-text-artifact-retention-receipts-v1";
 const TEXT_ARTIFACT_QUARANTINE_DIRECTORY: &str = ".code-text-artifact-retention-quarantine-v1";
 const TEXT_ARTIFACT_TRANSACTION_FILE: &str = ".code-text-artifact-retention-transaction-v1.json";

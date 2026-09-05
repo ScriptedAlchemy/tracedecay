@@ -25,8 +25,8 @@ use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionGenerationV1,
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
     GRAPH_REPLAY_POOL_ACQUIRE_BUDGET, GRAPH_REPLAY_POOL_ACQUIRE_POLL, MAX_TRANSACTION_BYTES,
-    QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, RETENTION_POINTER_ROLLBACK_CONTEXT,
-    RETENTION_POINTER_WRITE_CONTEXT, TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel,
+    QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, RETENTION_POINTER_WRITE_CONTEXT,
+    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel,
     read_optional_active_pointer, storage, sync_directory, total_bytes, validate_generation_file,
     write_active_pointer,
 };
@@ -102,7 +102,11 @@ pub(super) fn validate_transaction(
             "retention transaction active pointer does not match its receipt".to_owned(),
         ));
     }
-    validate_transaction_pointer_rewrite(transaction)?;
+    // The journal carries the pre-collection pointer and the exact deleted
+    // set, so the post-rewrite pointer is derivable from it. Proving that
+    // derivation here means a journal that survives a crash can never be
+    // replayed into a pointer this transaction could not have published.
+    transaction.rewritten_pointer()?;
     let mut generation_ids = BTreeSet::new();
     let mut generation_files = BTreeSet::new();
     for generation in &transaction.receipt.deleted_generations {
@@ -133,16 +137,6 @@ pub(super) fn validate_transaction(
         ));
     }
     Ok(())
-}
-
-/// The journal carries the pre-collection pointer and the exact deleted set,
-/// so the post-rewrite pointer is derivable from it. Proving that derivation
-/// here means a journal that survives a crash can never be replayed into a
-/// pointer this transaction could not have published.
-fn validate_transaction_pointer_rewrite(
-    transaction: &CodeGenerationRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    transaction.rewritten_pointer().map(|_| ())
 }
 
 pub(super) fn receipt_is_durable(
@@ -797,7 +791,11 @@ fn restore_pointer_for_rollback(
     if read_optional_active_pointer(store_root)? != Some(rewritten) {
         return Ok(());
     }
-    write_active_pointer(store_root, RETENTION_POINTER_ROLLBACK_CONTEXT, active)
+    write_active_pointer(
+        store_root,
+        "code-generation-retention-index-rollback",
+        active,
+    )
 }
 
 /// Finish the durable index rewrite a committed unit may have crashed before.
