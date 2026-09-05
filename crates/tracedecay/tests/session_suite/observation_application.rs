@@ -751,14 +751,18 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             ))
             .await
             .expect_err("{provider}: conflicting identity must fail");
+        // The committed cursor already covers this range, so a conflicting
+        // re-submission is a covered replay: it is indistinguishable from a
+        // stale writer that lost a cursor race, and the typed verdict is the
+        // retryable cursor conflict rather than a terminal content refusal.
         assert!(
             matches!(
                 conflict,
                 ObservationApplicationError::Store(
-                    tracedecay_store::ObservationStoreError::ObservationCollision { .. }
+                    tracedecay_store::ObservationStoreError::CursorConflict { .. }
                 )
             ),
-            "{provider}: expected ObservationCollision, got {conflict:?}"
+            "{provider}: expected a retryable CursorConflict, got {conflict:?}"
         );
         assert_eq!(
             table_counts(&runtime).await,

@@ -1290,12 +1290,16 @@ async fn cross_provider_projection_duplicate_reorder_conflict_and_restart_are_id
             .persist_observation(conflict_write)
             .await
             .expect_err("{provider}: conflicting identity must fail");
+        // The committed cursor already covers this range, so a conflicting
+        // re-submission is a covered replay: it is indistinguishable from a
+        // stale writer that lost a cursor race, and the typed verdict is the
+        // retryable cursor conflict rather than a terminal content refusal.
         assert!(
             matches!(
                 conflict,
-                tracedecay_store::ObservationStoreError::ObservationCollision { .. }
+                tracedecay_store::ObservationStoreError::CursorConflict { .. }
             ),
-            "{provider}: expected ObservationCollision, got {conflict:?}"
+            "{provider}: expected a retryable CursorConflict, got {conflict:?}"
         );
 
         let reorder_error = store
