@@ -427,7 +427,7 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
         .join()
         .expect("follow-up scheduler holder joins");
     wait_for_reconciling(&registry, 0).await;
-    let converged = latest(&registry, fixture.path()).await;
+    let converged = latest_for_generation(&registry, fixture.path(), Some(&competitor)).await;
     assert_eq!(
         converged.generation().manifest().generation_id,
         competitor,

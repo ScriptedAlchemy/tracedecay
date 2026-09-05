@@ -184,16 +184,30 @@ async fn latest(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> LatestCompleteCodeIndexV1 {
+    latest_for_generation(registry, project_root, None).await
+}
+
+// Publication and source-pass completion precede graph seating; reads may
+// still serve the incumbent until this exact successor reaches the slot.
+async fn latest_for_generation(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    expected: Option<&CodeGenerationId>,
+) -> LatestCompleteCodeIndexV1 {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(latest) = registry.latest_complete_fresh(project_root).await {
+            if let Some(latest) = registry.latest_complete_fresh(project_root).await
+                && expected.is_none_or(|expected| {
+                    expected == &latest.generation().manifest().generation_id
+                })
+            {
                 break latest;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("fresh serving generation")
+    .unwrap_or_else(|error| panic!("serving generation {expected:?} did not seat: {error}"))
 }
 
 async fn wait_for_reconciling(registry: &CodeIndexSchedulerRegistryV1, expected: u64) {
@@ -451,7 +465,13 @@ import { RuntimeOnly } from "runtime-only";
         "node_modules/oversized/index.d.ts",
         vec![b'x'; MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1 + 1],
     );
-    fixture.write("node_modules/privacy/index.d.ts", br#"{"token":"#);
+    fixture.write(
+        "node_modules/privacy/package.json",
+        br#"{"types":"index.toml"}"#,
+    );
+    // Quarantine applies to declared structured data; code and prose retain
+    // the raw credential scan rather than ambiguous-data parsing.
+    fixture.write("node_modules/privacy/index.toml", b"[table\nkey = \"value\"\n");
     fixture.write(
         "node_modules/runtime-only/index.d.ts",
         b"export const RuntimeOnly: number;\n",
@@ -785,7 +805,7 @@ async fn ordinary_reconcile_retains_the_exact_ignored_source_roster() {
     );
     let changed =
         wait_for_generation_change(&registry, fixture.path(), &admitted.generation_id).await;
-    let served = latest(&registry, fixture.path()).await;
+    let served = latest_for_generation(&registry, fixture.path(), Some(&changed)).await;
 
     assert_eq!(changed, served.generation().manifest().generation_id);
     assert_eq!(roster_paths(&served), ["node_modules/pkg/index.d.ts"]);
