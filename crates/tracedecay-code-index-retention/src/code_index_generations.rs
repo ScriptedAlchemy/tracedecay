@@ -942,8 +942,18 @@ fn plan_code_generation_retention_with_verification_cancellable(
             .take(rollback_floor)
             .map(|generation| generation.generation_id.clone()),
     );
+    // Sweep from the oldest end. `superseded_generations` is newest-first
+    // because the rollback reserve is the *newest* superseded window, but the
+    // collection batch is the opposite question: which bytes may go first.
+    // Reading the batch in the newest-first order made every bounded unit -
+    // `MAX_CODE_GENERATION_RETENTION_BATCH_V1` here, one generation after
+    // `plan_next`/`prepare_next` truncate it - name the newest collectable
+    // generation, so the oldest sealed generation was never in a plan and a
+    // store that publishes at least as fast as maintenance collects never
+    // released its floor.
     let collectable_generations = superseded_generations
         .iter()
+        .rev()
         .filter(|generation| !marked.contains(&generation.generation_id))
         .take(MAX_CODE_GENERATION_RETENTION_BATCH_V1)
         .cloned()

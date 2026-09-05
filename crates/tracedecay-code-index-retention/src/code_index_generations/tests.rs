@@ -996,6 +996,54 @@ fn next_retention_plan_limits_collection_to_one_generation() {
     assert_eq!(plan.superseded_generations.len(), 7);
 }
 
+/// The bounded collection unit must name the OLDEST collectable generation.
+///
+/// Planning newest-first meant a store that publishes at least as fast as
+/// maintenance collects never reclaimed its floor: every single-unit plan
+/// named the generation sealed a moment ago, and the first generation ever
+/// sealed stayed on disk forever.
+#[test]
+fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
+    let (store, generations) = fixture_store(5);
+
+    let plan = plan_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        &|| false,
+    )
+    .expect("plan one retention unit");
+
+    assert_eq!(
+        plan.collectable_generations
+            .iter()
+            .map(|generation| generation.generation_id.clone())
+            .collect::<Vec<_>>(),
+        vec![generations[0].id.clone()],
+        "the bounded unit must reclaim the oldest superseded generation"
+    );
+}
+
+/// The rollback reserve still holds the NEWEST superseded generations while
+/// the batch sweeps from the oldest end, so the two orders cannot collapse
+/// into one another.
+#[test]
+fn retention_reserves_the_newest_superseded_window_and_sweeps_from_the_oldest() {
+    let (store, generations) = fixture_store(6);
+
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention with a rollback reserve");
+
+    assert_eq!(
+        plan.collectable_generations
+            .iter()
+            .map(|generation| generation.generation_id.clone())
+            .collect::<Vec<_>>(),
+        vec![generations[0].id.clone(), generations[1].id.clone()],
+        "generations 2..4 are the newest superseded rollback reserve"
+    );
+}
+
 #[test]
 fn unpublished_store_collects_sealed_crash_debris_under_the_absent_pointer() {
     let (store, generations) = fixture_store(2);
