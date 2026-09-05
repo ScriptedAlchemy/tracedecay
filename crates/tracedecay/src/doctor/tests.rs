@@ -439,6 +439,32 @@ fn daemon_runtime_parser_rejects_missing_database_telemetry() {
     assert!(error.to_string().contains("omitted database telemetry"));
 }
 
+/// The sole daemon owner is the only authority that can observe storage
+/// health, so Doctor losing it is an issue, not a warning: nothing else in the
+/// run opened the store, and a zero exit reads as "checked and fine" to every
+/// caller and CI gate. `doctor_result` already turns any issue into a non-zero
+/// exit, so grading this `fail` is what makes an unavailable daemon fail closed.
+#[test]
+fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
+    let mut counters = DoctorCounters::new();
+    super::report_daemon_diagnostics_unavailable(
+        &mut counters,
+        None,
+        &tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon socket is unavailable".to_string(),
+        },
+    );
+
+    assert_eq!(counters.issues, 1, "an unobserved store is not a warning");
+    assert_eq!(counters.warnings, 0);
+    let error = super::doctor_result(
+        &counters,
+        &DatabaseHealth::unknown("canonical_doctor_report_unavailable"),
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
+}
+
 #[test]
 fn doctor_result_fails_when_checks_report_issues() {
     let mut counters = DoctorCounters::new();
