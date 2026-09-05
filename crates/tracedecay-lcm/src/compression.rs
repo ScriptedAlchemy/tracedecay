@@ -2377,6 +2377,10 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
 fn active_replay_for_metadata(replay: &Value) -> Value {
     let mut replay = replay.clone();
     if let Some(object) = replay.as_object_mut() {
+        // This locator is regenerated from the canonical raw row at replay.
+        // Persisting it makes our own replay look like a source metadata edit
+        // and invalidates otherwise unchanged summary lineage on re-ingest.
+        object.remove("store_id");
         replay_transactions::strip_disposable_assistant_replay_sidecars(object, "");
     }
     replay
