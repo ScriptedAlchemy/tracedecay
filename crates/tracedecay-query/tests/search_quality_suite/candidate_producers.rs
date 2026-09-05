@@ -547,6 +547,24 @@ fn real_verified_pages_with_maximum_page_chunks(
     (fixture, pages, receipt)
 }
 
+/// The parser-attested qualified name of every symbol the pages carry. The
+/// in-memory projection has no sealed page to read a symbol display from, so
+/// it takes the same authority as a map.
+fn page_symbol_qualified_names(
+    pages: &[VerifiedSealedLexicalPageV1],
+) -> BTreeMap<SymbolOccurrenceId, String> {
+    pages
+        .iter()
+        .flat_map(|page| page.symbol_displays().iter().flatten())
+        .map(|display| {
+            (
+                display.occurrence().clone(),
+                display.qualified_name().to_owned(),
+            )
+        })
+        .collect()
+}
+
 fn drain_verified_pages(
     fixture: &RealLexicalSourceFixture,
     maximum_page_chunks: usize,
@@ -1058,11 +1076,13 @@ fn retained_lexical_projection_preserves_progress_across_bounded_windows() {
     let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks.clone(),
+        BTreeMap::new(),
     )
     .expect("one-shot retained lexical projection");
     let mut build = CodeLexicalProjectionBuildV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks,
+        BTreeMap::new(),
     )
     .expect("start retained lexical projection");
 
@@ -1114,8 +1134,12 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         .iter()
         .flat_map(|page| page.chunks().iter().cloned())
         .collect::<Vec<_>>();
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks.clone())
-        .expect("one-shot lexical projection");
+    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
+        metadata.clone(),
+        chunks.clone(),
+        page_symbol_qualified_names(&pages),
+    )
+    .expect("one-shot lexical projection");
     let import_evidence = pages
         .iter()
         .flat_map(|page| page.imports())
@@ -1218,6 +1242,65 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
     assert_eq!(artifact, expected);
 }
 
+/// Regression: a qualified-symbol query is one whole technical token, and no
+/// language spells `Type::member` in the declaration source it is chunked
+/// from. Before the extracted qualified name reached the searchable fields,
+/// this query matched nothing.
+#[test]
+fn qualified_name_query_recalls_the_extracted_symbol_and_rejects_a_wrong_qualifier() {
+    let (fixture, pages, _receipt) = real_verified_pages();
+    let metadata = fixture.metadata.clone();
+    let generation = metadata.generation.clone();
+    let chunks = pages
+        .iter()
+        .flat_map(|page| page.chunks().iter().cloned())
+        .collect::<Vec<_>>();
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        metadata,
+        chunks,
+        page_symbol_qualified_names(&pages),
+    )
+    .expect("lexical projection over the extracted qualified names");
+
+    let mut request = lexical_request(
+        "src/artifact.ts::render",
+        &["src/artifact.ts::render"],
+        &[],
+        &[],
+        0,
+        8,
+    );
+    request.generation = generation.clone();
+    let recalled = complete(
+        LexicalLane::new(projection.clone())
+            .retrieve_lexical(&request)
+            .expect("qualified-name retrieval succeeds"),
+    );
+    assert!(
+        !recalled.candidates.is_empty(),
+        "the extracted qualified name must be searchable"
+    );
+
+    let mut wrong = lexical_request(
+        "src/absent.ts::render",
+        &["src/absent.ts::render"],
+        &[],
+        &[],
+        0,
+        8,
+    );
+    wrong.generation = generation;
+    let rejected = complete(
+        LexicalLane::new(projection)
+            .retrieve_lexical(&wrong)
+            .expect("wrong-qualifier retrieval succeeds"),
+    );
+    assert!(
+        rejected.candidates.is_empty(),
+        "a wrong qualifier must not recall the symbol"
+    );
+}
+
 #[test]
 fn disk_artifact_batch_stores_one_ngram_bitmap_shard_per_distinct_key() {
     let (fixture, pages, source_receipt) = real_verified_pages();
@@ -1227,8 +1310,12 @@ fn disk_artifact_batch_stores_one_ngram_bitmap_shard_per_distinct_key() {
         .iter()
         .flat_map(|page| page.chunks().iter().cloned())
         .collect::<Vec<_>>();
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks)
-        .expect("one-shot lexical projection");
+    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
+        metadata.clone(),
+        chunks,
+        page_symbol_qualified_names(&pages),
+    )
+    .expect("one-shot lexical projection");
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("ngram-bitmap-shards.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -4369,8 +4456,12 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
         .iter()
         .flat_map(|page| page.chunks().iter().cloned())
         .collect::<Vec<_>>();
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks)
-        .expect("one-shot lexical projection");
+    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
+        metadata.clone(),
+        chunks,
+        page_symbol_qualified_names(&pages),
+    )
+    .expect("one-shot lexical projection");
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("top-k.sqlite");
     let mut builder =
@@ -4538,6 +4629,7 @@ fn retained_lexical_projection_bounds_marginal_owned_byte_growth_for_repeated_to
             CodeSearchChunkGrainV1::SymbolBody,
             "retained_symbol",
         )],
+        BTreeMap::new(),
     )
     .expect("build small repeated-token projection");
     let large_projection = CodeLexicalProjectionAdapterV1::new_admitted(
@@ -4549,6 +4641,7 @@ fn retained_lexical_projection_bounds_marginal_owned_byte_growth_for_repeated_to
             CodeSearchChunkGrainV1::SymbolBody,
             "retained_symbol",
         )],
+        BTreeMap::new(),
     )
     .expect("build large repeated-token projection");
 
@@ -4820,6 +4913,7 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
     let projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks,
+        BTreeMap::new(),
     )
     .expect("projection builds");
     let whole_request = lexical_request("reserve_stock", &["reserve_stock"], &[], &[], 0, 8);
@@ -4892,6 +4986,7 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     let projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks,
+        BTreeMap::new(),
     )
     .expect("projection builds");
     let phrase_request = lexical_request(r#""reserve stock""#, &[], &[], &["reserve stock"], 0, 8);
@@ -4984,6 +5079,7 @@ fn lexical_phrase_candidate_set_and_frequency_are_reused_without_drift() {
     let projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks,
+        BTreeMap::new(),
     )
     .expect("projection builds");
 
@@ -5041,6 +5137,7 @@ fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
     let projection = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks,
+        BTreeMap::new(),
     )
     .expect("projection builds");
     let request = lexical_request(
@@ -5084,6 +5181,7 @@ fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
     let current = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Current),
         chunks.clone(),
+        BTreeMap::new(),
     )
     .expect("current projection builds");
     let request = lexical_request("target", &["target"], &[], &[], 0, 2);
@@ -5103,6 +5201,7 @@ fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
     let stale = CodeLexicalProjectionAdapterV1::new_admitted(
         projection_metadata(&generation, FreshnessCompatibilityV1::Stale),
         chunks,
+        BTreeMap::new(),
     )
     .expect("stale projection remains inspectable");
     let outcome = LexicalLane::new(stale)
@@ -5124,6 +5223,7 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
             CodeSearchChunkGrainV1::SymbolSignature,
             "target",
         )],
+        BTreeMap::new(),
     )
     .expect("first projection builds");
     let second_projection = CodeLexicalProjectionAdapterV1::new_admitted(
@@ -5135,6 +5235,7 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
             CodeSearchChunkGrainV1::SymbolSignature,
             "target",
         )],
+        BTreeMap::new(),
     )
     .expect("second projection builds");
     let first_request = lexical_request("target", &["target"], &[], &[], 0, 8);
