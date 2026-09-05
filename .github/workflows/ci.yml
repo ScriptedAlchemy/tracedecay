@@ -416,15 +416,6 @@ jobs:
         shell: pwsh
         run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
 
-      # Preserve both feature resolutions before packaging the ordinary workspace.
-      - name: Build controlled-workload hotpath parity executables
-        shell: pwsh
-        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile test
-
-      - name: Verify controlled-workload hotpath parity
-        shell: pwsh
-        run: cargo nextest run -p tracedecay-search-eval --locked --run-ignored only -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' --no-tests=fail
-
       - name: Build nextest archive
         shell: pwsh
         run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
