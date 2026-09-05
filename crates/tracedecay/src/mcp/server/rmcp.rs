@@ -455,6 +455,26 @@ impl RmcpConnectionAdapter {
             })
     }
 
+    /// Serve one connection with the handshake guard installed.
+    ///
+    /// This deliberately shadows [`rmcp::ServiceExt::serve`]: `rmcp` moves the
+    /// transport into its initialization state machine, so a caller can no
+    /// longer reach the wire once that machine fails. Installing the guard
+    /// here is what keeps every call site — daemon routing, benchmarks,
+    /// tests — on the same typed-refusal behavior.
+    pub(crate) async fn serve<T>(
+        self,
+        transport: T,
+    ) -> std::result::Result<
+        rmcp::service::RunningService<RoleServer, Self>,
+        rmcp::service::ServerInitializeError,
+    >
+    where
+        T: rmcp::transport::Transport<RoleServer> + Send + 'static,
+    {
+        rmcp::service::serve_server(self, GuardedHandshakeTransport::new(transport)).await
+    }
+
     fn response_result<T: DeserializeOwned>(response: JsonRpcResponse) -> Result<T, ErrorData> {
         match (response.result, response.error) {
             (Some(result), None) => serde_json::from_value(result)
@@ -465,6 +485,96 @@ impl RmcpConnectionAdapter {
                 None,
             )),
         }
+    }
+}
+
+/// The typed refusal for an `initialize` whose params `rmcp` could not decode.
+const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or malformed: \
+     protocolVersion, capabilities and clientInfo are required";
+
+/// Answers a malformed `initialize` with a typed JSON-RPC error frame and
+/// leaves the connection able to accept a corrected handshake.
+///
+/// `rmcp` demotes an `initialize` whose params do not deserialize into
+/// `InitializeRequestParams` to a `CustomRequest`, and its pre-initialize state
+/// machine then fails with `ExpectedInitializeRequest` *without writing
+/// anything to the wire* (rmcp 3.1.1, `service/server.rs`). Daemon routing maps
+/// that failure to a config error and drops the socket, so the client only sees
+/// "the daemon closed the connection after the request was sent but before
+/// returning a matching response" — a transport mystery for what is a
+/// definitive protocol answer, exactly like the unparseable-handshake and
+/// rejected-auth refusals the daemon already writes before closing.
+struct GuardedHandshakeTransport<T> {
+    inner: T,
+    /// Set once a request that ends `rmcp`'s pre-initialize loop is forwarded.
+    /// After that the guard is inert: a later stray `initialize` is an ordinary
+    /// request the adapter answers with a typed error of its own.
+    handshake_settled: bool,
+}
+
+impl<T> GuardedHandshakeTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            handshake_settled: false,
+        }
+    }
+}
+
+impl<T> rmcp::transport::Transport<RoleServer> for GuardedHandshakeTransport<T>
+where
+    T: rmcp::transport::Transport<RoleServer> + Send + 'static,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: rmcp::service::TxJsonRpcMessage<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send + 'static
+    {
+        self.inner.send(item)
+    }
+
+    fn receive(
+        &mut self,
+    ) -> impl std::future::Future<Output = Option<rmcp::service::RxJsonRpcMessage<RoleServer>>> + Send
+    {
+        async move {
+            loop {
+                let message = self.inner.receive().await?;
+                if self.handshake_settled {
+                    return Some(message);
+                }
+                let rmcp::model::ClientJsonRpcMessage::Request(request) = &message else {
+                    return Some(message);
+                };
+                let malformed_initialize = request.request.method() == "initialize"
+                    && !matches!(
+                        request.request,
+                        rmcp::model::ClientRequest::InitializeRequest(_)
+                    );
+                if !malformed_initialize {
+                    // `rmcp` answers a pre-initialize ping in place and keeps
+                    // waiting; any other request ends its handshake loop.
+                    self.handshake_settled =
+                        !matches!(request.request, rmcp::model::ClientRequest::PingRequest(_));
+                    return Some(message);
+                }
+                let refusal = rmcp::model::ServerJsonRpcMessage::error(
+                    ErrorData::invalid_params(MALFORMED_INITIALIZE_MESSAGE, None),
+                    Some(request.id.clone()),
+                );
+                if self.inner.send(refusal).await.is_err() {
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn close(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send {
+        self.inner.close()
     }
 }
 
@@ -771,6 +881,75 @@ mod tests {
             self.serving.await.expect("join RMCP server");
             self.server.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_initialize_is_refused_typed_and_a_corrected_handshake_still_serves() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        crate::product_runtime::register_fixture_product_runtime();
+        let (cg, repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered RMCP handshake server");
+        let adapter =
+            RmcpConnectionAdapter::new(Arc::clone(&server), false, None).expect("RMCP adapter");
+        let (server_io, client_io) = tokio::io::duplex(256 * 1024);
+        let serving = tokio::spawn(async move {
+            let running = adapter
+                .serve(IntoTransport::<RoleServer, _, _>::into_transport(server_io))
+                .await
+                .expect("a malformed initialize must not fail connection initialization");
+            let _ = running.waiting().await;
+        });
+
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut client_read = tokio::io::BufReader::new(client_read);
+        let mut line = String::new();
+
+        client_write
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+            .await
+            .expect("send malformed initialize");
+        client_read
+            .read_line(&mut line)
+            .await
+            .expect("read the typed refusal");
+        let refusal: Value = serde_json::from_str(&line).expect("refusal is a JSON-RPC frame");
+        assert_eq!(refusal["id"], json!(1), "the refusal answers the sent id");
+        assert_eq!(
+            refusal["error"]["code"],
+            json!(-32602),
+            "a malformed initialize is invalid params, not a dropped connection: {line}"
+        );
+
+        line.clear();
+        client_write
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"handshake-retry","version":"0"}}}
+"#,
+            )
+            .await
+            .expect("send corrected initialize");
+        client_read
+            .read_line(&mut line)
+            .await
+            .expect("read the initialize result");
+        let initialized: Value =
+            serde_json::from_str(&line).expect("initialize is a JSON-RPC frame");
+        assert_eq!(initialized["id"], json!(2));
+        assert!(
+            initialized["result"]["serverInfo"]["name"].is_string(),
+            "the connection stayed usable for a corrected handshake: {line}"
+        );
+
+        drop(client_write);
+        drop(client_read);
+        serving.await.expect("join RMCP server");
+        server.shutdown().await;
+        drop(repo);
     }
 
     #[tokio::test]
