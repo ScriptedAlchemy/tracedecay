@@ -208,7 +208,9 @@ use invocation_observability::{
 #[cfg(test)]
 use invocation_observability::{invocation_rejected_argument, invocation_response_outcome};
 use lsp::PublishedCodeIndexWorkspaceDocuments;
-pub use lsp_delivery::{lsp_delivery_attempt, retain_lsp_delivery_attempt};
+pub use lsp_delivery::{
+    LspDeliverySettlementAdmissionV1, lsp_delivery_attempt, retain_lsp_delivery_attempt,
+};
 use native_integration::execute_native_integration;
 use observatory::execute_observatory_read;
 use primitive::*;

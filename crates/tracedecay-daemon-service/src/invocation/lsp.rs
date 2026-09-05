@@ -694,7 +694,7 @@ impl DaemonInvocationService {
         };
         let acknowledged = session.actor.acknowledge_outbound();
         if acknowledged {
-            session.settle_in_flight_delivery(
+            let _ = session.settle_in_flight_delivery(
                 tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
                 None,
             );
@@ -736,7 +736,7 @@ impl DaemonInvocationService {
         // The stdio bridge reaches this path after a write or flush failure.
         // Removing the actor discards its in-flight frame, so terminalize that
         // exact captured attempt before any later detach bookkeeping can fail.
-        session.settle_in_flight_delivery(
+        let _ = session.settle_in_flight_delivery(
             tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
             Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
         );
