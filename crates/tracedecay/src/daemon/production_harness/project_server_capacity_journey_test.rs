@@ -324,6 +324,9 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
         .expect("an active owner's cached route remains available under pressure");
     assert!(Arc::ptr_eq(&initial_client, &still_live.server));
     assert_generation_contains_probe(&latest, "project_0_probe");
+    // The generation reader leases the same physical graph as project memory.
+    // Release it with this client before the revisit loop retires that owner.
+    drop(latest);
     drop(still_live);
     drop(initial_client);
 
