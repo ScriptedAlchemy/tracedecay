@@ -35,7 +35,7 @@
 //! deserializing them directly.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{Read, Seek, Write as IoWrite};
 
@@ -94,7 +94,16 @@ struct PartitionedGenerationEvidenceDescriptorV1 {
 struct PartitionedGenerationEvidenceDescriptorWireV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
+    #[serde(default, deserialize_with = "deserialize_present_vec")]
     pages: Option<Vec<PartitionedEvidencePageDescriptorV1>>,
+}
+
+fn deserialize_present_vec<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Vec::<T>::deserialize(deserializer).map(Some)
 }
 
 impl<'de> Deserialize<'de> for PartitionedGenerationEvidenceDescriptorV1 {
@@ -240,6 +249,7 @@ struct PartitionedFileSegmentIdentityV1 {
 struct PartitionedEvidenceSegmentIdentityV1 {
     segment_digest: ManifestDigest,
     segment_size_bytes: u64,
+    #[serde(default, deserialize_with = "deserialize_present_vec")]
     pages: Option<Vec<PartitionedEvidencePageIdentityV1>>,
 }
 
@@ -1038,12 +1048,65 @@ fn legacy_chunk_identity_field(key: &str) -> bool {
     matches!(key, "chunk_id" | "chunk_ids" | "parent_chunk_id")
 }
 
+fn legacy_identity_marker_indices(
+    identity: &str,
+    prefix: &str,
+    invalid_key_message: &'static str,
+) -> Result<(usize, usize), CodeIndexProductionErrorV1> {
+    let (file_key, item_key) = identity
+        .strip_prefix(prefix)
+        .and_then(|marker| marker.split_once(':'))
+        .and_then(|(file_key, item_key)| Some((file_key.parse().ok()?, item_key.parse().ok()?)))
+        .ok_or_else(|| CodeIndexProductionErrorV1::Contract(invalid_key_message.to_owned()))?;
+    Ok((file_key, item_key))
+}
+
+fn legacy_symbol_identity<'a>(
+    identity: &str,
+    file_segments: &'a [PartitionedFileSegmentDescriptorV1],
+) -> Result<&'a str, CodeIndexProductionErrorV1> {
+    let (file_key, symbol_key) = legacy_identity_marker_indices(
+        identity,
+        SYMBOL_OCCURRENCE_ID_MARKER_PREFIX,
+        "sealed generation evidence contains an invalid symbol key",
+    )?;
+    file_segments
+        .get(file_key)
+        .and_then(|descriptor| descriptor.symbol_occurrences.get(symbol_key))
+        .map(SymbolOccurrenceId::as_str)
+        .ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence contains an invalid symbol key".to_owned(),
+            )
+        })
+}
+
+fn legacy_chunk_identity<'a>(
+    identity: &str,
+    files: &'a [PersistedFileGenerationArtifactsV1],
+) -> Result<&'a str, CodeIndexProductionErrorV1> {
+    let (file_key, chunk_key) = legacy_identity_marker_indices(
+        identity,
+        CHUNK_ID_MARKER_PREFIX,
+        "sealed generation evidence contains an invalid chunk key",
+    )?;
+    files
+        .get(file_key)
+        .and_then(|file| file.artifacts.chunks.chunks.get(chunk_key))
+        .map(|chunk| chunk.id.as_str())
+        .ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence contains an invalid chunk key".to_owned(),
+            )
+        })
+}
+
 fn restore_legacy_evidence_identities(
     value: &mut Value,
     key: Option<&str>,
     generation_id: &str,
-    symbol_identities: &BTreeMap<String, String>,
-    chunk_identities: &BTreeMap<String, String>,
+    file_segments: &[PartitionedFileSegmentDescriptorV1],
+    files: &[PersistedFileGenerationArtifactsV1],
 ) -> Result<(), CodeIndexProductionErrorV1> {
     match value {
         Value::String(identity) => {
@@ -1053,19 +1116,11 @@ fn restore_legacy_evidence_identities(
             } else if key.is_some_and(legacy_symbol_identity_field)
                 && identity.starts_with(SYMBOL_OCCURRENCE_ID_MARKER_PREFIX)
             {
-                *identity = symbol_identities.get(identity).cloned().ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation evidence contains an invalid symbol key".to_owned(),
-                    )
-                })?;
+                *identity = legacy_symbol_identity(identity, file_segments)?.to_owned();
             } else if key.is_some_and(legacy_chunk_identity_field)
                 && identity.starts_with(CHUNK_ID_MARKER_PREFIX)
             {
-                *identity = chunk_identities.get(identity).cloned().ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation evidence contains an invalid chunk key".to_owned(),
-                    )
-                })?;
+                *identity = legacy_chunk_identity(identity, files)?.to_owned();
             }
         }
         Value::Array(values) => {
@@ -1074,8 +1129,8 @@ fn restore_legacy_evidence_identities(
                     value,
                     key,
                     generation_id,
-                    symbol_identities,
-                    chunk_identities,
+                    file_segments,
+                    files,
                 )?;
             }
         }
@@ -1085,8 +1140,8 @@ fn restore_legacy_evidence_identities(
                     value,
                     Some(key),
                     generation_id,
-                    symbol_identities,
-                    chunk_identities,
+                    file_segments,
+                    files,
                 )?;
             }
         }
@@ -1106,39 +1161,12 @@ fn decode_legacy_generation_evidence(
             "sealed generation evidence decoding failed: {error}"
         ))
     })?;
-    let mut symbol_identities = BTreeMap::new();
-    let mut chunk_identities = BTreeMap::new();
-    for descriptor in file_segments {
-        for (symbol_key, occurrence) in descriptor.symbol_occurrences.iter().enumerate() {
-            symbol_identities.insert(
-                format!(
-                    "{SYMBOL_OCCURRENCE_ID_MARKER_PREFIX}{}:{symbol_key}",
-                    descriptor.file_key
-                ),
-                occurrence.as_str().to_owned(),
-            );
-        }
-        let file = files.get(descriptor.file_key as usize).ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed evidence file key is outside its generation".to_owned(),
-            )
-        })?;
-        for (chunk_key, chunk) in file.artifacts.chunks.chunks.iter().enumerate() {
-            chunk_identities.insert(
-                format!(
-                    "{CHUNK_ID_MARKER_PREFIX}{}:{chunk_key}",
-                    descriptor.file_key
-                ),
-                chunk.id.as_str().to_owned(),
-            );
-        }
-    }
     restore_legacy_evidence_identities(
         &mut evidence,
         None,
         generation_id.as_str(),
-        &symbol_identities,
-        &chunk_identities,
+        file_segments,
+        files,
     )?;
     serde_json::from_value(evidence).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
@@ -1195,6 +1223,87 @@ fn decode_generation_evidence(
     Ok(evidence)
 }
 
+/// Validate the descriptor layout shared by the authenticated full-manifest
+/// parser and the retention-only streaming projection. Authentication stays
+/// with their respective callers; this helper only establishes the bounded,
+/// canonical layout they both rely on.
+fn validate_partitioned_generation_layout<'a, I, J, K>(
+    file_segments: I,
+    snapshot_files: J,
+    evidence_segment_size_bytes: u64,
+    pages: Option<K>,
+) -> Result<(), CodeIndexProductionErrorV1>
+where
+    I: ExactSizeIterator<Item = (u32, &'a FileOccurrenceId)>,
+    J: ExactSizeIterator<Item = &'a FileOccurrenceId>,
+    K: ExactSizeIterator<Item = (u32, u64)>,
+{
+    if file_segments.len() != snapshot_files.len() {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment count does not match its snapshot".to_owned(),
+        ));
+    }
+    for (expected_key, ((file_key, segment_file), snapshot_file)) in
+        file_segments.zip(snapshot_files).enumerate()
+    {
+        let expected_key = u32::try_from(expected_key).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation file key exceeds u32".to_owned(),
+            )
+        })?;
+        if file_key != expected_key || segment_file != snapshot_file {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation file segments are not canonically keyed".to_owned(),
+            ));
+        }
+    }
+    let Some(pages) = pages else {
+        if evidence_segment_size_bytes == 0 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "legacy sealed generation evidence segment is empty".to_owned(),
+            ));
+        }
+        return Ok(());
+    };
+    if pages.len() == 0 {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence has no pages".to_owned(),
+        ));
+    }
+    let page_max = u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence page bound exceeds u64".to_owned(),
+        )
+    })?;
+    let mut evidence_size_bytes = 0_u64;
+    for (expected_ordinal, (page_ordinal, page_size_bytes)) in pages.enumerate() {
+        let expected_ordinal = u32::try_from(expected_ordinal).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence page count exceeds u32".to_owned(),
+            )
+        })?;
+        if page_ordinal != expected_ordinal || page_size_bytes == 0 || page_size_bytes > page_max {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence pages are not canonically bounded and ordered"
+                    .to_owned(),
+            ));
+        }
+        evidence_size_bytes = evidence_size_bytes
+            .checked_add(page_size_bytes)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation evidence segment length exceeds u64".to_owned(),
+                )
+            })?;
+    }
+    if evidence_size_bytes != evidence_segment_size_bytes {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence segment byte size does not match its pages".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<Option<PartitionedPublishedGenerationV1>, CodeIndexProductionErrorV1> {
@@ -1226,75 +1335,25 @@ fn parse_partitioned_manifest(
             "sealed generation manifest payload decoding failed: {error}"
         ))
     })?;
-    if generation.file_segments.len() != generation.snapshot.files.len() {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation segment count does not match its snapshot".to_owned(),
-        ));
-    }
-    for (expected_key, descriptor) in generation.file_segments.iter().enumerate() {
-        let expected_key = u32::try_from(expected_key).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation file key exceeds u32".to_owned(),
-            )
-        })?;
-        if descriptor.file_key != expected_key
-            || generation.snapshot.files[expected_key as usize].file_occurrence_id
-                != descriptor.file_occurrence_id
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation file segments are not canonically keyed".to_owned(),
-            ));
-        }
-    }
-    if generation.generation_evidence.legacy_unpaged {
-        if generation.generation_evidence.segment_size_bytes == 0 {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "legacy sealed generation evidence segment is empty".to_owned(),
-            ));
-        }
-    } else {
-        if generation.generation_evidence.pages.is_empty() {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation evidence has no pages".to_owned(),
-            ));
-        }
-        let mut evidence_size_bytes = 0_u64;
-        for (expected_ordinal, descriptor) in
-            generation.generation_evidence.pages.iter().enumerate()
-        {
-            let expected_ordinal = u32::try_from(expected_ordinal).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence page count exceeds u32".to_owned(),
-                )
-            })?;
-            if descriptor.page_ordinal != expected_ordinal
-                || descriptor.page_size_bytes == 0
-                || descriptor.page_size_bytes
-                    > u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed generation evidence page bound exceeds u64".to_owned(),
-                        )
-                    })?
-            {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence pages are not canonically bounded and ordered"
-                        .to_owned(),
-                ));
-            }
-            evidence_size_bytes = evidence_size_bytes
-                .checked_add(descriptor.page_size_bytes)
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation evidence segment length exceeds u64".to_owned(),
-                    )
-                })?;
-        }
-        if evidence_size_bytes != generation.generation_evidence.segment_size_bytes {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation evidence segment byte size does not match its pages".to_owned(),
-            ));
-        }
-    }
+    validate_partitioned_generation_layout(
+        generation
+            .file_segments
+            .iter()
+            .map(|segment| (segment.file_key, &segment.file_occurrence_id)),
+        generation
+            .snapshot
+            .files
+            .iter()
+            .map(|file| &file.file_occurrence_id),
+        generation.generation_evidence.segment_size_bytes,
+        (!generation.generation_evidence.legacy_unpaged).then(|| {
+            generation
+                .generation_evidence
+                .pages
+                .iter()
+                .map(|page| (page.page_ordinal, page.page_size_bytes))
+        }),
+    )?;
     Ok(Some(generation))
 }
 
@@ -1641,76 +1700,29 @@ impl CodeIndexPublishedGenerationV1 {
         if generation.format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
             return Ok(None);
         }
-        if generation.file_segments.len() != generation.snapshot.files.len() {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment count does not match its snapshot".to_owned(),
-            ));
-        }
+        validate_partitioned_generation_layout(
+            generation
+                .file_segments
+                .iter()
+                .map(|segment| (segment.file_key, &segment.file_occurrence_id)),
+            generation
+                .snapshot
+                .files
+                .iter()
+                .map(|file| &file.file_occurrence_id),
+            generation.generation_evidence.segment_size_bytes,
+            generation.generation_evidence.pages.as_ref().map(|pages| {
+                pages
+                    .iter()
+                    .map(|page| (page.page_ordinal, page.page_size_bytes))
+            }),
+        )?;
         let mut identities = Vec::with_capacity(generation.file_segments.len().saturating_add(1));
-        for (expected_key, segment) in generation.file_segments.into_iter().enumerate() {
-            let expected_key = u32::try_from(expected_key).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation file key exceeds u32".to_owned(),
-                )
-            })?;
-            if segment.file_key != expected_key
-                || generation.snapshot.files[expected_key as usize].file_occurrence_id
-                    != segment.file_occurrence_id
-            {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation file segments are not canonically keyed".to_owned(),
-                ));
-            }
+        for segment in generation.file_segments {
             identities.push(SealedGenerationSegmentIdentityV1 {
                 digest: segment.segment_digest,
                 size_bytes: segment.segment_size_bytes,
             });
-        }
-        if let Some(pages) = generation.generation_evidence.pages.as_ref() {
-            if pages.is_empty() {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence has no pages".to_owned(),
-                ));
-            }
-            let page_max = u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence page bound exceeds u64".to_owned(),
-                )
-            })?;
-            let mut evidence_size_bytes = 0_u64;
-            for (expected_ordinal, page) in pages.iter().enumerate() {
-                let expected_ordinal = u32::try_from(expected_ordinal).map_err(|_| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation evidence page count exceeds u32".to_owned(),
-                    )
-                })?;
-                if page.page_ordinal != expected_ordinal
-                    || page.page_size_bytes == 0
-                    || page.page_size_bytes > page_max
-                {
-                    return Err(CodeIndexProductionErrorV1::Contract(
-                        "sealed generation evidence pages are not canonically bounded and ordered"
-                            .to_owned(),
-                    ));
-                }
-                evidence_size_bytes = evidence_size_bytes
-                    .checked_add(page.page_size_bytes)
-                    .ok_or_else(|| {
-                        CodeIndexProductionErrorV1::Contract(
-                            "sealed generation evidence segment length exceeds u64".to_owned(),
-                        )
-                    })?;
-            }
-            if evidence_size_bytes != generation.generation_evidence.segment_size_bytes {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence segment byte size does not match its pages"
-                        .to_owned(),
-                ));
-            }
-        } else if generation.generation_evidence.segment_size_bytes == 0 {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "legacy sealed generation evidence segment is empty".to_owned(),
-            ));
         }
         identities.push(SealedGenerationSegmentIdentityV1 {
             digest: generation.generation_evidence.segment_digest,
@@ -1841,6 +1853,133 @@ mod tests {
 
         assert_eq!(keys.get(&first), Some(&0));
         assert_eq!(keys.get(&second), Some(&1));
+    }
+
+    #[test]
+    fn missing_evidence_pages_is_legacy_but_explicit_null_is_rejected() {
+        let missing = serde_json::json!({
+            "segment_digest": "sha256:56f954431e92b5e2ef9b1355bc229acf516a8d3409b7e48e9cd9fb7856411f29",
+            "segment_size_bytes": 1
+        });
+        let descriptor: PartitionedGenerationEvidenceDescriptorV1 =
+            serde_json::from_value(missing.clone()).expect("missing pages is historical format");
+        assert!(descriptor.legacy_unpaged);
+        let identity: PartitionedEvidenceSegmentIdentityV1 =
+            serde_json::from_value(missing).expect("retention accepts historical format");
+        assert!(identity.pages.is_none());
+
+        let explicit_null = serde_json::json!({
+            "segment_digest": "sha256:56f954431e92b5e2ef9b1355bc229acf516a8d3409b7e48e9cd9fb7856411f29",
+            "segment_size_bytes": 1,
+            "pages": null
+        });
+        assert!(
+            serde_json::from_value::<PartitionedGenerationEvidenceDescriptorV1>(
+                explicit_null.clone()
+            )
+            .is_err(),
+            "the full parser must not treat explicit null as historical format"
+        );
+        assert!(
+            serde_json::from_value::<PartitionedEvidenceSegmentIdentityV1>(explicit_null).is_err(),
+            "the retention reader must not treat explicit null as historical format"
+        );
+    }
+
+    #[test]
+    fn shared_descriptor_layout_validator_keeps_parser_and_retention_invariants_aligned() {
+        let first = FileOccurrenceId::new("file.partitioned.first").unwrap();
+        let second = FileOccurrenceId::new("file.partitioned.second").unwrap();
+        let files = [&first, &second];
+        let valid_pages = [(0, 4_u64), (1, 5_u64)];
+        validate_partitioned_generation_layout(
+            [(0, &first), (1, &second)].into_iter(),
+            files.into_iter(),
+            9,
+            Some(valid_pages.into_iter()),
+        )
+        .expect("current paged descriptor is canonical");
+        validate_partitioned_generation_layout(
+            [(0, &first), (1, &second)].into_iter(),
+            files.into_iter(),
+            9,
+            None::<std::iter::Empty<(u32, u64)>>,
+        )
+        .expect("historical unpaged descriptor is canonical");
+
+        for (segments, snapshot, size, pages, expected) in [
+            (
+                vec![(0, &first)],
+                vec![&first, &second],
+                4,
+                Some(vec![(0, 4)]),
+                "segment count",
+            ),
+            (
+                vec![(0, &second), (1, &first)],
+                vec![&first, &second],
+                4,
+                Some(vec![(0, 4)]),
+                "canonically keyed",
+            ),
+            (
+                vec![(0, &first), (1, &second)],
+                vec![&first, &second],
+                0,
+                None,
+                "legacy sealed generation evidence segment is empty",
+            ),
+            (
+                vec![(0, &first), (1, &second)],
+                vec![&first, &second],
+                4,
+                Some(vec![]),
+                "has no pages",
+            ),
+            (
+                vec![(0, &first), (1, &second)],
+                vec![&first, &second],
+                4,
+                Some(vec![(1, 4)]),
+                "canonically bounded and ordered",
+            ),
+            (
+                vec![(0, &first), (1, &second)],
+                vec![&first, &second],
+                4,
+                Some(vec![(0, 0)]),
+                "canonically bounded and ordered",
+            ),
+            (
+                vec![(0, &first), (1, &second)],
+                vec![&first, &second],
+                4,
+                Some(vec![(
+                    0,
+                    u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).unwrap() + 1,
+                )]),
+                "canonically bounded and ordered",
+            ),
+            (
+                vec![(0, &first), (1, &second)],
+                vec![&first, &second],
+                5,
+                Some(vec![(0, 4)]),
+                "byte size does not match",
+            ),
+        ] {
+            let error = validate_partitioned_generation_layout(
+                segments.into_iter(),
+                snapshot.into_iter(),
+                size,
+                pages.map(Vec::into_iter),
+            )
+            .expect_err("malformed descriptor must be rejected by both readers");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?}, got {error}"
+            );
+        }
     }
 
     /// The replaced `serde_json::Value` encoder. It survives only here, as the
