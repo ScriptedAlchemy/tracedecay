@@ -668,7 +668,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
                 .expect("skill improvement recommendations should be present");
         assert!(recommendations.iter().any(|recommendation| {
             recommendation["id"] == "underused_tool_family:code_search"
-                && recommendation["recommendation"] == "add_or_patch_skill_guidance"
+                && recommendation["recommendation"] == "diagnose_routing_or_tooling_gap"
                 && recommendation["source"] == "session_tool_usage"
         }));
         Ok(AgentTaskResponse {
@@ -1281,4 +1281,44 @@ pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
         AgentTaskKind::CombinedReview => "combined_review:v1",
         AgentTaskKind::UserJob => "user_job:v1",
     }
+}
+
+/// Authored routing examples are proposal input, not measured adoption results.
+#[cfg(feature = "test-transport")]
+pub(crate) fn skill_routing_validation(skill_id: &str) -> Value {
+    json!([
+        {
+            "id": format!("{skill_id}-positive"),
+            "category": "skill_routing",
+            "fixture": "main",
+            "status": "active",
+            "hosts": ["codex"],
+            "prompt": format!("Review the repeated workflow covered by {skill_id} using its run evidence."),
+            "ground_truth": ["The response identifies the recorded workflow failure and a supported remedy."],
+            "max_tool_calls": 8,
+            "expected_skill": skill_id
+        },
+        {
+            "id": format!("{skill_id}-neighbor"),
+            "category": "skill_routing",
+            "fixture": "main",
+            "status": "active",
+            "hosts": ["codex"],
+            "prompt": "Locate the pricing function and explain its callers.",
+            "ground_truth": ["The response identifies the pricing function and its actual callers."],
+            "max_tool_calls": 8,
+            "expected_skill": "tracing-functions"
+        },
+        {
+            "id": format!("{skill_id}-negative"),
+            "category": "skill_routing",
+            "fixture": "main",
+            "status": "active",
+            "hosts": ["codex"],
+            "prompt": "What is two plus two?",
+            "ground_truth": ["The response answers four without loading a skill."],
+            "max_tool_calls": 0,
+            "allowed_skills": []
+        }
+    ])
 }
