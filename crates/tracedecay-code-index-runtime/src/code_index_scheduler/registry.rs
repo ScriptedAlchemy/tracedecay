@@ -1098,6 +1098,12 @@ pub struct CodeIndexSchedulerRegistryV1 {
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     serving_generation_installation_tokens: Arc<AtomicU64>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
+    /// Seating counter. Publication is broadcast when reconcile seals, which
+    /// is before the sealed generation takes the serving slot, so a waiter
+    /// that needs the seated slot has no publication event to wake on. This
+    /// advances once per install, after the slot is written, so those waiters
+    /// block on a transition instead of polling the slot.
+    serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
     test_attribution_authorities: Arc<
@@ -2473,6 +2479,18 @@ impl CodeIndexSchedulerRegistryV1 {
         self.generation_publications.subscribe()
     }
 
+    /// Observe serving-slot seating. Each advance means the serving slot was
+    /// written; the receiver reads the slot to learn what it now holds.
+    pub fn subscribe_serving_seats(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.serving_seats.subscribe()
+    }
+
+    /// Record that the serving slot was written. Call this only after the slot
+    /// holds the new generation, so a woken waiter observes the seated value.
+    fn record_serving_seat(seats: &tokio::sync::watch::Sender<u64>) {
+        seats.send_modify(|seats| *seats = seats.wrapping_add(1));
+    }
+
     fn publish_generation(
         sender: &tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
         published_generation_id: &RwLock<Option<CodeGenerationId>>,
@@ -2861,6 +2879,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_background_reconcile_admission =
             Arc::clone(&self.background_reconcile_admission);
         let worker_generation_publications = self.generation_publications.clone();
+        let worker_serving_seats = Arc::clone(&self.serving_seats);
         let worker_project_root = project_root.clone();
         let worker_project_id = project_id;
         let worker_repository_id = repository_id.clone();
@@ -4039,6 +4058,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     match serving_swap {
                         Ok(Ok(outcome)) => {
+                            // The slot was written inside the blocking swap, so
+                            // a waiter woken here already reads the seated
+                            // generation. Publication fired before the seal, so
+                            // this is the only transition it can wait on.
+                            if outcome.installs() {
+                                Self::record_serving_seat(&worker_serving_seats);
+                            }
                             let generation_id = text_latest
                                 .generation()
                                 .manifest()

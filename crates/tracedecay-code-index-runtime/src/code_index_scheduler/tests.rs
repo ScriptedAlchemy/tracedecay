@@ -12114,6 +12114,40 @@ async fn wait_for_live_complete_generation(
     }
 }
 
+/// Publication is broadcast when reconcile seals, before the sealed generation
+/// takes the serving slot, so `branch_add`'s exact-branch wait had no event for
+/// the seat and polled the slot every 10ms for up to thirty minutes instead.
+/// The seating counter replaces that poll, and it only can if a wake means the
+/// slot already holds the generation.
+#[tokio::test]
+async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut seats = registry.subscribe_serving_seats();
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount scheduler");
+    tokio::time::timeout(Duration::from_secs(30), seats.changed())
+        .await
+        .expect("seating wakes its waiters instead of leaving them to poll")
+        .expect("the seating channel stays open while the registry lives");
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_some(),
+        "a seat wake must not fire before the serving slot holds the generation"
+    );
+    registry.shutdown().await;
+}
+
 async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

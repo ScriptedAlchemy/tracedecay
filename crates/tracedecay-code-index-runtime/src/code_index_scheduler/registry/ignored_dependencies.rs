@@ -601,7 +601,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         };
         match swap {
-            Ok(()) => {}
+            Ok(()) => Self::record_serving_seat(&self.serving_seats),
             Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
                 CodeIndexIgnoredDependencyRefusalV1::StaleGeneration,
             )) => {

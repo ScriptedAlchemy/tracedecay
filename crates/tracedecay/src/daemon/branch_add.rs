@@ -25,8 +25,7 @@ const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismat
 const GIT_SNAPSHOT_UNAVAILABLE: &str = "git_snapshot_unavailable";
 const BRANCH_TRACKING_FAILED: &str = "branch_tracking_failed";
 const BRANCH_GENERATION_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-const BRANCH_GENERATION_HARD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const BRANCH_GENERATION_SEATING_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const BRANCH_GENERATION_HARD_TIMEOUT: Duration = Duration::from_mins(30);
 
 pub(super) struct BranchAddRequest {
     pub(super) id: serde_json::Value,
@@ -748,6 +747,12 @@ fn await_exact_branch_generation_inner<'a>(
     // so every profiling feature can compute its layout.
     Box::pin(async move {
         let mut publications = schedulers.subscribe_generation_publications();
+        // Publication is broadcast before graph seating, so the serving slot
+        // can become exact after the matching publication with no second
+        // publication to wake this waiter. The seating counter is that
+        // missing transition; subscribing before the refresh request keeps
+        // every seat from this point on observable.
+        let mut seats = schedulers.subscribe_serving_seats();
         if !schedulers
             .notify_hook_overflow(canonical_worktree_root)
             .await
@@ -831,10 +836,14 @@ fn await_exact_branch_generation_inner<'a>(
                         ));
                     }
                 },
-                // Publication is broadcast before graph seating. The serving
-                // slot may therefore become exact after the matching event,
-                // without a second event to wake this waiter.
-                () = tokio::time::sleep(BRANCH_GENERATION_SEATING_POLL_INTERVAL) => {}
+                // The scheduler advances this after it writes the serving slot,
+                // so a wake here means the slot already holds its new value.
+                // A closed channel disables this branch rather than spinning;
+                // the deadline below still bounds the wait.
+                Ok(()) = seats.changed() => {}
+                // Sleep to the nearer deadline so neither bound is overshot and
+                // neither is polled for.
+                () = tokio::time::sleep_until(idle_deadline.min(hard_deadline)) => {}
             }
         }
     })
@@ -862,30 +871,6 @@ fn branch_generation_timeout_error(
             canonical_worktree_root.display()
         ),
     )
-}
-
-#[cfg(test)]
-mod wait_policy_tests {
-    use super::*;
-
-    #[test]
-    fn pending_graph_activation_keeps_exact_branch_wait_live() {
-        let pending = CodeIndexWorktreeFreshnessV1 {
-            rebuild_in_flight: false,
-            code_graph_serving: Some(CodeGraphServingReadinessV1::Pending),
-            ..CodeIndexWorktreeFreshnessV1::default()
-        };
-        assert!(branch_generation_work_is_active(&pending));
-
-        let terminal = CodeIndexWorktreeFreshnessV1 {
-            rebuild_in_flight: false,
-            code_graph_serving: Some(CodeGraphServingReadinessV1::Refused {
-                reason: "fixture refusal".to_owned(),
-            }),
-            ..CodeIndexWorktreeFreshnessV1::default()
-        };
-        assert!(!branch_generation_work_is_active(&terminal));
-    }
 }
 
 fn generation_matches_branch_source(
@@ -1012,5 +997,43 @@ fn branch_add_outcome_name(outcome: &BranchAddOutcome) -> &'static str {
         BranchAddOutcome::AlreadyTracked => "already_tracked",
         BranchAddOutcome::Added => "added",
         BranchAddOutcome::Deferred => "deferred",
+    }
+}
+
+#[cfg(test)]
+mod wait_policy_tests {
+    use super::*;
+
+    #[test]
+    fn pending_graph_activation_keeps_exact_branch_wait_live() {
+        let pending = CodeIndexWorktreeFreshnessV1 {
+            rebuild_in_flight: false,
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Pending),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        assert!(branch_generation_work_is_active(&pending));
+
+        let terminal = CodeIndexWorktreeFreshnessV1 {
+            rebuild_in_flight: false,
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Refused {
+                reason: "fixture refusal".to_owned(),
+            }),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        assert!(!branch_generation_work_is_active(&terminal));
+    }
+
+    #[test]
+    fn the_hard_deadline_bounds_every_seating_wake() {
+        let start = Instant::now();
+        let hard = start + BRANCH_GENERATION_HARD_TIMEOUT;
+
+        // A live pass keeps pushing the idle deadline out. The wake must sleep
+        // to whichever bound arrives first, or an extended idle deadline would
+        // outlive the hard bound the wait is supposed to fail closed on.
+        let idle = start + BRANCH_GENERATION_IDLE_TIMEOUT;
+        assert_eq!(idle.min(hard), idle);
+        let extended = start + BRANCH_GENERATION_HARD_TIMEOUT + BRANCH_GENERATION_IDLE_TIMEOUT;
+        assert_eq!(extended.min(hard), hard);
     }
 }

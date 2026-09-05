@@ -63,6 +63,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )),
             serving_generation_installation_tokens: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             generation_publications,
+            serving_seats: Arc::new(tokio::sync::watch::Sender::new(0)),
             cadence_telemetry: Arc::new(std::sync::Mutex::new(
                 super::CodeIndexCadenceTelemetryV1::default(),
             )),
