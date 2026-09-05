@@ -789,19 +789,25 @@ fn await_exact_branch_generation_inner<'a>(
             {
                 return Ok(generation);
             }
-            match publications.recv().await {
-                Ok(event) if event.project_root == canonical_worktree_root => {}
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Err(TraceDecayError::project_route(
-                        CODE_INDEX_ACTIVATION_UNAVAILABLE,
-                        true,
-                        format!(
-                            "code-index publication stream closed for branch worktree '{}'",
-                            canonical_worktree_root.display()
-                        ),
-                    ));
-                }
+            tokio::select! {
+                result = publications.recv() => match result {
+                    Ok(event) if event.project_root == canonical_worktree_root => {}
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(TraceDecayError::project_route(
+                            CODE_INDEX_ACTIVATION_UNAVAILABLE,
+                            true,
+                            format!(
+                                "code-index publication stream closed for branch worktree '{}'",
+                                canonical_worktree_root.display()
+                            ),
+                        ));
+                    }
+                },
+                // Publication is broadcast before graph seating. The serving
+                // slot may therefore become exact after the matching event,
+                // without a second event to wake this waiter.
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
         }
     })
