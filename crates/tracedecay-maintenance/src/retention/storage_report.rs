@@ -1133,19 +1133,7 @@ mod tests {
             .unwrap();
     }
 
-    /// A full pass over a directory mutated mid-iteration must miss nothing
-    /// and stay bounded.
-    ///
-    /// Repeat-freedom is deliberately *not* asserted. `read_project_directory_page`
-    /// resumes with `seekdir` on a `telldir` cookie, and its own SAFETY note
-    /// records the contract: a cookie invalidated by a concurrent mutation may
-    /// yield a repeated page. APFS does exactly that, while glibc happens not
-    /// to — so a no-repeats assertion tested the platform, not the contract.
-    /// Deduplicating inside the reader would require carrying every name seen
-    /// so far, which is the unbounded state paging exists to avoid, so the
-    /// tolerance stays in the contract and both consumers absorb it: orphan
-    /// collection re-checks each candidate before acting, and the storage
-    /// report may double-count a directory in one page's estimate.
+    /// Inventory positions survive directory mutation without repeating records.
     #[test]
     fn project_directory_pages_cover_every_entry_within_a_bounded_pass() {
         for page_size in [64, 256] {
@@ -1193,19 +1181,11 @@ mod tests {
                 observed.is_superset(&expected_without_removed),
                 "page size {page_size} skipped an original directory"
             );
-            // A replay is permitted, an unbounded one is not: the whole pass
-            // must still cost within a constant factor of the directory.
             assert!(
-                returned <= (expected.len() + 1).saturating_mul(2),
+                returned == observed.len(),
                 "page size {page_size} returned {returned} entries for {} directories",
                 expected.len()
             );
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            assert!(
-                entries_scanned <= expected.len() + 1,
-                "page size {page_size} rescanned entries: {entries_scanned}"
-            );
-            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
             assert!(
                 entries_scanned <= (expected.len() + 1).saturating_mul(2),
                 "page size {page_size} rescanned directory or inventory entries: {entries_scanned}"
@@ -1215,6 +1195,214 @@ mod tests {
                 "entry accounting must cover every returned directory"
             );
         }
+    }
+
+    #[test]
+    fn project_directory_report_resume_is_stable_after_mutation_and_repeated_requests() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects = profile_root.join("projects");
+        for index in 0..17 {
+            std::fs::create_dir_all(projects.join(format!("proj_{index:02}"))).unwrap();
+        }
+        let first = list_project_directories_page(&profile_root, "", 2).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        for (_, path) in &first.directories {
+            std::fs::remove_dir(path).unwrap();
+        }
+        std::fs::create_dir_all(projects.join("proj_added")).unwrap();
+        let resumed = list_project_directories_page(&profile_root, &cursor, 2).unwrap();
+        let repeated = list_project_directories_page(&profile_root, &cursor, 2).unwrap();
+        assert_eq!(resumed.directories, repeated.directories);
+        assert_eq!(resumed.next_cursor, repeated.next_cursor);
+        let mut observed = first
+            .directories
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<BTreeSet<_>>();
+        let mut cursor = Some(cursor);
+        let mut pages = 0;
+        while let Some(saved) = cursor {
+            let page = list_project_directories_page(&profile_root, &saved, 2).unwrap();
+            for (name, _) in page.directories {
+                assert!(
+                    observed.insert(name),
+                    "resumption repeated an inventory record"
+                );
+            }
+            cursor = page.next_cursor;
+            pages += 1;
+            assert!(pages <= 10, "resumption failed to converge");
+        }
+        assert!((0..17).all(|index| observed.contains(&format!("proj_{index:02}"))));
+    }
+
+    #[tokio::test]
+    async fn project_directory_storage_report_counts_stable_resume_and_rejects_invalid_position() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path();
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            profile_root,
+        )
+        .await
+        .unwrap();
+        let db = runtime.profile_database_arc();
+        for index in 0..3 {
+            let project = profile_root
+                .join("projects")
+                .join(format!("proj_report_{index}"));
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("payload"), b"1234").unwrap();
+        }
+        let first = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            Some(DIRECTORY_CURSOR_PREFIX),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (first.unregistered_dir_count, first.unregistered_bytes),
+            (1, 4)
+        );
+        let cursor = first.coverage.next_cursor.unwrap();
+        let second = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            Some(&cursor),
+            1,
+        )
+        .await
+        .unwrap();
+        let repeated = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            Some(&cursor),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (second.unregistered_dir_count, second.unregistered_bytes),
+            (1, 4)
+        );
+        assert_eq!(second.coverage.next_cursor, repeated.coverage.next_cursor);
+        assert_eq!(second.unregistered_bytes, repeated.unregistered_bytes);
+        let (prefix, _) = cursor.rsplit_once(':').unwrap();
+        let invalid = format!("{prefix}:{}", u64::MAX);
+        assert!(matches!(
+            build_storage_report_page_from_registered_global_db(
+                profile_root,
+                &db,
+                Some(&invalid),
+                1
+            )
+            .await,
+            Err(tracedecay_domain::errors::TraceDecayError::Config { .. })
+        ));
+        let third = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            second.coverage.next_cursor.as_deref(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (third.unregistered_dir_count, third.unregistered_bytes),
+            (1, 4)
+        );
+        let exhausted = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            third.coverage.next_cursor.as_deref(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                exhausted.unregistered_dir_count,
+                exhausted.unregistered_bytes
+            ),
+            (0, 0)
+        );
+        assert!(exhausted.coverage.next_cursor.is_none());
+    }
+
+    #[test]
+    fn project_directory_report_rejects_invalidated_inventory_positions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        for index in 0..3 {
+            std::fs::create_dir_all(profile_root.join("projects").join(format!("proj_{index}")))
+                .unwrap();
+        }
+        let first = list_project_directories_page(&profile_root, "", 1).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        let (prefix, _) = cursor.rsplit_once(':').unwrap();
+        for offset in [1, u64::MAX] {
+            let error =
+                list_project_directories_page(&profile_root, &format!("{prefix}:{offset}"), 1)
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                tracedecay_domain::errors::TraceDecayError::Config { .. }
+            ));
+        }
+        // Rejected positions must not modify the inventory or poison its valid continuation.
+        let resumed = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
+        assert_eq!(resumed.directories.len(), 1);
+        assert_ne!(first.directories, resumed.directories);
+    }
+
+    #[test]
+    fn project_directory_report_empty_locked_page_retains_continuation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects = profile_root.join("projects");
+        std::fs::create_dir_all(projects.join("proj_pending")).unwrap();
+        let metadata = projects.metadata().unwrap();
+        let modified = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let signature = format!(
+            "{}-{}-{}",
+            modified.as_secs(),
+            modified.subsec_nanos(),
+            metadata.len()
+        );
+        let inventory = profile_root
+            .join("maintenance/unregistered-project-directory-inventory-v2")
+            .join(format!("{signature}.log"));
+        std::fs::create_dir_all(inventory.parent().unwrap()).unwrap();
+        let lock = tracedecay_runtime_core::storage::try_acquire_sidecar_lock(
+            &tracedecay_runtime_core::storage::append_lock_path(&inventory),
+        )
+        .unwrap()
+        .unwrap();
+        let empty = list_project_directories_page(&profile_root, "", 1).unwrap();
+        assert!(empty.directories.is_empty());
+        let cursor = empty
+            .next_cursor
+            .expect("lock contention is incomplete, never empty success");
+        let repeated = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
+        assert!(repeated.directories.is_empty());
+        assert_eq!(repeated.next_cursor.as_deref(), Some(cursor.as_str()));
+        drop(lock);
+        let resumed = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
+        assert_eq!(resumed.directories[0].0, "proj_pending");
+        let final_page = list_project_directories_page(
+            &profile_root,
+            resumed.next_cursor.as_deref().unwrap(),
+            1,
+        )
+        .unwrap();
+        assert!(final_page.directories.is_empty());
+        assert!(final_page.next_cursor.is_none());
     }
 
     #[test]
@@ -1273,12 +1461,6 @@ mod tests {
                 let elapsed = started.elapsed();
 
                 assert_eq!(observed, directory_count);
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-                assert_eq!(entries_scanned, directory_count);
-                #[cfg(not(any(
-                    all(target_os = "linux", target_env = "gnu"),
-                    target_os = "macos"
-                )))]
                 assert_eq!(entries_scanned, directory_count.saturating_mul(2));
                 eprintln!(
                     "directories={directory_count} page_size={page_size} \

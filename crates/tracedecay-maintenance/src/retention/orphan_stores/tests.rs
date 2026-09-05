@@ -2011,18 +2011,10 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
         .next_cursor
         .clone()
         .expect("a third directory requires a second page");
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
-    let portable_inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
-    )
-    .expect("first portable page publishes its durable inventory")
-    .next()
-    .expect("one cursor signature owns the first portable page")
-    .unwrap()
-    .path();
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+    let portable_inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
     let portable_inventory =
         std::fs::read(&portable_inventory_path).expect("read first portable inventory state");
 
@@ -2044,7 +2036,6 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     assert_eq!(second.completion, UnregisteredSweepCompletionV1::Complete);
     assert_eq!(second.outcome.collected.len(), 1);
     assert!(second.next_cursor.is_none());
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
     assert_eq!(
         std::fs::read(portable_inventory_path)
             .expect("resumed portable page keeps the prior inventory"),
@@ -2059,10 +2050,9 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     );
 }
 
-/// Platforms without a persistent OS directory offset use an append-only
-/// durable inventory. A cancelled admission keeps its partial inventory, and
+/// Every platform uses an append-only durable inventory. A cancelled admission
+/// keeps its partial inventory, and
 /// the next page advances that exact log instead of deleting/rebuilding it.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 #[test]
 fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2085,16 +2075,10 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     let cursor = page
         .next_cursor
         .expect("a bounded first chunk leaves durable continuation work");
-    let inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
     let partial = std::fs::read(&inventory_path).unwrap();
 
     let cancelled = CancellationToken::new();
@@ -2152,10 +2136,141 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     );
 }
 
+#[test]
+fn unregistered_inventory_hydrates_another_writers_committed_suffix() {
+    use std::io::Write;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path();
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_writer_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    let inventory = super::unregistered_page::portable_inventory_path(
+        profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    let initial = std::fs::read_to_string(&inventory).unwrap();
+    let foreign = (0..17)
+        .map(|index| format!("proj_writer_{index}"))
+        .find(|name| !initial.lines().any(|line| line == name))
+        .unwrap();
+    // Reproduce another process's durable append between writer admissions.
+    let lock = tracedecay_runtime_core::storage::try_acquire_sidecar_lock(
+        &tracedecay_runtime_core::storage::append_lock_path(&inventory),
+    )
+    .unwrap()
+    .unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&inventory)
+        .unwrap();
+    writeln!(writer, "{foreign}").unwrap();
+    writer.sync_data().unwrap();
+    drop(writer);
+    drop(lock);
+    let mut cursor = Some(cursor);
+    let mut pages = 0;
+    while let Some(saved) = cursor {
+        let page = super::unregistered_page::read_project_directory_page(
+            profile_root,
+            Some(&saved),
+            1,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+        cursor = page.next_cursor;
+        pages += 1;
+        assert!(pages <= 18);
+    }
+    let log = std::fs::read_to_string(&inventory).unwrap();
+    let records = log.lines().skip(1).collect::<Vec<_>>();
+    assert_eq!(records.len(), 17);
+    assert_eq!(
+        records
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        17
+    );
+    assert_eq!(records.iter().filter(|name| **name == foreign).count(), 1);
+}
+
+#[test]
+fn unregistered_inventory_restart_converges_without_repeating_records() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path();
+    let count = 73;
+    for index in 0..count {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_restart_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let mut scanned = first.entries_scanned;
+    let mut observed = std::collections::HashSet::new();
+    for entry in first.entries {
+        let super::unregistered_page::ProjectDirectoryWorkV1::Project(name) = entry else {
+            panic!("unexpected quarantine")
+        };
+        assert!(observed.insert(name));
+    }
+    let saved = first.next_cursor.unwrap();
+    let inventory = super::unregistered_page::portable_inventory_path(
+        profile_root,
+        saved.split(':').nth(1).unwrap(),
+    );
+    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory);
+    let mut cursor = Some(saved);
+    let mut pages = 0;
+    while let Some(saved) = cursor {
+        let page = super::unregistered_page::read_project_directory_page(
+            profile_root,
+            Some(&saved),
+            1,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+        scanned += page.entries_scanned;
+        for entry in page.entries {
+            let super::unregistered_page::ProjectDirectoryWorkV1::Project(name) = entry else {
+                panic!("unexpected quarantine")
+            };
+            assert!(observed.insert(name), "restart repeated a committed record");
+        }
+        cursor = page.next_cursor;
+        pages += 1;
+        assert!(
+            pages <= count + 3,
+            "restart failed to converge within bounded hydration and replay"
+        );
+    }
+    assert_eq!(observed.len(), count);
+    // Directory + inventory reads cost 2N; the one restart hydrates and
+    // replays only the eight records persisted by the first admission.
+    assert_eq!(scanned, count * 2 + 16);
+}
+
 /// A crash while a first inventory header is being published must not turn the
 /// cursor into a permanent configuration error. The next admission replaces
 /// the uncommitted header before it recreates bounded inventory progress.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 #[test]
 fn portable_inventory_repairs_torn_header_before_restart_resume() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2178,16 +2293,10 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
     let cursor = page
         .next_cursor
         .expect("the first source slice remains incomplete");
-    let inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
     std::fs::write(&inventory_path, b"v2:").unwrap();
     super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
 
@@ -2214,7 +2323,6 @@ fn portable_inventory_repairs_torn_header_before_restart_resume() {
 /// A final append is committed only by its newline. After a restart, an
 /// unterminated project id is discarded before hydration, so it cannot be
 /// joined with a later append and hide the real project from the page.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 #[test]
 fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
     use std::io::Write;
@@ -2237,16 +2345,10 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
     let cursor = page
         .next_cursor
         .expect("the inventory has unscanned source entries");
-    let inventory_path = std::fs::read_dir(
-        profile_root
-            .join("maintenance")
-            .join("unregistered-project-directory-inventory-v2"),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
     let inventory_before_torn_append = String::from_utf8(std::fs::read(&inventory_path).unwrap())
         .expect("the production inventory is UTF-8");
     let target = project_ids
@@ -2296,7 +2398,6 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
 /// The canonical sidecar writer lock is process-safe, rather than merely the
 /// in-process builder map. A competing admission yields without touching the
 /// log and a later admission resumes from the same durable boundary.
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 #[test]
 fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     let tmp = tempfile::TempDir::new().unwrap();
