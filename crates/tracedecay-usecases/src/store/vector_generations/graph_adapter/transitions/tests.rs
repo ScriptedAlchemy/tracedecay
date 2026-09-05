@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
@@ -34,6 +37,7 @@ use crate::semantic_runtime::{
     SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
+use crate::store::vector_generations::graph_adapter::GRAPH_BACKGROUND_OPERATION_BUDGET;
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
 use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, PreparedVectorGenerationV1, SemanticVectorStageDescriptorV1,
@@ -244,6 +248,7 @@ async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
         inner: Arc::clone(&store.runtime),
         require_background_begin: false,
         prepare_deadline: Mutex::new(None),
+        cancellation_to_trip: None,
     });
 
     let publication = store
@@ -278,6 +283,7 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
         inner: Arc::clone(&store.runtime),
         require_background_begin: true,
         prepare_deadline: Mutex::new(None),
+        cancellation_to_trip: None,
     });
 
     let outcome = store.begin_generation(plan, cancellation).await.unwrap();
@@ -286,12 +292,57 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
         outcome,
         VectorGenerationBeginOutcomeV1::ReplayFromStart { .. }
     ));
+    assert_eq!(
+        GRAPH_BACKGROUND_OPERATION_BUDGET,
+        Duration::from_secs(15 * 60),
+        "generation restart must have a finite corpus-scale authority"
+    );
+}
+
+struct SwitchCancellation(Arc<AtomicBool>);
+
+impl GraphCancellation for SwitchCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_refresh() {
+    let source = CodeGenerationId::new("code-generation.begin-cancelled").unwrap();
+    let cancellation_flag = Arc::new(AtomicBool::new(false));
+    let cancellation: Arc<dyn GraphCancellation> =
+        Arc::new(SwitchCancellation(Arc::clone(&cancellation_flag)));
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let (plan, _, descriptor) =
+        prepared_generation(&source, "chunk.begin-cancelled", 'e', &admitted_embedding());
+    store.configure_stage(descriptor).unwrap();
+    store.runtime = Arc::new(PublicationAuthorityProbeRuntime {
+        inner: Arc::clone(&store.runtime),
+        require_background_begin: false,
+        prepare_deadline: Mutex::new(None),
+        cancellation_to_trip: Some(cancellation_flag),
+    });
+
+    assert!(matches!(
+        store.begin_generation(plan, cancellation).await,
+        Err(VectorGenerationStoreErrorV1::Cancelled)
+    ));
 }
 
 struct PublicationAuthorityProbeRuntime {
     inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
     require_background_begin: bool,
     prepare_deadline: Mutex<Option<Instant>>,
+    cancellation_to_trip: Option<Arc<AtomicBool>>,
 }
 
 impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
@@ -303,6 +354,10 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         &self,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        if let Some(cancellation) = &self.cancellation_to_trip {
+            cancellation.store(true, Ordering::SeqCst);
+            authority.checkpoint()?;
+        }
         self.inner.recover_verified_snapshot(authority)
     }
 
@@ -336,7 +391,9 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
                 .deadline()
                 .checked_duration_since(Instant::now())
                 .ok_or(GraphDbError::DeadlineExceeded)?;
-            if remaining < Duration::from_secs(24 * 60 * 60) {
+            if !(Duration::from_secs(14 * 60)..=GRAPH_BACKGROUND_OPERATION_BUDGET)
+                .contains(&remaining)
+            {
                 return Err(GraphDbError::DeadlineExceeded);
             }
         }
@@ -385,7 +442,8 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
             .deadline()
             .checked_duration_since(Instant::now())
             .ok_or(GraphDbError::DeadlineExceeded)?;
-        if remaining < Duration::from_secs(24 * 60 * 60) {
+        if !(Duration::from_secs(14 * 60)..=GRAPH_BACKGROUND_OPERATION_BUDGET).contains(&remaining)
+        {
             return Err(GraphDbError::DeadlineExceeded);
         }
         *self.prepare_deadline.lock().unwrap() = Some(authority.deadline());
