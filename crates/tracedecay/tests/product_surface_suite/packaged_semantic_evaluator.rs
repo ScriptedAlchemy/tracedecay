@@ -63,18 +63,22 @@ fn packaged_evaluator_binary_validates_without_a_source_checkout() {
 }
 
 #[test]
-fn qualify_native_rejects_an_unparseable_candidate_without_writing_output() {
+fn qualify_native_requires_daemon_authority_without_writing_output() {
     let project = tempfile::tempdir().expect("temporary project");
-    let candidate = project.path().join("candidate.json");
+    let profile_root = project.path().join(".tracedecay");
     let output_path = project.path().join("qualification.json");
-    std::fs::write(&candidate, b"not semantic candidate JSON").expect("invalid candidate");
 
     let output = Command::new(search_eval_direct_bin())
         .current_dir(project.path())
+        .env("HOME", project.path())
+        .env("USERPROFILE", project.path())
+        .env("XDG_CONFIG_HOME", project.path().join(".config"))
+        .env("XDG_RUNTIME_DIR", project.path().join("run"))
+        .env("TRACEDECAY_DATA_DIR", &profile_root)
+        .env("TRACEDECAY_GLOBAL_DB", profile_root.join("global.db"))
         .args(["qualify-native", "--project-root"])
         .arg(project.path())
-        .arg("--candidate")
-        .arg(&candidate)
+        .args(["--profile", "hybrid-reranked"])
         .arg("--output")
         .arg(&output_path)
         .output()
@@ -88,10 +92,15 @@ fn qualify_native_rejects_an_unparseable_candidate_without_writing_output() {
     assert!(
         response["rationale"]
             .as_str()
-            .is_some_and(|rationale| rationale.contains("parse"))
+            .is_some_and(|rationale| rationale.contains("daemon authority record is not available")),
+        "unexpected refusal: {response}"
     );
     assert!(
         !output_path.exists(),
-        "candidate parsing failure must not create a qualification artifact"
+        "unavailable daemon authority must not create a qualification artifact"
+    );
+    assert!(
+        !profile_root.exists(),
+        "qualification must not mint profile or daemon authority"
     );
 }
