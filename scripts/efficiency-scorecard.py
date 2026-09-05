@@ -29,14 +29,15 @@ binary. The operator's daemon, profile, and stores are never touched.
     cold_index           `tracedecay init` -> code_index_freshness "current"
                          (wall), plus the daemon's own generation build
                          elapsed and the seal->activation span
+    baseline_restart     populated cold store -> same generation/revision current
     tool_calls           p50/p95/max of `tool` CLI round-trips: search, grep,
                          context, status, fact_store_search (memory recall);
                          N samples per tool after fixed warm-up
-    incremental_sync     one-file edit + commit, `tracedecay sync` -> the NEW
+    incremental_sync     after baseline restart and serving reads: one-file
+                         edit + commit, `tracedecay sync` -> the NEW
                          generation is "current" (wall + seal->activation)
     daemon_restart       SIGTERM -> exit, respawn -> freshness "current"
-                         again over the populated store (activation/replay
-                         cost on startup)
+                         again with the exact successor generation/revision
     store size           tracedecay.db/-wal/-shm bytes and per-generation
                          artifact sizes after cold index and after sync
     peak RSS             per-phase max daemon VmRSS (50 ms sampling) plus
@@ -843,6 +844,37 @@ def tool_battery(sandbox: Sandbox, samples: int) -> dict:
     }
 
 
+def restart_current_generation(
+    sandbox: Sandbox,
+    sampler: RssSampler,
+    phase: str,
+    generation: str,
+    revision: str,
+) -> dict:
+    """Measure populated-store recovery against the previously served identity."""
+    sampler.set_phase(phase)
+    sandbox.stop_daemon()
+    sampler.set_pid(None)
+    started = time.monotonic()
+    socket_seconds = sandbox.spawn_daemon()
+    _, payload, _ = wait_for(
+        sandbox,
+        phase,
+        RESTART_DEADLINE,
+        lambda payload: (
+            freshness_current(payload)
+            and latest_generation(payload) == generation
+            and source_revision(payload) == revision
+        ),
+    )
+    return {
+        "spawn_to_socket_seconds": round(socket_seconds, 3),
+        "spawn_to_current_seconds": round(time.monotonic() - started, 3),
+        "generation_id": latest_generation(payload),
+        "source_revision": source_revision(payload),
+    }
+
+
 def run_scenario(
     binary: Path, fixture: Path, tool_samples: int, keep_sandbox: bool, sampler: RssSampler
 ) -> dict:
@@ -864,7 +896,14 @@ def run_scenario(
         init_returned = time.monotonic() - init_started
         remaining = COLD_INDEX_DEADLINE - init_returned
         wall, payload, observed_at = wait_for(
-            sandbox, "cold_index", remaining, freshness_current
+            sandbox,
+            "cold_index",
+            remaining,
+            lambda payload: (
+                freshness_current(payload)
+                and bool(latest_generation(payload))
+                and source_revision(payload) == run["fixture_commit"]
+            ),
         )
         cold_generation = latest_generation(payload)
         worktree = freshness(payload).get("worktree") or {}
@@ -879,6 +918,7 @@ def run_scenario(
                 else None
             ),
             "generation_id": cold_generation,
+            "source_revision": source_revision(payload),
             "sealed_source_digest": progress.get("sealed_source_digest"),
             "graph_statistics": graph_statistics(payload),
             "store": store_measurements(sandbox),
@@ -891,6 +931,12 @@ def run_scenario(
                 "fact_store_add",
                 {"content": fact, "category": "decision", "format": "json"},
             )
+
+        # Recover the retained baseline in a new process before serving reads
+        # and the edit; the incremental phase must not reuse the cold builder.
+        run["baseline_restart"] = restart_current_generation(
+            sandbox, sampler, "baseline_restart", cold_generation, run["fixture_commit"]
+        )
 
         # ── tool_calls ───────────────────────────────────────────────────
         sampler.set_phase("tool_calls")
@@ -918,6 +964,7 @@ def run_scenario(
             # wait early.
             return (
                 freshness_current(payload)
+                and bool(latest_generation(payload))
                 and latest_generation(payload) != cold_generation
                 and source_revision(payload) == probe_commit
             )
@@ -930,23 +977,21 @@ def run_scenario(
             "sync_returned_seconds": round(sync_returned, 3),
             "seal_to_activation_seconds": seal_to_activation_seconds(payload, observed_at),
             "generation_id": latest_generation(payload),
+            "source_revision": source_revision(payload),
+            "probe_revision": probe_commit,
+            "baseline_generation_id": run["baseline_restart"]["generation_id"],
+            "baseline_source_revision": run["baseline_restart"]["source_revision"],
             "store": store_measurements(sandbox),
         }
 
         # ── daemon_restart (populated store -> serving again) ────────────
-        sampler.set_phase("daemon_restart")
-        sandbox.stop_daemon()
-        sampler.set_pid(None)
-        restart_started = time.monotonic()
-        socket_seconds = sandbox.spawn_daemon()
-        wall, payload, _observed_at = wait_for(
-            sandbox, "daemon_restart", RESTART_DEADLINE, freshness_current
+        run["daemon_restart"] = restart_current_generation(
+            sandbox,
+            sampler,
+            "daemon_restart",
+            run["incremental_sync"]["generation_id"],
+            probe_commit,
         )
-        run["daemon_restart"] = {
-            "spawn_to_socket_seconds": round(socket_seconds, 3),
-            "spawn_to_current_seconds": round(time.monotonic() - restart_started, 3),
-            "generation_id": latest_generation(payload),
-        }
 
         sampler.set_phase("idle")
         run["status"] = "ok"
@@ -985,6 +1030,7 @@ def collect_scalars(run: dict) -> dict[str, float]:
     for section in (
         "daemon_start_empty",
         "cold_index",
+        "baseline_restart",
         "tool_calls",
         "incremental_sync",
         "daemon_restart",
@@ -1063,7 +1109,8 @@ def human_summary(scorecard: dict) -> str:
     row("cold index → freshness current", "cold_index.wall_seconds")
     row("cold index seal → activation", "cold_index.seal_to_activation_seconds")
     row("cold index daemon build elapsed", "cold_index.daemon_build_elapsed_seconds")
-    row("incremental sync (1-file) → new generation current", "incremental_sync.wall_seconds")
+    row("baseline restart → same generation current", "baseline_restart.spawn_to_current_seconds")
+    row("incremental sync after restart → new generation current", "incremental_sync.wall_seconds")
     row("incremental sync seal → activation", "incremental_sync.seal_to_activation_seconds")
     row("daemon restart → serving (populated store)", "daemon_restart.spawn_to_current_seconds")
     row("readiness observer processes", "observer.process_count", "")
@@ -1107,6 +1154,7 @@ def human_summary(scorecard: dict) -> str:
     for phase in (
         "daemon_start_empty",
         "cold_index",
+        "baseline_restart",
         "tool_calls",
         "incremental_sync",
         "daemon_restart",
