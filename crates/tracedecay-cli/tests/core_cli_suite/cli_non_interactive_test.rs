@@ -1196,16 +1196,20 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         .to_path_buf();
     let mut artifact_record: AutomationRunLedgerRecord =
         serde_json::from_value(record).expect("ledger should deserialize as run record");
+    // Terminal rows are immutable. Publish the artifact fixture under its own
+    // identity with its complete artifact set on the first ledger append.
+    let artifact_run_id = format!("{run_id}.artifact-inspection");
+    artifact_record.run_id = artifact_run_id.clone();
     let artifact_payload = serde_json::json!({
         "loop_stage": "codex_handoff",
-        "run_id": run_id,
+        "run_id": artifact_run_id,
         "status": "ready_for_review",
     });
     let runtime = create_runtime();
     let artifact = runtime
         .block_on(write_run_artifact(
             &dashboard_root,
-            run_id,
+            &artifact_run_id,
             AutomationRunArtifactKind::CodexHandoff,
             &artifact_payload,
             Some("CLI handoff artifact".to_string()),
@@ -1222,7 +1226,7 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         "automation",
         "runs",
         "artifact",
-        run_id,
+        &artifact_run_id,
         "codex_handoff",
         "--json",
     ]);
@@ -1235,11 +1239,26 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     );
     let artifact_view_payload: serde_json::Value =
         serde_json::from_slice(&artifact_output.stdout).expect("artifact view should print JSON");
-    assert_eq!(artifact_view_payload["run_id"], run_id);
+    assert_eq!(artifact_view_payload["run_id"], artifact_run_id);
     assert_eq!(artifact_view_payload["artifact"]["kind"], "codex_handoff");
     assert_eq!(
         artifact_view_payload["payload"]["status"],
         "ready_for_review"
+    );
+
+    let mut original_view = tracedecay_command(home.path(), project.path());
+    original_view.args(["automation", "runs", "view", run_id, "--json"]);
+    let original_output = run_with_timeout(original_view, cli_timeout());
+    assert!(
+        original_output.status.success(),
+        "original skipped run remains readable: {}",
+        String::from_utf8_lossy(&original_output.stderr)
+    );
+    let original_payload: serde_json::Value =
+        serde_json::from_slice(&original_output.stdout).expect("original run JSON");
+    assert_eq!(
+        original_payload["record"], view_payload["record"],
+        "artifact publication and inspection must preserve the skipped terminal"
     );
 }
 
