@@ -638,8 +638,11 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
 
     // Transcript persistence never projects summary nodes: a `kind = "summary"`
     // transcript message is durable raw evidence, and `lcm_summary_nodes` rows
-    // are only written by the explicit immutable-summary publication API
-    // (`lcm_publish_immutable_summary_guarded`).
+    // are only ever written by the immutable-summary publication path
+    // (`lcm_publish_immutable_summary_guarded`, which LCM compression reaches
+    // through `dag::insert_summary_node`). See
+    // `transcript_summary_message_keeps_native_compaction_evidence` for the
+    // other half of that contract.
     assert_eq!(
         store_counts(&db, "cursor", "concurrent-full-session", &transcript_path,).await,
         StoreCounts {
@@ -652,6 +655,88 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
             cursors: 1,
         }
     );
+}
+
+/// `summaries: 0` above is only safe because ingest keeps the evidence the
+/// summarization pipeline recognizes. `native_summary_evidence` scans
+/// `session_messages` for a non-empty body plus `kind = "summary"` and the
+/// provider's metadata discriminators, and only a recognized row reaches
+/// compression — the sole production writer of `lcm_summary_nodes`. Dropping
+/// or rewriting either column at persist time would strand every host
+/// compaction with no failing count to show for it.
+#[tokio::test]
+async fn transcript_summary_message_keeps_native_compaction_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let transcript_path = tmp.path().join("codex-compaction.jsonl");
+    let db = profile_runtime(&tmp).await;
+    let store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
+    let mut session = sample_session("codex", "codex-compaction-session", "project-a");
+    session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
+    store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::upsert(
+                session,
+                vec![summary_message(
+                    "codex",
+                    "codex-compaction-summary",
+                    "codex-compaction-session",
+                )],
+                ParseOffset::default(),
+                ParseOffset {
+                    byte_offset: 120,
+                    mtime: 1_000,
+                    file_id: 11,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store_counts(&db, "codex", "codex-compaction-session", &transcript_path).await,
+        StoreCounts {
+            sessions: 1,
+            projections: 1,
+            raw_messages: 1,
+            raw_fts: 1,
+            all_raw_fts: 1,
+            summaries: 0,
+            cursors: 1,
+        }
+    );
+
+    let snapshot_path = tmp.path().join("codex-compaction-snapshot.db");
+    db.snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
+        .await
+        .unwrap();
+    let connection = rusqlite::Connection::open(&snapshot_path).unwrap();
+    let (text, kind, metadata_json) = connection
+        .query_row(
+            "SELECT text, kind, metadata_json FROM session_messages
+             WHERE provider = ?1 AND session_id = ?2",
+            ("codex", "codex-compaction-session"),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert!(
+        !text.trim().is_empty(),
+        "the evidence scan skips blank bodies, so the summary text must survive persist"
+    );
+    assert_eq!(kind.as_deref(), Some("summary"));
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_json.expect("summary metadata must survive persist"))
+            .unwrap();
+    assert_eq!(metadata["source"], "codex_context_compacted");
+    assert_eq!(metadata["summary_body"], "plaintext");
 }
 
 #[tokio::test]
