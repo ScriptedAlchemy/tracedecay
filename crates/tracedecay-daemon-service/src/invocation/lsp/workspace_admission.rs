@@ -56,28 +56,18 @@ impl DaemonInvocationService {
         {
             return None;
         }
-        if expected_owner.is_some_and(|expected| {
-            !authorized
-                .factories
-                .iter()
-                .zip(authorized.scope_set.roots())
-                .any(|((_, factory), root)| {
-                    root.locator().is_some_and(|locator| {
-                        expected.project_identity.matches_locator(locator)
-                            && std::sync::Arc::ptr_eq(factory, &expected.factory)
-                    })
-                })
-        }) {
-            return None;
-        }
         if authorized.scope_set.roots().len() != authorized.factories.len() {
             return None;
         }
-        for ((root, factory), authorized_root) in authorized
-            .factories
-            .iter()
-            .zip(authorized.scope_set.roots())
-        {
+        let mut expected_owner_matched = expected_owner.is_none();
+        for (root, factory) in &authorized.factories {
+            // LSP roots are ordered by scope digest; the application scope set
+            // orders exact project identities. Bind authorities by identity,
+            // since their positions need not agree.
+            let authorized_root =
+                authorized.scope_set.roots().iter().find(|candidate| {
+                    Some(&candidate.scope().scope_digest) == root.scope_digest()
+                })?;
             let locator = authorized_root.locator()?;
             let path = url::Url::parse(root.uri()).ok()?.to_file_path().ok()?;
             let current_owner = self.lsp_owner(Some(&path)).await?;
@@ -86,6 +76,15 @@ impl DaemonInvocationService {
             {
                 return None;
             }
+            if expected_owner.is_some_and(|expected| {
+                expected.project_identity.matches_locator(locator)
+                    && std::sync::Arc::ptr_eq(factory, &expected.factory)
+            }) {
+                expected_owner_matched = true;
+            }
+        }
+        if !expected_owner_matched {
+            return None;
         }
         Some(CurrentLspWorkspaceAuthorityV1::Federated(authorized))
     }

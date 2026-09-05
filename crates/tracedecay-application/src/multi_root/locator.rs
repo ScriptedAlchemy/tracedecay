@@ -4,40 +4,39 @@ use std::path::{Component, Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{ProjectId, UserProfileId};
+use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 
 use super::{AuthorizedScopeSetError, MultiRootQueryError};
 use crate::{RequestContext, ResolvedScope};
 
-/// Shared physical profile-store locator supplied by the profile authority.
+/// Stable identity of the shared Profile shard supplied by its registered lease.
 ///
-/// The typed profile and store IDs select this locator. It never derives an
-/// identity from a path, CWD, active graph, or mutable project alias.
+/// Brain and profile IDs survive an owner restart. Lease incarnations and
+/// authority epochs remain runtime fences rather than persisted root identity.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct SharedProfileStoreLocatorV1 {
+    pub brain_id: BrainId,
     pub profile_id: UserProfileId,
-    pub store_id: String,
 }
 
 impl SharedProfileStoreLocatorV1 {
-    pub fn new(
-        profile_id: UserProfileId,
-        store_id: impl Into<String>,
-    ) -> Result<Self, MultiRootQueryError> {
+    pub fn new(brain_id: BrainId, profile_id: UserProfileId) -> Result<Self, MultiRootQueryError> {
         let locator = Self {
+            brain_id,
             profile_id,
-            store_id: store_id.into(),
         };
         locator.validate()?;
         Ok(locator)
     }
 
     pub fn validate(&self) -> Result<(), MultiRootQueryError> {
-        self.profile_id
+        self.brain_id
             .validate()
             .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        validate_locator_text(&self.store_id, "profile store id")
+        self.profile_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))
     }
 }
 
@@ -56,13 +55,12 @@ pub struct RegisteredRootLocatorV1 {
 impl RegisteredRootLocatorV1 {
     pub fn new(
         project_id: ProjectId,
-        profile_id: UserProfileId,
-        store_id: impl Into<String>,
+        profile: SharedProfileStoreLocatorV1,
         canonical_root: impl Into<PathBuf>,
     ) -> Result<Self, MultiRootQueryError> {
         let locator = Self {
             project_id,
-            profile: SharedProfileStoreLocatorV1::new(profile_id, store_id)?,
+            profile,
             canonical_root: canonical_root.into(),
         };
         locator.validate()?;
@@ -178,19 +176,6 @@ impl AuthorizedRootAdmission {
         AuthorizedRoot::registered(context.scope().clone(), locator.clone())?;
         Ok(Self { context, locator })
     }
-}
-
-fn validate_locator_text(value: &str, field: &'static str) -> Result<(), MultiRootQueryError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(MultiRootQueryError::Invalid(format!(
-            "{field} is not canonical"
-        )));
-    }
-    Ok(())
 }
 
 fn validate_absolute_root(root: &Path) -> Result<(), MultiRootQueryError> {

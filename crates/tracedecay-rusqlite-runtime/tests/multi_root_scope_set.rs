@@ -7,10 +7,10 @@ use tempfile::TempDir;
 use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, RegisteredRootLocatorV1, RequestContext,
-    RequestId, ResolvedScope,
+    RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_domain::{
-    ActorId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
+    ActorId, BrainId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
     ScopeSetRevision, UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
@@ -200,8 +200,11 @@ fn scope_set_for_id_actor(revision: u64, scope_set_id: &str, actor: &str) -> Aut
             context,
             RegisteredRootLocatorV1::new(
                 project_id,
-                UserProfileId::new("profile.fixture").unwrap(),
-                "store.fixture".to_owned(),
+                SharedProfileStoreLocatorV1::new(
+                    BrainId::new("brain.fixture").unwrap(),
+                    UserProfileId::new("profile.fixture").unwrap(),
+                )
+                .unwrap(),
                 format!("/workspace/{}", worktree_id.as_str()),
             )
             .unwrap(),

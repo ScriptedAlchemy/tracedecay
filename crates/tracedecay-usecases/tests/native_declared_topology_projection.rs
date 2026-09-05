@@ -15,7 +15,7 @@ use tracedecay_application::{
     NativeIntegrationPortError, NativeIntegrationSelectionBindingV1,
     NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
     NativeIntegrationStackResolutionRequestV1, RegisteredRootLocatorV1, RequestContext, RequestId,
-    ResolvedScope,
+    ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_code_index::git_projection::{
     GitTopologyProjectionError, GitTopologyProjectionStore, git_topology_namespace,
@@ -431,8 +431,11 @@ fn authorize_registered_roots(
                 request_context(destination, "main"),
                 RegisteredRootLocatorV1::new(
                     project.clone(),
-                    UserProfileId::new("profile.native-declared-topology").expect("profile"),
-                    "store.native-declared-topology",
+                    SharedProfileStoreLocatorV1::new(
+                        BrainId::new("brain.native-topology-fixture").expect("brain"),
+                        UserProfileId::new("profile.native-declared-topology").expect("profile"),
+                    )
+                    .expect("profile shard locator"),
                     fixture.canonical_root(),
                 )
                 .expect("main locator"),
@@ -442,8 +445,11 @@ fn authorize_registered_roots(
                 request_context(source, "feature"),
                 RegisteredRootLocatorV1::new(
                     project.clone(),
-                    UserProfileId::new("profile.native-declared-topology").expect("profile"),
-                    "store.native-declared-topology",
+                    SharedProfileStoreLocatorV1::new(
+                        BrainId::new("brain.native-topology-fixture").expect("brain"),
+                        UserProfileId::new("profile.native-declared-topology").expect("profile"),
+                    )
+                    .expect("profile shard locator"),
                     fixture.canonical_linked_root(),
                 )
                 .expect("feature locator"),
@@ -748,6 +754,36 @@ fn declared_stack_with_a_foreign_profile_graph_runtime_is_unavailable() {
         resolver
             .resolve(&declared.request, &cancellation)
             .expect("foreign-profile declared-stack resolution"),
+        NativeIntegrationStackResolutionOutcomeV1::Unavailable
+    );
+}
+
+#[test]
+fn declared_stack_with_a_foreign_brain_locator_is_unavailable() {
+    let fixture = NativeGitFixture::new();
+    fixture.advance_feature("foreign-brain feature revision\n");
+    let declared = declared_stack_request(&fixture, "branch-stack-revision.native.brain");
+    let cancellation =
+        CancellationSignal::active("cancel.native-declared-topology.brain").expect("cancellation");
+    expect_declared_stack(
+        resolver(
+            &fixture,
+            &declared,
+            Arc::new(VerifiedSnapshotRuntime::default()),
+        )
+        .resolve(&declared.request, &cancellation)
+        .expect("matching-brain declared-stack resolution"),
+        &declared.revision,
+    );
+    let mut runtime = VerifiedSnapshotRuntime::for_project(declared.project.clone());
+    let foreign_brain = BrainId::new("brain.native-topology-foreign").expect("foreign brain");
+    runtime.binding.shard_id.brain_id = foreign_brain.clone();
+    runtime.locator.shard_id.brain_id = foreign_brain;
+    let resolver = resolver(&fixture, &declared, Arc::new(runtime));
+    assert_eq!(
+        resolver
+            .resolve(&declared.request, &cancellation)
+            .expect("cross-brain declared-stack resolution"),
         NativeIntegrationStackResolutionOutcomeV1::Unavailable
     );
 }

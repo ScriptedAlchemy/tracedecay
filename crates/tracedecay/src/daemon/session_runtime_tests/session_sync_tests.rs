@@ -14,7 +14,7 @@ use tracedecay_application::session_sync::{
 use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, IdempotencyKey, OperationTermination,
-    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
+    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_code_index::git_projection::{
     GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitBranchStackBindingV1, GitTopologyProjectionStore,
@@ -511,8 +511,11 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
                 native_topology_context(main_scope.clone(), "main.1", &capability, &use_case),
                 RegisteredRootLocatorV1::new(
                     project.clone(),
-                    identity.profile_id().clone(),
-                    "store.session-sync.native-topology",
+                    SharedProfileStoreLocatorV1::new(
+                        identity.brain_id().clone(),
+                        identity.profile_id().clone(),
+                    )
+                    .expect("profile shard locator"),
                     roots[0].clone(),
                 )
                 .expect("main locator"),
@@ -522,8 +525,11 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
                 native_topology_context(feature_scope.clone(), "feature.1", &capability, &use_case),
                 RegisteredRootLocatorV1::new(
                     project.clone(),
-                    identity.profile_id().clone(),
-                    "store.session-sync.native-topology",
+                    SharedProfileStoreLocatorV1::new(
+                        identity.brain_id().clone(),
+                        identity.profile_id().clone(),
+                    )
+                    .expect("profile shard locator"),
                     roots[1].clone(),
                 )
                 .expect("feature locator"),
@@ -710,8 +716,11 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
                 native_topology_context(main_scope, "main.2", &capability, &use_case),
                 RegisteredRootLocatorV1::new(
                     project.clone(),
-                    identity.profile_id().clone(),
-                    "store.session-sync.native-topology",
+                    SharedProfileStoreLocatorV1::new(
+                        identity.brain_id().clone(),
+                        identity.profile_id().clone(),
+                    )
+                    .expect("profile shard locator"),
                     roots[0].clone(),
                 )
                 .expect("replacement main locator"),
@@ -721,8 +730,11 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
                 native_topology_context(feature_scope, "feature.2", &capability, &use_case),
                 RegisteredRootLocatorV1::new(
                     project,
-                    identity.profile_id().clone(),
-                    "store.session-sync.native-topology",
+                    SharedProfileStoreLocatorV1::new(
+                        identity.brain_id().clone(),
+                        identity.profile_id().clone(),
+                    )
+                    .expect("profile shard locator"),
                     roots[1].clone(),
                 )
                 .expect("replacement feature locator"),

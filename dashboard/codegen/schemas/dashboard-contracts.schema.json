@@ -18300,18 +18300,18 @@
     },
     "SharedProfileStoreLocatorV1": {
       "additionalProperties": false,
-      "description": "Shared physical profile-store locator supplied by the profile authority.\n\nThe typed profile and store IDs select this locator. It never derives an\nidentity from a path, CWD, active graph, or mutable project alias.",
+      "description": "Stable identity of the shared Profile shard supplied by its registered lease.\n\nBrain and profile IDs survive an owner restart. Lease incarnations and\nauthority epochs remain runtime fences rather than persisted root identity.",
       "properties": {
+        "brain_id": {
+          "$ref": "#/$defs/BrainId"
+        },
         "profile_id": {
           "$ref": "#/$defs/UserProfileId"
-        },
-        "store_id": {
-          "type": "string"
         }
       },
       "required": [
-        "profile_id",
-        "store_id"
+        "brain_id",
+        "profile_id"
       ],
       "type": "object"
     },

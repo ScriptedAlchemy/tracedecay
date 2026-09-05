@@ -4412,13 +4412,13 @@ export const SettingsPayloadV1Schema = z.object({
 });
 export type SettingsPayloadV1 = z.infer<typeof SettingsPayloadV1Schema>;
 
-/** Shared physical profile-store locator supplied by the profile authority.
+/** Stable identity of the shared Profile shard supplied by its registered lease.
 
-The typed profile and store IDs select this locator. It never derives an
-identity from a path, CWD, active graph, or mutable project alias. */
+Brain and profile IDs survive an owner restart. Lease incarnations and
+authority epochs remain runtime fences rather than persisted root identity. */
 export const SharedProfileStoreLocatorV1Schema = z.object({
+  brain_id: z.lazy(() => BrainIdSchema),
   profile_id: z.lazy(() => UserProfileIdSchema),
-  store_id: z.string(),
 }).strict();
 export type SharedProfileStoreLocatorV1 = z.infer<typeof SharedProfileStoreLocatorV1Schema>;
 

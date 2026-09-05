@@ -2,8 +2,10 @@ use super::*;
 use tracedecay_application::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeNavigationSurfaceRequest,
-    CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest, RegisteredRootLocatorV1,
+    SharedProfileStoreLocatorV1,
 };
+use tracedecay_domain::{BrainId, RepositoryId, WorktreeId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn lsp_deadline() -> Deadline {
@@ -628,6 +630,125 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert!(service.lsp_sessions.lock().await.is_empty());
     assert!(service.authorized_lsp_workspaces.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn federated_lsp_admission_matches_exact_roots_across_canonical_orders() {
+    let service = DaemonInvocationService::default();
+    let home = tempfile::tempdir().expect("workspace roots");
+    let profile = UserProfileId::new("profile.workspace").expect("profile");
+    let registrar = DaemonLspOwnerRegistrar::new(&service);
+    let mut roots = Vec::new();
+    let mut owners = Vec::new();
+    for suffix in ["a", "b"] {
+        let root = home.path().join(suffix);
+        std::fs::create_dir(&root).expect("workspace root");
+        let root = root.canonicalize().expect("canonical workspace root");
+        let scope = ResolvedScope::new(
+            ProjectId::new(format!("project.workspace-{suffix}")).expect("project"),
+            RepositoryId::new(format!("repository.workspace-{suffix}")).expect("repository"),
+            WorktreeId::new(format!("worktree.workspace-{suffix}")).expect("worktree"),
+            None,
+        )
+        .expect("scope");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!("grant.workspace-{suffix}")).expect("grant"),
+            1,
+            canonical_sha256(&("workspace grant", suffix)).expect("grant digest"),
+            ActorId::new("actor.workspace").expect("actor"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            std::collections::BTreeSet::from([
+                CapabilityId::new(LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability")
+            ]),
+            std::collections::BTreeSet::from([
+                UseCaseId::new(LSP_WORKSPACE_USE_CASE_ID_V1).expect("use case")
+            ]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("grant");
+        let owner = DaemonLspInvocationOwner::for_test_project(
+            unavailable_lsp_session_factory(),
+            profile.clone(),
+            scope.project_id.clone(),
+            root.clone(),
+        )
+        .with_scope_grant(grant);
+        registrar
+            .register_lsp_owner(root.clone(), owner.clone())
+            .await
+            .expect("register owner");
+        let locator = RegisteredRootLocatorV1::new(
+            scope.project_id.clone(),
+            SharedProfileStoreLocatorV1::new(
+                BrainId::new("brain.workspace").expect("brain"),
+                profile.clone(),
+            )
+            .expect("profile shard locator"),
+            root.clone(),
+        )
+        .expect("registered root");
+        let uri = url::Url::from_directory_path(&root)
+            .expect("root URI")
+            .to_string();
+        roots.push((root, uri, scope, locator));
+        owners.push(owner);
+    }
+    assert!(roots[0].2.project_id < roots[1].2.project_id);
+    assert!(
+        roots[0].2.scope_digest > roots[1].2.scope_digest,
+        "the fixture must exercise distinct application and LSP canonical orders"
+    );
+    let workspace = service
+        .authorize_lsp_workspace(roots.clone(), UtcMicros(1))
+        .await
+        .expect("authorize registered workspace");
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let opened = service
+        .open_lsp_session(
+            &registry,
+            Some(workspace.clone()),
+            "request.workspace-ordered".to_owned(),
+            "3.17".to_owned(),
+            Some(roots[0].1.clone()),
+            roots.iter().map(|root| root.1.clone()).collect(),
+            0,
+            Some(owners[0].clone()),
+        )
+        .await;
+    assert!(
+        matches!(opened.outcome, DaemonInvocationOutcome::LspOpened { .. }),
+        "{opened:?}"
+    );
+
+    // An owner replacement still invalidates the old workspace, even when
+    // its project and path remain the same.
+    let mut replacement = owners[1].clone();
+    replacement.factory = unavailable_lsp_session_factory();
+    registrar
+        .register_lsp_owner(roots[1].0.clone(), replacement)
+        .await
+        .expect("replace owner");
+    let stale = service
+        .open_lsp_session(
+            &registry,
+            Some(workspace),
+            "request.workspace-stale".to_owned(),
+            "3.17".to_owned(),
+            Some(roots[0].1.clone()),
+            roots.iter().map(|root| root.1.clone()).collect(),
+            0,
+            Some(owners[0].clone()),
+        )
+        .await;
+    assert!(matches!(
+        stale.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    ));
+    assert_eq!(registry.lock().await.active_sessions(), 1);
 }
 
 #[tokio::test]
