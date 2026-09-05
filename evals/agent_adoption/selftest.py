@@ -488,6 +488,23 @@ def test_skill_routing():
     agg = grade.aggregate([a,b,c,d])["claude"]
     check("routing: per-skill missed and correct counts", agg["skill_routing"]["tracing-functions"] == {"tp":1,"fn":1,"fp":1})
     check("routing: no-skill overtrigger counted", agg["no_skill_cases"] == 2 and agg["no_skill_overtrigger"] == 1)
+    for condition in ("no-skills", "bare"):
+        absent = transcript([claude_result("place_order")])
+        ablated = grade.score_scenario(scn, absent, {}, {"channel_condition": condition})
+        routing = ablated["details"]["skill_routing"]
+        check(f"routing: {condition} absence is not an available-skill miss",
+              routing["measured"] is False and routing["missed"] is None and
+              routing["unmeasured_reason"] == "skills_unavailable_in_condition")
+        check(f"routing: {condition} task outcome remains measured",
+              ablated["subscores"]["outcome"] == 1 and ablated["subscores"]["efficiency"] == 1)
+        mixed = grade.aggregate([a, b, ablated])["claude"]
+        check(f"routing: {condition} excluded from mixed miss denominator",
+              mixed["skill_routing"]["tracing-functions"] == {"tp": 1, "fn": 1, "fp": 0}
+              and mixed["unmeasured_skill_cases"] == 1)
+        no_skill = grade.score_scenario(neg, absent, {}, {"channel_condition": condition})
+        counts = grade.aggregate([no_skill])["claude"]
+        check(f"routing: {condition} excluded from no-skill denominator",
+              counts["no_skill_cases"] == 0 and counts["unmeasured_skill_cases"] == 1)
     codex = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
         "type": "command_execution", "command": "cat /tmp/plugin/skills/tracing-functions/SKILL.md",
         "aggregated_output": "# Tracing functions", "exit_code": 0}})], "codex")
