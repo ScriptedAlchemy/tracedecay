@@ -80,11 +80,12 @@ fn admit_projectless_connection(
                 .to_owned(),
         });
     }
+    let pinned_profile_root = profile_identity.profile_root().to_path_buf();
     let shard = StoreShardIdV1::profile_sessions(
         profile_identity.brain_id().clone(),
         profile_identity.profile_id().clone(),
     );
-    let serving_db = user_sessions_db_path(profile_identity.profile_root());
+    let serving_db = user_sessions_db_path(&pinned_profile_root);
     let serving = crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
         profile_identity,
         &shard,
@@ -102,7 +103,10 @@ fn admit_projectless_connection(
         profile_session_root.identity(),
     )?;
     Ok(ProjectlessConnectionStateV1 {
-        client_identity: client_identity.clone(),
+        client_identity: DaemonClientIdentity::new(
+            pinned_profile_root.clone(),
+            pinned_profile_root.join("global.db"),
+        ),
         profile_authority,
     })
 }
@@ -641,5 +645,135 @@ mod projectless_admission_tests {
             admit_projectless_connection(&client, &administration).is_err(),
             "a profile root that resolves to nothing must stay refused"
         );
+    }
+
+    #[tokio::test]
+    async fn retargeted_client_profile_root_keeps_hermes_receipt_under_pinned_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (real_root, linked_root) = linked_profile_root(temp.path());
+        let foreign_root = temp.path().join("foreign").join(".tracedecay");
+        std::fs::create_dir_all(&foreign_root).expect("create foreign profile root");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&foreign_root, std::fs::Permissions::from_mode(0o700))
+                .expect("restrict foreign profile root");
+        }
+        crate::product_runtime::register_fixture_product_runtime();
+        crate::host_admission::ensure_process_background_cpu_authority()
+            .expect("install fixture worker authority");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
+            .expect("pin profile identity");
+        let administration = StoreAdministration::default().with_profile_identity(identity);
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &real_root,
+            1,
+            "projectless-retargeted-hermes-test",
+        )
+        .expect("enter fixture database scope");
+        let client = DaemonClientIdentity::new(linked_root.clone(), linked_root.join("global.db"));
+        let connection = admit_projectless_connection(&client, &administration)
+            .expect("admit symlinked client profile");
+
+        let linked_parent = linked_root.parent().expect("linked profile parent");
+        std::fs::remove_file(linked_parent).expect("remove original profile symlink");
+        std::os::unix::fs::symlink(
+            foreign_root.parent().expect("foreign profile parent"),
+            linked_parent,
+        )
+        .expect("retarget profile symlink");
+
+        let response = projectless_hook_runtime_response(
+            json!(1),
+            json!({
+                "action": "hermes_receipt",
+                "event": {
+                    "agent": "hermes",
+                    "event": "turnCompleted",
+                    "route": { "session_id": "pinned-hermes-session" },
+                    "receipt": {
+                        "status": "success",
+                        "transcript_watermark": "pinned-hermes-watermark"
+                    }
+                }
+            }),
+            &connection,
+            &administration,
+        )
+        .await;
+
+        let pinned_automation_root =
+            tracedecay_automation_runtime::automation::runner::user_automation_root(&real_root);
+        let foreign_automation_root =
+            tracedecay_automation_runtime::automation::runner::user_automation_root(&foreign_root);
+        let pinned_receipt_exists = pinned_automation_root.join("host_receipts.json").is_file();
+        let foreign_receipt_exists = foreign_automation_root.join("host_receipts.json").exists();
+        administration.shutdown_host_admission_replay().await;
+
+        assert!(
+            response.error.is_none(),
+            "Hermes receipt failed: {response:?}"
+        );
+        assert!(
+            pinned_receipt_exists,
+            "durable Hermes receipt must remain under the admitted profile"
+        );
+        assert!(
+            !foreign_receipt_exists,
+            "retargeting the client symlink must never redirect durable receipt writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_client_profile_symlink_keeps_retained_codex_path_pinned() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (real_root, linked_root) = linked_profile_root(temp.path());
+        crate::product_runtime::register_fixture_product_runtime();
+        crate::host_admission::ensure_process_background_cpu_authority()
+            .expect("install fixture worker authority");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
+            .expect("pin profile identity");
+        let administration = StoreAdministration::default().with_profile_identity(identity);
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &real_root,
+            1,
+            "projectless-removed-codex-test",
+        )
+        .expect("enter fixture database scope");
+        let client = DaemonClientIdentity::new(linked_root.clone(), linked_root.join("global.db"));
+        let connection = admit_projectless_connection(&client, &administration)
+            .expect("admit symlinked client profile");
+        let runtime_registry = administration
+            .registered_runtime_registry()
+            .await
+            .expect("open profile runtime registry");
+
+        std::fs::remove_file(linked_root.parent().expect("linked profile parent"))
+            .expect("remove client profile symlink after admission");
+        let retained_profile_root = connection.client_identity.profile_root.clone();
+        let retained_global_db_path = connection.client_identity.global_db_path.clone();
+
+        let response = projectless_hook_runtime_response(
+            json!(2),
+            json!({
+                "action": "codex_stop",
+                "session_id": "pinned-codex-session"
+            }),
+            &connection,
+            &administration,
+        )
+        .await;
+        let terminal_shutdown = runtime_registry.shutdown_terminal_tasks().await;
+        administration.shutdown_host_admission_replay().await;
+
+        assert_eq!(retained_profile_root, real_root);
+        assert_eq!(
+            retained_global_db_path,
+            retained_profile_root.join("global.db")
+        );
+        assert!(
+            response.error.is_none(),
+            "retained Codex stop failed after client symlink removal: {response:?}"
+        );
+        terminal_shutdown.expect("join retained Codex task");
     }
 }

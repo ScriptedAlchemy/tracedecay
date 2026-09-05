@@ -5896,6 +5896,95 @@ fn ordinary_background_reconcile_does_not_supersede_in_flight_text_work() {
 }
 
 #[test]
+fn observed_change_after_neutral_wake_supersedes_in_flight_text_work() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn neutral_then_observed_change() -> u32 { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let control = tracedecay_usecases::code_index::DaemonCodeIndexControlV1::new(
+        Arc::clone(&scheduler.epoch),
+        Arc::clone(&scheduler.shutting_down),
+    );
+
+    scheduler.request_background_reconcile();
+    assert!(
+        !control.is_cancelled(),
+        "the neutral wake must preserve work admitted for unchanged source state"
+    );
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn neutral_then_observed_change() -> u32 { 2 }\n",
+    );
+    scheduler.request_background_reconcile_for_observed_change();
+
+    assert!(
+        control.is_cancelled(),
+        "a source change observed before the neutral wake drains must still supersede stale work"
+    );
+    let observed_change_epoch = scheduler.epoch.load(std::sync::atomic::Ordering::Acquire);
+
+    scheduler.request_background_reconcile_for_observed_change();
+
+    assert_eq!(
+        scheduler.epoch.load(std::sync::atomic::Ordering::Acquire),
+        observed_change_epoch,
+        "repeated reads of the same pending drift must keep the cancellation epoch stable"
+    );
+}
+
+#[test]
+fn observed_change_during_capture_retries_before_publication() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn changed_during_capture() -> u32 { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish initial source"));
+    scheduler.request_background_reconcile();
+    let mut capture_attempts = 0;
+
+    let outcome = scheduler
+        .reconcile_now_with_capture(|scheduler, control| {
+            let captured = scheduler.capture_authoritative_snapshot(Some(control))?;
+            capture_attempts += 1;
+            if capture_attempts == 1 {
+                fixture.edit(
+                    "src/lib.rs",
+                    "pub fn changed_during_capture() -> u32 { 2 }\n",
+                );
+                scheduler.request_background_reconcile_for_observed_change();
+            }
+            Ok(captured)
+        })
+        .expect("reconcile source changed during capture");
+    let published = published(outcome);
+    let current = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture current source after publication");
+
+    assert_eq!(
+        capture_attempts, 2,
+        "the capture superseded by the observed change must be retried exactly once"
+    );
+    assert_eq!(
+        published.snapshot_content_identity, current.snapshot.content_identity,
+        "the published generation must describe the source captured after the observed change"
+    );
+}
+
+#[test]
 fn same_daemon_scheduler_retire_remount_mints_new_progress_producer() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn producer_epoch() {}\n")]);
     let store = TempDir::new().expect("store root");
@@ -14435,6 +14524,81 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     );
 }
 
+#[test]
+fn graph_off_change_after_capture_refuses_stale_publication() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn retained_capture_race() -> u32 { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation A"));
+    let pointer_a = scheduler
+        .publication
+        .read_publication_pointer()
+        .expect("read generation A pointer")
+        .expect("generation A pointer");
+    let metadata_a = scheduler
+        .servable_retained_text_generation()
+        .expect("verified generation A text handle")
+        .metadata()
+        .clone();
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn retained_capture_race() -> u32 { 2 }\n",
+    );
+    scheduler.request_background_reconcile_for_observed_change();
+    let stale_capture = scheduler
+        .capture_retained_reconcile_attempt()
+        .expect("capture generation B source")
+        .expect("generation B capture remains current");
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn retained_capture_race() -> u32 { 3 }\n",
+    );
+    scheduler.request_background_reconcile_for_observed_change();
+    let refused = scheduler
+        .finish_retained_reconcile(
+            &metadata_a,
+            super::RestoreFreshnessWitnessV1::load(store.path()),
+            stale_capture,
+        )
+        .expect("refuse superseded retained capture");
+
+    assert!(
+        refused.is_none(),
+        "a retained capture superseded after hint drain must not publish"
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read pointer after refusal")
+            .expect("active pointer after refusal"),
+        pointer_a,
+        "refusing the stale capture must preserve generation A"
+    );
+
+    let outcome = scheduler
+        .reconcile_retained_text_generation_with(&metadata_a, true)
+        .expect("retry retained reconcile")
+        .expect("retry outcome");
+    let published = published(outcome);
+    let current = scheduler
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture current generation C source");
+    assert_eq!(
+        published.snapshot_content_identity, current.snapshot.content_identity,
+        "the retry must publish the source state that superseded generation B"
+    );
+}
+
 /// A graph-off changed-source rebuild must use the same canonical worker-memory
 /// admission as the complete reconcile path. A denial occurs before capture,
 /// leaves the durable pointer and hint authority intact, and releases its RAII
@@ -14543,7 +14707,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
 /// source.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graph_off_changed_source_advances_text_authority_without_full_decode() {
-    let sources = (0..256)
+    let mut sources = (0..256)
         .map(|index| {
             (
                 format!("src/file_{index:04}.rs"),
@@ -14551,6 +14715,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             )
         })
         .collect::<Vec<_>>();
+    sources.push(("revision.marker".to_owned(), "generation A\n".to_owned()));
     let source_refs = sources
         .iter()
         .map(|(path, source)| (path.as_str(), source.as_str()))
@@ -14688,7 +14853,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         );
         tokio::task::yield_now().await;
     }
-    {
+    let unpublished_b_generation = {
         let mut scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -14712,6 +14877,48 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         );
         assert_eq!(scheduler.sealed_decode_count(), 0);
         scheduler.publication.generations_root = durable_generations_root;
+        scheduler
+            .publication
+            .unpublished_candidate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .expect("generation B remains available for a publication-only retry")
+            .manifest()
+            .generation_id
+            .clone()
+    };
+
+    fixture.edit(
+        "revision.marker",
+        "generation C leaves indexed source unchanged\n",
+    );
+    git(
+        fixture.path(),
+        &["commit", "-qam", "advance to generation C"],
+    );
+    {
+        let mut scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        scheduler.request_background_reconcile_for_observed_change();
+        assert!(
+            scheduler
+                .republish_unpublished_retained_generation()
+                .expect("validate publication-only retry against generation C")
+                .is_none(),
+            "the unpublished generation B must not publish after source advances to C"
+        );
+        assert_eq!(
+            scheduler
+                .publication
+                .read_publication_pointer()
+                .expect("read pointer after stale candidate refusal")
+                .expect("generation A remains durable")
+                .generation_id,
+            generation_a.as_str(),
+            "refusing unpublished B must preserve generation A"
+        );
     }
     assert!(
         registry
@@ -14721,7 +14928,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
     );
 
     let publication_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let generation_b = loop {
+    let generation_c = loop {
         let durable = match scheduler.try_lock() {
             Ok(scheduler) => scheduler
                 .publication
@@ -14739,17 +14946,17 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         if let Some(durable) = durable
             && durable != generation_a.as_str()
         {
-            break CodeGenerationId::new(durable).expect("generation B id");
+            break CodeGenerationId::new(durable).expect("generation C id");
         }
         assert!(
             std::time::Instant::now() <= publication_deadline,
-            "changed graph-off source never published durable generation B"
+            "changed graph-off source never published durable generation C"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
 
     let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let progress_b = loop {
+    let progress_c = loop {
         let progress = match scheduler.try_lock() {
             Ok(scheduler) => {
                 let progress = scheduler.build_progress_slot();
@@ -14769,7 +14976,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             }
         };
         if let Some((owner_epoch, Some(progress))) = progress
-            && progress.generation_id == generation_b.as_str()
+            && progress.generation_id == generation_c.as_str()
             && progress.committed_pages > 0
         {
             assert!(owner_epoch > owner_epoch_a);
@@ -14777,14 +14984,14 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         }
         assert!(
             std::time::Instant::now() <= progress_deadline,
-            "durable generation B never acquired advancing text authority"
+            "durable generation C never acquired advancing text authority"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert!(progress_b.progress_epoch > 0);
+    assert!(progress_c.progress_epoch > 0);
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
-        Some(generation_b.clone()),
+        Some(generation_c.clone()),
         "generation A stops owning the graph-off query route"
     );
     if let Ok(executed) = registry
@@ -14793,32 +15000,32 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
     {
         assert_ne!(
             executed.generation, generation_a,
-            "generation A must not serve after B owns text progress"
+            "generation A must not serve after C owns text progress"
         );
     }
 
     let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let executed_b = loop {
+    let executed_c = loop {
         match registry
             .execute_query_search(&scope, core_search_request("beta_0000"))
             .await
         {
-            Ok(executed) if executed.generation == generation_b => break executed,
+            Ok(executed) if executed.generation == generation_c => break executed,
             Ok(executed) => panic!(
-                "stale generation {} served after durable B",
+                "stale generation {} served after durable C",
                 executed.generation
             ),
             Err(error) => {
                 assert!(
                     std::time::Instant::now() <= query_deadline,
-                    "generation B never became text-queryable: {error}"
+                    "generation C never became text-queryable: {error}"
                 );
                 tokio::task::yield_now().await;
             }
         }
     };
     assert_eq!(
-        executed_b
+        executed_c
             .authorized
             .fallback
             .public_fallback_lane_coverage
@@ -14826,7 +15033,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         Some(&PublicRetrieverStatus::Complete)
     );
     assert_eq!(
-        executed_b
+        executed_c
             .authorized
             .fallback
             .public_fallback_lane_coverage
@@ -14834,21 +15041,41 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         Some(&PublicRetrieverStatus::Complete)
     );
     assert_eq!(
-        executed_b
+        executed_c
             .authorized
             .fallback
             .public_fallback_lane_coverage
             .get(&RetrieverKind::Graph),
         Some(&PublicRetrieverStatus::Unavailable)
     );
-    assert_eq!(
-        scheduler
+    {
+        let scheduler = scheduler
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .sealed_decode_count(),
-        0,
-        "graph-off A-to-B publication must not decode a sealed generation"
-    );
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let active = scheduler
+            .publication
+            .load_active_shared()
+            .expect("load generation C from the in-memory publication authority")
+            .expect("generation C is active");
+        let current = scheduler
+            .capture_authoritative_snapshot_without_active_generation_reuse(None)
+            .expect("capture current generation C revision");
+        assert_ne!(
+            active.manifest().generation_id,
+            unpublished_b_generation,
+            "generation B must never become active after generation C is observed"
+        );
+        assert_eq!(
+            active.snapshot().source_revision,
+            current.snapshot.source_revision,
+            "the successor must record the allow-empty generation C revision"
+        );
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            0,
+            "graph-off A-to-C publication must not decode a sealed generation"
+        );
+    }
     registry.shutdown().await;
 }
 

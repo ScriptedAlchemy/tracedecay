@@ -45,6 +45,7 @@ controlled-workload-hotpath = [
 hotpath = [
     "tracedecay-domain/hotpath",
     "hotpath/hotpath",
+    "hotpath/tokio",
     "tracedecay-application/hotpath",
     "tracedecay-capture/hotpath",
     "tracedecay-code-index/hotpath",

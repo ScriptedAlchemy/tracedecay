@@ -217,7 +217,17 @@ jobs:
 
       - name: Test release distribution
         if: matrix.name == 'x86_64-linux'
-        run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
+        run: |
+          python3 .release-automation/scripts/build-controlled-workload-hotpath-helpers.py \
+            --source . \
+            --profile release \
+            --target ${{ matrix.target }}
+          cargo nextest run -p tracedecay-search-eval --release --target ${{ matrix.target }} \
+            --all-features --locked \
+            --run-ignored only \
+            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
+            --no-tests=fail
+          cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
 
       # Runs before the default build so it never leaves an all-features
       # binary (e.g. test-transport) on disk at the shared release output

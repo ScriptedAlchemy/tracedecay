@@ -5,6 +5,7 @@
 //! resolution remain with the application crate's authoritative store adapter.
 
 mod canonical_projection;
+mod codex_goal_context;
 pub mod configuration;
 pub mod cursor_dispatch;
 pub mod diagnostics;
@@ -33,6 +34,10 @@ pub mod transcript;
 
 pub use canonical_projection::{
     canonical_fact_text, derive_canonical_projection, workflow_semantic_kind,
+};
+pub use codex_goal_context::{
+    CodexGoalContext, CodexGoalContextCorrelation, CodexGoalContextSource,
+    codex_goal_context_correlation, codex_goal_context_from_text, codex_message_visible_text,
 };
 pub use configuration::{
     ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationRevisionRecordV1,

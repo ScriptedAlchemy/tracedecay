@@ -41,8 +41,8 @@ use super::{
     LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage, LcmRawMessageOverview,
     LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionReplayRequest,
     LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
-    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, dag, gc, maintenance, payload,
-    raw, schema, util,
+    LcmSummaryConvergenceStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, dag,
+    gc, maintenance, payload, raw, schema, util,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;

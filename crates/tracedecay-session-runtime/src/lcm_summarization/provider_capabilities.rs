@@ -232,7 +232,8 @@ async fn claude_summary_pair_is_exact(
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let Some(boundary) = metadata
         .as_deref()
-        .and_then(|metadata| serde_json::from_str::<CanonicalObservationEnvelopeV1>(metadata).ok())
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .and_then(super::decode_canonical_observation_metadata)
     else {
         return Ok(false);
     };
@@ -278,6 +279,7 @@ async fn cursor_agent_summary(
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
     let mut config = CursorAgentSummaryConfig::from_env();
     config.timeout = config.timeout.min(timeout);
+    let source_range = request.source_range.clone();
     let text = tokio::task::spawn_blocking(move || summarize_with_cursor_agent(&request, &config))
         .await
         .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?
@@ -285,6 +287,7 @@ async fn cursor_agent_summary(
     Ok(AuthoritativeSummary {
         text,
         route: "cursor_agent".to_string(),
+        source_range: Some(source_range),
     })
 }
 
@@ -307,6 +310,7 @@ async fn codex_app_server_summary(
     let mut config =
         tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig::from_env();
     config.timeout = config.timeout.min(timeout);
+    let source_range = request.source_range.clone();
     let result = tokio::task::spawn_blocking(move || {
         tracedecay_sessions::runtime::codex_app_server::summarize_with_codex_app_server(
             &request, &config,
@@ -321,6 +325,7 @@ async fn codex_app_server_summary(
             || "codex_app_server".to_string(),
             |model| format!("codex_app_server:{model}"),
         ),
+        source_range: Some(source_range),
     })
 }
 

@@ -267,6 +267,7 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_session_refresh_operations_state"),
     ("index", "idx_session_refresh_receipts_session"),
     ("index", "idx_session_relation_receipts_pending"),
+    ("index", "idx_session_relation_receipts_recovery_due"),
     ("index", "idx_session_summary_availability_generation"),
     ("index", "idx_session_summary_nodes_root_created_order"),
     ("index", "idx_session_summary_nodes_session_created"),

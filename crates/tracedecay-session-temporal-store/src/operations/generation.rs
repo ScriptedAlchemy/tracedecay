@@ -12,6 +12,223 @@ use crate::sql::GENERATION_COPY_STATEMENTS;
 const MAX_LINEAGE_DEPTH: usize = 64;
 const MAX_LINEAGE_NODES: usize = 4_096;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawSummaryInvalidation {
+    pub rewind_frontier_store_id: i64,
+    pub stale_summary_count: usize,
+    pub work_count: usize,
+    pub has_more: bool,
+}
+
+/// Starts a new canonical generation in which every summary transitively
+/// derived from a revised raw source is stale. The immutable historical nodes
+/// remain auditable, but no active-generation retrieval can return them.
+pub async fn invalidate_raw_summary_revision(
+    conn: &impl crate::handle::SessionTemporalExec,
+    provider: &str,
+    session_id: &str,
+    raw_store_id: i64,
+    max_affected: usize,
+) -> Result<RawSummaryInvalidation, LcmError> {
+    if max_affected == 0 {
+        return Err(lineage_limit(
+            session_id,
+            "raw_revision_invalidation_budget_exhausted",
+        ));
+    }
+    let Some(active) = active_generation(conn, session_id).await? else {
+        return Ok(RawSummaryInvalidation {
+            rewind_frontier_store_id: raw_store_id.saturating_sub(1).max(0),
+            stale_summary_count: 0,
+            work_count: 0,
+            has_more: false,
+        });
+    };
+    conn.execute(
+        "INSERT INTO lcm_summary_convergence_invalidation_work (
+             provider, session_id, raw_store_id,
+             source_kind, source_id, depth, after_node_id
+         ) VALUES (?1, ?2, ?3, 'raw_message', CAST(?3 AS TEXT), 0, '')
+         ON CONFLICT(provider, session_id, raw_store_id, source_kind, source_id)
+         DO NOTHING",
+        params![provider, session_id, raw_store_id],
+    )
+    .await?;
+    let now = super::unixepoch(conn).await?;
+    let mut work_count = 0_usize;
+    let mut stale_summary_count = 0_usize;
+    while work_count < max_affected {
+        let mut work_rows = conn
+            .query(
+                "SELECT source_kind, source_id, depth, after_node_id
+                 FROM lcm_summary_convergence_invalidation_work
+                 WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
+                   AND state = 'pending'
+                 ORDER BY depth, source_kind, source_id
+                 LIMIT 1",
+                params![provider, session_id, raw_store_id],
+            )
+            .await?;
+        let Some(work_row) = work_rows.next().await? else {
+            break;
+        };
+        let source_kind = work_row.get::<String>(0)?;
+        let source_id = work_row.get::<String>(1)?;
+        let depth = work_row.get::<i64>(2)?;
+        let after_node_id = work_row.get::<String>(3)?;
+        drop(work_rows);
+        let remaining = max_affected.saturating_sub(work_count);
+        let query_limit = i64::try_from(remaining.saturating_add(1))
+            .map_err(|_| lineage_limit(session_id, "raw_revision_invalidation_budget_exhausted"))?;
+        let mut rows = conn
+            .query(
+                "SELECT node_id
+                 FROM lcm_summary_sources
+                 WHERE source_kind = ?1 AND source_id = ?2 AND node_id > ?3
+                 ORDER BY node_id
+                 LIMIT ?4",
+                params![
+                    source_kind.as_str(),
+                    source_id.as_str(),
+                    after_node_id,
+                    query_limit
+                ],
+            )
+            .await?;
+        let mut discovered = Vec::with_capacity(remaining.saturating_add(1));
+        while let Some(row) = rows.next().await? {
+            discovered.push(row.get::<String>(0)?);
+        }
+        drop(rows);
+        let source_drained = discovered.len() <= remaining;
+        discovered.truncate(remaining);
+        if discovered.is_empty() {
+            conn.execute(
+                "UPDATE lcm_summary_convergence_invalidation_work
+                 SET state = 'drained'
+                 WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
+                   AND source_kind = ?4 AND source_id = ?5",
+                params![provider, session_id, raw_store_id, source_kind, source_id],
+            )
+            .await?;
+            work_count = work_count.saturating_add(1);
+            continue;
+        }
+        for summary_id in &discovered {
+            conn.execute(
+                "INSERT INTO lcm_summary_convergence_invalidation_work (
+                     provider, session_id, raw_store_id,
+                     source_kind, source_id, depth, after_node_id
+                 ) VALUES (?1, ?2, ?3, 'summary_node', ?4, ?5, '')
+                 ON CONFLICT(provider, session_id, raw_store_id, source_kind, source_id)
+                 DO NOTHING",
+                params![
+                    provider,
+                    session_id,
+                    raw_store_id,
+                    summary_id,
+                    depth.saturating_add(1)
+                ],
+            )
+            .await?;
+            let changed = conn
+                .execute(
+                    "UPDATE session_summary_availability
+                     SET availability = 'stale', reason = 'raw_source_revised', checked_at = ?4
+                     WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3
+                       AND availability = 'available'",
+                    params![session_id, active, summary_id, now],
+                )
+                .await?;
+            stale_summary_count =
+                stale_summary_count.saturating_add(usize::try_from(changed).map_err(|_| {
+                    lineage_limit(session_id, "raw_revision_invalidation_count_overflow")
+                })?);
+            let mut source_rows = conn
+                .query(
+                    "SELECT MIN(CAST(source_id AS INTEGER))
+                     FROM lcm_summary_sources
+                     WHERE node_id = ?1 AND source_kind = 'raw_message'",
+                    params![summary_id],
+                )
+                .await?;
+            let first_raw_source = source_rows
+                .next()
+                .await?
+                .ok_or_else(|| LcmError::Db("summary source query returned no row".into()))?
+                .get::<Option<i64>>(0)?;
+            drop(source_rows);
+            if let Some(first_raw_source) = first_raw_source {
+                conn.execute(
+                    "UPDATE lcm_summary_convergence_dirty_raw
+                     SET rewind_frontier_store_id = MIN(
+                         rewind_frontier_store_id, MAX(0, ?4 - 1)
+                     )
+                     WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
+                    params![provider, session_id, raw_store_id, first_raw_source],
+                )
+                .await?;
+            }
+        }
+        work_count = work_count.saturating_add(discovered.len());
+        if source_drained {
+            conn.execute(
+                "UPDATE lcm_summary_convergence_invalidation_work
+                 SET state = 'drained'
+                 WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
+                   AND source_kind = ?4 AND source_id = ?5",
+                params![provider, session_id, raw_store_id, source_kind, source_id],
+            )
+            .await?;
+        } else if let Some(last_node_id) = discovered.last() {
+            conn.execute(
+                "UPDATE lcm_summary_convergence_invalidation_work
+                 SET after_node_id = ?6
+                 WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
+                   AND source_kind = ?4 AND source_id = ?5",
+                params![
+                    provider,
+                    session_id,
+                    raw_store_id,
+                    source_kind,
+                    source_id,
+                    last_node_id,
+                ],
+            )
+            .await?;
+        }
+    }
+    let mut remaining_rows = conn
+        .query(
+            "SELECT 1 FROM lcm_summary_convergence_invalidation_work
+             WHERE provider = ?1 AND session_id = ?2 AND raw_store_id = ?3
+               AND state = 'pending'
+             LIMIT 1",
+            params![provider, session_id, raw_store_id],
+        )
+        .await?;
+    let has_more = remaining_rows.next().await?.is_some();
+    let mut rewind_rows = conn
+        .query(
+            "SELECT rewind_frontier_store_id
+             FROM lcm_summary_convergence_dirty_raw
+             WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
+            params![provider, session_id, raw_store_id],
+        )
+        .await?;
+    let rewind_frontier_store_id = rewind_rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("dirty raw revision disappeared during invalidation".into()))?
+        .get::<i64>(0)?;
+    Ok(RawSummaryInvalidation {
+        rewind_frontier_store_id,
+        stale_summary_count,
+        work_count,
+        has_more,
+    })
+}
+
 pub(super) fn validate_lineage_projection(
     projection: &SessionRelationProjection,
     publication: &LcmImmutableSummaryPublication,
@@ -85,10 +302,18 @@ pub(super) async fn validate_current_predecessor(
         .collect::<BTreeSet<_>>();
     let mut matching = conn
         .query(
-            "SELECT summary_id, publication_json
-             FROM session_summary_nodes
-             WHERE session_id = ?1
-             ORDER BY created_at, summary_id",
+            "SELECT node.summary_id, node.publication_json
+             FROM session_summary_nodes AS node
+             JOIN session_temporal_generations AS generation
+               ON generation.session_id = node.session_id
+              AND generation.state = 'active'
+             JOIN session_summary_availability AS availability
+               ON availability.session_id = node.session_id
+              AND availability.generation = generation.generation
+              AND availability.summary_id = node.summary_id
+              AND availability.availability = 'available'
+             WHERE node.session_id = ?1
+             ORDER BY node.created_at, node.summary_id",
             params![publication.draft.session_id.as_str()],
         )
         .await?;
@@ -421,4 +646,262 @@ pub(super) async fn generation_watermarks(
         })?
         .get(0)
         .map_err(LcmError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+
+    use super::invalidate_raw_summary_revision;
+
+    #[tokio::test]
+    async fn raw_revision_invalidation_pages_beyond_the_former_lineage_cap() {
+        const SUMMARY_COUNT: i64 = 4_098;
+        const PAGE_LIMIT: usize = 512;
+        let temp = tempfile::tempdir().unwrap();
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL
+             );
+             CREATE TABLE lcm_summary_sources (
+                node_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL
+             );
+             CREATE TABLE session_summary_availability (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                summary_id TEXT NOT NULL,
+                availability TEXT NOT NULL,
+                reason TEXT,
+                checked_at INTEGER NOT NULL
+             );
+             CREATE INDEX idx_test_availability
+                ON session_summary_availability(session_id, generation, availability);
+             CREATE TABLE lcm_summary_convergence_dirty_raw (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                store_id INTEGER NOT NULL,
+                rewind_frontier_store_id INTEGER NOT NULL,
+                PRIMARY KEY(provider, session_id, store_id)
+             );
+             CREATE TABLE lcm_summary_convergence_invalidation_work (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                raw_store_id INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                after_node_id TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
+                PRIMARY KEY(provider, session_id, raw_store_id, source_kind, source_id)
+             );
+             INSERT INTO session_temporal_generations(session_id, generation, state)
+             VALUES ('large-closure', 1, 'active');
+             INSERT INTO lcm_summary_convergence_dirty_raw(
+                 provider, session_id, store_id, rewind_frontier_store_id
+             )
+             VALUES ('cursor', 'large-closure', 100, 99);
+             WITH RECURSIVE ids(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM ids WHERE value < 4098
+             )
+             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id)
+             SELECT printf('summary-%05d', value), 'raw_message', '100' FROM ids;
+             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id)
+             VALUES ('summary-00001', 'raw_message', '5');
+             WITH RECURSIVE ids(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM ids WHERE value < 4098
+             )
+             INSERT INTO session_summary_availability(
+                session_id, generation, summary_id, availability, reason, checked_at
+             )
+             SELECT 'large-closure', 1, printf('summary-%05d', value),
+                    'available', NULL, 0
+             FROM ids;",
+        )
+        .await
+        .unwrap();
+
+        let mut affected = 0_usize;
+        let mut final_rewind = None;
+        for _ in 0..32 {
+            let page =
+                invalidate_raw_summary_revision(&conn, "cursor", "large-closure", 100, PAGE_LIMIT)
+                    .await
+                    .unwrap();
+            assert!(page.stale_summary_count <= PAGE_LIMIT);
+            affected = affected.saturating_add(page.stale_summary_count);
+            final_rewind = Some(page.rewind_frontier_store_id);
+            if !page.has_more {
+                break;
+            }
+        }
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM session_summary_availability
+                 WHERE session_id = 'large-closure' AND generation = 1
+                   AND availability = 'available'",
+                params![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0,
+            "bounded pages must not strand descendants beyond an internal traversal cap"
+        );
+        assert_eq!(affected, SUMMARY_COUNT as usize);
+        assert_eq!(final_rewind, Some(4));
+    }
+
+    #[tokio::test]
+    async fn raw_revision_invalidation_visits_diamond_nodes_once_across_pages() {
+        const PAGE_LIMIT: usize = 1;
+        let temp = tempfile::tempdir().unwrap();
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL
+             );
+             CREATE TABLE lcm_summary_sources (
+                node_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL
+             );
+             CREATE TABLE lcm_summary_nodes (
+                node_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                summary_text TEXT NOT NULL,
+                summary_hash TEXT NOT NULL,
+                summary_token_count INTEGER NOT NULL,
+                source_token_count INTEGER NOT NULL,
+                source_time_start INTEGER,
+                source_time_end INTEGER,
+                expand_hint TEXT,
+                metadata_json TEXT,
+                created_at INTEGER NOT NULL
+             );
+             CREATE TABLE session_summary_availability (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                summary_id TEXT NOT NULL,
+                availability TEXT NOT NULL,
+                reason TEXT,
+                checked_at INTEGER NOT NULL
+             );
+             CREATE TABLE lcm_summary_convergence_dirty_raw (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                store_id INTEGER NOT NULL,
+                rewind_frontier_store_id INTEGER NOT NULL,
+                PRIMARY KEY(provider, session_id, store_id)
+             );
+             CREATE TABLE lcm_summary_convergence_invalidation_work (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                raw_store_id INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                after_node_id TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending',
+                PRIMARY KEY(provider, session_id, raw_store_id, source_kind, source_id)
+             );
+             INSERT INTO session_temporal_generations(session_id, generation, state)
+             VALUES ('diamond', 1, 'active');
+             INSERT INTO lcm_summary_convergence_dirty_raw(
+                 provider, session_id, store_id, rewind_frontier_store_id
+             ) VALUES ('cursor', 'diamond', 100, 99);
+             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id) VALUES
+                 ('a', 'raw_message', '100'),
+                 ('d', 'raw_message', '100'),
+                 ('b', 'summary_node', 'a'),
+                 ('d', 'summary_node', 'b'),
+                 ('e', 'summary_node', 'd'),
+                 ('z', 'raw_message', '200');
+             INSERT INTO lcm_summary_nodes(
+                 node_id, provider, conversation_id, session_id, depth,
+                 summary_text, summary_hash, summary_token_count, source_token_count, created_at
+             ) VALUES
+                 ('a', 'cursor', 'diamond', 'diamond', 0, 'a', 'a-hash', 1, 1, 1),
+                 ('b', 'cursor', 'diamond', 'diamond', 1, 'b', 'b-hash', 1, 1, 2),
+                 ('d', 'cursor', 'diamond', 'diamond', 2, 'd', 'd-hash', 1, 1, 3),
+                 ('e', 'cursor', 'diamond', 'diamond', 3, 'e', 'e-hash', 1, 1, 4),
+                 ('z', 'cursor', 'diamond', 'diamond', 0, 'unrelated',
+                  'c2703a7ddf6c74b39505339af20dd6dd4f0794720e038b78ba395600c72417d4',
+                  1, 1, 5);
+             INSERT INTO session_summary_availability(
+                 session_id, generation, summary_id, availability, reason, checked_at
+             ) VALUES
+                 ('diamond', 1, 'a', 'available', NULL, 0),
+                 ('diamond', 1, 'b', 'available', NULL, 0),
+                 ('diamond', 1, 'd', 'available', NULL, 0),
+                 ('diamond', 1, 'e', 'available', NULL, 0),
+                 ('diamond', 1, 'z', 'available', NULL, 0);",
+        )
+        .await
+        .unwrap();
+
+        let mut work_count = 0_usize;
+        let mut stale_count = 0_usize;
+        let mut pages = Vec::new();
+        let first_page =
+            invalidate_raw_summary_revision(&conn, "cursor", "diamond", 100, PAGE_LIMIT)
+                .await
+                .unwrap();
+        assert!(first_page.has_more);
+        work_count = work_count.saturating_add(first_page.work_count);
+        stale_count = stale_count.saturating_add(first_page.stale_summary_count);
+        pages.push((
+            first_page.work_count,
+            first_page.stale_summary_count,
+            first_page.has_more,
+        ));
+        assert!(
+            tracedecay_lcm::dag::load_uncondensed_summary_nodes(&conn, "cursor", "diamond")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a partial invalidation must hide the entire dirty session"
+        );
+
+        for _ in 1..16 {
+            let page = invalidate_raw_summary_revision(&conn, "cursor", "diamond", 100, PAGE_LIMIT)
+                .await
+                .unwrap();
+            work_count = work_count.saturating_add(page.work_count);
+            stale_count = stale_count.saturating_add(page.stale_summary_count);
+            pages.push((page.work_count, page.stale_summary_count, page.has_more));
+            if !page.has_more {
+                break;
+            }
+        }
+
+        assert_eq!(stale_count, 4, "unexpected invalidation pages: {pages:?}");
+        assert_eq!(
+            work_count, 6,
+            "the longer path must not retraverse an already drained shortcut node"
+        );
+        conn.execute(
+            "DELETE FROM lcm_summary_convergence_dirty_raw
+             WHERE provider = 'cursor' AND session_id = 'diamond' AND store_id = 100",
+            (),
+        )
+        .await
+        .unwrap();
+        let replay =
+            tracedecay_lcm::dag::load_uncondensed_summary_nodes(&conn, "cursor", "diamond")
+                .await
+                .unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].node.node_id, "z");
+    }
 }

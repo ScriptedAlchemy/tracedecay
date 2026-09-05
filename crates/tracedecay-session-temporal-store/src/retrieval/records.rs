@@ -782,7 +782,15 @@ impl RecordModeSql {
                    AND copy_current.current_occurrence_id = target.occurrence_id"
                     .to_string(),
                 copy_predicate: "1 = 1".to_string(),
-                summary_predicate: "availability.availability = 'available'".to_string(),
+                summary_predicate: "availability.availability = 'available'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM lcm_summary_convergence_dirty_raw AS dirty
+                        WHERE dirty.provider =
+                            json_extract(n.publication_json, '$.provider')
+                          AND dirty.session_id = n.session_id
+                    )"
+                .to_string(),
             },
             TemporalModeV1::AsOf { .. } => Self {
                 occurrence_join: String::new(),
