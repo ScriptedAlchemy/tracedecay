@@ -8,7 +8,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use rmcp::ServiceExt;
 use serde_json::json;
 #[cfg(unix)]
 use tokio::net::UnixStream;
