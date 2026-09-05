@@ -17,9 +17,12 @@ use super::super::ports::{
 /// Indexing never blocks exact/lexical/graph; the route remains lexical until
 /// [`SemanticRuntimeStateV1::Current`]. A scheduler `Current` pointer is not
 /// Ready by itself: Ready requires the durable activation receipt remount
-/// reattached from the configuration store. A missing or mismatched receipt
-/// stays [`SemanticFallbackReasonV1::InvalidRuntimeStatus`] — never a
-/// synthesized receipt or empty success.
+/// reattached from the configuration store. An absent receipt is the ordinary
+/// pre-activation state and reports
+/// [`SemanticFallbackReasonV1::NotActivated`]; a receipt that exists but does
+/// not certify this generation stays
+/// [`SemanticFallbackReasonV1::InvalidRuntimeStatus`]. Neither ever
+/// synthesizes a receipt or an empty success.
 pub fn application_status_from_projection(
     projection: &SemanticRuntimeStatusProjectionV1,
     configuration: Option<SemanticConfigurationPinV1>,
@@ -84,6 +87,7 @@ fn ready_or_typed_missing_receipt(
     configuration: Option<SemanticConfigurationPinV1>,
     activation_receipt: Option<SemanticActivationReceiptV1>,
 ) -> SemanticRuntimeStatusV1 {
+    let activation_receipt_absent = activation_receipt.is_none();
     if let Some(receipt) = activation_receipt
         && receipt.validate().is_ok()
         && receipt.activated_generation == *generation
@@ -100,7 +104,15 @@ fn ready_or_typed_missing_receipt(
         configuration,
         SemanticRuntimeStateV1::Degraded {
             active_generation: Some(generation.clone()),
-            reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+            // A fresh profile reaches a `Current` scheduler pointer before any
+            // activation exists. That is a cause-bearing pre-activation state,
+            // not an invalid status; `InvalidRuntimeStatus` is reserved for a
+            // receipt that exists but does not certify this generation.
+            reason: if activation_receipt_absent {
+                SemanticFallbackReasonV1::NotActivated
+            } else {
+                SemanticFallbackReasonV1::InvalidRuntimeStatus
+            },
         },
     )
 }

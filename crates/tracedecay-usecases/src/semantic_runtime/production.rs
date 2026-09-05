@@ -5410,7 +5410,9 @@ mod tests {
             status.state,
             SemanticRuntimeStateV1::Degraded {
                 active_generation: Some(generation),
-                reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+                // Never activated: a cause-bearing pre-activation state, not
+                // an invalid runtime status.
+                reason: SemanticFallbackReasonV1::NotActivated,
             }
         );
         assert_eq!(
