@@ -51,7 +51,8 @@ use tracedecay_domain::{
     RepositoryDirtyStateV1, RepositoryId, RerankPolicy, RetrievalBudget, RetrievalFailure,
     RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark,
+    SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -287,6 +288,7 @@ fn build_query_projections(
     generation: &CodeIndexPublishedGenerationV1,
     file_scopes: &BTreeMap<String, String>,
     queries: &[WorkloadQueryV1],
+    symbol_qualified_names: &BTreeMap<SymbolOccurrenceId, String>,
 ) -> Result<
     (
         ScopedLexicalProjections,
@@ -342,8 +344,12 @@ fn build_query_projections(
             .collect();
         lexical.insert(
             scope_key.clone(),
-            CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), scoped_admitted)
-                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+            CodeLexicalProjectionAdapterV1::new_admitted(
+                metadata.clone(),
+                scoped_admitted,
+                symbol_qualified_names.clone(),
+            )
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
         let graph_chunks = generation
             .chunks()
@@ -2279,7 +2285,12 @@ fn publish_corpus_with_scale(
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
         .len() as u64;
     let (lexical_projections, graph_projections, semantic_allowed_chunks) =
-        build_query_projections(&generation, &file_scopes, &workload.queries)?;
+        build_query_projections(
+            &generation,
+            &file_scopes,
+            &workload.queries,
+            &qualified_names,
+        )?;
     Ok(PublishedCorpus {
         generation,
         lexical_projections,

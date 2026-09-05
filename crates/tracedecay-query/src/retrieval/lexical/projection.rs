@@ -12,7 +12,8 @@ use tracedecay_domain::{
     FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
     LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId, exact_search_canonical, technical_tokens, validate_code_logical_path,
+    SourceOccurrenceId, SymbolOccurrenceId, exact_search_canonical, technical_tokens,
+    validate_code_logical_path,
 };
 
 use super::{
@@ -143,8 +144,9 @@ impl ProjectedChunkV1 {
     fn new(
         chunk: CodeSearchChunkV1,
         logical_path: String,
+        qualified_name: Option<&str>,
     ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
-        let fields = Self::projected_fields(&chunk, &logical_path);
+        let fields = Self::projected_fields(&chunk, &logical_path, qualified_name);
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
         Self::from_parts(
             chunk.id,
@@ -154,7 +156,7 @@ impl ProjectedChunkV1 {
             chunk.sanitized_text,
             logical_path,
             None,
-            None,
+            qualified_name.map(str::to_owned),
             None,
             normalized_text,
             fields,
@@ -169,7 +171,8 @@ impl ProjectedChunkV1 {
         logical_path: String,
         display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
     ) -> (Self, BTreeMap<LexicalFieldV1, Vec<String>>) {
-        let fields = Self::projected_fields(chunk, &logical_path);
+        let fields =
+            Self::projected_fields(chunk, &logical_path, display.map(|d| d.qualified_name()));
         let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
         Self::from_parts(
             chunk.id.clone(),
@@ -186,11 +189,25 @@ impl ProjectedChunkV1 {
         )
     }
 
+    /// `qualified_name` is the parser-attested extracted qualified name of the
+    /// symbol this chunk anchors. Rust (and every language whose declarations
+    /// name the type and the member separately) never spells `Type::member` in
+    /// source, so the whole-term postings derived from chunk text and the
+    /// simple-name whole-symbol term cannot answer a qualified-name query. The
+    /// extractor is the only authority for that complete name, so the
+    /// projection indexes it directly instead of re-deriving one.
     fn projected_fields(
         chunk: &CodeSearchChunkV1,
         logical_path: &str,
+        qualified_name: Option<&str>,
     ) -> BTreeMap<LexicalFieldV1, Vec<String>> {
         let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
+        if let Some(qualified_name) = qualified_name.filter(|name| !name.is_empty()) {
+            fields
+                .entry(LexicalFieldV1::QualifiedName)
+                .or_default()
+                .push(normalize_lexical(qualified_name));
+        }
         let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
             LexicalFieldV1::PreambleText
         } else {
@@ -479,6 +496,10 @@ enum CodeLexicalProjectionBuildPhaseV1 {
 #[derive(Debug)]
 pub struct CodeLexicalProjectionBuildV1 {
     metadata: CodeLexicalProjectionMetadataV1,
+    /// Parser-attested extracted qualified name per symbol occurrence. The
+    /// sealed-page artifact path carries the same authority per chunk on its
+    /// symbol display; this is how the in-memory build receives it.
+    symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
     chunks: Vec<Option<CodeSearchChunkV1>>,
     rows: Vec<ProjectedChunkV1>,
     postings: Option<LexicalGenerationPostingsBuildV1>,
@@ -492,6 +513,7 @@ impl CodeLexicalProjectionBuildV1 {
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
+        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
@@ -502,6 +524,7 @@ impl CodeLexicalProjectionBuildV1 {
                 .into_iter()
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
+            symbol_qualified_names,
             true,
         )
     }
@@ -509,6 +532,7 @@ impl CodeLexicalProjectionBuildV1 {
     fn new_inner(
         metadata: CodeLexicalProjectionMetadataV1,
         mut chunks: Vec<CodeSearchChunkV1>,
+        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
         extraction_admitted: bool,
     ) -> Result<Self, RetrievalPortError> {
         metadata.validate()?;
@@ -526,6 +550,7 @@ impl CodeLexicalProjectionBuildV1 {
         let row_capacity = chunks.len();
         Ok(Self {
             metadata,
+            symbol_qualified_names,
             chunks: chunks.into_iter().map(Some).collect(),
             rows: Vec::with_capacity(row_capacity),
             postings: Some(LexicalGenerationPostingsBuildV1::default()),
@@ -605,7 +630,13 @@ impl CodeLexicalProjectionBuildV1 {
                                 chunk.anchor.file_occurrence_id
                             ))
                         })?;
-                    let (row, fields) = ProjectedChunkV1::new(chunk, logical_path);
+                    let qualified_name = chunk
+                        .anchor
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .and_then(|symbol| self.symbol_qualified_names.get(symbol))
+                        .map(String::as_str);
+                    let (row, fields) = ProjectedChunkV1::new(chunk, logical_path, qualified_name);
                     self.raw_matches_normalized &=
                         row.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes();
                     self.postings
@@ -893,19 +924,26 @@ impl CodeLexicalProjectionAdapterV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, RetrievalPortError> {
-        Self::new_inner(metadata, chunks, false, None)
+        Self::new_inner(metadata, chunks, BTreeMap::new(), false, None)
     }
 
     /// Hard-wires `deadline_micros = None` (crate 30s fallback). Live daemon
     /// mount is [`Self::new_admitted_with_budget`].
+    ///
+    /// `symbol_qualified_names` carries the extractor's qualified name for
+    /// every symbol occurrence in `chunks`; the sealed-page artifact path
+    /// carries the same authority on its per-chunk symbol display. Passing an
+    /// empty map projects no qualified-name postings, so qualified-symbol
+    /// queries lose their exact recall.
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
+        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
     {
-        Self::new_admitted_with_deadline(metadata, chunks, None)
+        Self::new_admitted_with_deadline(metadata, chunks, symbol_qualified_names, None)
     }
 
     /// Budget-aware admitted build for the daemon mount. A set
@@ -915,17 +953,24 @@ impl CodeLexicalProjectionAdapterV1 {
     pub fn new_admitted_with_budget<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
+        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
         budget: &RetrievalBudget,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
     {
-        Self::new_admitted_with_deadline(metadata, chunks, budget.deadline_micros)
+        Self::new_admitted_with_deadline(
+            metadata,
+            chunks,
+            symbol_qualified_names,
+            budget.deadline_micros,
+        )
     }
 
     fn new_admitted_with_deadline<C>(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<C>,
+        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError>
     where
@@ -937,6 +982,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 .into_iter()
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
+            symbol_qualified_names,
             true,
             deadline_micros,
         )
@@ -945,14 +991,19 @@ impl CodeLexicalProjectionAdapterV1 {
     fn new_inner(
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
+        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
         extraction_admitted: bool,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError> {
         let deadline = Instant::now()
             + Duration::from_micros(lexical_projection_build_deadline_micros(deadline_micros));
         check_projection_build_deadline(deadline)?;
-        let mut build =
-            CodeLexicalProjectionBuildV1::new_inner(metadata, chunks, extraction_admitted)?;
+        let mut build = CodeLexicalProjectionBuildV1::new_inner(
+            metadata,
+            chunks,
+            symbol_qualified_names,
+            extraction_admitted,
+        )?;
         match build.advance_inner(usize::MAX, Some(deadline))? {
             CodeLexicalProjectionBuildStepV1::Ready(projection) => Ok(*projection),
             CodeLexicalProjectionBuildStepV1::Pending { .. } => Err(RetrievalPortError::Contract(
@@ -1917,6 +1968,7 @@ mod deadline_budget_tests {
         let error = CodeLexicalProjectionAdapterV1::new_inner(
             dummy_metadata(),
             Vec::<CodeSearchChunkV1>::new(),
+            BTreeMap::new(),
             true,
             budget.deadline_micros,
         )
