@@ -277,11 +277,12 @@ impl GraphActivationGateV1 {
 pub enum ServingSwapOutcomeV1 {
     /// The generation is the active durable publication and now serves.
     Seated,
-    /// The durable pointer already names a successor, but nothing was serving:
-    /// a stale seat beats an empty route and the successor supersedes it.
+    /// The durable pointer already names a successor, and the slot holds
+    /// nothing the store still calls active: a stale seat beats an empty or
+    /// equally superseded route, and the next publication supersedes it.
     SeatedStale,
-    /// The durable pointer already names a successor and a generation is
-    /// already serving, so the slot keeps what it has.
+    /// The durable pointer already names a successor and the incumbent *is*
+    /// that active publication, so the slot keeps what it has.
     Superseded,
     /// The generation already serves; only semantic admission was re-offered.
     Offered,
@@ -295,13 +296,21 @@ impl ServingSwapOutcomeV1 {
     /// checkout it sealed from, and refusing that seat left the graph route
     /// serving nothing at all rather than serving something stale.
     #[hotpath::skip]
-    pub const fn decide(publication_matches: bool, serving_is_seated: bool, replace: bool) -> Self {
+    pub const fn decide(
+        publication_matches: bool,
+        incumbent_is_active: bool,
+        replace: bool,
+    ) -> Self {
         if !publication_matches {
-            if serving_is_seated {
-                // Something already serves; a superseded generation must not
-                // move the slot backwards.
+            if incumbent_is_active {
+                // The active durable publication already serves; a superseded
+                // generation must not move the slot backwards.
                 return Self::Superseded;
             }
+            // Nothing active holds the slot — it is empty, or its incumbent
+            // was superseded too. Either way this generation is no worse than
+            // what is there, and refusing left the route wedged on a
+            // generation the store no longer publishes.
             return Self::SeatedStale;
         }
         if replace { Self::Seated } else { Self::Offered }
@@ -4033,16 +4042,33 @@ impl CodeIndexSchedulerRegistryV1 {
                             // Refusing the swap outright then left the route
                             // serving nothing at all, so an empty serving slot
                             // takes the stale seat and the next publication
-                            // supersedes it; a slot that already serves keeps what
-                            // it has rather than moving backwards.
+                            // supersedes it.
+                            //
+                            // Only the *active* publication may refuse that
+                            // stale seat. Asking merely whether something was
+                            // seated let an incumbent the canonical store had
+                            // already superseded keep the slot forever: both
+                            // candidate and incumbent were then non-active, so
+                            // every later pass refused too and serving never
+                            // converged on the durable head.
                             let publication_matches =
                                 scheduler.active_publication_matches(&latest)?;
                             let mut serving = serving_generation
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let incumbent_is_active = serving.as_ref().is_some_and(|incumbent| {
+                                // The active generation is already loaded
+                                // and cached by the check above, so this
+                                // is a second comparison, not a second
+                                // decode. A store that cannot answer keeps
+                                // the incumbent rather than displacing it.
+                                scheduler
+                                    .active_publication_matches(incumbent)
+                                    .unwrap_or(true)
+                            });
                             let outcome = ServingSwapOutcomeV1::decide(
                                 publication_matches,
-                                serving.is_some(),
+                                incumbent_is_active,
                                 replace_serving_generation,
                             );
                             if outcome.installs() {
