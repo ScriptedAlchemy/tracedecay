@@ -414,6 +414,47 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         DoctorStorageFamilyReadV1::ObservedIncomplete { .. }
     ));
 
+    // Issue #879: the mounted activation lease still binds `first_source`.
+    // Reset the census the way a failed or mutated configuration inventory
+    // does mid-journey (production journey cc-5583) and the exact vector pin
+    // set becomes unknown. The offline protection set names only the serving
+    // generation, so planning against it collected this live vector source.
+    // The pass must now report the degradation and retain every source.
+    observations.record_semantic_vector_retention_failure(&canonical_root);
+    let offline_inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
+        graph.as_ref(),
+        schedulers,
+        &observations,
+    )
+    .await;
+    assert!(
+        matches!(
+            offline_inventory,
+            crate::daemon::store_maintenance::VectorRetentionInventoryV1::Offline { .. }
+        ),
+        "an unreadable inventory resolves to the typed offline degradation"
+    );
+    assert_eq!(
+        offline_inventory.degraded_reason().as_deref(),
+        Some("vector_inventory_offline:vector_census_incomplete"),
+        "the CI-facing retention_degraded event still reports pass=code_generations"
+    );
+    assert_eq!(
+        crate::daemon::store_maintenance::run_code_generation_retention(
+            graph.as_ref(),
+            schedulers,
+            &observations,
+            &cancellation,
+        )
+        .await,
+        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
+        "an unreadable vector inventory fails the pass instead of sweeping"
+    );
+    assert!(
+        first_source_file.is_file(),
+        "an unreadable vector inventory must retain the mounted lease's exact source"
+    );
+
     drop(activation_lease);
     assert!(
         !crate::daemon::maintenance::generation::run_project_generation_maintenance(
