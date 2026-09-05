@@ -9,7 +9,7 @@ fn control() -> BoundedGitControl {
     BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10))
 }
 
-fn git(path: &Path, args: &[&str]) {
+fn git<T: AsRef<std::ffi::OsStr> + std::fmt::Debug>(path: &Path, args: &[T]) {
     let output = Command::new(
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
@@ -279,18 +279,35 @@ fn non_utf8_local_ref_is_sealed_without_fabricated_branch_text() {
     use std::os::unix::ffi::OsStrExt as _;
 
     let fixture = fixture();
+    let expected_oid = gix::discover(fixture.path())
+        .unwrap()
+        .head_id()
+        .unwrap()
+        .detach()
+        .to_hex()
+        .to_string();
+    // Packed refs retain arbitrary ref bytes without requiring the filesystem
+    // to accept a non-UTF8 loose-ref filename (not supported on macOS).
+    git(fixture.path(), &["branch", "topic-x"]);
+    git(fixture.path(), &["pack-refs", "--all"]);
+    let packed_refs = fixture.path().join(".git/packed-refs");
+    let mut packed = std::fs::read(&packed_refs).unwrap();
+    let reference = b"refs/heads/topic-x\n";
+    let position = packed
+        .windows(reference.len())
+        .position(|bytes| bytes == reference)
+        .unwrap();
+    packed[position + reference.len() - 2] = 0xff;
+    std::fs::write(packed_refs, packed).unwrap();
+
     let branch = std::ffi::OsStr::from_bytes(b"topic-\xff");
-    let output = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(fixture.path())
-    .arg("checkout")
-    .arg("-b")
-    .arg(branch)
-    .output()
-    .unwrap();
-    assert!(output.status.success());
+    git(fixture.path(), &[std::ffi::OsStr::new("checkout"), branch]);
+    let cursor = initialize_reflog_cursor(fixture.path(), i64::MAX, &control()).unwrap();
+    assert_eq!(
+        cursor.source_head_referent.as_deref(),
+        Some(b"refs/heads/topic-\xff".as_slice())
+    );
+    assert_eq!(cursor.source_head_oid, expected_oid);
     git(fixture.path(), &["checkout", "main"]);
     assert!(
         collect_segments(fixture.path())
