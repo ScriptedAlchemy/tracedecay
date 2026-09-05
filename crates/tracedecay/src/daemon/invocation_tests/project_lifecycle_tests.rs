@@ -25,8 +25,8 @@ use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 
 use super::{
     RecordingFeedbackCycleObservations, UnavailableCancellationAuthority,
-    UnavailableContextAuthority, UnavailableDiagnosticAuthority, unavailable_feedback_cycle,
-    unavailable_lsp_session_factory,
+    UnavailableContextAuthority, UnavailableDiagnosticAuthority, admitted_root_fixture,
+    unavailable_feedback_cycle, unavailable_lsp_session_factory,
 };
 
 fn recovery_deadline() -> Deadline {
