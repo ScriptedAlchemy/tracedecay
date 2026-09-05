@@ -69,7 +69,7 @@ use crate::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
             CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
             CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
-            CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+            CodeIndexInterruptionV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
             CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
             SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
@@ -108,7 +108,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_code_generation_store_lock,
     attach_verified_text_artifact_under_lock, code_text_artifact_path, code_text_artifacts_root,
     durable_generation_index_digest, retain_bounded_generation_index,
-    withdraw_verified_text_artifact_under_lock,
+    try_acquire_code_generation_store_lock, withdraw_verified_text_artifact_under_lock,
 };
 use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 
@@ -1364,6 +1364,34 @@ impl DaemonCodeIndexPublicationStoreV1 {
             digest: Self::state_digest(bytes),
             pointer: pointer.clone(),
         });
+    }
+
+    fn read_retained_partitioned_segment(
+        &self,
+        identity: &DurableSealedCodeGenerationIdentityV1,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let root = self
+            .active_path
+            .parent()
+            .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
+        let _lock = try_acquire_code_generation_store_lock(root)
+            .map_err(Self::unavailable)?
+            .ok_or_else(|| Self::unavailable("sealed lexical source generation store is busy"))?;
+        let pointer = self.read_publication_pointer()?;
+        if !pointer.as_ref().is_some_and(|pointer| {
+            pointer.generation_index.iter().any(|entry| {
+                entry.generation_file == identity.locator
+                    && entry.state_digest == identity.digest.as_str()
+                    && entry.size_bytes == identity.size_bytes
+            })
+        }) {
+            return Err(CodeIndexProductionErrorV1::Interrupted(
+                CodeIndexInterruptionV1::Cancelled,
+            ));
+        }
+        self.read_partitioned_segment(request, buffer)
     }
 
     #[hotpath::measure(label = "code_index.generation.decode.segment")]
@@ -3347,7 +3375,10 @@ fn map_sealed_page_source_error(error: CodeIndexProductionErrorV1) -> RetrievalP
         CodeIndexProductionErrorV1::Interrupted(
             crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
         ) => RetrievalPortError::BudgetExceeded,
-        CodeIndexProductionErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
+        CodeIndexProductionErrorV1::Contract(detail)
+        | CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail),
+        ) => RetrievalPortError::Contract(detail),
         error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
     }
 }
@@ -3632,12 +3663,15 @@ impl DaemonCodeTextArtifactStoreV1 {
                     ));
                 }
                 let manifest = File::open(path).map_err(text_artifact_unavailable)?;
+                let publication = self.publication.clone();
+                let source_identity = identity.clone();
                 VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
                     manifest,
                     &manifest_bytes,
                     identity.digest.clone(),
-                    |digest, expected_size, buffer| {
-                        self.publication.read_partitioned_segment(
+                    move |digest, expected_size, buffer| {
+                        publication.read_retained_partitioned_segment(
+                            &source_identity,
                             SealedGenerationSegmentReadV1::Whole {
                                 digest,
                                 size_bytes: expected_size,
@@ -3704,12 +3738,15 @@ impl DaemonCodeTextArtifactStoreV1 {
                 }
                 progress(identity.size_bytes, identity.size_bytes);
                 let manifest = File::open(&path).map_err(text_artifact_unavailable)?;
+                let publication = self.publication.clone();
+                let source_identity = identity.clone();
                 VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
                     manifest,
                     &manifest_bytes,
                     identity.digest.clone(),
-                    |digest, expected_size, buffer| {
-                        self.publication.read_partitioned_segment(
+                    move |digest, expected_size, buffer| {
+                        publication.read_retained_partitioned_segment(
+                            &source_identity,
                             SealedGenerationSegmentReadV1::Whole {
                                 digest,
                                 size_bytes: expected_size,

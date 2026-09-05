@@ -20,7 +20,7 @@ use tracedecay_code_index::{
         CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
-        VerifiedSealedLexicalPageSourceV1,
+        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -153,7 +153,7 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 
 struct EncodedFixture {
     manifest: Vec<u8>,
-    segments: BTreeMap<String, Vec<u8>>,
+    segments: Arc<BTreeMap<String, Vec<u8>>>,
 }
 
 #[derive(Serialize)]
@@ -178,6 +178,7 @@ struct Measurement {
     vm_hwm_bytes: u64,
     encode_wall: Distribution,
     decode_and_open_wall: Distribution,
+    lexical_drain_wall: Distribution,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -190,6 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for _ in 0..WARMUPS {
         black_box(encode_once(&generation)?);
         decode_and_open(&fixture)?;
+        drain_lexical(&fixture)?;
     }
 
     reset_peak_rss()?;
@@ -199,6 +201,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build();
     let mut encode_wall = Vec::with_capacity(MEASURED);
     let mut decode_wall = Vec::with_capacity(MEASURED);
+    let mut lexical_drain_wall = Vec::with_capacity(MEASURED);
     for _ in 0..MEASURED {
         let started = Instant::now();
         let encoded = hotpath::measure_block!(
@@ -214,12 +217,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             decode_and_open(&fixture)?
         );
         decode_wall.push(duration_ns(started.elapsed())?);
+        let started = Instant::now();
+        hotpath::measure_block!("code_index.lexical.drain", drain_lexical(&fixture)?);
+        lexical_drain_wall.push(duration_ns(started.elapsed())?);
     }
     drop(guard);
 
     let segment_bytes = fixture.segments.values().map(Vec::len).sum::<usize>();
     let measurement = Measurement {
-        schema_version: 1,
+        schema_version: 2,
         allocation_metric: if count_allocations { "count" } else { "bytes" },
         corpus_files: sources.len(),
         corpus_bytes,
@@ -232,6 +238,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         vm_hwm_bytes: proc_value("/proc/self/status", "VmHWM:")?.saturating_mul(1024),
         encode_wall: distribution(encode_wall),
         decode_and_open_wall: distribution(decode_wall),
+        lexical_drain_wall: distribution(lexical_drain_wall),
     };
     println!("{}", serde_json::to_string_pretty(&measurement)?);
     Ok(())
@@ -417,7 +424,10 @@ fn encode_once(
         }
         Ok(())
     })?;
-    Ok(EncodedFixture { manifest, segments })
+    Ok(EncodedFixture {
+        manifest,
+        segments: Arc::new(segments),
+    })
 }
 
 fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
@@ -452,14 +462,23 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
         CodeIndexProductionErrorV1::Contract("benchmark manifest is incompatible".to_owned())
     })?;
     black_box(decoded);
+    black_box(open_lexical(fixture)?);
+    Ok(())
+}
+
+#[hotpath::measure(label = "code_index.lexical.open")]
+fn open_lexical(
+    fixture: &EncodedFixture,
+) -> Result<VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>>, CodeIndexProductionErrorV1> {
     let source_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&fixture.manifest))
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+    let segments = Arc::clone(&fixture.segments);
     let source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         Cursor::new(Vec::<u8>::new()),
         &fixture.manifest,
         source_digest,
-        |digest, _, buffer| {
-            let bytes = fixture.segments.get(digest.as_str()).ok_or_else(|| {
+        move |digest, _, buffer| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
             })?;
             buffer.clear();
@@ -472,8 +491,22 @@ fn decode_and_open(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionEr
     .ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("benchmark manifest is incompatible".to_owned())
     })?;
-    black_box(source);
-    Ok(())
+    Ok(source)
+}
+
+fn drain_lexical(fixture: &EncodedFixture) -> Result<(), CodeIndexProductionErrorV1> {
+    let mut source = open_lexical(fixture)?;
+    loop {
+        match source.next_page(&ActiveControl)? {
+            VerifiedSealedLexicalPageReadV1::Page(page) => {
+                black_box(page);
+            }
+            VerifiedSealedLexicalPageReadV1::Complete(receipt) => {
+                receipt.verify_completion(Some(source.cursor()))?;
+                return Ok(());
+            }
+        }
+    }
 }
 
 fn assert_fixture_identity(
