@@ -354,7 +354,6 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
 
     let expected_copies = page.copies().to_vec();
     drop(observation_store);
-    drop(store);
     drop(runtime);
 
     let reopened = profile_runtime(&tmp).await;
