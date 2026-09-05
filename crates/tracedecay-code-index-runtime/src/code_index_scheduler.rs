@@ -4925,6 +4925,18 @@ impl LatestCodeTextGenerationV1 {
                 Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("query.artifact.batch.refusal_total").inc(1u64);
+                    checkpoint_text_artifact_control(control)?;
+                    if let Some((previous_page_records, tightened_page_records)) =
+                        artifact_build.source.tighten_page_record_bound()
+                    {
+                        tracing::debug!(
+                            previous_page_records,
+                            tightened_page_records,
+                            error = %error,
+                            "subdividing refused lexical page at the unchanged source cursor"
+                        );
+                        return Ok(false);
+                    }
                     return Err(map_text_artifact_error(error));
                 }
                 Ok(Err(error)) => {
