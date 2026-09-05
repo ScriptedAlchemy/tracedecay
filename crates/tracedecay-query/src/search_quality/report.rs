@@ -471,6 +471,32 @@ impl DirectEvaluationReportV1 {
                     profile.profile_id, profile.partition
                 );
             }
+            if !profile.fallback_matches_expected {
+                let observed = self
+                    .raw_outputs
+                    .iter()
+                    .find(|output| {
+                        output.profile_id == profile.profile_id
+                            && output.partition == profile.partition
+                    })
+                    .map_or(("<unavailable>", "<unavailable>"), |output| {
+                        (
+                            output.expected_query_fallback_digest.as_str(),
+                            output.query_fallback_digest.as_str(),
+                        )
+                    });
+                return format!(
+                    "{}:{} query fallback digest does not match the checked-in pin \
+                     `expected_query_fallback_digests.{}`: expected {}, observed {}. \
+                     Production retrieval changed; re-pin the workload only after \
+                     confirming the query results are the intended ones.",
+                    profile.profile_id,
+                    profile.partition,
+                    profile.partition,
+                    observed.0,
+                    observed.1,
+                );
+            }
             if !profile.cancellation_bounded {
                 return format!(
                     "{}:{} cancellation contract failed",

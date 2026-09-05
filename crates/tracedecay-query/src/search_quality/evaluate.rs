@@ -349,8 +349,11 @@ fn evaluate_profile(
     }
     let fallback_matches_expected = output.query_fallback_matches_expected
         && output.query_fallback_digest == *expected_fallback_digest;
-    let fallback_stable =
-        output.fallback_digest == output.query_fallback_digest && fallback_matches_expected;
+    // Within-run byte stability only. Folding the checked-in expectation in
+    // here reported every pin drift as "fallback bytes changed", which is a
+    // different failure with a different operator remedy; `hard_invariants_pass`
+    // below still requires both.
+    let fallback_stable = output.fallback_digest == output.query_fallback_digest;
     let cancellation_bounded =
         output.cancellation == workload.decision_policy.required_cancellation;
     let offline = output.offline == workload.decision_policy.required_offline;
@@ -362,6 +365,7 @@ fn evaluate_profile(
     let quality = aggregate_quality(&results);
     let hard_invariants_pass = failed_queries == 0
         && fallback_stable
+        && fallback_matches_expected
         && cancellation_bounded
         && offline
         && quality.protected_recall_at_10.denominator != 0
