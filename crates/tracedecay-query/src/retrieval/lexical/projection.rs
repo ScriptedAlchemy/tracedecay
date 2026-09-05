@@ -10,10 +10,9 @@ use tracedecay_domain::{
     CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
     ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1,
     FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
-    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrievalBudget, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId, SymbolOccurrenceId, exact_search_canonical, technical_tokens,
-    validate_code_logical_path,
+    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
+    SymbolOccurrenceId, exact_search_canonical, technical_tokens, validate_code_logical_path,
 };
 
 use super::{
@@ -927,8 +926,8 @@ impl CodeLexicalProjectionAdapterV1 {
         Self::new_inner(metadata, chunks, BTreeMap::new(), false, None)
     }
 
-    /// Hard-wires `deadline_micros = None` (crate 30s fallback). Live daemon
-    /// mount is [`Self::new_admitted_with_budget`].
+    /// Hard-wires `deadline_micros = None` (crate 30s fallback); the daemon
+    /// mount passes its own deadline to [`Self::new_admitted_with_deadline`].
     ///
     /// `symbol_qualified_names` carries the extractor's qualified name for
     /// every symbol occurrence in `chunks`; the sealed-page artifact path
@@ -944,27 +943,6 @@ impl CodeLexicalProjectionAdapterV1 {
         C: ExtractionAdmittedChunkV1,
     {
         Self::new_admitted_with_deadline(metadata, chunks, symbol_qualified_names, None)
-    }
-
-    /// Budget-aware admitted build for the daemon mount. A set
-    /// `budget.deadline_micros`, including `Some(0)`, is used as-is; `None`
-    /// uses the crate 30s fallback. Callers with lane+base must pass the tighter
-    /// value on the budget they hand in.
-    pub fn new_admitted_with_budget<C>(
-        metadata: CodeLexicalProjectionMetadataV1,
-        chunks: Vec<C>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
-        budget: &RetrievalBudget,
-    ) -> Result<Self, RetrievalPortError>
-    where
-        C: ExtractionAdmittedChunkV1,
-    {
-        Self::new_admitted_with_deadline(
-            metadata,
-            chunks,
-            symbol_qualified_names,
-            budget.deadline_micros,
-        )
     }
 
     fn new_admitted_with_deadline<C>(
@@ -1957,20 +1935,13 @@ mod deadline_budget_tests {
     }
 
     #[test]
-    fn new_admitted_with_budget_zero_deadline_is_immediate_budget_exceeded() {
-        let budget = RetrievalBudget {
-            max_candidates_per_lane: 1,
-            max_fused_candidates: 1,
-            max_hydrated_results: 1,
-            max_hydration_bytes: 1,
-            deadline_micros: Some(0),
-        };
+    fn zero_deadline_is_immediate_budget_exceeded() {
         let error = CodeLexicalProjectionAdapterV1::new_inner(
             dummy_metadata(),
             Vec::<CodeSearchChunkV1>::new(),
             BTreeMap::new(),
             true,
-            budget.deadline_micros,
+            Some(0),
         )
         .expect_err("Some(0) must expire before validate");
         assert!(

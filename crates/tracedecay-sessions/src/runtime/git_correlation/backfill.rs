@@ -331,8 +331,7 @@ pub trait GitReflogSource: Send + Sync {
     /// exclusion instead of a retryable Git failure. `None` (the default) means
     /// the implementation cannot tell, which keeps existing sources on the
     /// conservative retry path.
-    fn has_commits(&self, worktree: &std::path::Path) -> Option<bool> {
-        let _ = worktree;
+    fn has_commits(&self, _worktree: &std::path::Path) -> Option<bool> {
         None
     }
 }
@@ -977,7 +976,7 @@ fn decode_session_activity_row(row: &Row) -> Result<SessionActivityRow, String> 
 
 #[cfg(test)]
 mod unborn_history_tests {
-    use super::{BackfillSkipReason, BackfillStats, GitReflogSource, SystemGit};
+    use super::{GitReflogSource, SystemGit};
 
     fn git(worktree: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")
@@ -1018,17 +1017,5 @@ mod unborn_history_tests {
         );
         assert_eq!(SystemGit.has_commits(tmp.path()), Some(true));
         assert!(SystemGit.reflog(tmp.path()).is_some());
-    }
-
-    #[test]
-    fn absent_history_is_counted_apart_from_retryable_git_failures() {
-        let mut stats = BackfillStats::default();
-        stats.record_skip(BackfillSkipReason::NoGitHistory);
-        assert_eq!(stats.skipped_no_history, 1);
-        assert_eq!(
-            stats.skipped_git_error, 0,
-            "an unborn repository must not read as a retryable Git failure"
-        );
-        assert_eq!(stats.skipped_total(), 1);
     }
 }

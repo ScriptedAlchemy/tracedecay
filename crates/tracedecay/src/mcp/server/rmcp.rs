@@ -472,7 +472,14 @@ impl RmcpConnectionAdapter {
     where
         T: rmcp::transport::Transport<RoleServer> + Send + 'static,
     {
-        rmcp::service::serve_server(self, GuardedHandshakeTransport::new(transport)).await
+        rmcp::service::serve_server(
+            self,
+            GuardedHandshakeTransport {
+                inner: transport,
+                handshake_settled: false,
+            },
+        )
+        .await
     }
 
     fn response_result<T: DeserializeOwned>(response: JsonRpcResponse) -> Result<T, ErrorData> {
@@ -510,15 +517,6 @@ struct GuardedHandshakeTransport<T> {
     /// After that the guard is inert: a later stray `initialize` is an ordinary
     /// request the adapter answers with a typed error of its own.
     handshake_settled: bool,
-}
-
-impl<T> GuardedHandshakeTransport<T> {
-    fn new(inner: T) -> Self {
-        Self {
-            inner,
-            handshake_settled: false,
-        }
-    }
 }
 
 impl<T> rmcp::transport::Transport<RoleServer> for GuardedHandshakeTransport<T>
