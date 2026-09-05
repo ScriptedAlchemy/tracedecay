@@ -52,9 +52,9 @@ const MAX_DAEMON_NATIVE_QUALIFICATION_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 10
 // keeps the package and shipped binary from carrying 7.6 MiB of repeated JSON.
 const PACKAGED_NATIVE_QUALIFICATION_GZIP: &[u8] =
     include_bytes!("../../assets/native-qualification-v1.json.gz");
-const PACKAGED_NATIVE_QUALIFICATION_BYTES: usize = 7_659_749;
+const PACKAGED_NATIVE_QUALIFICATION_BYTES: usize = 7_644_855;
 const PACKAGED_NATIVE_QUALIFICATION_SHA256: &str =
-    "sha256:72647e4ec74b3ac4e95a962a7265ca4274247e7f4a8872dc25472f2b8a7a0f3c";
+    "sha256:4568e64d6d8032491b23f20cf5e670275cabff6c559743b1551000ad4251f984";
 
 static PACKAGED_NATIVE_QUALIFICATION_CANONICAL: OnceLock<
     Result<Vec<u8>, PackagedNativeQualificationErrorV1>,
