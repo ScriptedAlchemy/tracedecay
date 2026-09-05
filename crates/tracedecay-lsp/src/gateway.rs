@@ -67,17 +67,20 @@ impl AdmittedRoot {
     }
 
     pub(crate) fn is_valid(&self) -> bool {
-        strict_file_uri_path(&self.uri).is_some()
+        strict_file_uri_segments(&self.uri).is_some()
     }
 
     pub(crate) fn matches_root_uri(&self, candidate: &str) -> bool {
         match (
-            strict_file_uri_path(&self.uri),
-            strict_file_uri_path(candidate),
+            strict_file_uri_segments(&self.uri),
+            strict_file_uri_segments(candidate),
         ) {
-            (Some((admitted_url, admitted_path)), Some((candidate_url, candidate_path))) => {
+            (
+                Some((admitted_url, admitted_segments)),
+                Some((candidate_url, candidate_segments)),
+            ) => {
                 admitted_url.host_str() == candidate_url.host_str()
-                    && admitted_path == candidate_path
+                    && admitted_segments == candidate_segments
             }
             _ => false,
         }
@@ -94,8 +97,8 @@ impl AdmittedRoot {
     pub(crate) fn document_root_depth(&self, document_uri: &str) -> Option<usize> {
         self.contains_document(document_uri)
             .then_some(())
-            .and_then(|()| strict_file_uri_path(&self.uri))
-            .map(|(_, path)| path.components().count())
+            .and_then(|()| strict_file_uri_segments(&self.uri))
+            .map(|(_, segments)| segments.len())
     }
 }
 
@@ -136,9 +139,42 @@ pub fn strict_file_url(uri: &str) -> Option<Url> {
     Some(url)
 }
 
+/// Parses a `file:` URI into its `(Url, decoded path segments)` form: the
+/// URL-level rules of [`strict_file_url`] plus percent-decoding of every
+/// non-empty segment.
+///
+/// URI identity and containment are protocol questions, so this deliberately
+/// stops short of [`Url::to_file_path`] the same way [`strict_file_url`] does.
+/// That conversion is platform-dependent in both directions — a drive-less
+/// path such as `file:///root` converts on Unix and fails on Windows, while a
+/// UNC host converts only on Windows — so routing root equality or document
+/// containment through it makes the same LSP request admitted on one host and
+/// rejected on another. Segments are compared instead, which is identical on
+/// every platform. A real filesystem path is produced only where one is
+/// genuinely needed (the symlink-escape guard below, daemon owner lookup),
+/// and those sites already fail closed when the conversion is impossible.
+pub fn strict_file_uri_segments(uri: &str) -> Option<(Url, Vec<String>)> {
+    let url = strict_file_url(uri)?;
+    let mut segments = Vec::new();
+    for segment in url.path_segments()? {
+        if segment.is_empty() {
+            continue;
+        }
+        let decoded = String::from_utf8(decode_uri_segment(segment)?).ok()?;
+        if decoded == "." || decoded == ".." {
+            return None;
+        }
+        segments.push(decoded);
+    }
+    Some((url, segments))
+}
+
 /// Parses a `file:` URI into its `(Url, PathBuf)` form: the URL-level rules
 /// of [`strict_file_url`] plus a platform-local path conversion and a
 /// traversal-component check on the converted path.
+///
+/// Only for callers that need to touch the filesystem; use
+/// [`strict_file_uri_segments`] to compare or contain URIs.
 pub fn strict_file_uri_path(uri: &str) -> Option<(Url, PathBuf)> {
     let url = strict_file_url(uri)?;
     let path = url.to_file_path().ok()?;
@@ -1107,40 +1143,41 @@ pub fn project_semantic_outcome(
 /// location in a semantic response.
 struct DocumentConfinement {
     root_host: Option<String>,
-    root_path: PathBuf,
+    root_segments: Vec<String>,
     canonical_root: Option<PathBuf>,
 }
 
 impl DocumentConfinement {
     fn for_root(root: &AdmittedRoot) -> Option<Self> {
-        let (root_url, root_path) = strict_file_uri_path(&root.uri)?;
+        let (root_url, root_segments) = strict_file_uri_segments(&root.uri)?;
         Some(Self {
             root_host: root_url.host_str().map(str::to_owned),
-            canonical_root: root_path.canonicalize().ok(),
-            root_path,
+            canonical_root: strict_file_uri_path(&root.uri)
+                .and_then(|(_, path)| path.canonicalize().ok()),
+            root_segments,
         })
     }
 
     fn contains(&self, document_uri: &str) -> bool {
-        let Some((document_url, document_path)) = strict_file_uri_path(document_uri) else {
+        let Some((document_url, document_segments)) = strict_file_uri_segments(document_uri) else {
             return false;
         };
         if self.root_host.as_deref() != document_url.host_str() {
             return false;
         }
-        let lexical_match = document_path
-            .strip_prefix(&self.root_path)
-            .is_ok_and(|relative| {
-                !relative.as_os_str().is_empty()
-                    && relative
-                        .components()
-                        .all(|component| matches!(component, Component::Normal(_)))
-            });
-        if !lexical_match {
+        if document_segments.len() <= self.root_segments.len()
+            || !document_segments.starts_with(&self.root_segments)
+        {
             return false;
         }
+        // The lexical decision above is complete on its own; the canonical
+        // guard only applies when the root actually exists on this host, and
+        // then only to reject a symlink that escapes it.
         let Some(canonical_root) = self.canonical_root.as_ref() else {
             return true;
+        };
+        let Some((_, document_path)) = strict_file_uri_path(document_uri) else {
+            return false;
         };
         let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
         else {
@@ -2681,6 +2718,68 @@ mod tests {
 
         assert!(root.matches_root_uri("file:///root/project/"));
         assert!(!root.matches_root_uri("file:///root/project-other/"));
+    }
+
+    /// Root admission and document containment must not depend on whether the
+    /// running host can convert the URI to one of its own filesystem paths.
+    /// `Url::to_file_path` fails for a drive-less path on Windows and for a
+    /// UNC host on Unix, so deciding admission through it rejected otherwise
+    /// well-formed client roots on one platform and accepted them on another.
+    #[test]
+    fn root_admission_and_containment_are_host_independent() {
+        for (root_uri, document_uri, sibling_uri, depth) in [
+            (
+                "file:///root",
+                "file:///root/src/lib.rs",
+                "file:///root-sibling/lib.rs",
+                1,
+            ),
+            (
+                "file:///C:/root",
+                "file:///C:/root/src/lib.rs",
+                "file:///C:/root-sibling/lib.rs",
+                2,
+            ),
+            (
+                "file://server/share",
+                "file://server/share/src/lib.rs",
+                "file://server/share-other/lib.rs",
+                1,
+            ),
+        ] {
+            let root = AdmittedRoot::new(root_uri);
+            assert!(root.is_valid(), "{root_uri} must be admitted");
+            assert!(
+                root.matches_root_uri(&format!("{root_uri}/")),
+                "{root_uri} must match its trailing-slash form"
+            );
+            assert!(
+                root.contains_document(document_uri),
+                "{root_uri} must contain {document_uri}"
+            );
+            assert!(
+                !root.contains_document(sibling_uri),
+                "{root_uri} must not contain {sibling_uri}"
+            );
+            assert_eq!(root.document_root_depth(document_uri), Some(depth));
+        }
+
+        // A UNC host is part of the root's identity, never a prefix match.
+        let unc = AdmittedRoot::new("file://server/share");
+        assert!(!unc.matches_root_uri("file://other/share"));
+        assert!(!unc.contains_document("file://other/share/src/lib.rs"));
+        assert!(!unc.contains_document("file:///share/src/lib.rs"));
+    }
+
+    /// A drive-less root and a drive-letter root sit in different admitted
+    /// workspaces on every host, so neither may route the other's documents.
+    #[test]
+    fn authorized_workspace_admits_both_unix_and_windows_root_shapes() {
+        for root_uri in ["file:///root", "file:///C:/root"] {
+            let workspace = AuthorizedLspWorkspace::new(None, vec![AdmittedRoot::new(root_uri)])
+                .unwrap_or_else(|_| panic!("{root_uri} must be admitted as a workspace root"));
+            assert_eq!(workspace.anchor_root_uri(), root_uri);
+        }
     }
 
     #[test]
