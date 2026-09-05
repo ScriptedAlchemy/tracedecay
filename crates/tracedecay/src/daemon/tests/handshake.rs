@@ -38,8 +38,12 @@ pub(super) async fn daemon_round_trip(
         }
         responses
     };
+    // Anti-hang bound, not a latency budget: under whole-suite parallelism the
+    // first connection for a fresh profile pays a cold
+    // `DaemonSessionRuntimeRegistryV1::open` (measured over 500ms with six
+    // profiles opening at once) before it can even route the request.
     let (server_result, responses) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             tokio::join!(server, read_responses)
         })
         .await
