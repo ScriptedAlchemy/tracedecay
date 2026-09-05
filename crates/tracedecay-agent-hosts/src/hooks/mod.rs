@@ -135,7 +135,6 @@ pub(crate) async fn write_hook_output(
     host: tracedecay_hooks::HookHostV1,
     event_json: &str,
     output: &str,
-    telemetry: Option<&analytics::HookTimingSpan>,
 ) -> bool {
     let delivery_writer = match project_root {
         None => None,
@@ -158,10 +157,6 @@ pub(crate) async fn write_hook_output(
             }
         }
     };
-    // Scoped so both the stdout handle and its lock guard (neither of which is
-    // `Send`) are fully dropped before the delivery-settlement await below;
-    // otherwise the compiler must treat this future as holding a `!Send`
-    // guard across that suspend point.
     let written = {
         let stdout = std::io::stdout();
         let mut stdout = stdout.lock();
@@ -174,7 +169,7 @@ pub(crate) async fn write_hook_output(
         eprintln!("tracedecay hook: failed to flush host output: {error}");
         return false;
     }
-    let Some(project_root) = project_root else {
+    let Some(_) = project_root else {
         return true;
     };
     let Some(delivery_writer) = delivery_writer else {
@@ -233,29 +228,15 @@ pub(crate) async fn write_hook_output(
             return false;
         }
     };
-    let receipt = match delivery_writer.append_or_replay(&receipt) {
-        Ok(receipt) => receipt,
+    match delivery_writer.append_or_replay(&receipt) {
+        Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "Hook output delivery receipt could not be persisted");
             return false;
         }
-    };
-    let settlement = receipt.settlement;
-    drop(delivery_writer);
-    if let Err(error) = daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "delivery_settlement",
-            "settlement": settlement,
-        }),
-        telemetry,
-    )
-    .await
-    {
-        // The source receipt is durable and the daemon replay lane will retry
-        // the exact retained settlement after a transport or daemon failure.
-        tracing::warn!(%error, "Hook output delivery receipt could not be reported; retained for replay");
     }
+    // The daemon replay lane settles and acknowledges this durable source
+    // receipt, including when the callback runs while the daemon is offline.
     true
 }
 
@@ -308,7 +289,7 @@ async fn hook_native_event(
         return 0;
     };
     if let Some(guidance) = dispatch(&event, &root).await
-        && !write_hook_output(Some(&root), host, &event, &guidance, None).await
+        && !write_hook_output(Some(&root), host, &event, &guidance).await
     {
         return 1;
     }
@@ -695,7 +676,6 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         &output,
-        Some(&hook_telemetry),
     )
     .await
     {

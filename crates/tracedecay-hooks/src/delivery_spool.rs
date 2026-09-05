@@ -183,9 +183,9 @@ impl HookDeliveryReceiptSpoolV1 {
     }
 
     /// Appends a source receipt or returns the exact durable receipt already
-    /// retained for its stable identity.  Callers must forward the returned
-    /// settlement to the daemon so a retry replays the original timestamps
-    /// rather than reconstructing a conflicting delivery attempt.
+    /// retained for its stable identity. The daemon drains the retained
+    /// settlement with its original timestamps, so retries never reconstruct
+    /// a conflicting delivery attempt.
     #[hotpath::measure(label = "hooks.delivery.append_or_replay")]
     pub fn append_or_replay(
         &self,

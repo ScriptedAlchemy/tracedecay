@@ -139,7 +139,6 @@ pub async fn hook_claude_session_start() -> i32 {
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &output,
-        None,
     )
     .await
     {
@@ -217,7 +216,7 @@ pub async fn hook_claude_subagent_start() -> i32 {
     // route. Resolve a local workspace boundary and let the one bounded status
     // request map a registered global-only alias when one exists.
     let root = claude_subagent_project_root(&parsed);
-    let hook_telemetry = record_hook_invoked_parsed(
+    let _hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Claude,
         "SubagentStart",
@@ -265,7 +264,6 @@ pub async fn hook_claude_subagent_start() -> i32 {
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
             &output,
-            Some(&hook_telemetry),
         ),
     )
     .await;
@@ -308,7 +306,6 @@ pub async fn hook_claude_post_compact() -> i32 {
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -360,7 +357,6 @@ pub async fn hook_claude_post_tool_use() -> i32 {
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
             &response,
-            None,
         )
         .await
     {
@@ -441,7 +437,6 @@ pub async fn hook_prompt_submit() -> i32 {
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -470,7 +465,6 @@ pub async fn hook_stop() -> i32 {
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &output,
-        None,
     )
     .await
     {

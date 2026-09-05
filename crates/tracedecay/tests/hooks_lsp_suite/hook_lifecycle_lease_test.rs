@@ -190,6 +190,31 @@ fn cursor_before_submit_prompt_remains_capture_only() {
 }
 
 #[test]
+fn native_prompts_reject_invalid_profile_identity_without_ingesting() {
+    for hook in ["hook-codex-user-prompt-submit", "hook-kiro-prompt-submit"] {
+        let home = tempfile::tempdir().unwrap();
+        let profile = home.path().join(".tracedecay");
+        std::fs::create_dir(&profile).unwrap();
+        let identity = profile.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME);
+        std::fs::write(&identity, b"{}").unwrap();
+        let event = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "unbound-prompt-session",
+            "cwd": home.path(),
+            "prompt": "inspect the current change",
+        });
+
+        let output = run_hook(home.path(), hook, Some(event.to_string().as_bytes()));
+
+        assert!(!output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(std::fs::read(identity).unwrap(), b"{}");
+        assert!(!profile.join("global.db").exists());
+        assert!(!profile.join("sessions.db").exists());
+    }
+}
+
+#[test]
 fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
     let temp = tempfile::tempdir().unwrap();
     let cases = [
@@ -356,6 +381,20 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             .to_vec(),
         ),
         (
+            "hook-cursor-stop",
+            HookHostV1::CursorDesktop,
+            HookEventFamily::SessionBoundary,
+            serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "stop",
+                "conversation_id": "cursor-stop-session",
+                "generation_id": "cursor-stop-generation",
+                "model": "fixture-model",
+                "status": "completed",
+                "loop_count": 0,
+            }))
+            .unwrap(),
+        ),
+        (
             "hook-hermes-terminal-receipt",
             HookHostV1::Hermes,
             HookEventFamily::ToolLifecycle,
@@ -425,22 +464,18 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         })
         .unwrap();
 
-        // Claude's response-capable PostToolUse handler resolves its project
-        // identity from the payload CWD rather than the process CWD. The
-        // recorded host fixture intentionally uses a portable workspace path,
-        // so bind this production-shaped payload to this test's enrollment.
-        let payload = if hook == "hook-claude-post-tool-use" {
-            payload_with_enrolled_cwd(&payload, &project)
-        } else {
-            payload
-        };
+        // Response-capable handlers resolve the payload CWD. Bind every
+        // recorded host payload to this test's enrollment.
+        let payload = payload_with_enrolled_cwd(&payload, &project);
         let output = run_hook_at(&home, &project, hook, Some(&payload));
 
         assert!(output.status.success(), "{hook}: {output:?}");
-        let expected_stdout: &[u8] = if hook == "hook-claude-post-tool-use" {
-            b""
-        } else {
-            b"{}\n"
+        let expected_stdout: &[u8] = match hook {
+            "hook-claude-post-tool-use"
+            | "hook-kimi-event"
+            | "hook-opencode-event"
+            | "hook-opencode-tool-after" => b"",
+            _ => b"{}\n",
         };
         assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
         assert!(output.stderr.is_empty(), "{hook}: {output:?}");
@@ -454,6 +489,18 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         assert!(!home.join(".tracedecay/global.db").exists());
         assert!(!data_root.join("tracedecay.db").exists());
         assert!(!data_root.join("sessions.db").exists());
+        if hook == "hook-stop" {
+            let deliveries = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+                tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host),
+            )
+            .unwrap();
+            let pending = deliveries.pending(2).unwrap();
+            assert_eq!(pending.len(), 1, "offline output must retain its receipt");
+            assert_eq!(
+                pending[0].settlement.outcome,
+                tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+            );
+        }
         let spool_root = data_root.join("hook-v2-spool").join(host.hook_key());
         let (mut spool, report) =
             HookSpoolV1::open(&spool_root, HookSpoolConfigV1::stock(host), test_now()).unwrap();

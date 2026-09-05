@@ -76,7 +76,6 @@ pub async fn hook_codex_session_start() -> i32 {
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &output,
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -98,6 +97,26 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
+    // A compatibility prompt callback can run before TraceDecay is installed
+    // for this profile. Only an existing profile can own projectless ingest.
+    let profile = crate::storage::default_profile_root().and_then(|root| {
+        crate::storage::read_existing_profile_identity_record(
+            &root.join(crate::storage::PROFILE_IDENTITY_FILENAME),
+        )
+    });
+    match profile {
+        Ok(None) => {
+            return i32::from(
+                !super::write_hook_output(None, tracedecay_hooks::HookHostV1::Codex, &event, "{}")
+                    .await,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Codex prompt profile identity is unavailable");
+            return 1;
+        }
+        Ok(Some(_)) => {}
+    }
     let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Codex,
@@ -125,7 +144,6 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &additional_context_json("UserPromptSubmit", &context),
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -186,7 +204,6 @@ pub async fn hook_codex_subagent_start() -> i32 {
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             &output,
-            Some(&_hook_telemetry),
         )
         .await
     {
@@ -228,7 +245,6 @@ pub async fn hook_codex_post_tool_use() -> i32 {
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             &additional_context_json("PostToolUse", &guidance),
-            Some(&hook_telemetry),
         )
         .await
     {
@@ -265,7 +281,6 @@ pub async fn hook_codex_post_compact() -> i32 {
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -316,7 +331,6 @@ pub async fn hook_codex_stop() -> i32 {
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             &output,
-            Some(&hook_telemetry),
         )
         .await
         {
@@ -332,7 +346,6 @@ pub async fn hook_codex_stop() -> i32 {
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
     )
     .await
     {

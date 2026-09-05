@@ -67,7 +67,6 @@ pub async fn hook_cursor_subagent_start() -> i32 {
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             &decision,
-            Some(&_hook_telemetry),
         )
         .await
     {
@@ -105,7 +104,6 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             &decision,
-            Some(&_hook_telemetry),
         )
         .await
     {
@@ -133,13 +131,12 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     let Ok(parsed) = serde_json::from_str::<Value>(&event) else {
         // A malformed event keeps the fail-open telemetry row and empty
         // output the handler always produced, but is never ingested.
-        let hook_telemetry = record_hook_invoked(None, HintAgent::Cursor, hook_name, &event);
+        let _hook_telemetry = record_hook_invoked(None, HintAgent::Cursor, hook_name, &event);
         if !super::write_hook_output(
             None,
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             &serde_json::json!({}).to_string(),
-            Some(&hook_telemetry),
         )
         .await
         {
@@ -192,7 +189,6 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
         &output,
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -247,7 +243,6 @@ pub async fn hook_cursor_pre_compact() -> i32 {
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -299,7 +294,6 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
                 tracedecay_hooks::HookHostV1::CursorDesktop,
                 &event,
                 &serde_json::json!({ "additional_context": guidance }).to_string(),
-                Some(&hook_telemetry),
             )
             .await
         {
@@ -316,7 +310,6 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             &decision,
-            Some(&hook_telemetry),
         )
         .await
     {
@@ -334,7 +327,6 @@ pub async fn hook_cursor_session_start() -> i32 {
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
         &output,
-        None,
     )
     .await
     {
@@ -409,7 +401,6 @@ pub async fn hook_cursor_workspace_open() -> i32 {
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
     )
     .await
     {

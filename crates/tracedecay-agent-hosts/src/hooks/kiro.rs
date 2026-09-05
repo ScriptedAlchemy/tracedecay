@@ -144,6 +144,24 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let profile = crate::storage::default_profile_root().and_then(|root| {
+        crate::storage::read_existing_profile_identity_record(
+            &root.join(crate::storage::PROFILE_IDENTITY_FILENAME),
+        )
+    });
+    match profile {
+        Ok(None) => {
+            return i32::from(
+                !super::write_hook_output(None, tracedecay_hooks::HookHostV1::Kiro, &event, "{}")
+                    .await,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Kiro prompt profile identity is unavailable");
+            return 1;
+        }
+        Ok(Some(_)) => {}
+    }
     let root = event_project_root_or_process_cwd(&parsed);
     let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
@@ -190,7 +208,6 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
         tracedecay_hooks::HookHostV1::Kiro,
         &event,
         &output,
-        Some(&hook_telemetry),
     )
     .await
     {

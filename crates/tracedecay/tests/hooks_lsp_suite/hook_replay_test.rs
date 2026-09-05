@@ -1,8 +1,9 @@
-//! End-to-end hook replay: drives every provider's hook subcommands through
+//! End-to-end hook replay: drives response and capture hook subcommands through
 //! the real binary with representative event payloads, then asserts the full
-//! telemetry wiring — each invocation records an attributed
-//! `hook_analytics.jsonl` row in the project store, and `tracedecay analytics
-//! sync` bridges those rows into the durable `analytics_events` table.
+//! telemetry wiring — synchronous response handlers record attributed
+//! `hook_analytics.jsonl` rows, and `tracedecay analytics sync` bridges those
+//! rows into durable analytics events. Capture-only callbacks use delivery
+//! receipts instead; their durable spool journey is covered by the lifecycle suite.
 //!
 //! Uses only child-process env (no process-global mutation), so it does not
 //! need `GLOBAL_DB_ENV_LOCK`.
@@ -39,6 +40,19 @@ struct Replay {
     tool_input_env: Option<Value>,
 }
 
+impl Replay {
+    fn emits_timing_rows(&self) -> bool {
+        !matches!(
+            self.subcommand,
+            "hook-pre-tool-use"
+                | "hook-codex-stop"
+                | "hook-cursor-stop"
+                | "hook-kiro-pre-tool-use"
+                | "hook-kiro-post-tool-use"
+        )
+    }
+}
+
 fn replays(root: &str) -> Vec<Replay> {
     vec![
         Replay {
@@ -60,8 +74,15 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(json!({
                 "session_id": "claude-s1",
                 "cwd": root,
+                "hook_event_name": "PostToolUse",
                 "tool_name": "Edit",
+                "tool_use_id": "claude-edit-1",
                 "tool_input": { "file_path": format!("{root}/src/lib.rs") },
+                "tool_response": { "success": true },
+                "transcript_path": null,
+                "prompt_id": "claude-prompt-1",
+                "permission_mode": "default",
+                "duration_ms": 1,
             })),
             tool_input_env: None,
         },
@@ -80,7 +101,9 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-codex-session-start",
             agent: "codex",
             hook_name: "SessionStart",
-            stdin: Some(json!({ "session_id": "codex-s1", "cwd": root })),
+            stdin: Some(
+                json!({ "hook_event_name": "SessionStart", "session_id": "codex-s1", "cwd": root }),
+            ),
             tool_input_env: None,
         },
         Replay {
@@ -90,6 +113,7 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(json!({
                 "session_id": "codex-s1",
                 "cwd": root,
+                "hook_event_name": "UserPromptSubmit",
                 "prompt": "fix the failing test",
             })),
             tool_input_env: None,
@@ -101,8 +125,12 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(json!({
                 "session_id": "codex-s1",
                 "cwd": root,
+                "hook_event_name": "PostToolUse",
+                "turn_id": "codex-turn-1",
                 "tool_name": "shell",
-                "command": "cargo build",
+                "tool_use_id": "codex-shell-1",
+                "tool_input": { "command": "cargo build" },
+                "tool_response": "Finished",
             })),
             tool_input_env: None,
         },
@@ -110,14 +138,21 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-codex-stop",
             agent: "codex",
             hook_name: "Stop",
-            stdin: Some(json!({ "session_id": "codex-s1", "cwd": root })),
+            stdin: Some(json!({
+                "hook_event_name": "Stop", "session_id": "codex-s1", "cwd": root,
+                "turn_id": "codex-turn-1", "model": "fixture-model",
+                "permission_mode": "default", "stop_hook_active": false,
+                "last_assistant_message": "Finished"
+            })),
             tool_input_env: None,
         },
         Replay {
             subcommand: "hook-cursor-session-start",
             agent: "cursor",
             hook_name: "sessionStart",
-            stdin: Some(json!({ "conversation_id": "cursor-s1", "cwd": root })),
+            stdin: Some(
+                json!({ "hook_event_name": "sessionStart", "conversation_id": "cursor-s1", "cwd": root }),
+            ),
             tool_input_env: None,
         },
         Replay {
@@ -136,7 +171,11 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-cursor-stop",
             agent: "cursor",
             hook_name: "stop",
-            stdin: Some(json!({ "conversation_id": "cursor-s1", "cwd": root })),
+            stdin: Some(json!({
+                "hook_event_name": "stop", "conversation_id": "cursor-s1", "cwd": root,
+                "generation_id": "cursor-generation-1", "model": "fixture-model",
+                "status": "completed", "loop_count": 0
+            })),
             tool_input_env: None,
         },
         Replay {
@@ -146,6 +185,7 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(json!({
                 "session_id": "kiro-s1",
                 "cwd": root,
+                "hook_event_name": "preToolUse",
                 "tool_name": "fsWrite",
             })),
             tool_input_env: None,
@@ -157,6 +197,7 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(json!({
                 "session_id": "kiro-s1",
                 "cwd": root,
+                "hook_event_name": "userPromptSubmit",
                 "prompt": "add a feature",
             })),
             tool_input_env: None,
@@ -168,6 +209,7 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(json!({
                 "session_id": "kiro-s1",
                 "cwd": root,
+                "hook_event_name": "postToolUse",
                 "tool_name": "fsWrite",
                 "file_path": format!("{root}/src/lib.rs"),
             })),
@@ -298,17 +340,20 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
                     && str_field(row, "hook_name") == replay.hook_name
             })
             .collect();
+        // Fast native capture persists canonical delivery receipts, while the
+        // retired pre-tool callback returns without opening any telemetry file.
+        let expected_rows = usize::from(replay.emits_timing_rows());
         assert_eq!(
             matched.len(),
-            1,
-            "expected exactly one {}/{} row, got {} (all rows: {:?})",
+            expected_rows,
+            "expected {expected_rows} {}/{} rows, got {} (all rows: {:?})",
             replay.agent,
             replay.hook_name,
             matched.len(),
             hook_invoked
         );
         assert!(
-            matched[0].get("project_root").is_none(),
+            matched.iter().all(|row| row.get("project_root").is_none()),
             "{}/{} row must not persist a raw project path",
             replay.agent,
             replay.hook_name
@@ -320,7 +365,9 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         "attributed hooks must not spill into the user-level fallback file: {fallback_rows:?}"
     );
 
-    // Bridge: `analytics sync` imports the JSONL rows into the durable table.
+    // Callbacks can already advance the shared import cursor while settling
+    // hint outcomes. Explicit sync must import the remaining tail; the durable
+    // table below must contain every emitted row exactly once.
     let sync = enable_profile_accounting(&mut tracedecay_command_with_home(&home_root))
         .args(["analytics", "sync"])
         .current_dir(&project_root)
@@ -338,10 +385,20 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             String::from_utf8_lossy(&sync.stdout)
         )
     });
-    assert_eq!(
-        sync_outcome.get("imported").and_then(Value::as_u64),
-        Some(store_rows.len() as u64),
-        "analytics sync must import every emitted hook analytics row: {sync_outcome:#}"
+    assert!(
+        sync_outcome
+            .get("imported")
+            .and_then(Value::as_u64)
+            .is_some_and(|imported| imported <= store_rows.len() as u64),
+        "analytics sync must report the imported tail: {sync_outcome:#}"
+    );
+    assert!(
+        sync_outcome["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source["error"].is_null() && source["skipped"] == 0),
+        "analytics sync must cover every remaining row: {sync_outcome:#}"
     );
     drop(daemon);
 
@@ -353,7 +410,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             provider: None,
             project_id: None,
             session_id: None,
-            event_kind: Some("hook_invoked".to_string()),
+            event_kind: None,
             since: None,
             until: None,
             before_id: None,
@@ -361,13 +418,29 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         })
         .await
         .expect("query analytics events");
+    let hook_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.provider.starts_with("hook_"))
+        .collect();
+    assert_eq!(
+        hook_events.len(),
+        store_rows.len(),
+        "every emitted hook analytics row must be durable exactly once"
+    );
+    let events: Vec<_> = hook_events
+        .into_iter()
+        .filter(|event| event.event_kind == "hook_invoked")
+        .collect();
     assert_eq!(
         events.len(),
-        replays.len(),
-        "every replayed hook must bridge into analytics_events"
+        replays
+            .iter()
+            .filter(|replay| replay.emits_timing_rows())
+            .count(),
+        "every response handler timing row must bridge into analytics_events"
     );
     let canonical_project = HostAdmissionTestRuntimeV1::canonical_project_key(&project_root);
-    for replay in &replays {
+    for replay in replays.iter().filter(|replay| replay.emits_timing_rows()) {
         let provider = format!("hook_{}", replay.agent);
         let event = events
             .iter()
