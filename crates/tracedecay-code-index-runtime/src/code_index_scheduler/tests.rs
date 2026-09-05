@@ -9969,38 +9969,42 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler handle");
+    struct ResumeOnDrop(Arc<super::reconcile_panic_guard::ReconcileFaultInjectionV1>);
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            self.0.resume();
+        }
+    }
+
+    let admitted = Arc::new(super::reconcile_panic_guard::ReconcileFaultInjectionV1::paused());
+    let release = ResumeOnDrop(Arc::clone(&admitted));
     let wake = {
-        let scheduler = scheduler
+        let mut scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        scheduler.install_reconcile_fault_for_test(Arc::clone(&admitted));
         Arc::clone(&scheduler.wake)
     };
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let lock_thread = std::thread::spawn(move || {
-        let _guard = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held_tx.send(()).expect("signal scheduler lock held");
-        release_rx.recv().expect("release scheduler lock");
-    });
-    held_rx.recv().expect("scheduler lock acquired");
     fixture.edit("src/lib.rs", "pub fn busy() -> u32 { 2 }\n");
     wake.notify_one();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while admitted.attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker admits a reconcile pass before retirement");
     let roots = [fixture.path().canonicalize().expect("canonical root")]
         .into_iter()
         .collect();
 
-    assert!(
-        !registry
-            .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
-            .await,
-        "blocked writer must report settling"
-    );
-    assert_eq!(registry.retiring_owner_count().await, 1);
-    release_tx.send(()).expect("release writer");
-    lock_thread.join().expect("writer joins");
+    let drained = registry
+        .retire_project_roots_with_deadline(&roots, Duration::from_millis(25))
+        .await;
+    let retained = registry.retiring_owner_count().await;
+    drop(release);
+    assert!(!drained, "blocked writer must report settling");
+    assert_eq!(retained, 1);
     assert!(
         registry
             .retire_project_roots_with_deadline(&roots, Duration::from_secs(2))
