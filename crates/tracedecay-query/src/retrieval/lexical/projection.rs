@@ -202,10 +202,25 @@ impl ProjectedChunkV1 {
     ) -> BTreeMap<LexicalFieldV1, Vec<String>> {
         let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
         if let Some(qualified_name) = qualified_name.filter(|name| !name.is_empty()) {
-            fields
-                .entry(LexicalFieldV1::QualifiedName)
-                .or_default()
-                .push(normalize_lexical(qualified_name));
+            let qualified_name_postings = fields.entry(LexicalFieldV1::QualifiedName).or_default();
+            qualified_name_postings.push(normalize_lexical(qualified_name));
+            // The extractor attests the qualified name with the declaring
+            // logical path ahead of the symbol path
+            // (`src/watermark.rs::VectorWatermark::merge_max`), but an operator
+            // names the symbol path alone (`VectorWatermark::merge_max`).
+            // Postings are whole terms and cannot match a suffix, so index the
+            // attested symbol path as its own key. Only the logical path this
+            // chunk already carries is removed - nothing is re-derived from
+            // source text, so a wrong qualifier still misses. A path-only
+            // qualification leaves a bare simple name, which `SymbolName`
+            // already answers from the whole-symbol exact term.
+            if let Some(symbol_path) = qualified_name
+                .strip_prefix(logical_path)
+                .and_then(|suffix| suffix.strip_prefix("::"))
+                .filter(|symbol_path| symbol_path.contains("::"))
+            {
+                qualified_name_postings.push(normalize_lexical(symbol_path));
+            }
         }
         let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
             LexicalFieldV1::PreambleText
