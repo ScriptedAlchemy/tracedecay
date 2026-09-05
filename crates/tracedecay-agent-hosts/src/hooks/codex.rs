@@ -120,11 +120,20 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         root.as_deref(),
     ))
     .await;
+    // A turn-local prompt with nothing to say emits no `hookSpecificOutput` at
+    // all, exactly as `hook_codex_session_start` does for guidance-free
+    // admission. An `additionalContext: ""` envelope is not "no context": Codex
+    // treats it as an injected empty context block.
+    let output = if context.is_empty() {
+        serde_json::json!({}).to_string()
+    } else {
+        additional_context_json("UserPromptSubmit", &context)
+    };
     if !super::write_hook_output(
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
-        &additional_context_json("UserPromptSubmit", &context),
+        &output,
         Some(&hook_telemetry),
     )
     .await
@@ -366,7 +375,7 @@ async fn retain_codex_stop_in_daemon(
         {
             Ok(result) => result.get("status").and_then(Value::as_str) == Some("accepted"),
             Err(error) => {
-                eprintln!("[tracedecay] codex stop daemon retention failed: {error}");
+                tracing::warn!(%error, "Codex Stop daemon retention failed");
                 false
             }
         }
@@ -638,7 +647,7 @@ async fn codex_post_compact(
         session_id.as_deref(),
     );
     if let Err(error) = super::daemon_hook_action(Some(&root), args, telemetry).await {
-        eprintln!("[tracedecay] Codex PostCompact daemon call failed: {error}");
+        tracing::warn!(%error, "Codex PostCompact daemon call failed");
     }
 }
 
