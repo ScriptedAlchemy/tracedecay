@@ -7961,7 +7961,13 @@ async fn a_same_content_successor_pointer_keeps_the_seated_generation_serving() 
     // source content — the exact durable state between a convergence
     // republication's publish and its seat.
     advance_pointer_to_unseated_successor(
-        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+        &super::scoped_code_index_store_root(
+            store.path(),
+            &fixture
+                .path()
+                .canonicalize()
+                .expect("canonical fixture root"),
+        ),
         false,
     );
 
@@ -8012,7 +8018,13 @@ async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
         .await
         .expect("mounted worktree witness");
     advance_pointer_to_unseated_successor(
-        &super::scoped_code_index_store_root(store.path(), fixture.path()),
+        &super::scoped_code_index_store_root(
+            store.path(),
+            &fixture
+                .path()
+                .canonicalize()
+                .expect("canonical fixture root"),
+        ),
         true,
     );
 
@@ -14914,11 +14926,6 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         progress.owner_epoch
     };
 
-    fixture.edit(
-        "src/file_0000.rs",
-        "pub fn beta_0000() -> usize { 10_000 }\n",
-    );
-    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
     let durable_generations_root = {
         let mut scheduler = scheduler
             .lock()
@@ -14929,6 +14936,11 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         scheduler.publication.generations_root = blocker;
         durable
     };
+    fixture.edit(
+        "src/file_0000.rs",
+        "pub fn beta_0000() -> usize { 10_000 }\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
     let reconcile_in_progress = {
         Arc::clone(
             &scheduler
@@ -14961,7 +14973,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         tokio::task::yield_now().await;
     }
     let unpublished_b_generation = {
-        let mut scheduler = scheduler
+        let scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
@@ -14983,7 +14995,6 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             generation_a.as_str()
         );
         assert_eq!(scheduler.sealed_decode_count(), 0);
-        scheduler.publication.generations_root = durable_generations_root;
         scheduler
             .publication
             .unpublished_candidate
@@ -14996,18 +15007,22 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             .clone()
     };
 
-    fixture.edit(
-        "revision.marker",
-        "generation C leaves indexed source unchanged\n",
-    );
-    git(
-        fixture.path(),
-        &["commit", "-qam", "advance to generation C"],
-    );
     {
         let mut scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Keep B unpublished until C is committed and its stale retry is
+        // checked; the background owner must not publish between those steps.
+        fixture.edit(
+            "revision.marker",
+            "generation C leaves indexed source unchanged\n",
+        );
+        git(
+            fixture.path(),
+            &["commit", "-qam", "advance to generation C"],
+        );
+        scheduler.publication.generations_root = durable_generations_root;
         scheduler.request_background_reconcile_for_observed_change();
         assert!(
             scheduler
