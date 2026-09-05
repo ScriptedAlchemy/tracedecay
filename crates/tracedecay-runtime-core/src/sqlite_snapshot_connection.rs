@@ -10,21 +10,17 @@ use crate::profiled_lock::ProfiledMutex;
 
 pub struct SnapshotConnection {
     pub(super) connection: Arc<ProfiledMutex<Connection>>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    interrupt: rusqlite::InterruptHandle,
 }
 
 impl SnapshotConnection {
     pub(super) fn open(path: &Path, flags: OpenFlags) -> crate::db::engine::Result<Self> {
         let connection = Connection::open_with_flags(path, flags)
             .map_err(|error| snapshot_sqlite_error("open snapshot", error))?;
-        let interrupt = connection.get_interrupt_handle();
         Ok(Self {
             connection: Arc::new(hotpath::mutex!(
                 Mutex::new(connection),
                 label = "runtime_core.db.snapshot.connection"
             )),
-            interrupt,
         })
     }
 
@@ -47,11 +43,6 @@ impl SnapshotConnection {
     #[hotpath::skip]
     pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         Executor::execute_batch(self, sql).await
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn interrupt(&self) {
-        self.interrupt.interrupt();
     }
 }
 
