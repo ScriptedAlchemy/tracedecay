@@ -161,6 +161,10 @@ struct GenerationStageContext {
     physical_namespace: GraphNamespace,
     dependency_namespaces: BTreeMap<crate::GraphProjectionIdentity, GraphNamespace>,
     dependency_digest: tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
+    /// Set when the resident rows are a released row set rather than the
+    /// ordered prefix the page pipeline builds, which makes the row-count
+    /// heuristic unusable for every page of this stage.
+    replay_every_page: bool,
 }
 
 struct GenerationStagePlan<'a> {
@@ -170,10 +174,6 @@ struct GenerationStagePlan<'a> {
     pages: &'a [GenerationStagePage],
     adopt_legacy_partial: bool,
     restaging_sealed_only: bool,
-    /// Set when the resident rows are a released row set rather than the
-    /// ordered prefix the page pipeline builds, which makes the row-count
-    /// heuristic unusable for every page of this stage.
-    replay_every_page: bool,
 }
 
 /// CPU-only page batch, built outside the exclusive snapshot gate so the next
@@ -448,21 +448,24 @@ impl GraphDb {
         .map(|projection| projection.commit))
     }
 
-    /// Whether the shared staging container still holds native rows for this
-    /// generation. A leftover empty projection commit after row release is
-    /// not serving state — remount must still adopt the sealed store.
-    pub(crate) fn staging_generation_has_rows(
+    /// The native rows the shared staging container currently holds for this
+    /// generation. Recovery compares this with the manifest's own counts: a
+    /// leftover empty projection commit after a row release is not serving
+    /// state, and neither is a row set that is present but short — an
+    /// interrupted release proves nothing about the head it is supposed to
+    /// reproduce. Either way remount must adopt the sealed store.
+    pub(crate) fn staging_generation_rows(
         &self,
         locator: &GenerationLocator,
-    ) -> Result<bool, GraphDbError> {
+    ) -> Result<(usize, usize), GraphDbError> {
         let physical_namespace = locator.physical_namespace()?;
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        Ok(projection_node_counts(
+        projection_node_counts(
             database,
             &physical_namespace,
             &locator.projection.projection,
-        )? != (0, 0))
+        )
     }
 
     /// Proves a generation durably before its relational head can advance.
@@ -587,7 +590,7 @@ impl GraphDb {
         manifest.validate_checked(check)?;
         let identity = manifest.identity();
         let expected_row_counts = manifest.row_counts();
-        let context = GenerationStageContext {
+        let mut context = GenerationStageContext {
             locator: GenerationLocator::new(
                 identity.projection.clone(),
                 identity.generation.clone(),
@@ -595,6 +598,7 @@ impl GraphDb {
             physical_namespace: identity.physical_namespace()?,
             dependency_namespaces: self.require_exact_dependencies(&identity)?,
             dependency_digest: identity.dependency_closure_digest(check)?,
+            replay_every_page: false,
         };
         let restaging_sealed_only = self
             .wait_verified_generations_write()?
@@ -610,7 +614,7 @@ impl GraphDb {
             return Ok(GenerationStageOutcome::Reseated(commit));
         }
         let pages = generation_stage_pages(&manifest)?;
-        let replay_every_page = self
+        context.replay_every_page = self
             .generation_stage_release_interrupted(&identity, expected, &context, &pages, check)?;
         let adopt_legacy_partial = self.has_exact_legacy_stage_prefix(
             &manifest,
@@ -635,7 +639,6 @@ impl GraphDb {
             pages: &pages,
             adopt_legacy_partial,
             restaging_sealed_only,
-            replay_every_page,
         };
         match Arc::try_unwrap(manifest) {
             Ok(mut manifest) => {
@@ -768,7 +771,6 @@ impl GraphDb {
             pages,
             adopt_legacy_partial,
             restaging_sealed_only,
-            replay_every_page,
         } = plan;
         let mut prepared_next = None;
         for (index, page) in pages.iter().enumerate() {
@@ -793,7 +795,6 @@ impl GraphDb {
                         expected,
                         context,
                         page,
-                        replay_every_page,
                         check,
                     )?,
                 }
@@ -806,7 +807,6 @@ impl GraphDb {
                         expected,
                         context,
                         next_page,
-                        replay_every_page,
                     )?,
                 Some(_) | None => false,
             };
@@ -833,7 +833,6 @@ impl GraphDb {
                     index.checked_sub(1).and_then(|prior| pages.get(prior)),
                     page,
                     adopt_legacy_partial && index == 0,
-                    replay_every_page,
                     current,
                     check,
                 )?;
@@ -874,7 +873,6 @@ impl GraphDb {
             pages,
             adopt_legacy_partial,
             restaging_sealed_only,
-            replay_every_page,
         } = plan;
         let mut rows = OwnedGenerationStageRows::new(entities, relations);
         let Some(first_page) = pages.first() else {
@@ -890,13 +888,9 @@ impl GraphDb {
             )?;
         let first_rows = rows.take_page(first_page)?;
         let mut current = if first_page_blocked
-            || self.generation_stage_page_already_applied(
-                identity,
-                expected,
-                context,
-                first_page,
-                replay_every_page,
-            )? {
+            || self
+                .generation_stage_page_already_applied(identity, expected, context, first_page)?
+        {
             drop(first_rows);
             None
         } else {
@@ -918,13 +912,8 @@ impl GraphDb {
             // it suppress every later construct dropped rows the apply then
             // demanded ("owned generation stage page was not prepared").
             let successor_needs_construct = match successor {
-                Some(next_page) => !self.generation_stage_page_already_applied(
-                    identity,
-                    expected,
-                    context,
-                    next_page,
-                    replay_every_page,
-                )?,
+                Some(next_page) => !self
+                    .generation_stage_page_already_applied(identity, expected, context, next_page)?,
                 None => false,
             };
             current = thread::scope(|scope| {
@@ -959,7 +948,6 @@ impl GraphDb {
                     index.checked_sub(1).and_then(|prior| pages.get(prior)),
                     page,
                     adopt_legacy_partial && index == 0,
-                    replay_every_page,
                     current.take(),
                     check,
                 )?;
@@ -976,7 +964,6 @@ impl GraphDb {
         rows.finish()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn construct_generation_stage_page_if_needed(
         &self,
         manifest: &GraphGenerationManifest,
@@ -984,16 +971,9 @@ impl GraphDb {
         expected: &GraphRecoveredGenerationDigestV1,
         context: &GenerationStageContext,
         page: &GenerationStagePage,
-        replay_every_page: bool,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Option<PreparedGenerationStagePage>, GraphDbError> {
-        if self.generation_stage_page_already_applied(
-            identity,
-            expected,
-            context,
-            page,
-            replay_every_page,
-        )? {
+        if self.generation_stage_page_already_applied(identity, expected, context, page)? {
             return Ok(None);
         }
         construct_generation_stage_page(manifest, identity, context, page, check).map(Some)
@@ -1064,9 +1044,8 @@ impl GraphDb {
         expected: &GraphRecoveredGenerationDigestV1,
         context: &GenerationStageContext,
         page: &GenerationStagePage,
-        replay_every_page: bool,
     ) -> Result<bool, GraphDbError> {
-        if replay_every_page {
+        if context.replay_every_page {
             return Ok(false);
         }
         let guard = self.read_guard()?;
@@ -1119,7 +1098,6 @@ impl GraphDb {
             predecessor,
             page,
             adopt_legacy_partial,
-            false,
             None,
             check,
         )
@@ -1139,7 +1117,6 @@ impl GraphDb {
         predecessor: Option<&GenerationStagePage>,
         page: &GenerationStagePage,
         adopt_legacy_partial: bool,
-        replay_every_page: bool,
         prepared: Option<PreparedGenerationStagePage>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
@@ -1159,7 +1136,7 @@ impl GraphDb {
                         && existing.commit.source_generation == identity.source_generation
                         && existing.commit.watermark == identity.watermark
                     {
-                        if !replay_every_page
+                        if !context.replay_every_page
                             && Self::generation_stage_page_rows_present(database, context, page)?
                         {
                             return Ok(GraphBatchPlan::Settled(existing.commit, ()));
@@ -3816,6 +3793,7 @@ mod tests {
             physical_namespace: identity.physical_namespace().unwrap(),
             dependency_namespaces: BTreeMap::new(),
             dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
         };
 
         let serial_started = Instant::now();
@@ -3892,6 +3870,7 @@ mod tests {
             physical_namespace: identity.physical_namespace().unwrap(),
             dependency_namespaces: database.require_exact_dependencies(&identity).unwrap(),
             dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
         };
         let started = Instant::now();
         database
@@ -3904,7 +3883,6 @@ mod tests {
                     pages: &pages,
                     adopt_legacy_partial: false,
                     restaging_sealed_only: false,
-                    replay_every_page: false,
                 },
                 &|| Ok(()),
             )
@@ -4086,6 +4064,7 @@ mod tests {
                 .require_exact_dependencies(&manifest.identity())
                 .unwrap(),
             dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
         };
         for (index, legacy_page) in legacy_pages.iter().take(2).enumerate() {
             database

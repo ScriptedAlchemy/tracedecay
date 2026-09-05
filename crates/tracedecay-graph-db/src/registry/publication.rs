@@ -2054,6 +2054,7 @@ impl GraphDbRegistry {
         // dependency hydration from holding a second full row set alive while
         // the proof runs.
         let identity = manifest.identity();
+        let expected_row_counts = manifest.row_counts();
         drop(manifest);
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
@@ -2071,7 +2072,15 @@ impl GraphDbRegistry {
         let dependencies =
             self.load_dependencies(operation, database, authority, context, &identity, visiting)?;
         operation.check(self, context)?;
-        if sealed_code_generation && !database.staging_generation_has_rows(&locator)? {
+        // Present rows are not proof: releasing a sealed generation's
+        // duplicate staging rows deletes bounded pages of arbitrary
+        // identities, so an interrupted release leaves a *short* row set that
+        // still answers "has rows". Serving it recovered a generation whose
+        // rows no longer reproduce the head. Only the manifest's own counts
+        // separate a complete staged row set from that hole; anything else
+        // falls back to the sealed artifact, and a republication restages
+        // every page.
+        if sealed_code_generation && database.staging_generation_rows(&locator)? != expected_row_counts {
             if !dependencies.is_empty() {
                 return Err(GraphDbError::ResetRequired {
                     message: "dependency-bearing graph generation lost its staging rows; republish from the canonical manifest".to_owned(),
@@ -2080,7 +2089,7 @@ impl GraphDbRegistry {
             database.open_sealed_generation_store_if_present(&identity, &head.recovered_digest)?;
             let sealed = database.sealed_generation_reader(&locator).ok_or_else(|| {
                 GraphDbError::ResetRequired {
-                    message: "graph generation has neither staging rows nor a usable sealed artifact; republish from the canonical manifest".to_owned(),
+                    message: "graph generation has neither a complete staged row set nor a usable sealed artifact; republish from the canonical manifest".to_owned(),
                 }
             })?;
             if sealed.recovered_digest() != head.recovered_digest.as_str() {
