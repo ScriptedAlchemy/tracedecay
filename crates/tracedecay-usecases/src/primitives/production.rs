@@ -1470,15 +1470,18 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(hotpath::future!(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
-                let Ok(reader) = open_code_graph(
+                let reader = match open_code_graph(
                     self.code_graph.as_ref(),
                     context.request,
                     now_observed(),
                     Arc::clone(&cancellation),
                 )
                 .await
-                else {
-                    return failed(EvidenceDomain::Symbol, now_observed());
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        return graph_read_outcome(&error, EvidenceDomain::Symbol, now_observed());
+                    }
                 };
                 let Ok(nodes) = reader.resolve_qualified_name(
                     &request.qualified_name,
@@ -2837,6 +2840,62 @@ pub fn locator_digest_for_project(
 #[cfg(test)]
 mod unavailable_evidence_tests {
     use super::*;
+
+    #[test]
+    fn graph_admission_failures_preserve_termination_and_omission_reason() {
+        for (error, reason) in [
+            (
+                CodeGraphReadError::Unavailable {
+                    detail: "the verified graph is not ready".to_owned(),
+                },
+                OmissionReason::Unavailable,
+            ),
+            (
+                CodeGraphReadError::Stale {
+                    detail: "the graph no longer matches the request".to_owned(),
+                },
+                OmissionReason::Stale,
+            ),
+            (CodeGraphReadError::Cancelled, OmissionReason::Cancelled),
+            (CodeGraphReadError::TimedOut, OmissionReason::TimedOut),
+        ] {
+            let outcome: RetrievalPortOutcome<QualifiedNamePrimitiveResult> =
+                graph_read_outcome(&error, EvidenceDomain::Symbol, UtcMicros(1));
+            match reason {
+                OmissionReason::Cancelled => {
+                    assert!(matches!(&outcome, RetrievalPortOutcome::Cancelled(_)));
+                }
+                OmissionReason::TimedOut => {
+                    assert!(matches!(&outcome, RetrievalPortOutcome::TimedOut(_)));
+                }
+                _ => assert!(matches!(&outcome, RetrievalPortOutcome::Unavailable(_))),
+            }
+            let evidence = outcome.evidence();
+            assert!(evidence.payload.is_none());
+            assert!(evidence.coverage.validate().is_ok());
+            assert_eq!(
+                evidence.coverage.completeness,
+                CoverageCompleteness::Unknown
+            );
+            assert_eq!(evidence.coverage.returned, 0);
+            assert_eq!(
+                evidence.omissions,
+                vec![Omission {
+                    domain: EvidenceDomain::Symbol,
+                    count: 0,
+                    reason,
+                }]
+            );
+            assert_eq!(
+                evidence.temporal.freshness,
+                if reason == OmissionReason::Stale {
+                    FreshnessState::Stale
+                } else {
+                    FreshnessState::Unknown
+                }
+            );
+        }
+    }
 
     #[test]
     fn generic_failure_preserves_unknown_domain_coverage() {
