@@ -238,8 +238,30 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             records.push(decode_inventory_record(&row, &project_id)?);
         }
         drop(rows);
+        // No scope rows at this cursor is a successful, complete read of an
+        // empty corpus, not an unavailable authority: the revision recheck
+        // below is what proves the emptiness was not torn by a concurrent
+        // mutation. Retention depends on the distinction — an unreadable
+        // inventory retains every source, while this canonically empty one
+        // proves no vector stage requires protection and lets the ordinary
+        // default-off cleanup run.
         if records.is_empty() {
-            return Err(SemanticConfigurationBackendErrorV1::Unavailable);
+            if inventory_revision(&snapshot, &project_id).await? != revision {
+                return Err(SemanticConfigurationBackendErrorV1::Conflict);
+            }
+            return Ok(SemanticConfigurationInventoryPageV1 {
+                scanned_scopes: 0,
+                scanned_root_bindings: 0,
+                continuation: None,
+                complete_receipt: Some(SemanticConfigurationInventoryReceiptV1 {
+                    project_id,
+                    store_binding_digest,
+                    revision,
+                    scope_count,
+                    root_binding_count,
+                    inventory_digest: digest,
+                }),
+            });
         }
         let has_more = records.len() > usize::from(request.max_scopes);
         records.truncate(usize::from(request.max_scopes));
@@ -643,11 +665,22 @@ async fn inventory_revision(
         )
         .await
         .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-    let row = rows
+    // A project that never committed a semantic retrieval state has no
+    // inventory row at all. That is authoritative absence — revision 0,
+    // nothing was ever enrolled — not an unavailable authority. Reporting it
+    // as unavailable made a readable, canonically empty inventory
+    // indistinguishable from an unreadable one, and code-generation retention
+    // then planned against the offline protection set instead of an exact
+    // (empty) vector pin set. Every mutation trigger writes revision 1 on
+    // first insert, so receipts minted at revision 0 are rejected as stale
+    // from the first configuration mutation onward.
+    let Some(row) = rows
         .next()
         .await
         .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?
-        .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?;
+    else {
+        return Ok(0);
+    };
     let revision = row
         .get::<i64>(0)
         .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
