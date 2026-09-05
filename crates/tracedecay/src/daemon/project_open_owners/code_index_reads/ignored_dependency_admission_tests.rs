@@ -314,10 +314,18 @@ async fn latest(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> LatestCompleteCodeIndexV1 {
-    registry
-        .latest_complete_fresh(project_root)
-        .await
-        .expect("fresh serving generation")
+    // Lightweight publication precedes complete-generation seating. Demand
+    // that complete state before using its imports as admission evidence.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh(project_root).await {
+                return latest;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("fresh serving generation")
 }
 
 fn git(root: &Path, arguments: &[&str]) {
