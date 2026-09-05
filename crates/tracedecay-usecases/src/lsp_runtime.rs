@@ -57,6 +57,7 @@ use tracedecay_lsp::{
 };
 
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
+use tracedecay_runtime_core::path_safety::canonicalize_existing_prefix;
 use url::Url;
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, FeedbackRuntime, ProjectFeedbackStore};
@@ -3006,20 +3007,17 @@ fn validated_document_path(
 ) -> Result<ValidatedDocumentPath, LspRuntimeFailure> {
     let url = strict_file_url(document_uri)
         .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
-    let relative_uri = root_uri
-        .make_relative(&url)
-        .ok_or_else(|| LspRuntimeFailure::new("document-outside-registered-root"))?;
-    if relative_uri.is_empty()
-        || relative_uri.starts_with('/')
-        || relative_uri == ".."
-        || relative_uri.starts_with("../")
-    {
+    if root_uri.host_str() != url.host_str() {
         return Err(LspRuntimeFailure::new("document-outside-registered-root"));
     }
-
     let path = url
         .to_file_path()
         .map_err(|()| LspRuntimeFailure::new("document-uri-invalid"))?;
+    // Client URIs may address the admitted root through an OS or worktree
+    // alias. Resolve that spelling, then retain the directory capability for
+    // normalization and every subsequent file open.
+    let path = canonicalize_existing_prefix(&path)
+        .ok_or_else(|| LspRuntimeFailure::new("document-outside-registered-root"))?;
     let relative = path
         .strip_prefix(project_root)
         .map_err(|_| LspRuntimeFailure::new("document-outside-registered-root"))?;
@@ -3107,6 +3105,8 @@ fn open_project_file(
 
 #[cfg(test)]
 mod path_tests {
+    #[cfg(unix)]
+    use std::io::Read;
     use std::path::{Component, Path};
 
     use cap_std::ambient_authority;
@@ -3192,6 +3192,43 @@ mod path_tests {
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_alias_documents_resolve_and_open_under_the_admitted_directory() {
+        let (temp, root, root_url, root_dir) = admitted_root();
+        let alias = temp.path().join("alias");
+        symlink(&root, &alias).expect("root alias");
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn inside() {}\n").unwrap();
+        let uri = Url::from_file_path(alias.join("src/lib.rs")).unwrap();
+        let saved_document = validated_document_path(&root, &root_url, &root_dir, uri.as_str())
+            .expect("client alias resolves to the admitted directory");
+        assert_eq!(saved_document.absolute, root.join("src/lib.rs"));
+        assert_eq!(saved_document.relative, Path::new("src/lib.rs"));
+        let (_, mut file) = open_project_file(&root_dir, &saved_document.relative).unwrap();
+        let mut source = String::new();
+        file.read_to_string(&mut source).unwrap();
+        assert_eq!(source, "pub fn inside() {}\n");
+
+        let unsaved = Url::from_file_path(alias.join("src/new/unsaved.rs")).unwrap();
+        let document = validated_document_path(&root, &root_url, &root_dir, unsaved.as_str())
+            .expect("unsaved alias buffer resolves through its parent");
+        assert_eq!(document.relative, Path::new("src/new/unsaved.rs"));
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("lib.rs"), "outside evidence").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let escaped = Url::from_file_path(alias.join("escape/lib.rs")).unwrap();
+        assert!(validated_document_path(&root, &root_url, &root_dir, escaped.as_str()).is_err());
+
+        // A successful resolution does not grant an ambient-path read. The
+        // retained directory capability still refuses a replacement escape.
+        std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+        symlink(outside.join("lib.rs"), root.join("src/lib.rs")).unwrap();
+        assert!(open_project_file(&root_dir, &saved_document.relative).is_err());
     }
 
     #[cfg(unix)]
