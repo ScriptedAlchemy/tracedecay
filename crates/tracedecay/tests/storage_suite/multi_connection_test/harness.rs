@@ -106,11 +106,35 @@ pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> ChildGuard {
     child
 }
 
+/// Where the spawned daemon's stderr was redirected, when the caller captured
+/// it. Every client-side failure in this file quotes its tail: the daemon is a
+/// separate process, so a mid-request close leaves no evidence in the client's
+/// panic unless the daemon's own diagnostics are pulled in here.
+static DAEMON_STDERR_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Tail of the spawned daemon's stderr, for inclusion in a client-side panic.
+pub(super) fn daemon_stderr_tail() -> String {
+    let Some(path) = DAEMON_STDERR_PATH.get() else {
+        return "<daemon stderr was not captured by this test>".to_owned();
+    };
+    match std::fs::read_to_string(path) {
+        Ok(contents) if contents.is_empty() => "<daemon stderr is empty>".to_owned(),
+        Ok(contents) => {
+            let lines = contents.lines().collect::<Vec<_>>();
+            let start = lines.len().saturating_sub(200);
+            lines[start..].join("\n")
+        }
+        Err(error) => format!("<could not read daemon stderr {}: {error}>", path.display()),
+    }
+}
+
 pub(super) fn spawn_daemon_with_stderr(
     home: &Path,
     socket_path: &Path,
+    stderr_path: &Path,
     stderr: std::fs::File,
 ) -> ChildGuard {
+    let _ = DAEMON_STDERR_PATH.set(stderr_path.to_path_buf());
     let mut child = ChildGuard::new(
         common::tracedecay_command_with_home(home)
             .args(["daemon", "run", "--socket"])
@@ -300,19 +324,31 @@ impl McpProxy {
                     self.pending.insert(response_id, response);
                 }
                 Ok(ProxyOutput::InvalidJson { line, error }) => {
-                    panic!("invalid MCP response while waiting for {id}: {error}\nline: {line}")
+                    panic!(
+                        "invalid MCP response while waiting for {id}: {error}\nline: {line}\ndaemon stderr:\n{}",
+                        daemon_stderr_tail()
+                    )
                 }
                 Ok(ProxyOutput::ReadError(error)) => {
-                    panic!("failed to read MCP response {id}: {error}")
+                    panic!(
+                        "failed to read MCP response {id}: {error}\ndaemon stderr:\n{}",
+                        daemon_stderr_tail()
+                    )
                 }
                 Ok(ProxyOutput::Eof) => {
                     let status = self.child.try_wait().expect("read MCP proxy status");
-                    panic!("MCP proxy exited before response {id}; status: {status:?}")
+                    panic!(
+                        "MCP proxy exited before response {id}; status: {status:?}\ndaemon stderr:\n{}",
+                        daemon_stderr_tail()
+                    )
                 }
                 Err(RecvTimeoutError::Timeout) => self.kill_for_timeout(id),
                 Err(RecvTimeoutError::Disconnected) => {
                     let status = self.child.try_wait().expect("read MCP proxy status");
-                    panic!("MCP stdout reader stopped before response {id}; status: {status:?}")
+                    panic!(
+                        "MCP stdout reader stopped before response {id}; status: {status:?}\ndaemon stderr:\n{}",
+                        daemon_stderr_tail()
+                    )
                 }
             }
         }
@@ -320,7 +356,10 @@ impl McpProxy {
 
     fn kill_for_timeout(&mut self, id: u64) -> ! {
         stop_child(&mut self.child);
-        panic!("MCP request {id} exceeded {PROCESS_TIMEOUT:?}")
+        panic!(
+            "MCP request {id} exceeded {PROCESS_TIMEOUT:?}\ndaemon stderr:\n{}",
+            daemon_stderr_tail()
+        )
     }
 }
 
@@ -336,7 +375,8 @@ impl Drop for McpProxy {
 fn assert_successful_response(id: u64, response: Value) -> Value {
     assert!(
         response.get("error").is_none(),
-        "MCP request {id} failed: {response}"
+        "MCP request {id} failed: {response}\ndaemon stderr:\n{}",
+        daemon_stderr_tail()
     );
     response
 }

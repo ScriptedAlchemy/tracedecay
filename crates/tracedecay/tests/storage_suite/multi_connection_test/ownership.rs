@@ -8,7 +8,8 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
     let socket_path = common::daemon_socket_path(&home_path);
     let daemon_stderr_path = home_path.join("daemon.stderr.log");
     let daemon_stderr = std::fs::File::create(&daemon_stderr_path).expect("create daemon stderr");
-    let mut daemon = spawn_daemon_with_stderr(&home_path, &socket_path, daemon_stderr);
+    let mut daemon =
+        spawn_daemon_with_stderr(&home_path, &socket_path, &daemon_stderr_path, daemon_stderr);
     let profile_db_path = init_project(&home_path, &project_path, &socket_path);
 
     let mut clients = (0..CLIENT_COUNT)
@@ -100,9 +101,17 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
                         .spawn()
                         .expect("spawn brokered tool status"),
                 );
-                let status = wait_for_exit(&mut tool)
-                    .unwrap_or_else(|| panic!("tool client exceeded {PROCESS_TIMEOUT:?}"));
-                assert!(status.success(), "brokered tool status failed");
+                let status = wait_for_exit(&mut tool).unwrap_or_else(|| {
+                    panic!(
+                        "tool client exceeded {PROCESS_TIMEOUT:?}\ndaemon stderr:\n{}",
+                        daemon_stderr_tail()
+                    )
+                });
+                assert!(
+                    status.success(),
+                    "brokered tool status failed\ndaemon stderr:\n{}",
+                    daemon_stderr_tail()
+                );
             }));
         }
         for _ in 0..CONCURRENT_CLIENTS_PER_PATH {
@@ -129,9 +138,17 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
                     .write_all(hook_event.as_bytes())
                     .expect("write hook event");
                 drop(stdin);
-                let status = wait_for_exit(&mut hook)
-                    .unwrap_or_else(|| panic!("hook client exceeded {PROCESS_TIMEOUT:?}"));
-                assert!(status.success(), "hook client failed");
+                let status = wait_for_exit(&mut hook).unwrap_or_else(|| {
+                    panic!(
+                        "hook client exceeded {PROCESS_TIMEOUT:?}\ndaemon stderr:\n{}",
+                        daemon_stderr_tail()
+                    )
+                });
+                assert!(
+                    status.success(),
+                    "hook client failed\ndaemon stderr:\n{}",
+                    daemon_stderr_tail()
+                );
             }));
         }
         start.wait();
@@ -147,7 +164,13 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
         .current_dir(&project_path)
         .output()
         .expect("run doctor probe");
-    assert_command_success("brokered doctor", &doctor);
+    assert!(
+        doctor.status.success(),
+        "brokered doctor failed\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
+        String::from_utf8_lossy(&doctor.stdout),
+        String::from_utf8_lossy(&doctor.stderr),
+        daemon_stderr_tail()
+    );
     assert_eq!(
         file_identity(&profile_db_path),
         Some(db_identity),
