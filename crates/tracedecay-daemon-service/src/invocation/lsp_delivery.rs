@@ -68,17 +68,38 @@ pub fn retain_lsp_delivery_attempt(
     retained.clone()
 }
 
+/// What one settlement attempt for a session's in-flight outbound frame did.
+///
+/// The admission refusals are values rather than a swallowed log line: a
+/// refused receipt means this transport's delivery evidence never became
+/// durable, and only a typed outcome lets a caller — or a test — tell that
+/// apart from "there was nothing in flight".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LspDeliverySettlementAdmissionV1 {
+    /// No unacknowledged outbound frame was retained for this session.
+    NoAttemptInFlight,
+    /// The session was opened without a delivery settlement recorder.
+    RecorderUnavailable,
+    /// The receipt is durable in the recorder's spool and queued for its
+    /// write-behind lane; the recorder owns replay from there.
+    Enqueued,
+    /// The recorder's bounded spool refused the receipt at capacity.
+    DroppedAtCapacity,
+    /// The recorder refused the receipt, carrying its typed reason code.
+    Refused(&'static str),
+}
+
 impl RuntimeLspSession {
     pub(super) fn settle_in_flight_delivery(
         &mut self,
         outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
         drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
-    ) {
+    ) -> LspDeliverySettlementAdmissionV1 {
         let Some(attempt) = self.in_flight_delivery_attempt.take() else {
-            return;
+            return LspDeliverySettlementAdmissionV1::NoAttemptInFlight;
         };
         let Some(recorder) = self.delivery_settlements.as_ref() else {
-            return;
+            return LspDeliverySettlementAdmissionV1::RecorderUnavailable;
         };
         let settlement = tracedecay_domain::DeliverySettlementV1 {
             settled_at: current_micros().max(attempt.attempted_at),
@@ -87,11 +108,19 @@ impl RuntimeLspSession {
             drop_reason,
         };
         match recorder.try_record(settlement) {
-            Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {}
+            Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {
+                LspDeliverySettlementAdmissionV1::Enqueued
+            }
             Ok(
                 tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::DroppedAtCapacity,
-            ) => tracing::warn!("LSP delivery receipt was dropped at recorder capacity"),
-            Err(error) => tracing::warn!(%error, "LSP delivery receipt was refused"),
+            ) => {
+                tracing::warn!("LSP delivery receipt was dropped at recorder capacity");
+                LspDeliverySettlementAdmissionV1::DroppedAtCapacity
+            }
+            Err(error) => {
+                tracing::warn!(%error, "LSP delivery receipt was refused");
+                LspDeliverySettlementAdmissionV1::Refused(error)
+            }
         }
     }
 }
@@ -101,7 +130,7 @@ impl Drop for RuntimeLspSession {
         // Any removal without a protocol ACK discards the frame. This fallback
         // covers transport loss, TTL expiry, owner retirement, and shutdown;
         // explicit paths may settle first with a more specific reason.
-        self.settle_in_flight_delivery(
+        let _ = self.settle_in_flight_delivery(
             tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
             Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
         );

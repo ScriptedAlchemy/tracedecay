@@ -1118,15 +1118,26 @@ async fn cursor_blank_unsupported_and_oversized_frames_are_covered() {
     assert!(covered.source_deferred);
     let mut messages_upserted = covered.messages_upserted;
     let mut deferred = covered.source_deferred;
-    for _ in 0..3 {
+    let file_len = std::fs::metadata(&transcript_path).unwrap().len();
+    for pass in 0..3 {
         if !deferred {
             break;
         }
+        let before =
+            observation_source_cursor_position(&db, "cursor", "cursor-covered-frames", &project)
+                .await;
         let catchup =
             try_ingest_cursor_transcript_event(&event.to_string(), &db, test_project_id(&project))
                 .await
                 .expect("bounded follow-up pass must make durable progress");
-        assert!(catchup.bytes_consumed > 0);
+        let after =
+            observation_source_cursor_position(&db, "cursor", "cursor-covered-frames", &project)
+                .await;
+        assert!(
+            catchup.bytes_consumed > 0,
+            "catch-up pass {pass} made no durable progress: {catchup:?}; \
+             cursor {before:?} -> {after:?} of {file_len} bytes"
+        );
         messages_upserted += catchup.messages_upserted;
         deferred = catchup.source_deferred;
     }

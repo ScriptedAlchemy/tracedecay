@@ -12,16 +12,16 @@ use tracedecay_domain::{
     CanonicalObservationRelationsV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
     ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, CommitId,
     ComponentVersion, CoverageReportV1, DurableClaudeObservationV1, EvidenceAvailabilityV1,
-    EvidenceClass, GenerationBoundRepositoryProvenanceV1, NativeAliasV2,
-    ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    ProjectionGenerationId, ProviderId, RefId, RepositoryDirtyStateV1, RepositoryEvidenceV1,
-    RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark, WorktreeId,
+    EvidenceClass, GenerationBoundRepositoryProvenanceV1, NativeAliasV2, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1,
+    PrivacyDomainBoundLocatorDigest, ProjectionGenerationId, ProviderId, RefId,
+    RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1,
+    RepositoryRemoteIdentityV1, RetentionClass, RetrievalAnchorRecordV2,
+    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, TreeId, UtcMicros, VectorWatermark, WorktreeId,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::observation::{
@@ -1232,7 +1232,7 @@ async fn canonical_payload_revision_replays_advance_typed_coverage() {
 }
 
 #[tokio::test]
-async fn canonical_payload_revision_compatibility_rejects_unshipped_differences() {
+async fn canonical_payload_revision_compatibility_separates_revisions_from_unshipped_differences() {
     for provider in ["codex", "cursor"] {
         let tmp = TempDir::new().unwrap();
         let runtime = profile_runtime(&tmp).await;
@@ -1334,22 +1334,77 @@ async fn canonical_payload_revision_compatibility_rejects_unshipped_differences(
             _ => unreachable!("fixture provider is allowlisted"),
         }
 
+        // Three shipped dispositions share this loop, keyed by where the
+        // candidate sits relative to the durable scan frontier:
+        //
+        // * No expected cursor: the candidate's range is already covered, so
+        //   the store cannot tell an unshipped difference from a stale writer
+        //   that lost a cursor race. The verdict is the retryable
+        //   `CursorConflict`, and no ledger, cursor, or row moves.
+        // * At the frontier with a moved range, Codex: the Codex revision
+        //   normalizer never adopts a candidate's `evidence.range`, so the
+        //   record is an unshipped difference and stays fail-closed with the
+        //   terminal `ObservationCollision`. The refusal still records
+        //   coverage — the cursor advances past the refused range so ingest
+        //   does not re-read the refused record forever.
+        // * At the frontier with a moved range, Cursor: the Cursor normalizer
+        //   deliberately replaces `evidence.range` with the candidate's
+        //   (`normalize_cursor_payload_revision`), because a Cursor record
+        //   carries its own `stable_record_id` and a rewritten transcript
+        //   moves it. That is the shipped canonical-payload-revision replay,
+        //   so it settles as `CoveredDuplicate` over the retained row and
+        //   advances the cursor rather than refusing.
+        let mut durable_cursor = old_cursor.clone();
         for (difference, changed, expected_cursor) in candidates {
-            let error = store
+            let at_scan_frontier = expected_cursor.is_some();
+            let result = store
                 .persist_observation(provider_write(changed.clone(), expected_cursor))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(error, ObservationStoreError::ObservationCollision { .. }),
-                "{provider} {difference} must remain fail-closed, got {error:?}"
-            );
+                .await;
+            if at_scan_frontier {
+                match provider {
+                    "codex" => {
+                        let error = result.expect_err(
+                            "a moved Codex range is an unshipped difference and must refuse",
+                        );
+                        assert!(
+                            matches!(error, ObservationStoreError::ObservationCollision { .. }),
+                            "{provider} {difference} must remain fail-closed, got {error:?}"
+                        );
+                    }
+                    "cursor" => {
+                        let outcome = result.expect(
+                            "a moved Cursor range is the shipped canonical payload revision",
+                        );
+                        assert!(
+                            matches!(outcome, ObservationPersistOutcome::CoveredDuplicate(_)),
+                            "{provider} {difference} must settle as a covered duplicate, \
+                             got {outcome:?}"
+                        );
+                    }
+                    _ => unreachable!("fixture provider is allowlisted"),
+                }
+                durable_cursor = provider_cursor(
+                    provider,
+                    &format!("session.{provider}.canonical-revision"),
+                    changed.identity().generation().generation_id(),
+                    changed.identity().position().end(),
+                );
+            } else {
+                let error = result
+                    .expect_err("a covered replay of an unshipped difference must not commit");
+                assert!(
+                    matches!(error, ObservationStoreError::CursorConflict { .. }),
+                    "{provider} {difference} must be a retryable cursor conflict, \
+                     got {error:?}"
+                );
+            }
             assert_eq!(
                 store
                     .get_source_cursor(changed.source(), changed.scope())
                     .await
                     .unwrap(),
-                Some(old_cursor.clone()),
-                "{provider} {difference} must not advance the cursor"
+                Some(durable_cursor.clone()),
+                "{provider} {difference} left the wrong durable cursor"
             );
         }
     }
@@ -1751,8 +1806,15 @@ async fn cursor_only_progress_survives_restart() {
     );
 }
 
+/// Re-submitting the same canonical identity material after it committed is a
+/// *covered* replay: the durable source cursor already stands past the
+/// candidate's range, so the store cannot tell a genuine content collision
+/// from a stale reader that lost a cursor race. The typed verdict is therefore
+/// the retryable [`ObservationStoreError::CursorConflict`] — never a terminal
+/// [`ObservationStoreError::ObservationCollision`] — and no ledger, cursor, or
+/// row may move.
 #[tokio::test]
-async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchanged() {
+async fn covered_identity_collision_is_retryable_and_leaves_all_authoritative_state_unchanged() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -1786,26 +1848,19 @@ async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchange
     let error = store
         .persist_observation(write(colliding.clone(), None))
         .await
-        .expect_err("same canonical identity with another payload must collide");
+        .expect_err("same canonical identity with another payload must not commit");
     match error {
-        ObservationStoreError::ObservationCollision {
-            observation_id,
-            existing_digest,
-            candidate_digest,
-            outcome,
-        } => {
-            assert_eq!(observation_id.as_ref(), original.observation_id());
+        ObservationStoreError::CursorConflict { expected, actual } => {
             assert_eq!(
-                existing_digest.as_ref(),
-                original.payload_reference().digest()
+                *expected, None,
+                "the stale writer carried no expected cursor"
             );
             assert_eq!(
-                candidate_digest.as_ref(),
-                colliding.payload_reference().digest()
+                *actual, cursor_before,
+                "the retry must resume from the durable winning cursor"
             );
-            assert_eq!(outcome, ObservationCollisionOutcomeV1::IdentityCollision);
         }
-        other => panic!("expected typed observation collision, got {other:?}"),
+        other => panic!("expected a retryable cursor conflict, got {other:?}"),
     }
 
     assert_eq!(
@@ -1963,8 +2018,18 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
     }
 }
 
+/// Two writers submitting byte-identical evidence settle one sequence and one
+/// receipt.
+///
+/// Which typed outcome the follower reports is a scheduling detail, not a
+/// contract: a follower that reaches the writer while the leader is still
+/// queued or in flight attaches to that leader and settles the leader's
+/// `Committed` outcome, while one that arrives after the commit reads the
+/// retained row and reports `ExactDuplicate`. Both carry the same receipt, so
+/// the invariant under test is "one sequence, one row set, identical receipts"
+/// — never a second commit.
 #[tokio::test]
-async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate() {
+async fn concurrent_exact_retry_commits_one_sequence_and_settles_one_receipt() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store_left = runtime
@@ -1992,16 +2057,23 @@ async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate()
             | ObservationPersistOutcome::CoveredDuplicate(_) => None,
         })
         .expect("one concurrent writer must commit");
-    let duplicate = outcomes
+    let settled = outcomes
         .iter()
-        .find_map(|outcome| match outcome {
-            ObservationPersistOutcome::ExactDuplicate(receipt) => Some(receipt),
-            ObservationPersistOutcome::Committed(_)
-            | ObservationPersistOutcome::CoveredDuplicate(_) => None,
+        .map(|outcome| match outcome {
+            ObservationPersistOutcome::Committed(receipt)
+            | ObservationPersistOutcome::ExactDuplicate(receipt) => receipt,
+            ObservationPersistOutcome::CoveredDuplicate(receipt) => panic!(
+                "a byte-identical retry keeps its own identity and can never be a covered \
+                 duplicate, got {receipt:?}"
+            ),
         })
-        .expect("the other concurrent writer must observe the duplicate");
-
-    assert_eq!(committed, duplicate);
+        .collect::<Vec<_>>();
+    assert_eq!(settled.len(), 2);
+    assert_eq!(
+        settled[0], settled[1],
+        "both writers must settle the same receipt"
+    );
+    assert_eq!(committed, settled[0]);
     let replay = store_left
         .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
         .await
@@ -2233,16 +2305,17 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             native_record_id: &record_id,
             body: "conflicting cross-provider payload",
         });
+        // The committed cursor already covers this range, so a conflicting
+        // re-submission is indistinguishable from a stale writer that lost a
+        // cursor race: the typed verdict is the retryable cursor conflict, and
+        // nothing below it may move.
         let collision = store
             .persist_observation(provider_write(colliding, None))
             .await
             .expect_err("{provider}: conflicting identity must fail closed");
         assert!(
-            matches!(
-                collision,
-                ObservationStoreError::ObservationCollision { .. }
-            ),
-            "{provider}: expected ObservationCollision, got {collision:?}"
+            matches!(collision, ObservationStoreError::CursorConflict { .. }),
+            "{provider}: expected a retryable CursorConflict, got {collision:?}"
         );
         assert_eq!(
             store.get_source_cursor(&source, &scope()).await.unwrap(),

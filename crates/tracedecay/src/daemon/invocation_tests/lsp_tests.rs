@@ -411,6 +411,11 @@ fn lsp_delivery_same_session_identical_frames_after_ack_have_distinct_events() {
 
 struct LspDeliveryFixture {
     _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
+    /// The runtime owns the daemon database scope every durable settlement
+    /// write is admitted under. Dropping it leaves the lease without an active
+    /// write scope, so the recorder's replay would retain every receipt
+    /// instead of settling it.
+    _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
     _project: tempfile::TempDir,
     project_id: ProjectId,
     recorder: Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
@@ -463,6 +468,7 @@ async fn lsp_delivery_fixture() -> LspDeliveryFixture {
     );
     LspDeliveryFixture {
         _pin: pin,
+        _runtime: runtime,
         _project: project,
         project_id,
         recorder,
@@ -570,8 +576,11 @@ async fn assert_one_lsp_delivery_drop(fixture: LspDeliveryFixture) {
         .shutdown()
         .await
         .expect("drain LSP delivery recorder");
-    assert_eq!(summary.settled, 1, "one outbound frame must settle");
-    assert_eq!(summary.failed, 0, "terminal LSP drop must persist");
+    assert_eq!(
+        (summary.settled, summary.failed, summary.retained),
+        (1, 0, 0),
+        "one outbound frame must settle durably with nothing refused or retained: {summary:?}"
+    );
     drop(fixture.recorder);
     drop(fixture.authority);
     let Ok(producer) = Arc::try_unwrap(fixture.producer) else {
