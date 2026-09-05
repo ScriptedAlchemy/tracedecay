@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tracedecay_domain::ManifestDigest;
+use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, same_canonical_path};
 use url::Url;
 
 use crate::capabilities::{
@@ -77,7 +78,7 @@ impl AdmittedRoot {
         ) {
             (Some((admitted_url, admitted_path)), Some((candidate_url, candidate_path))) => {
                 admitted_url.host_str() == candidate_url.host_str()
-                    && admitted_path == candidate_path
+                    && same_canonical_path(&admitted_path, &candidate_path)
             }
             _ => false,
         }
@@ -1128,27 +1129,26 @@ impl DocumentConfinement {
         if self.root_host.as_deref() != document_url.host_str() {
             return false;
         }
-        let lexical_match = document_path
-            .strip_prefix(&self.root_path)
-            .is_ok_and(|relative| {
-                !relative.as_os_str().is_empty()
-                    && relative
-                        .components()
-                        .all(|component| matches!(component, Component::Normal(_)))
-            });
-        if !lexical_match {
-            return false;
-        }
-        let Some(canonical_root) = self.canonical_root.as_ref() else {
-            return true;
+        // Admission resolves filesystem aliases before binding this root.
+        // Apply the same identity rule to client document URIs, including an
+        // unsaved buffer whose existing parent is reached through an alias.
+        let canonical_document;
+        let (root_path, document_path) = match &self.canonical_root {
+            Some(root) => {
+                let Some(path) = canonicalize_existing_prefix(&document_path) else {
+                    return false;
+                };
+                canonical_document = path;
+                (root.as_path(), canonical_document.as_path())
+            }
+            None => (self.root_path.as_path(), document_path.as_path()),
         };
-        let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
-        else {
-            return false;
-        };
-        existing_ancestor
-            .canonicalize()
-            .is_ok_and(|canonical_ancestor| canonical_ancestor.strip_prefix(canonical_root).is_ok())
+        document_path.strip_prefix(root_path).is_ok_and(|relative| {
+            !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+        })
     }
 }
 
