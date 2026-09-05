@@ -43,6 +43,22 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
     }
 }
 
+/// Flush an already-written file's contents so its bytes are durable.
+///
+/// The handle is opened for reading *and* writing. Windows implements
+/// `File::sync_all` with `FlushFileBuffers`, which requires write access and
+/// fails with `ERROR_ACCESS_DENIED` on a read-only handle, while Unix `fsync`
+/// accepts a read-only descriptor; opening for write is the one shape that is
+/// durable on both. Shared so no caller reintroduces the read-only open.
+#[hotpath::measure(label = "private_fs.framed_log.sync_file_at")]
+pub fn sync_file_at(path: &Path) -> io::Result<()> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .and_then(|file| sync_owned_file(&file))
+}
+
 pub fn file_len(path: &Path) -> io::Result<u64> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),

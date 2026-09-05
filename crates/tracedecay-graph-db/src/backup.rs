@@ -622,8 +622,7 @@ fn sha256_file(path: &Path) -> Result<String, GraphDbError> {
 }
 
 fn sync_file(path: &Path) -> Result<(), GraphDbError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
+    tracedecay_private_fs::framed_log::sync_file_at(path)
         .map_err(|error| unavailable_io("sync graph backup artifact", path, error))
 }
 

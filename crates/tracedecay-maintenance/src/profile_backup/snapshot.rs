@@ -8,7 +8,7 @@
 //! opens under the current format authority). Write-ahead and shared-memory
 //! sidecars are therefore excluded from the backup inventory.
 
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -229,12 +229,10 @@ fn native_backup_path(destination: &Path) -> Result<PathBuf, ProfileBackupError>
 }
 
 fn sync_file(path: &Path) -> Result<(), ProfileBackupError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| {
-            ProfileBackupError::unavailable(format!(
-                "sync backup artifact '{}': {error}",
-                path.display()
-            ))
-        })
+    tracedecay_private_fs::framed_log::sync_file_at(path).map_err(|error| {
+        ProfileBackupError::unavailable(format!(
+            "sync backup artifact '{}': {error}",
+            path.display()
+        ))
+    })
 }

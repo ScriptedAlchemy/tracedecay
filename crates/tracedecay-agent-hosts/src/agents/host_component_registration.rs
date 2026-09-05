@@ -1802,8 +1802,7 @@ fn registration_directory_applied_state(
 fn sync_registration_metadata(
     path: &Path,
 ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-    fs::File::open(path)
-        .and_then(|file| file.sync_all())
+    tracedecay_private_fs::framed_log::sync_file_at(path)
         .and_then(|()| {
             tracedecay_private_fs::framed_log::sync_parent_directory(
                 path,

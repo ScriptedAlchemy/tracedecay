@@ -1040,11 +1040,9 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), ProfileBackupError>
 }
 
 fn sync_file(path: &Path) -> Result<(), ProfileBackupError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| {
-            ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
-        })
+    tracedecay_private_fs::framed_log::sync_file_at(path).map_err(|error| {
+        ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
+    })
 }
 
 fn sync_directory(path: &Path) -> Result<(), ProfileBackupError> {
