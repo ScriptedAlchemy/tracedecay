@@ -1000,7 +1000,10 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
         }),
     );
     // PromptBoundary now live-dispatches (counter reset). Without a daemon the
-    // hook still fail-opens at exit 0 / `{}` and records the typed diagnostic.
+    // hook still fail-opens at exit 0 / `{}`. The diagnostic goes to tracing,
+    // which the hook entry point keeps silent by default: Kiro reads stderr
+    // as its block-reason channel and Codex treats unexpected stderr as a
+    // hook failure, so a daemon-unavailable note must not appear there.
     assert_eq!(
         prompt_submit.status.code(),
         Some(0),
@@ -1011,8 +1014,8 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
     assert_eq!(prompt_submit.stdout, b"{}\n", "{prompt_submit:?}");
     let prompt_stderr = String::from_utf8_lossy(&prompt_submit.stderr);
     assert!(
-        prompt_stderr.contains("local counter reset daemon call failed"),
-        "live PromptBoundary dispatch must surface the daemon-unavailable diagnostic: {prompt_submit:?}"
+        prompt_stderr.is_empty(),
+        "live PromptBoundary dispatch must keep the daemon-unavailable diagnostic off the host stderr: {prompt_submit:?}"
     );
 
     let (mut spool, report) = HookSpoolV1::open(
