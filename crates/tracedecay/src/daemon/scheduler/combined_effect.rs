@@ -1153,8 +1153,9 @@ mod tests {
     impl CombinedAdmissionFixture {
         async fn new() -> Self {
             let temp = TempDir::new().expect("combined admission fixture");
-            let project_root = temp.path().join("project");
-            let profile_root = temp.path().join("profile");
+            let fixture_root = temp.path().canonicalize().expect("canonical fixture root");
+            let project_root = fixture_root.join("project");
+            let profile_root = fixture_root.join("profile");
             std::fs::create_dir_all(project_root.join("src"))
                 .expect("combined admission source directory");
             std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
