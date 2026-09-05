@@ -103,7 +103,11 @@ fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
 async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_owner() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
-    let scoped_store = super::scoped_code_index_store_root(store.path(), project.path());
+    let canonical_project_root = project
+        .path()
+        .canonicalize()
+        .expect("canonical project root");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), &canonical_project_root);
     let generation_id = {
         let mut scheduler = open(project.path(), &scoped_store);
         publish(&mut scheduler)
