@@ -312,6 +312,192 @@ impl RegisteredGlobalDb {
     }
 
     #[hotpath::skip]
+    pub async fn lcm_compress_retained_page_guarded<F>(
+        &self,
+        request: LcmCompressionRequest,
+        control: &ExecutionControl,
+        before_commit: F,
+        guard: compression::RetainedCompressionGuard,
+        convergence_candidate: Option<
+            &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
+        >,
+    ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
+        check_execution(control)?;
+        let storage_root = self.lcm_storage_root()?;
+        let session_id = SessionId::new(request.session_id.clone()).map_err(|error| {
+            LcmError::Db(format!(
+                "invalid retained LCM compression session identity '{}': {error}",
+                request.session_id
+            ))
+        })?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let mut payload_rollback =
+            payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
+        if let Some(candidate) = convergence_candidate {
+            tracedecay_lcm::summary_convergence::require_candidate_revision(
+                &transaction,
+                candidate,
+            )
+            .await?;
+        }
+        let relation_projection = seed_session_relation_projection(
+            self,
+            &transaction,
+            &session_id,
+            execution_control_graph_cancellation(control),
+        )
+        .await
+        .map_err(|error| {
+            LcmError::Db(format!(
+                "seed native retained LCM relation projection: {error}"
+            ))
+        })?;
+        check_execution(control)?;
+        let publisher = session_temporal_operations::GlobalDbLcmSummaryPublication::for_scope(
+            &transaction,
+            relation_projection,
+        );
+        let bounded = compression::compress_retained_page(
+            &transaction,
+            &publisher,
+            storage_root,
+            request,
+            &mut payload_rollback,
+            guard,
+        )
+        .await?;
+        if bounded.response.status != "needs_summary"
+            && let Some(candidate) = convergence_candidate
+        {
+            let state = if bounded.has_more {
+                tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Pending
+            } else {
+                tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Current
+            };
+            let settled = tracedecay_lcm::summary_convergence::record_outcome(
+                &transaction,
+                candidate,
+                state,
+                None,
+                0,
+                0,
+            )
+            .await?;
+            if !settled {
+                tracedecay_lcm::summary_convergence::require_candidate_revision(
+                    &transaction,
+                    candidate,
+                )
+                .await?;
+                return Err(LcmError::Db(
+                    "retained convergence queue settlement affected no row".to_string(),
+                ));
+            }
+        }
+        check_execution(control)?;
+        before_commit()?;
+        transaction.commit().await?;
+        payload_rollback.disarm();
+        // Retained convergence publishes the durable relation effect journal
+        // atomically with the summary, lifecycle frontier, and queue outcome.
+        // Applying that potentially session-wide graph is recovered by the
+        // scheduler's separately bounded relation page.
+        Ok(bounded)
+    }
+
+    #[hotpath::skip]
+    pub async fn lcm_invalidate_retained_raw_revision_page(
+        &self,
+        candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
+        max_affected: usize,
+    ) -> Result<(usize, bool), LcmError> {
+        let Some(_) = candidate.stale_from_store_id else {
+            return Ok((0, false));
+        };
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let budget = max_affected.max(1);
+        let mut work = 0_usize;
+        let mut current = candidate.clone();
+        loop {
+            tracedecay_lcm::summary_convergence::require_candidate_revision(&transaction, &current)
+                .await?;
+            let Some(stale_from_store_id) = current.stale_from_store_id else {
+                break;
+            };
+            let invalidation = session_temporal_operations::invalidate_raw_summary_revision(
+                &transaction,
+                current.provider.as_str(),
+                current.session_id.as_str(),
+                stale_from_store_id,
+                budget.saturating_sub(work).max(1),
+            )
+            .await?;
+            transaction
+                .execute(
+                    "UPDATE lcm_lifecycle_state
+                     SET current_frontier_store_id = CASE
+                           WHEN current_frontier_store_id IS NULL THEN NULL
+                           ELSE MIN(current_frontier_store_id, ?3)
+                         END,
+                         updated_at = unixepoch()
+                     WHERE provider = ?1 AND conversation_id = ?2",
+                    tracedecay_runtime_core::db::engine::params![
+                        current.provider.as_str(),
+                        current.session_id.as_str(),
+                        invalidation.rewind_frontier_store_id,
+                    ],
+                )
+                .await
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            if invalidation.has_more {
+                tracedecay_lcm::summary_convergence::record_invalidation_page_yield(
+                    &transaction,
+                    &current,
+                )
+                .await?;
+                work = work.saturating_add(invalidation.work_count);
+                break;
+            }
+            tracedecay_lcm::summary_convergence::complete_stale_raw_revision(
+                &transaction,
+                &current,
+            )
+            .await?;
+            let affected_summary = invalidation.stale_summary_count > 0;
+            work = work.saturating_add(invalidation.work_count.max(1));
+            let Some(next) = tracedecay_lcm::summary_convergence::candidate_for_session(
+                &transaction,
+                current.provider.as_str(),
+                current.session_id.as_str(),
+            )
+            .await?
+            else {
+                current.stale_from_store_id = None;
+                break;
+            };
+            current = next;
+            if affected_summary || work >= budget {
+                break;
+            }
+        }
+        let has_more = current.stale_from_store_id.is_some();
+        transaction
+            .commit()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        Ok((work, has_more))
+    }
+
+    #[hotpath::skip]
     pub async fn lcm_payload_health_detail(
         &self,
         storage_root: &Path,
@@ -362,6 +548,26 @@ impl RegisteredGlobalDb {
     ) -> Result<u64, LcmError> {
         SessionStoreAccess::new(self)
             .lcm_protect_session_raw_messages(provider, session_id)
+            .await
+    }
+
+    #[hotpath::skip]
+    pub async fn lcm_protect_session_raw_messages_page(
+        &self,
+        provider: &str,
+        session_id: &str,
+        after_store_id: i64,
+        page_limit: usize,
+        page_max_bytes: u64,
+    ) -> Result<tracedecay_lcm::summary_convergence::LcmRawProtectionPage, LcmError> {
+        SessionStoreAccess::new(self)
+            .lcm_protect_session_raw_messages_page(
+                provider,
+                session_id,
+                after_store_id,
+                page_limit,
+                page_max_bytes,
+            )
             .await
     }
 

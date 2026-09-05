@@ -9,7 +9,7 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_store::SessionStoreResult;
+use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
 use super::operations::CanonicalPublicationManifest;
 use super::projection::observation_envelope_from_payload;
@@ -19,7 +19,10 @@ use super::relations::{
     SessionRelationScope, SummaryRelationNode, SummaryRelationRead, SummarySourceRef,
     ThreadHierarchyRelation, WorkflowAgentMembership,
 };
-use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
+use crate::handle::{
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
+    SessionTemporalWriteTxn,
+};
 
 const RECONSTRUCT_OPERATION: &str = "reconstruct native session relation projection";
 const DEFAULT_MAX_ENTITIES: usize = 100_000;
@@ -28,6 +31,23 @@ const DEFAULT_MAX_RELATIONS: usize = 100_000;
 // reconstruction and its receipt acknowledgement; each retry re-reads the
 // refreshed generation, so the bound only limits back-to-back supersessions.
 const APPLY_PUBLICATION_RACE_ATTEMPTS: usize = 3;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionRelationRecoveryPage {
+    pub recovered: usize,
+    pub processed: usize,
+    pub has_more: bool,
+    pub next_retry_at_unix_seconds: Option<i64>,
+}
+
+struct PendingRelationRecovery {
+    session_id: String,
+    generation: i64,
+    scope_kind: String,
+    scope_id: String,
+    projection_json: Option<String>,
+    failure_count: i64,
+}
 
 struct CanonicalOccurrence {
     occurrence_id: MessageOccurrenceIdV1,
@@ -141,6 +161,21 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> SessionStoreResult<usize> {
+        Ok(self
+            .recover_pending_session_relation_projection_page(limit, cancellation)
+            .await?
+            .recovered)
+    }
+
+    #[hotpath::measure(
+        future = true,
+        label = "session_temporal.persist.recover_relation_page"
+    )]
+    pub async fn recover_pending_session_relation_projection_page(
+        &self,
+        limit: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<SessionRelationRecoveryPage> {
         if limit == 0 {
             return Err(storage(
                 RECONSTRUCT_OPERATION,
@@ -159,17 +194,18 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let mut rows = snapshot
             .query(
                 "SELECT receipt.session_id, receipt.generation, receipt.scope_kind,
-                        receipt.scope_id, journal.projection_json
+                        receipt.scope_id, journal.projection_json,
+                        receipt.recovery_failure_count
                  FROM session_relation_receipts AS receipt
                  LEFT JOIN session_relation_effect_journal AS journal
                    ON journal.session_id = receipt.session_id
                   AND journal.generation = receipt.generation
                  WHERE receipt.state = 'pending'
+                   AND receipt.recovery_state IN ('pending', 'retryable')
+                   AND receipt.recovery_next_attempt_at <= unixepoch()
                  ORDER BY receipt.created_at, receipt.session_id, receipt.generation
                  LIMIT ?1",
-                params![
-                    i64::try_from(limit).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-                ],
+                params![bounded_query_limit(limit)?],
             )
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
@@ -180,74 +216,193 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
         {
             require_not_cancelled(&cancellation)?;
-            let session_id = SessionId::new(
-                row.get::<String>(0)
+            pending.push(PendingRelationRecovery {
+                session_id: row
+                    .get(0)
                     .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let generation = SessionProjectionGenerationV1::new(
-                u64::try_from(
-                    row.get::<i64>(1)
-                        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-                )
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            )
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let scope_kind: String = row
-                .get(2)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let scope_id: String = row
-                .get(3)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let expected_kind = match scope {
-                SessionRelationScope::ProjectSessions { .. } => "project_sessions",
-                SessionRelationScope::ProfileSessions { .. } => "profile_sessions",
-            };
-            if scope_kind != expected_kind || scope_id != scope.identity() {
-                return Err(storage_message(
-                    RECONSTRUCT_OPERATION,
-                    "pending relation receipt does not belong to the mounted session scope",
-                ));
-            }
-            let projection_json = row
-                .get::<Option<String>>(4)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-                .ok_or_else(|| {
-                    storage_message(
-                        RECONSTRUCT_OPERATION,
-                        "pending relation receipt has no durable effect journal",
-                    )
-                })?;
-            let projection: SessionRelationProjection = serde_json::from_str(&projection_json)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            if projection.session_id != session_id || projection.generation != generation.value() {
-                return Err(storage_message(
-                    RECONSTRUCT_OPERATION,
-                    "relation effect journal identity does not match its receipt",
-                ));
-            }
-            if projection.scope != scope {
-                return Err(storage_message(
-                    RECONSTRUCT_OPERATION,
-                    "relation effect journal does not belong to the mounted session scope",
-                ));
-            }
-            pending.push(projection);
+                generation: row
+                    .get(1)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+                scope_kind: row
+                    .get(2)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+                scope_id: row
+                    .get(3)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+                projection_json: row
+                    .get(4)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+                failure_count: row
+                    .get(5)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            });
         }
         drop(rows);
         drop(snapshot);
-        for projection in &pending {
+        let expected_kind = match scope {
+            SessionRelationScope::ProjectSessions { .. } => "project_sessions",
+            SessionRelationScope::ProfileSessions { .. } => "profile_sessions",
+        };
+        let has_more = pending.len() > limit;
+        pending.truncate(limit);
+        let mut recovered = 0_usize;
+        let mut processed = 0_usize;
+        for candidate in &pending {
             require_not_cancelled(&cancellation)?;
-            super::relation_receipts::apply_relation_projection(
+            processed = processed.saturating_add(1);
+            let session_id = match SessionId::new(candidate.session_id.clone()) {
+                Ok(session_id) => session_id,
+                Err(_) => {
+                    self.settle_relation_recovery_failure(
+                        candidate,
+                        "invalid_session_identity",
+                        true,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+            let generation = match u64::try_from(candidate.generation)
+                .ok()
+                .and_then(|generation| SessionProjectionGenerationV1::new(generation).ok())
+            {
+                Some(generation) => generation,
+                None => {
+                    self.settle_relation_recovery_failure(candidate, "invalid_generation", true)
+                        .await?;
+                    continue;
+                }
+            };
+            if candidate.scope_kind != expected_kind || candidate.scope_id != scope.identity() {
+                self.settle_relation_recovery_failure(candidate, "scope_mismatch", true)
+                    .await?;
+                continue;
+            }
+            let Some(projection_json) = candidate.projection_json.as_deref() else {
+                self.settle_relation_recovery_failure(candidate, "journal_missing", true)
+                    .await?;
+                continue;
+            };
+            let projection =
+                match serde_json::from_str::<SessionRelationProjection>(projection_json) {
+                    Ok(projection) => projection,
+                    Err(_) => {
+                        self.settle_relation_recovery_failure(candidate, "journal_malformed", true)
+                            .await?;
+                        continue;
+                    }
+                };
+            if projection.session_id != session_id || projection.generation != generation.value() {
+                self.settle_relation_recovery_failure(candidate, "journal_identity_mismatch", true)
+                    .await?;
+                continue;
+            }
+            if projection.scope != scope {
+                self.settle_relation_recovery_failure(candidate, "journal_scope_mismatch", true)
+                    .await?;
+                continue;
+            }
+            match super::relation_receipts::apply_relation_projection(
                 self.inner(),
-                projection,
+                &projection,
                 Arc::clone(&cancellation),
             )
-            .await?;
+            .await
+            {
+                Ok(_) => recovered = recovered.saturating_add(1),
+                Err(SessionStoreError::Cancelled) => return Err(SessionStoreError::Cancelled),
+                Err(SessionStoreError::DeadlineExceeded) => {
+                    return Err(SessionStoreError::DeadlineExceeded);
+                }
+                Err(error) => {
+                    let (failure_code, permanent) = relation_apply_failure_disposition(&error);
+                    self.settle_relation_recovery_failure(candidate, failure_code, permanent)
+                        .await?;
+                }
+            }
         }
-        let recovered = u64::try_from(pending.len()).unwrap_or(u64::MAX);
-        crate::support::record_output_sessions(recovered);
-        Ok(pending.len())
+        crate::support::record_output_sessions(u64::try_from(recovered).unwrap_or(u64::MAX));
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut retry_rows = snapshot
+            .query(
+                "SELECT MIN(recovery_next_attempt_at)
+                 FROM session_relation_receipts
+                 WHERE state = 'pending'
+                   AND recovery_state IN ('pending', 'retryable')",
+                (),
+            )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let next_retry_at_unix_seconds = retry_rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            .ok_or_else(|| {
+                storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "relation retry query returned no aggregate row",
+                )
+            })?
+            .get(0)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        Ok(SessionRelationRecoveryPage {
+            recovered,
+            processed,
+            has_more,
+            next_retry_at_unix_seconds,
+        })
+    }
+
+    async fn settle_relation_recovery_failure(
+        &self,
+        candidate: &PendingRelationRecovery,
+        failure_code: &'static str,
+        permanent: bool,
+    ) -> SessionStoreResult<()> {
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let next_count = candidate.failure_count.saturating_add(1);
+        let delay_seconds = 1_i64
+            .checked_shl(u32::try_from(next_count.min(8)).unwrap_or(8))
+            .unwrap_or(256);
+        let changed = transaction
+            .execute(
+                "UPDATE session_relation_receipts
+                 SET recovery_state = ?4,
+                     recovery_failure_code = ?5,
+                     recovery_failure_count = ?6,
+                     recovery_next_attempt_at = CASE
+                         WHEN ?4 = 'retryable' THEN unixepoch() + ?7 ELSE 0 END
+                 WHERE session_id = ?1 AND generation = ?2
+                   AND state = 'pending' AND recovery_failure_count = ?3",
+                params![
+                    candidate.session_id.as_str(),
+                    candidate.generation,
+                    candidate.failure_count,
+                    if permanent { "permanent" } else { "retryable" },
+                    failure_code,
+                    next_count,
+                    delay_seconds,
+                ],
+            )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        if changed != 1 {
+            return Err(storage_message(
+                RECONSTRUCT_OPERATION,
+                "relation recovery disposition changed concurrently",
+            ));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        Ok(())
     }
 
     #[hotpath::skip]
@@ -400,6 +555,7 @@ async fn reconstruct_summaries(
               AND node.session_id = availability.session_id
              WHERE availability.session_id = ?1
                AND availability.generation = ?2
+               AND availability.availability = 'available'
              ORDER BY node.created_at, node.summary_id
              LIMIT ?3",
             params![
@@ -958,12 +1114,34 @@ fn bounded_query_limit(limit: usize) -> SessionStoreResult<i64> {
 
 fn require_not_cancelled(cancellation: &Arc<dyn GraphCancellation>) -> SessionStoreResult<()> {
     if cancellation.is_cancelled() {
-        Err(storage(
-            RECONSTRUCT_OPERATION,
-            SessionRelationError::Cancelled,
-        ))
+        Err(SessionStoreError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+fn relation_apply_failure_disposition(error: &SessionStoreError) -> (&'static str, bool) {
+    match error {
+        SessionStoreError::UnsupportedCapability { .. } => ("relation_apply_unsupported", true),
+        SessionStoreError::BudgetExceeded { .. } => ("relation_apply_budget_exhausted", true),
+        SessionStoreError::ReceiptIdentityMismatch { .. } => ("relation_receipt_mismatch", true),
+        SessionStoreError::SessionMismatch { .. } => ("relation_scope_mismatch", true),
+        SessionStoreError::Storage { source, .. } => {
+            match source.downcast_ref::<SessionRelationError>() {
+                Some(SessionRelationError::Invalid) => ("relation_apply_invalid", true),
+                Some(SessionRelationError::Cycle) => ("relation_apply_cycle", true),
+                Some(SessionRelationError::Conflict) => ("relation_apply_conflict", true),
+                Some(SessionRelationError::ResetRequired) => {
+                    ("relation_apply_reset_required", true)
+                }
+                Some(SessionRelationError::Corrupt) => ("relation_apply_corrupt", true),
+                Some(SessionRelationError::BudgetExhausted) => {
+                    ("relation_apply_budget_exhausted", true)
+                }
+                _ => ("relation_apply_failed", false),
+            }
+        }
+        _ => ("relation_apply_failed", false),
     }
 }
 

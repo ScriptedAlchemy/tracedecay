@@ -427,6 +427,17 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                     return;
                 }
             };
+            // Opening and policy verification do not enter the database schema.
+            // Complete WAL-index recovery before this worker can race admitted writes.
+            if connection
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .is_err()
+            {
+                let _ = started.send(Err(ReaderStartError::ReadOnlySetupFailed));
+                return;
+            }
             let _keep_pinned_database_alive = locator;
             let interrupt = Arc::new(connection.get_interrupt_handle());
             if started

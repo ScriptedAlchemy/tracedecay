@@ -364,6 +364,14 @@ pub(super) const SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     summary_publication_provider!(),
     " = ?3)
       AND a.availability <> 'unavailable'
+      AND (?11 <> 'current' OR NOT EXISTS (
+          SELECT 1
+          FROM lcm_summary_convergence_dirty_raw AS dirty
+          WHERE dirty.provider = ",
+    summary_publication_provider!(),
+    "
+            AND dirty.session_id = n.session_id
+      ))
       ",
     summary_keyset!("?4", "?5"),
     "
@@ -398,6 +406,14 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = concat!(
     summary_publication_provider!(),
     " = ?3)
           AND n.summary_anchor_id = ?4
+          AND (?8 <> 'current' OR NOT EXISTS (
+              SELECT 1
+              FROM lcm_summary_convergence_dirty_raw AS dirty
+              WHERE dirty.provider = ",
+    summary_publication_provider!(),
+    "
+                AND dirty.session_id = n.session_id
+          ))
     )
     WHERE knowledge_at < ?5 OR (knowledge_at = ?5 AND stable_id > ?6)
     ORDER BY knowledge_at DESC, stable_id
@@ -487,6 +503,14 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = concat!(
     WHERE n.session_id = ?1
       AND session_summary_nodes_fts MATCH ?3
       AND a.availability <> 'unavailable'
+      AND (?11 <> 'current' OR NOT EXISTS (
+          SELECT 1
+          FROM lcm_summary_convergence_dirty_raw AS dirty
+          WHERE dirty.provider = ",
+    summary_publication_provider!(),
+    "
+            AND dirty.session_id = n.session_id
+      ))
       ",
     summary_keyset!("?4", "?5"),
     "
@@ -629,6 +653,12 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
     "
       AND session_summary_nodes_fts MATCH ?2
       AND a.availability <> 'unavailable'
+      AND (?12 <> 'current' OR NOT EXISTS (
+          SELECT 1
+          FROM lcm_summary_convergence_dirty_raw AS dirty
+          WHERE dirty.provider = authority_session.provider
+            AND dirty.session_id = n.session_id
+      ))
       ",
     summary_root_keyset!("?3", "?4", "?5"),
     "
@@ -670,6 +700,12 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR authority_session.provider = ?2)
       AND a.availability <> 'unavailable'
+      AND (?12 <> 'current' OR NOT EXISTS (
+          SELECT 1
+          FROM lcm_summary_convergence_dirty_raw AS dirty
+          WHERE dirty.provider = authority_session.provider
+            AND dirty.session_id = n.session_id
+      ))
       ",
     summary_root_keyset!("?3", "?4", "?5"),
     "

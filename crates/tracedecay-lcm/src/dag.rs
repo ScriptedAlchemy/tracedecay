@@ -353,10 +353,29 @@ pub async fn load_uncondensed_summary_nodes(
                       n.source_token_count, n.source_time_start, n.source_time_end,
                       n.expand_hint, n.metadata_json, n.created_at
                FROM lcm_summary_nodes n
+               JOIN session_temporal_generations generation
+                 ON generation.session_id = n.session_id
+                AND generation.state = 'active'
+               JOIN session_summary_availability availability
+                 ON availability.session_id = generation.session_id
+                AND availability.generation = generation.generation
+                AND availability.summary_id = n.node_id
+                AND availability.availability = 'available'
                WHERE n.provider = ?1 AND n.session_id = ?2
                  AND NOT EXISTS (
                    SELECT 1
+                   FROM lcm_summary_convergence_dirty_raw dirty
+                   WHERE dirty.provider = n.provider
+                     AND dirty.session_id = n.session_id
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
                    FROM lcm_summary_sources s
+                   JOIN session_summary_availability parent_availability
+                     ON parent_availability.session_id = generation.session_id
+                    AND parent_availability.generation = generation.generation
+                    AND parent_availability.summary_id = s.node_id
+                    AND parent_availability.availability = 'available'
                    WHERE s.source_kind = 'summary_node'
                      AND s.source_id = n.node_id
                  )

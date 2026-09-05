@@ -347,7 +347,23 @@ pub struct LcmStatus {
     pub payload: LcmPayloadStatus,
     pub payload_gc: LcmPayloadGcStatus,
     pub lifecycle: LcmLifecycleStatus,
+    #[serde(default)]
+    pub summary_convergence: LcmSummaryConvergenceStatus,
     pub redaction: LcmRedactionStatus,
+}
+
+/// Durable retained-session summary work visible to operators.
+///
+/// Counts are disjoint queue states. In particular, an unsupported provider
+/// remains `unavailable` rather than looking current merely because the
+/// background scheduler completed its bounded pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSummaryConvergenceStatus {
+    pub pending_session_count: i64,
+    pub retryable_session_count: i64,
+    pub current_session_count: i64,
+    pub unavailable_session_count: i64,
+    pub permanent_session_count: i64,
 }
 
 /// Default fresh-tail size applied when the host omits `fresh_tail_count`.
