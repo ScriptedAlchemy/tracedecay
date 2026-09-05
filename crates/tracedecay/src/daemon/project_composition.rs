@@ -58,7 +58,17 @@ async fn release_one_idle_project_server_before_open(
     capacity_admission: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
     let runtime_registry = store_administration.session_runtime_registry().await?;
-    if runtime_registry.has_project_graph_admission_capacity()? {
+    // The route cache and invocation schedulers have independent bounds. Retire
+    // the whole idle owner before either fills: evicting only its MCP server
+    // leaves the code-index worker holding its scheduler slot.
+    let project_server_cache_saturated = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .servers
+        .len()
+        >= MAX_CACHED_PROJECT_SERVERS;
+    if runtime_registry.has_project_graph_admission_capacity()? && !project_server_cache_saturated {
         return Ok(capacity_admission);
     }
     if let Some(error) = store_administration
