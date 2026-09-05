@@ -37,6 +37,30 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     .expect("generate direct fixture outputs");
     let report = evaluate_generated_outputs(&repo_root, &workload, &generated)
         .expect("evaluate direct fixture outputs");
+    // Semantic activation refuses any report whose query fallback drifted from
+    // the checked-in pin, and the operator journey that would notice is skipped
+    // without the FastEmbed distribution fixture. Gate the pin here, where the
+    // ordinary lane always runs it: production retrieval changes must land with
+    // a re-pinned workload or they silently break `semantic activate`.
+    for profile in &report.profiles {
+        assert!(
+            profile.fallback_matches_expected,
+            "{}:{} query fallback digest drifted from \
+             `expected_query_fallback_digests.{}` in \
+             tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json. \
+             Confirm the new query results are intended, then re-pin both workload \
+             copies and packaged::WORKLOAD_SHA256.",
+            profile.profile_id, profile.partition, profile.partition
+        );
+    }
+    assert_eq!(
+        report.status,
+        crate::DirectEvaluationStatusV1::Pass,
+        "the checked-in query-fallback baseline must keep passing the labels \
+         activation requires: {}",
+        serde_json::to_string(&report.profiles).expect("serialize profile evaluations")
+    );
+
     let expected_raw_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.search-eval.raw-output-evidence.v1",
         &report.raw_outputs,
