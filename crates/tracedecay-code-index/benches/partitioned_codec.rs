@@ -184,6 +184,9 @@ struct Measurement {
 fn main() -> Result<(), Box<dyn Error>> {
     let count_allocations = std::env::args().any(|argument| argument == "--alloc-count");
     let output_path = configure_hotpath(count_allocations);
+    if std::env::args().any(|argument| argument == "--historical-fixture") {
+        return measure_historical_fixture(output_path, count_allocations);
+    }
     let sources = replicated_sources()?;
     let corpus_bytes = sources.iter().map(|source| source.bytes.len()).sum();
     let generation = build_generation(&sources)?;
@@ -241,6 +244,101 @@ fn main() -> Result<(), Box<dyn Error>> {
         lexical_drain_wall: distribution(lexical_drain_wall),
     };
     println!("{}", serde_json::to_string_pretty(&measurement)?);
+    Ok(())
+}
+
+/// Samples the authentic retained bytes without retaining an original decoded
+/// generation or all input segments alongside the output. Validation buffers
+/// are allocated only after sampling so they cannot inflate decoder peak RSS.
+fn measure_historical_fixture(
+    output_path: PathBuf,
+    count_allocations: bool,
+) -> Result<(), Box<dyn Error>> {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/partitioned_pre_paging");
+    let manifest = std::fs::read(fixture.join("manifest.json"))?;
+    let guard = hotpath::HotpathGuardBuilder::new("historical-partitioned-codec-bench")
+        .sections_exclude(vec![hotpath::Section::FunctionsCpu])
+        .format(hotpath::Format::Json)
+        .output_path(output_path)
+        .build();
+    let input_rss_bytes = proc_value("/proc/self/status", "VmRSS:")? * 1024;
+    reset_peak_rss()?;
+    let mut segment_bytes_read = 0_u64;
+    let mut segments_read = 0_u64;
+    let mut largest_segment_bytes = 0_u64;
+    let started = Instant::now();
+    let restored = hotpath::measure_block!("code_index.generation.decode.historical", {
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |request, buffer| {
+            let SealedGenerationSegmentReadV1::Whole { digest, size_bytes } = request else {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "historical fixture unexpectedly requested a paged segment".to_owned(),
+                ));
+            };
+            let digest = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("invalid fixture digest".to_owned())
+            })?;
+            *buffer = std::fs::read(fixture.join("segments").join(format!("{digest}.json")))
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+            if buffer.len() as u64 != size_bytes {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "historical segment size differs from its descriptor".to_owned(),
+                ));
+            }
+            segment_bytes_read += size_bytes;
+            segments_read += 1;
+            largest_segment_bytes = largest_segment_bytes.max(size_bytes);
+            Ok(())
+        })?
+        .ok_or("historical fixture is not a partitioned generation")?
+    });
+    let decode_elapsed_ns = duration_ns(started.elapsed())?;
+    let peak_rss_bytes = proc_value("/proc/self/status", "VmHWM:")? * 1024;
+    let retained_output_rss_bytes = proc_value("/proc/self/status", "VmRSS:")? * 1024;
+    drop(guard);
+
+    let expected = std::fs::read(fixture.join("expected-generation.json"))?;
+    let provenance: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.join("provenance.json"))?)?;
+    assert_eq!(
+        hex::encode(Sha256::digest(&manifest)),
+        provenance["manifest_sha256"]
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(&expected)),
+        provenance["expected_generation_sha256"]
+    );
+    assert_eq!(restored.encode_sealed()?, expected);
+    assert_eq!(
+        restored.manifest().generation_id.as_str(),
+        provenance["generation_id"]
+    );
+    assert_eq!(
+        restored.snapshot().content_identity.as_str(),
+        provenance["snapshot_content_identity"]
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "workload": "historical_partitioned_fixture",
+            "writer_commit": provenance["writer_commit"],
+            "manifest_sha256": provenance["manifest_sha256"],
+            "expected_generation_sha256": provenance["expected_generation_sha256"],
+            "manifest_bytes": manifest.len(),
+            "expected_output_encoded_bytes": expected.len(),
+            "segment_bytes_read": segment_bytes_read,
+            "segments_read": segments_read,
+            "largest_segment_bytes": largest_segment_bytes,
+            "decode_elapsed_ns": decode_elapsed_ns,
+            "input_rss_bytes": input_rss_bytes,
+            "peak_rss_bytes": peak_rss_bytes,
+            "retained_output_rss_bytes": retained_output_rss_bytes,
+            "allocation_metric": if count_allocations { "count" } else { "bytes" },
+            "rss_scope": "whole process including manifest, profiler, decoder temporaries and retained output; validation runs after sampling",
+            "allocation_scope": "Hotpath cumulative allocations, not peak live heap",
+            "scale_scope": "single authentic historical fixture; no corpus-scale bound claimed"
+        }))?
+    );
     Ok(())
 }
 
