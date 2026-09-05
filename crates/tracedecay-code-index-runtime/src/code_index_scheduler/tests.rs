@@ -61,7 +61,9 @@ use super::{
     GenerationDecodeAdmissionV1, SharedCodeIndexBytePoolV1,
 };
 use crate::code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexPublicationStoreErrorV1,
+    CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
+    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
@@ -1195,6 +1197,107 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
         !segment_path(&first_evidence_pack).exists(),
         "retention must collect packed evidence referenced only by the retired generation"
     );
+}
+
+#[test]
+fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn before_retirement() -> usize { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish first generation"));
+    let latest = scheduler
+        .latest_complete_already_decoded()
+        .expect("first generation");
+    let generation_id = latest.generation.manifest().generation_id.clone();
+    let text_store = &latest.text.text_artifact_store;
+    let identity = text_store
+        .sealed_identity(&generation_id)
+        .expect("retained seal identity");
+    let mut source = text_store
+        .open_sealed_source(&identity, &UninterruptibleCodeIndexControlV1)
+        .expect("open lazy source without retaining every file");
+    let initial_cursor = source.cursor().clone();
+    let lock =
+        super::acquire_code_generation_store_lock(store.path()).expect("hold publication lock");
+    let (sent, received) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let result = source.next_page(&UninterruptibleCodeIndexControlV1);
+        sent.send((source, result)).expect("return lexical source");
+    });
+    let response = received.recv_timeout(Duration::from_secs(2));
+    drop(lock);
+    reader.join().expect("lexical reader exits");
+    let (mut source, result) =
+        response.expect("busy publication must not block the lexical reader");
+    assert!(matches!(
+        result,
+        Err(CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::Unavailable(_)
+        ))
+    ));
+    assert_eq!(source.cursor(), &initial_cursor);
+    assert!(matches!(
+        source
+            .next_page(&UninterruptibleCodeIndexControlV1)
+            .expect("retry after publication unlock"),
+        VerifiedSealedLexicalPageReadV1::Page(_)
+    ));
+    source
+        .rewind()
+        .expect("rewind before retiring unread source");
+
+    fixture.edit("src/lib.rs", "pub fn after_retirement() -> usize { 2 }\n");
+    published(scheduler.reconcile_now().expect("publish successor"));
+    remove_historical_pointer_entries(store.path());
+    let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
+        store.path(), &BTreeSet::new(),
+        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(9_000_000), None,
+    ).expect("collect retired generation");
+    assert_eq!(report.deleted_generations.len(), 1);
+    assert!(
+        matches!(
+            source.next_page(&UninterruptibleCodeIndexControlV1),
+            Err(CodeIndexProductionErrorV1::Interrupted(
+                CodeIndexInterruptionV1::Cancelled
+            ))
+        ),
+        "retired lazy sources cancel before reading collected segment paths"
+    );
+    assert_eq!(source.cursor(), &initial_cursor);
+
+    let latest = scheduler
+        .latest_complete_already_decoded()
+        .expect("successor generation");
+    let text_store = &latest.text.text_artifact_store;
+    let identity = text_store
+        .sealed_identity(&latest.generation.manifest().generation_id)
+        .expect("successor seal identity");
+    let mut corrupt_source = text_store
+        .open_sealed_source(&identity, &UninterruptibleCodeIndexControlV1)
+        .expect("open source before pointer corruption");
+    let cursor = corrupt_source.cursor().clone();
+    std::fs::write(
+        store.path().join("active-code-generation-v1.json"),
+        b"corrupt",
+    )
+    .expect("corrupt hermetic publication pointer");
+    let error = corrupt_source
+        .next_page(&UninterruptibleCodeIndexControlV1)
+        .expect_err("corrupt publication pointer must refuse source read");
+    assert!(
+        matches!(
+            super::map_sealed_page_source_error(error),
+            super::RetrievalPortError::Contract(_)
+        ),
+        "corrupt authority is terminal, never transient store contention"
+    );
+    assert_eq!(corrupt_source.cursor(), &cursor);
 }
 
 #[test]
