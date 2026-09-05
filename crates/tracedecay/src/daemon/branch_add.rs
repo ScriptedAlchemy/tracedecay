@@ -741,7 +741,19 @@ fn await_exact_branch_generation_inner<'a>(
     // Erase the deeply nested future before it reaches the measured wrapper
     // so every profiling feature can compute its layout.
     Box::pin(async move {
-        let mut publications = schedulers.subscribe_generation_publications();
+        let mut serving_changes = schedulers
+            .subscribe_serving_generation_changes(canonical_worktree_root)
+            .await
+            .ok_or_else(|| {
+                TraceDecayError::project_route(
+                    CODE_INDEX_SCHEDULER_UNAVAILABLE,
+                    true,
+                    format!(
+                        "code-index scheduler is unavailable for branch worktree '{}'",
+                        canonical_worktree_root.display()
+                    ),
+                )
+            })?;
         if !schedulers
             .notify_hook_overflow(canonical_worktree_root)
             .await
@@ -789,15 +801,14 @@ fn await_exact_branch_generation_inner<'a>(
             {
                 return Ok(generation);
             }
-            match publications.recv().await {
-                Ok(event) if event.project_root == canonical_worktree_root => {}
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            match serving_changes.changed().await {
+                Ok(()) => {}
+                Err(_) => {
                     return Err(TraceDecayError::project_route(
                         CODE_INDEX_ACTIVATION_UNAVAILABLE,
                         true,
                         format!(
-                            "code-index publication stream closed for branch worktree '{}'",
+                            "code-index serving owner closed for branch worktree '{}'",
                             canonical_worktree_root.display()
                         ),
                     ));

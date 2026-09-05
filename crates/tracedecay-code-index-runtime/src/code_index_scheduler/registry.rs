@@ -54,6 +54,8 @@ mod lsp_projection;
 #[cfg(test)]
 mod reconcile_failure_isolation_tests;
 mod scope_identity;
+#[cfg(test)]
+mod serving_readiness_tests;
 
 pub use scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 
@@ -546,6 +548,10 @@ pub struct MountedCodeIndexWorktreeV1 {
     pub(super) build_publication_lock: Arc<tokio::sync::Mutex<()>>,
     pub historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
     pub serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    /// Complete-generation callers need the decoded serving owner; restored
+    /// text and persistent graph reads do not. Only their explicit demand
+    /// admits this optional decode after verified-head recovery.
+    complete_generation_requested: Arc<AtomicBool>,
     /// Source-freshness state is independent from scheduler build state so
     /// readiness probes remain available throughout a long publication.
     source_freshness: super::SourceFreshnessFenceV1,
@@ -587,6 +593,8 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Monotonic replacement epoch for the serving slot. It invalidates a
     /// branch-publication token even if a future worker re-seats an equal id.
     serving_generation_epoch: Arc<AtomicU64>,
+    /// A wake signal only: readers resolve identity and availability from the serving slot.
+    serving_generation_changed: tokio::sync::watch::Sender<()>,
     /// One in-flight branch publication may own a serving-slot installation.
     /// It is paired with `serving_generation_epoch` under the slot CAS.
     serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
@@ -1990,6 +1998,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree
                     .serving_generation_epoch
                     .fetch_add(1, Ordering::AcqRel);
+                worktree.serving_generation_changed.send_replace(());
             }
         }
     }
@@ -2098,6 +2107,7 @@ impl CodeIndexSchedulerRegistryV1 {
             text_generation,
             published_generation_id,
             serving_source_witness,
+            serving_generation_changed,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
@@ -2110,6 +2120,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_source_witness),
+                worktree.serving_generation_changed.clone(),
             )
         };
         let mut serving = serving_generation
@@ -2158,6 +2169,7 @@ impl CodeIndexSchedulerRegistryV1 {
             if published.as_ref() == Some(&installation.generation_id) {
                 *published = None;
             }
+            serving_generation_changed.send_replace(());
         }
         ServingGenerationRollbackOutcomeV1::Cleared
     }
@@ -2471,6 +2483,30 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
     ) -> tokio::sync::broadcast::Receiver<CodeIndexGenerationPublishedV1> {
         self.generation_publications.subscribe()
+    }
+
+    /// Admit complete-generation demand and subscribe before probing the serving
+    /// slot. Sealed publication precedes serving, including on a restored mount
+    /// where no new publication event is emitted.
+    pub async fn subscribe_serving_generation_changes(
+        &self,
+        project_root: &Path,
+    ) -> Option<tokio::sync::watch::Receiver<()>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root)?;
+        let changes = worktree.serving_generation_changed.subscribe();
+        if !worktree
+            .complete_generation_requested
+            .swap(true, Ordering::AcqRel)
+        {
+            Self::note_wake(
+                &worktree.pending_wake,
+                &worktree.wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+        }
+        Some(changes)
     }
 
     fn publish_generation(
@@ -2816,6 +2852,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // claims freshness; missing Git authority still leaves this empty.
         let serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>> =
             Arc::new(RwLock::new(None));
+        let complete_generation_requested = Arc::new(AtomicBool::new(false));
         let text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>> =
             Arc::new(RwLock::new(None));
         let convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>> =
@@ -2825,6 +2862,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>> =
             Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
+        let (serving_generation_changed, _) = tokio::sync::watch::channel(());
         let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
@@ -2841,11 +2879,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
+        let worker_complete_generation_requested = Arc::clone(&complete_generation_requested);
         let worker_text_generation = Arc::clone(&text_generation);
         let worker_convergence_park = Arc::clone(&convergence_park);
         let worker_published_generation_id = Arc::clone(&published_generation_id);
         let worker_serving_source_witness = Arc::clone(&serving_source_witness);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
+        let worker_serving_generation_changed = serving_generation_changed.clone();
         let worker_wake = Arc::clone(&wake);
         // The code-index control epoch. It advances exactly when new input is
         // announced (hook hints, watch paths, overflow), so it is the signal a
@@ -3660,7 +3700,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         .as_ref()
                         .is_some_and(|retained| retained.interactive_graph_store().is_ok())
                 {
-                    prepare_graph = false;
+                    // Verified-head recovery owns a queryable graph without
+                    // decoding the complete generation. A complete-generation
+                    // request must still reach the canonical bind and swap,
+                    // while graph-only reads retain that lightweight owner.
+                    prepare_graph = serving_empty
+                        && worker_complete_generation_requested.load(Ordering::Acquire);
                 }
                 if prepare_graph
                     && !published_pass
@@ -3857,10 +3902,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // replayed over a graph that already serves.
                 let activate_graph = match &result {
                     Ok((Ok(_), Some(latest), Some(_))) => {
-                        replace_serving_generation
-                            || (latest.graph_activation_is_pending()
-                                && graph_seat_attempted.as_ref()
-                                    != Some(&latest.generation().manifest().generation_id))
+                        latest.code_graph_serving_readiness() != CodeGraphServingReadinessV1::Ready
+                            && (replace_serving_generation
+                                || (latest.graph_activation_is_pending()
+                                    && graph_seat_attempted.as_ref()
+                                        != Some(&latest.generation().manifest().generation_id)))
                     }
                     _ => false,
                 };
@@ -4039,6 +4085,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     match serving_swap {
                         Ok(Ok(outcome)) => {
+                            if outcome.installs() {
+                                worker_serving_generation_changed.send_replace(());
+                            }
                             let generation_id = text_latest
                                 .generation()
                                 .manifest()
@@ -4221,6 +4270,7 @@ impl CodeIndexSchedulerRegistryV1 {
             build_publication_lock,
             historical_generation_owner,
             serving_generation,
+            complete_generation_requested,
             source_freshness,
             last_reconciled_at_micros,
             text_generation,
@@ -4230,6 +4280,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_source_witness,
             build_progress,
             serving_generation_epoch,
+            serving_generation_changed,
             serving_generation_installation,
             graph_activation,
             ignored_dependency_admissions,
@@ -5294,6 +5345,16 @@ impl CodeIndexSchedulerRegistryV1 {
         let (scheduler, serving_generation, text_generation, hints, wake, pending_wake) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
+            if !worktree
+                .complete_generation_requested
+                .swap(true, Ordering::AcqRel)
+            {
+                Self::note_wake(
+                    &worktree.pending_wake,
+                    &worktree.wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
@@ -5431,12 +5492,23 @@ impl CodeIndexSchedulerRegistryV1 {
     async fn latest_complete_ready_with(
         &self,
         project_root: &Path,
-        _admission: GenerationDecodeAdmissionV1,
+        admission: GenerationDecodeAdmissionV1,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
         let (source_freshness, serving_generation, shutting_down) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
+            if admission == GenerationDecodeAdmissionV1::AwaitDecode
+                && !worktree
+                    .complete_generation_requested
+                    .swap(true, Ordering::AcqRel)
+            {
+                Self::note_wake(
+                    &worktree.pending_wake,
+                    &worktree.wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
             (
                 worktree.source_freshness.clone(),
                 Arc::clone(&worktree.serving_generation),
@@ -6180,6 +6252,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .clear();
         for worktree in mounted.values() {
             worktree.shutting_down.store(true, Ordering::Release);
+            worktree.serving_generation_changed.send_replace(());
             worktree.wake.notify_one();
         }
         for (_, worktree) in mounted {
@@ -6234,6 +6307,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         for (root, worktree) in retired {
             worktree.shutting_down.store(true, Ordering::Release);
+            worktree.serving_generation_changed.send_replace(());
             worktree.wake.notify_one();
             retiring.insert(root, worktree);
         }
@@ -6284,6 +6358,7 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Ok(mounted) = self.mounted.try_lock() {
             for worktree in mounted.values() {
                 worktree.shutting_down.store(true, Ordering::Release);
+                worktree.serving_generation_changed.send_replace(());
                 worktree.wake.notify_one();
             }
         }
