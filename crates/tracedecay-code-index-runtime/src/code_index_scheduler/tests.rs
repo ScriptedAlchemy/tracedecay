@@ -3794,7 +3794,7 @@ async fn retirement_parks_the_incumbent_while_a_same_root_remount_waits_on_its_s
             if reconciling {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -6883,7 +6883,7 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
             Instant::now() <= settled_deadline,
             "retained graph-off owner never established initial freshness"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let admission = registry
         .background_reconcile_admission()
@@ -7537,7 +7537,7 @@ async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
             .reconciled_without_generation_for_scope(&scope)
             .await
         {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -7711,7 +7711,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     });
     tokio::time::timeout(Duration::from_millis(100), async {
         while global_admission.available_permits() != 0 {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -8762,7 +8762,7 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
             if let Some(progress) = progress_slot.read().expect("progress slot").snapshot() {
                 break progress;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -12230,7 +12230,7 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
             if ready {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -12251,7 +12251,7 @@ async fn wait_for_queryable_text_generation(
             if let Some(text) = registry.latest_text_serving_for_root(path).await {
                 break text;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -12272,7 +12272,7 @@ async fn wait_for_queryable_text_generation_change(
                     break text;
                 }
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -14098,7 +14098,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             std::time::Instant::now() <= progress_deadline,
             "text projection completed before exposing bounded live progress"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     };
     let status_poll_admission = registry
         .background_reconcile_admission()
@@ -14187,7 +14187,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
                     std::time::Instant::now() <= query_deadline,
                     "graph-off text projection never became queryable: {error}"
                 );
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
     };
@@ -14215,7 +14215,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             std::time::Instant::now() <= overflow_deadline,
             "graph-off overflow did not settle through a real no-op reconcile"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let (owner_epoch_after_overflow, progress_after_overflow, decode_count) = {
         let scheduler = scheduler
@@ -14798,7 +14798,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
                     std::time::Instant::now() <= ready_deadline,
                     "generation A never became text-queryable: {error}"
                 );
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
     };
@@ -14857,7 +14857,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             std::time::Instant::now() <= attempt_deadline,
             "transient publication failure was never attempted"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let restore_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while reconcile_in_progress.load(std::sync::atomic::Ordering::Acquire) != 0 {
@@ -14865,7 +14865,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             std::time::Instant::now() <= restore_deadline,
             "transient publication failure did not terminate"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let unpublished_b_generation = {
         let mut scheduler = scheduler
@@ -15034,7 +15034,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
                     std::time::Instant::now() <= query_deadline,
                     "generation C never became text-queryable: {error}"
                 );
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
     };
@@ -15391,7 +15391,7 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
             Instant::now() <= settled_deadline,
             "graph-off retained generation never settled"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
 
     let admission = registry
@@ -15438,7 +15438,7 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
             Instant::now() <= reconcile_deadline,
             "the remount wake never reconciled the unhinted edit"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     registry.shutdown().await;
 }
@@ -15544,7 +15544,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
             std::time::Instant::now() <= progress_deadline,
             "graph-on text projection never exposed bounded live progress"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     };
     assert_eq!(
         progress_mid_build.generation_id,
@@ -15573,7 +15573,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
             std::time::Instant::now() <= progress_deadline,
             "graph retries withheld retained exact and lexical readiness"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     };
     assert_eq!(
         text_owner_before_retry.metadata().manifest().generation_id,
@@ -15820,7 +15820,7 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
             Instant::now() <= deadline,
             "terminal graph activation failure remained pending: {freshness:?}"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     };
     assert!(
         reason.contains("injected terminal graph activation failure"),
@@ -15886,7 +15886,7 @@ async fn graph_decode_does_not_block_text_freshness() {
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -15919,7 +15919,7 @@ async fn graph_decode_does_not_block_text_freshness() {
             if held_decode.waiter_count() > 0 {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -16101,7 +16101,7 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
             std::time::Instant::now() <= deadline,
             "optional telemetry held successful reconcile readiness: {freshness:?}"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
 
     blocked_writer
@@ -16343,7 +16343,7 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
             if revision.is_multiple_of(10) {
                 churn_registry.notify_hook_overflow(&churn_root).await;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     });
 

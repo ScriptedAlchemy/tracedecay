@@ -168,7 +168,7 @@ async fn wait_for_initial_generation(
             if let Some(generation) = registry.latest_generation_id(project_root).await {
                 break generation;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -187,7 +187,7 @@ async fn wait_for_generation_change(
             {
                 break generation;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -203,7 +203,7 @@ async fn latest(
             if let Some(latest) = registry.latest_complete_fresh(project_root).await {
                 break latest;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -216,7 +216,7 @@ async fn wait_for_reconciling(registry: &CodeIndexSchedulerRegistryV1, expected:
             if registry.memory_stats().await.reconciling_worktrees == expected {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
@@ -413,7 +413,7 @@ export function GenerationAnchor() { return 1; }
         .expect("admission returns after persistent graph publication");
     tokio::time::timeout(Duration::from_secs(5), async {
         while graph_store.interactive_catalog_is_warm() != Ok(true) {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
