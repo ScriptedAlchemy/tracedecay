@@ -390,13 +390,8 @@ const PROJECT_DIRECTORY_CURSOR_PREFIX: &str = "name-v3:";
 /// * converges in `ceil(candidates / limit)` pages under any amount of
 ///   directory churn, because a page that returns a cursor has advanced the
 ///   name order by a full page; and
-/// * holds at most `limit` names in memory, whatever the directory's size.
-///
-/// The ordering costs one directory pass per page: an unordered directory
-/// cannot answer "the next `limit` names after N" without either persistent
-/// per-pass state or a name set proportional to the directory. Only the cheap
-/// name read repeats — every expensive per-store inventory the caller drives
-/// from this page stays bounded by `limit`.
+/// * holds at most `limit` names in memory, whatever the directory's size,
+///   at the cost of one cheap directory read per page.
 pub(in crate::retention) fn read_project_directory_page(
     profile_root: &Path,
     cursor: Option<&str>,
@@ -446,7 +441,7 @@ pub(in crate::retention) fn read_project_directory_page(
         if interrupted() {
             return Ok(None);
         }
-        entries_scanned = entries_scanned.saturating_add(1);
+        entries_scanned += 1;
         // A directory entry that cannot be read or named is not a candidate:
         // no project id and no quarantine name is unreadable or non-UTF-8, so
         // skipping one keeps the pass converging instead of failing the page.
@@ -462,7 +457,7 @@ pub(in crate::retention) fn read_project_directory_page(
         if after.as_deref().is_some_and(|after| name.as_str() <= after) {
             continue;
         }
-        candidates = candidates.saturating_add(1);
+        candidates += 1;
         selected.push(name);
         if selected.len() > limit {
             selected.pop();

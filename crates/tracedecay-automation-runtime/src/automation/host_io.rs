@@ -230,32 +230,13 @@ mod tests {
     fn a_second_registration_cannot_replace_part_of_the_first() {
         register(bundle());
         let installed = registered().expect("a bundle is registered");
-        let addresses = (
-            installed.export_to_agents as usize,
-            installed.export_to_agent_hosts as usize,
-            installed.write_text as usize,
-            installed.write_json as usize,
-            installed.remove_host_file as usize,
-            installed.resolve_on_path as usize,
-            installed.codex_agent_files as usize,
-            installed.with_write_intents as usize,
-        );
-
         register(bundle());
-
-        let after = registered().expect("the bundle survives a second register");
-        assert_eq!(
-            addresses,
-            (
-                after.export_to_agents as usize,
-                after.export_to_agent_hosts as usize,
-                after.write_text as usize,
-                after.write_json as usize,
-                after.remove_host_file as usize,
-                after.resolve_on_path as usize,
-                after.codex_agent_files as usize,
-                after.with_write_intents as usize,
+        assert!(
+            std::ptr::eq(
+                installed,
+                registered().expect("the bundle survives a second register")
             ),
+            "a second register must not replace any part of the first bundle"
         );
     }
 }
