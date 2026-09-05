@@ -5524,6 +5524,14 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     generation_recovery: Arc<RwLock<Option<CodeIndexGenerationRecoveryV1>>>,
     latest_content_identity: Option<ContentDigest>,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    /// Set when a retained generation was refused because its ignored-source
+    /// roster no longer verifies. That refusal also clears the roster, so the
+    /// next pass rebuilds without it — but the refused pass has already
+    /// consumed the wake that ran it, so nothing scheduled that next pass and
+    /// the still-pending source stayed uncaptured with no seat at all. The
+    /// worker takes this flag to re-arm exactly one pass; taking it clears it,
+    /// so a refusal can never spin the worker.
+    ignored_roster_refusal_requires_rebuild: bool,
     query_owners: ProfiledStdMutex<Option<GenerationServingCachesV1>>,
     /// Immutable generation-scoped build snapshot. The registry clones this
     /// slot at mount so dashboard reads never acquire the scheduler mutex.
@@ -5758,6 +5766,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             generation_recovery: Arc::new(RwLock::new(None)),
             latest_content_identity,
             ignored_source_admissions: Vec::new(),
+            ignored_roster_refusal_requires_rebuild: false,
             query_owners: hotpath::mutex!(
                 Mutex::new(None),
                 label = "daemon.code_index.serving_caches"
@@ -6813,9 +6822,20 @@ impl CodeIndexWorktreeSchedulerV1 {
                  with the sealed generation"
             );
             self.ignored_source_admissions.clear();
+            // The cleared roster is the remedy, and the pass that must apply
+            // it needs a wake this refused pass already consumed.
+            self.ignored_roster_refusal_requires_rebuild = true;
             return None;
         }
         Some(self.bind_latest_complete(generation, retained_text))
+    }
+
+    /// Claim the one rebuild pass a refused ignored-source roster requires.
+    ///
+    /// Taking clears the claim, so the refusal arms exactly one follow-up pass
+    /// no matter how many times the worker asks.
+    pub fn take_ignored_roster_refusal_rebuild(&mut self) -> bool {
+        std::mem::take(&mut self.ignored_roster_refusal_requires_rebuild)
     }
 
     /// Bind exact/lexical serving directly from the canonical active pointer.

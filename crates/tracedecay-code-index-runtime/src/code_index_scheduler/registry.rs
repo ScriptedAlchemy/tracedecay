@@ -3855,6 +3855,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                     ),
                                     None => None,
                                 };
+                                // A refused ignored-source roster clears
+                                // itself, so the very next pass can publish
+                                // the successor — but this pass consumed the
+                                // wake that would have run it.
+                                let roster_refusal_rebuild = latest.is_none()
+                                    && Self::lock_scheduler_unless_shutting_down(
+                                        &graph_scheduler,
+                                        &shutting_down,
+                                    )?
+                                    .take_ignored_roster_refusal_rebuild();
                                 let replay_binding = match latest.as_ref() {
                                     Some(latest) => Some(
                                         Self::lock_scheduler_unless_shutting_down(
@@ -3867,20 +3877,29 @@ impl CodeIndexSchedulerRegistryV1 {
                                     ),
                                     None => None,
                                 };
-                                replay_binding.transpose().map(|binding| (latest, binding))
+                                replay_binding
+                                    .transpose()
+                                    .map(|binding| (latest, binding, roster_refusal_rebuild))
                             }),
                             label = "daemon.code_index.graph_prepare"
                         )
                         .await
                         {
-                            Ok(Ok((latest, replay_binding))) => {
+                            Ok(Ok((latest, replay_binding, roster_refusal_rebuild))) => {
                                 if latest.is_none() {
                                     tracing::warn!(
                                         event = "code_index_graph_prepare_no_servable_generation",
                                         published_pass,
+                                        roster_refusal_rebuild,
                                         "graph prepare produced no servable generation; \
                                          the sealed generation cannot seat"
                                     );
+                                }
+                                if roster_refusal_rebuild {
+                                    // One pass, claimed from the scheduler, so
+                                    // a refusal that keeps reproducing cannot
+                                    // spin this worker.
+                                    worker_wake.notify_one();
                                 }
                                 Ok((outcome, latest, replay_binding))
                             }
