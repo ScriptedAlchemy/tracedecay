@@ -280,11 +280,6 @@ pub(super) fn admitted_root_fixture(name: &str) -> (std::path::PathBuf, String) 
     }
 }
 
-/// The `file:` URI half of [`admitted_root_fixture`].
-pub(super) fn admitted_root_uri_fixture(name: &str) -> String {
-    admitted_root_fixture(name).1
-}
-
 mod configuration_registrars_tests;
 mod lsp_lease_tests;
 mod lsp_tests;
