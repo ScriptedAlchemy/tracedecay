@@ -66,6 +66,18 @@ impl BoundedGitControl {
     }
 }
 
+pub(super) fn verified_empty_history(
+    project_path: &std::path::Path,
+) -> Result<bool, BoundedBackfillInterruption> {
+    let control =
+        BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+    let Some(source) = native::capture_unborn_source(project_path, &control)? else {
+        return Ok(false);
+    };
+    native::verify_unborn_source(project_path, &source, &control)?;
+    Ok(true)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundedBackfillInterruption {
     Cancelled,

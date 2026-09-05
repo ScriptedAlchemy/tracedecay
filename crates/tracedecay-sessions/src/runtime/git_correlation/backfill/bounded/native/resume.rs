@@ -160,7 +160,7 @@ pub(in super::super) fn initialize_history_source(
     }
 }
 
-fn capture_unborn_source(
+pub(in super::super) fn capture_unborn_source(
     project_path: &Path,
     control: &BoundedGitControl,
 ) -> Result<Option<UnbornSource>, BoundedBackfillInterruption> {

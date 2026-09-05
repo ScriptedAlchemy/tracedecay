@@ -302,6 +302,14 @@ fn incremental_backfill_failure(
 /// `Send + Sync` so a `&dyn GitReflogSource` can be held across an `.await`
 /// inside a spawned task (the startup auto-backfill runs on a tokio worker).
 pub trait GitReflogSource: Send + Sync {
+    /// Proves that this source has no history to publish. Sources without an
+    /// unborn-repository authority retain normal reflog reads and error handling.
+    fn has_verified_empty_history(
+        &self,
+        _worktree: &std::path::Path,
+    ) -> Result<bool, GitCorrelationError> {
+        Ok(false)
+    }
     /// `git reflog --date=unix HEAD` text for `worktree`, or `None` on error.
     fn reflog(&self, worktree: &std::path::Path) -> Option<String>;
     /// The branch `HEAD` currently points at in `worktree` (`None` = detached
@@ -323,6 +331,17 @@ impl SystemGit {
 }
 
 impl GitReflogSource for SystemGit {
+    fn has_verified_empty_history(
+        &self,
+        worktree: &std::path::Path,
+    ) -> Result<bool, GitCorrelationError> {
+        bounded::verified_empty_history(worktree).map_err(|interruption| {
+            GitCorrelationError::Unavailable(format!(
+                "Git history source verification failed: {interruption:?}"
+            ))
+        })
+    }
+
     fn reflog(&self, worktree: &std::path::Path) -> Option<String> {
         Self::output(worktree, &["reflog", "--date=unix", "HEAD"])
     }
@@ -712,6 +731,13 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
     let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(worktree_path)
         .ok_or(BackfillSkipReason::NotAWorktree)?;
     let worktree = normalize_worktree(&worktree_root.to_string_lossy());
+
+    if git
+        .has_verified_empty_history(&worktree_root)
+        .map_err(|_| BackfillSkipReason::GitError)?
+    {
+        return Ok(());
+    }
 
     let reflog_text = git
         .reflog(&worktree_root)

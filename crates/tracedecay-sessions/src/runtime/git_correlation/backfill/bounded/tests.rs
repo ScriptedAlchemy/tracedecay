@@ -493,6 +493,81 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
 }
 
 #[tokio::test]
+async fn incremental_unborn_history_settles_without_masking_source_failures() {
+    let repository = tempfile::tempdir().unwrap();
+    git(repository.path(), &["init", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store
+        .connection
+        .execute_batch("UPDATE sessions SET ended_at = 1")
+        .await
+        .unwrap();
+
+    // A source with no unborn authority must retain its failed reflog read.
+    let source = FailCommitLogCall {
+        calls: AtomicUsize::new(0),
+        fail_on: usize::MAX,
+    };
+    let failed = run_incremental_backfill_outcome(&store, &source, 1)
+        .await
+        .unwrap();
+    assert_eq!(failed.stats.skipped_git_error, 1);
+    assert!(!failed.stats.frontier_advanced);
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let settled = run_incremental_backfill_outcome(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert_eq!(settled.later_failure, None);
+    assert_eq!(settled.stats.skipped_git_error, 0);
+    assert!(settled.stats.frontier_advanced);
+    assert_eq!(settled.stats.spans_written, 0);
+    assert_eq!(settled.stats.commits_attributed, 0);
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let repeated = run_incremental_backfill_outcome(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert_eq!(repeated.stats.sessions_scanned, 0);
+    assert_eq!(repeated.later_failure, None);
+
+    git(
+        repository.path(),
+        &["commit", "--allow-empty", "-m", "first"],
+    );
+    let timestamp = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET ended_at = ?1", params![timestamp])
+        .await
+        .unwrap();
+    let settled = run_incremental_backfill_outcome(&store, &SystemGit, 1)
+        .await
+        .unwrap();
+    assert_eq!(settled.later_failure, None);
+    assert_eq!(settled.stats.skipped_git_error, 0);
+    assert!(settled.stats.frontier_advanced);
+    assert!(settled.stats.spans_written > 0);
+    assert!(settled.stats.commits_attributed > 0);
+    assert_eq!(
+        read_meta_value(&store.connection, AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(timestamp)
+    );
+}
+
+#[tokio::test]
 async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
     let repository = tempfile::tempdir().unwrap();
     git(repository.path(), &["init", "-b", "main"]);
