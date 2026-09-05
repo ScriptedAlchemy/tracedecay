@@ -509,6 +509,7 @@ fn release_publish_transient_memory() {
 pub(crate) struct RetainedCodeGraphRuntimeV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_manifest_provider: Arc<super::code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
+    _manifest_route: super::code_graph_manifest::CodeGraphManifestRouteV1,
     authority: Arc<CanonicalCodeGraphStoreLeaseV1>,
     project_database: Arc<tracedecay_runtime_core::db::Database>,
     project_id: ProjectId,
@@ -1575,8 +1576,8 @@ impl RetainedCodeGraphRuntimeV1 {
     }
 
     /// The classification gate slice: observe the typed interruption first
-    /// (a publisher may have blocked on the gate), bind the shared manifest
-    /// provider, then read the journaled replay and verified head to decide
+    /// (a publisher may have blocked on the gate), then read the journaled
+    /// replay and verified head to decide
     /// the publication arm. No journal write and no corpus-sized work happens
     /// here.
     #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.classify")]
@@ -1594,13 +1595,6 @@ impl RetainedCodeGraphRuntimeV1 {
             }
             None => {}
         }
-        self.graph_manifest_provider.bind(
-            self.authority.binding().shard_id.clone(),
-            self.project_id.clone(),
-            self.repository_id.clone(),
-            self.generations_root.clone(),
-            self.replay_root.clone(),
-        )?;
         match storage
             .replay(&prepared.publication_key, context)
             .map_err(map_publication_error)?
@@ -2560,6 +2554,21 @@ impl DaemonSessionRuntimeRegistryV1 {
             );
             self.ensure_code_graph_shard_attached(&bound_shard).await;
         }
+        let replay_root = project_database
+            .database_path()
+            .with_extension("graph-replay");
+        let manifest_route = self
+            .graph_manifest_provider
+            .bind(
+                authority.binding().shard_id.clone(),
+                project_id.clone(),
+                repository_id.clone(),
+                replay_binding.generations_root.clone(),
+                replay_root.clone(),
+            )
+            .map_err(|error| {
+                session_registry_error("bind code graph replay route", error.to_string())
+            })?;
         // Offer the already-decoded seal before any publication or recovery can
         // reach the manifest provider. The offer is keyed by the exact shard the
         // provider resolves bindings under, and is only ever served on an exact
@@ -2577,13 +2586,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                     session_registry_error("offer decoded code generation", error.to_string())
                 })?;
         }
-        let replay_root = project_database
-            .database_path()
-            .with_extension("graph-replay");
         let publication_locks = self.retain_project_publication_locks(&project_shard);
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
             graph_manifest_provider: Arc::clone(&self.graph_manifest_provider),
+            _manifest_route: manifest_route,
             authority,
             project_database,
             project_id,
