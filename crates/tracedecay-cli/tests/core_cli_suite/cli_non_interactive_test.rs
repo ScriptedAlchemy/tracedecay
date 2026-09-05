@@ -1072,6 +1072,24 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
+    // Pause through the same durable authority as the dashboard before the
+    // first mount can admit scheduled work. Manual curation still runs through
+    // its ordinary lock and backend gates.
+    let dashboard_root = profile_sharded_data_root(
+        &profile_root(home.path()),
+        &default_profile_project_id(&canonical_temp_path(project.path())),
+    )
+    .join("dashboard");
+    create_runtime()
+        .block_on(
+            tracedecay_automation_runtime::automation::scheduler::save_scheduler_control(
+                &dashboard_root,
+                &tracedecay_automation_runtime::automation::scheduler::AutomationSchedulerControl {
+                    paused: true,
+                },
+            ),
+        )
+        .expect("pause scheduled work before project activation");
     init_project_fixture(home.path(), project.path());
 
     // A backend-disabled skip is the subject here, and the shipped automation
@@ -1140,9 +1158,7 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     let run_id = run["run_id"]
         .as_str()
         .expect("automation run payload should include a run_id");
-    // The scheduled curation loop writes its own records into the same
-    // ledger, so identify this run by the id the manual call returned rather
-    // than by being the only line in the file.
+    // Inspect the exact run identity returned by the manual call.
     let ledger = std::fs::read_to_string(&ledger_paths[0]).unwrap();
     let record = ledger
         .lines()
