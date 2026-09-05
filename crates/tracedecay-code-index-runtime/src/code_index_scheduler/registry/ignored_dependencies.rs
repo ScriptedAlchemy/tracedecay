@@ -427,6 +427,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             scheduler,
             serving_generation,
+            serving_source_witness,
             text_generation,
             published_generation_id,
             serving_generation_epoch,
@@ -450,6 +451,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.worktree_id.clone(),
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.serving_source_witness),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_generation_epoch),
@@ -559,6 +561,7 @@ impl CodeIndexSchedulerRegistryV1 {
         );
         let swap_scheduler = Arc::clone(&scheduler);
         let swap_serving_generation = Arc::clone(&serving_generation);
+        let swap_serving_source_witness = Arc::clone(&serving_source_witness);
         let swap_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let incumbent = serving.clone();
         let candidate = build.latest.clone();
@@ -587,6 +590,16 @@ impl CodeIndexSchedulerRegistryV1 {
             *serving = Some(candidate.clone());
             swap_serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
             drop(serving);
+            // This candidate was extracted from the live checkout by this very
+            // pass and is now the active durable publication, so it carries the
+            // same freshness proof a published background pass mints. Without
+            // it the seat is unproven, and the verified read that follows
+            // admission - the caller's whole reason for admitting - abstained
+            // on its own newly seated generation.
+            *swap_serving_source_witness
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = scheduler
+                .source_currency_witness_for(&candidate.generation().manifest().generation_id);
             let _ = scheduler.schedule_semantic_generation(candidate.generation_handle());
             Ok::<_, CodeIndexSchedulerErrorV1>(())
         })
