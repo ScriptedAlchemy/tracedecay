@@ -366,8 +366,18 @@ impl GraphDbRegistry {
                     context,
                     projection,
                 );
-                if let Ok(snapshot) = recovered {
-                    drop(snapshot);
+                match recovered {
+                    Ok(snapshot) => drop(snapshot),
+                    // Recovery may quarantine the generation durably on its
+                    // way to this error; a sweep that swallowed it left no
+                    // record at the site that asked for it.
+                    Err(error) => tracing::warn!(
+                        event = "graph_staging_release_recovery_failed",
+                        projection = %locator.projection,
+                        generation = locator.generation.as_str(),
+                        error = %error,
+                        "sealed-row release could not recover the verified head; rows stay retained"
+                    ),
                 }
             } else if let Some(commit) = database.staging_generation_commit(&locator)? {
                 let identity = GraphGenerationManifestIdentity::new(
