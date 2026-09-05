@@ -428,7 +428,7 @@ async fn analytics_events_query_since_bounds_timestamp() {
 }
 
 #[tokio::test]
-async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
+async fn open_at_refuses_unversioned_global_db_without_mutating_legacy_sessions() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("global.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
@@ -451,35 +451,36 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
     .unwrap();
     drop(conn);
 
-    let db = HostAdmissionTestRuntimeV1::profile(db_path.parent().expect("profile root"))
-        .await
-        .expect("registered profile runtime");
-    let event = AnalyticsEventInsert {
-        hook_name: Some("post-tool-use".to_string()),
-        tool_name: Some("shell".to_string()),
-        tool_category: Some("local".to_string()),
-        outcome: Some("recorded".to_string()),
-        metadata_json: Some(r#"{"upgraded":true}"#.to_string()),
-        ..analytics_event(None, 1_715_000_126, "hook")
+    let error = match HostAdmissionTestRuntimeV1::profile(db_path.parent().unwrap()).await {
+        Ok(_) => panic!("unversioned legacy store must require an explicit reset"),
+        Err(error) => error,
     };
-    let id = append_analytics_event(&db, &event, "append analytics event after upgrade").await;
-
-    let events = db
-        .query_analytics_events(&analytics_query(None, Some("hook"), 5))
-        .await
-        .expect("query analytics events after upgrade");
-
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].id, id);
-    assert_eq!(events[0].hook_name.as_deref(), Some("post-tool-use"));
-
-    let index_count = db
-        .profile_analytics_indexes_present_for_test()
-        .await
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("typed reset requirement");
+    assert_eq!(authority, "session temporal");
+    assert!(reason.contains("final schema marker"));
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let columns = conn
+        .prepare("PRAGMA table_info(sessions)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
-        index_count, 2,
-        "analytics aggregate indexes must migrate on open"
+        columns,
+        [
+            "provider",
+            "session_id",
+            "project_key",
+            "project_path",
+            "title",
+            "started_at",
+            "ended_at",
+            "transcript_path",
+            "metadata_json"
+        ]
     );
 }
 
@@ -790,7 +791,11 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .await
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::External);
-    assert!(raw.content.is_empty());
+    assert!(
+        raw.content
+            .starts_with("[Externalized LCM ingest payload: kind=tool_result;")
+    );
+    assert!(raw.content.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
     assert!(!raw.content.contains(body_secret));
     assert!(
         !raw.metadata_json
@@ -1084,7 +1089,7 @@ async fn search_session_messages_filters_by_message_timestamp() {
 }
 
 #[tokio::test]
-async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
+async fn open_at_refuses_unversioned_sessions_without_losing_parent_row() {
     let tmp = TempDir::new().unwrap();
     let profile_root = tmp.path().join(".tracedecay");
     let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
@@ -1115,35 +1120,37 @@ async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
     .unwrap();
     drop(conn);
 
-    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .expect("registered profile runtime");
-    let session = db
-        .get_session("cursor", "old-parent")
-        .await
-        .expect("old row should survive schema upgrade");
-
-    assert_eq!(session.parent_session_id, None);
-    assert!(!session.is_subagent);
-    assert_eq!(session.agent_id, None);
-    assert_eq!(session.parent_tool_use_id, None);
-
-    let child = SessionRecord {
-        session_id: "child-agent".to_string(),
-        parent_session_id: Some("old-parent".to_string()),
-        is_subagent: true,
-        agent_id: Some("child-agent".to_string()),
-        ..sample_session("cursor", "child-agent", "project-a")
+    let error = match HostAdmissionTestRuntimeV1::profile(&profile_root).await {
+        Ok(_) => panic!("unversioned legacy sessions must require an explicit reset"),
+        Err(error) => error,
     };
-    assert!(db.upsert_session(&child).await);
-
-    let fetched = db
-        .get_session("cursor", "child-agent")
-        .await
-        .expect("child row should round-trip");
-    assert_eq!(fetched.parent_session_id.as_deref(), Some("old-parent"));
-    assert!(fetched.is_subagent);
-    assert_eq!(fetched.agent_id.as_deref(), Some("child-agent"));
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("typed reset requirement");
+    assert_eq!(authority, "session temporal");
+    assert!(reason.contains("final schema marker"));
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let row = conn
+        .query_row(
+            "SELECT session_id, title, metadata_json FROM sessions",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "old-parent".into(),
+            "Old title".into(),
+            r#"{"source":"old"}"#.into()
+        )
+    );
 }
 
 #[tokio::test]

@@ -97,7 +97,7 @@ fn diagnostic_runner_reaches_cargo_on_linux_and_macos() {
             .expect("diagnostic runner must execute cargo");
         assert!(
             receipt.starts_with(
-                "argv=<bench><--bench><session_temporal><--all-features><--><--run>\n"
+                "argv=<bench><-p><tracedecay><--bench><session_temporal><--all-features><--><--run>\n"
             ),
             "{platform} cargo receipt: {receipt}"
         );
