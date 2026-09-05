@@ -751,23 +751,42 @@ mod tests {
     use super::*;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_query::search_quality::{
-        PackagedNativeQualificationV1, packaged_native_qualification_bytes,
+        PackagedNativeQualificationV1, compute_workload_digest, packaged_native_qualification_bytes,
     };
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     }
 
+    /// The staleness this pins is a property of the *evidence*, not of the
+    /// checked-in artifact: the shipped qualification is regenerated with the
+    /// workload, so asserting the packaged report is stale asserts a packaging
+    /// defect instead of the authority rule. Prove the current artifact is
+    /// accepted, then bind the same report to a revised workload's digest and
+    /// require the refusal.
     #[test]
-    fn stale_portable_report_is_rejected_after_workload_revision() {
+    fn portable_report_requires_the_current_workload_digest() {
         let qualification: PackagedNativeQualificationV1 =
             serde_json::from_slice(packaged_native_qualification_bytes())
                 .expect("reviewed packaged qualification");
         let workload: CandidateWorkloadV1 =
             serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
 
+        let mut report = qualification.portable_evidence.report;
         assert_eq!(
-            validate_report_authority(&qualification.portable_evidence.report, &workload),
+            validate_report_authority(&report, &workload),
+            Ok(EvaluationEvidenceKindV1::PackagedPortable)
+        );
+
+        let mut revised_workload = workload.clone();
+        revised_workload
+            .execution_contract
+            .runtime_revision
+            .push_str("-revised");
+        report.workload_digest =
+            compute_workload_digest(&revised_workload).expect("revised workload digest");
+        assert_eq!(
+            validate_report_authority(&report, &workload),
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
         );
     }
