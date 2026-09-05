@@ -208,6 +208,65 @@ impl GraphSeatGateV1 {
     }
 }
 
+/// Whether a prepared generation still owes native graph activation.
+///
+/// Preparation binds the complete generation and hands it to the serving
+/// swap; activation installs its native graph. The two used to share one
+/// gate, so refusing a redundant activation also refused the seat — a restart
+/// that restored an owner whose graph was already Ready therefore left the
+/// serving slot empty forever while status read the same owner and reported
+/// Ready. Every arm here refuses activation only; the seat always happens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphActivationGateV1 {
+    /// Install this generation's native graph.
+    Activate,
+    /// The bound owner already serves a native graph. Replaying activation
+    /// reopened the persistent graph, so shutdown cancelled the duplicate
+    /// projection and then conflicted closing the live reconciliation owner.
+    AlreadyServing,
+    /// Nothing new to install: the serving slot already holds this exact
+    /// generation and its graph is terminal (Ready, Refused, or Unavailable).
+    UnchangedGraph,
+    /// A generation whose graph is still Pending gets exactly one further
+    /// attempt per worker; this one is already spent.
+    PendingAttemptSpent,
+}
+
+impl GraphActivationGateV1 {
+    /// Decide activation for a generation this pass prepared and will seat.
+    ///
+    /// `graph_already_serves` is the retained/restored text owner's own
+    /// readiness, not the bound generation's: a restored owner carries its
+    /// Ready graph across the bind, and that owner is the authority status
+    /// reads.
+    #[hotpath::skip]
+    pub const fn decide(
+        graph_already_serves: bool,
+        replaces_serving_generation: bool,
+        graph_activation_is_pending: bool,
+        pending_attempt_spent: bool,
+    ) -> Self {
+        if graph_already_serves {
+            return Self::AlreadyServing;
+        }
+        if replaces_serving_generation {
+            return Self::Activate;
+        }
+        if !graph_activation_is_pending {
+            return Self::UnchangedGraph;
+        }
+        if pending_attempt_spent {
+            return Self::PendingAttemptSpent;
+        }
+        Self::Activate
+    }
+
+    #[hotpath::skip]
+    pub const fn activates(self) -> bool {
+        matches!(self, Self::Activate)
+    }
+}
+
 /// What the serving swap did with a reconciled generation.
 ///
 /// The swap is the only writer of the serving slot, so every arm here is a
@@ -3655,13 +3714,19 @@ impl CodeIndexSchedulerRegistryV1 {
                         worker_wake.notify_one();
                     }
                 }
-                if prepare_graph
-                    && graph_text
-                        .as_ref()
-                        .is_some_and(|retained| retained.interactive_graph_store().is_ok())
-                {
-                    prepare_graph = false;
-                }
+                // A text owner that already serves a native graph must not be
+                // activated a second time, but preparation is not activation.
+                // Clearing `prepare_graph` here also skipped the bind and the
+                // serving swap, so a restart that restored a Ready retained
+                // graph left `serving_generation` empty forever: every
+                // complete-generation demand (`latest_complete_ready`,
+                // `latest_complete_fresh`, `latest_complete_serving_for_scope`)
+                // answered unavailable while `dashboard_code_graph_serving`
+                // read the same text owner and reported Ready. Prepare, bind
+                // and seat as usual; only the activation call is suppressed.
+                let graph_already_serves = graph_text
+                    .as_ref()
+                    .is_some_and(|retained| retained.interactive_graph_store().is_ok());
                 if prepare_graph
                     && !published_pass
                     && !retained_graph_head_recovery_attempted
@@ -3707,13 +3772,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                         &worker_project_root,
                                     )
                                     .await;
-                                    // The retained pass intentionally did not
-                                    // capture the dirty checkout. Wake one
-                                    // successor pass now that its stale graph
-                                    // is queryable; the Pending guard above
-                                    // becomes false after recovery, so this
-                                    // cannot spin another retained-seat Noop.
-                                    worker_wake.notify_one();
                                 }
                                 Ok(false) => {}
                                 Err(error) => {
@@ -3744,6 +3802,19 @@ impl CodeIndexSchedulerRegistryV1 {
                             );
                         }
                     }
+                    // The reserved pass deliberately did not capture the
+                    // checkout, and it consumed whatever wake ran it. Schedule
+                    // the successor for every outcome of the attempt, not only
+                    // the recovered one: an abstaining or degraded attempt
+                    // leaves exactly the same uncaptured source behind, and
+                    // the reservation is armed once per worker, so a quiet
+                    // reserved pass that answered `Noop` for a checkout with
+                    // hook hints already pending stranded them with no wake at
+                    // all and never published the successor generation. The
+                    // `retained_graph_head_recovery_attempted` guard above is
+                    // now false for every later pass, so this cannot spin
+                    // another retained-recovery Noop.
+                    worker_wake.notify_one();
                 }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
@@ -3841,27 +3912,18 @@ impl CodeIndexSchedulerRegistryV1 {
                     Ok((Ok(_), Some(_), Some(_))) => true,
                     _ => false,
                 };
-                // An unchanged reconcile over the exact serving generation has
-                // no graph effect to install. Replaying activation here opened
-                // the persistent graph again, so daemon shutdown cancelled the
-                // duplicate projection and then conflicted while closing the
-                // still-running graph reconciliation owner.
-                //
-                // Identity alone is not that proof, though: a generation seated
-                // by the exact route, or one whose activation failed earlier,
-                // serves text under the very same id with no native graph at
-                // all. Leaving the replace gate as the only door left those
-                // generations answering "not ready" forever. A generation whose
-                // graph is still Pending - never Ready, never Refused - gets
-                // exactly one further attempt per worker, so nothing is
-                // replayed over a graph that already serves.
+                // Activation is decided independently of the seat: every arm
+                // below refuses only the native graph call, and the serving
+                // swap still installs the prepared generation.
                 let activate_graph = match &result {
-                    Ok((Ok(_), Some(latest), Some(_))) => {
-                        replace_serving_generation
-                            || (latest.graph_activation_is_pending()
-                                && graph_seat_attempted.as_ref()
-                                    != Some(&latest.generation().manifest().generation_id))
-                    }
+                    Ok((Ok(_), Some(latest), Some(_))) => GraphActivationGateV1::decide(
+                        graph_already_serves,
+                        replace_serving_generation,
+                        latest.graph_activation_is_pending(),
+                        graph_seat_attempted.as_ref()
+                            == Some(&latest.generation().manifest().generation_id),
+                    )
+                    .activates(),
                     _ => false,
                 };
                 if activate_graph && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {

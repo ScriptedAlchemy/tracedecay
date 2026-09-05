@@ -16238,6 +16238,57 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
     );
 }
 
+/// Refusing a redundant activation must never refuse the seat.
+///
+/// Preparation and activation shared one gate, so an owner whose native graph
+/// was already Ready cleared `prepare_graph` and skipped the bind and the
+/// serving swap along with the activation call. A restart that restored such
+/// an owner therefore left `serving_generation` empty forever: every
+/// complete-generation demand answered unavailable while the dashboard read
+/// the same owner and reported Ready/fresh/complete. This table pins the
+/// separation - every refusal here is activation-only.
+#[test]
+fn a_redundant_activation_is_refused_without_refusing_the_seat() {
+    use super::registry::GraphActivationGateV1;
+
+    assert_eq!(
+        GraphActivationGateV1::decide(true, true, true, false),
+        GraphActivationGateV1::AlreadyServing,
+        "a restored owner that already serves a native graph is never activated again, not \
+         even when it takes an empty serving slot"
+    );
+    assert_eq!(
+        GraphActivationGateV1::decide(false, true, false, true),
+        GraphActivationGateV1::Activate,
+        "a generation entering the serving slot installs its native graph"
+    );
+    assert_eq!(
+        GraphActivationGateV1::decide(false, false, false, false),
+        GraphActivationGateV1::UnchangedGraph,
+        "an unchanged pass over a terminal graph has no effect to install"
+    );
+    assert_eq!(
+        GraphActivationGateV1::decide(false, false, true, false),
+        GraphActivationGateV1::Activate,
+        "a generation serving text with a still-Pending graph gets one further attempt"
+    );
+    assert_eq!(
+        GraphActivationGateV1::decide(false, false, true, true),
+        GraphActivationGateV1::PendingAttemptSpent,
+        "that attempt is bounded to one per generation per worker"
+    );
+    assert!(
+        [
+            GraphActivationGateV1::AlreadyServing,
+            GraphActivationGateV1::UnchangedGraph,
+            GraphActivationGateV1::PendingAttemptSpent,
+        ]
+        .into_iter()
+        .all(|gate| !gate.activates()),
+        "only the Activate arm may call native graph activation"
+    );
+}
+
 /// Activation that completes against a moved durable pointer must still seat.
 ///
 /// Graph activation of a large generation is minutes of real work, and the
