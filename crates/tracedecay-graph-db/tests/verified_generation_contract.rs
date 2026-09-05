@@ -1761,6 +1761,117 @@ fn restart_reverification_installs_once_and_steady_reads_need_no_authority() {
     drop(historical);
 }
 
+#[test]
+fn cancelled_restart_recovery_preserves_the_head_and_retries_exactly() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("restart-cancel", "work");
+    let generation = manifest(identity.clone(), "g1", "g1", vec![], vec![]);
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &generation,
+        "publish:g1",
+        None,
+        'd',
+    );
+    let published = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+            None,
+        )
+        .unwrap();
+    let expected_head = published.head.clone();
+    drop(published);
+    assert!(registered.close().unwrap());
+    registered.mount().unwrap();
+
+    // Registration admits the lease at the first probe; recovery checks it at
+    // the second, reads the durable head, then checks again before loading it.
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let mut gated = registration(registered.binding.clone(), temp.path());
+    gated.cancellation = Arc::new(GateOnPoll {
+        polls: AtomicUsize::new(0),
+        gate_on: 3,
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let reads_before = authority.read_calls;
+    let cas_before = authority.cas_calls;
+    let interrupted = Arc::clone(&probe.interruption);
+    let recovery = {
+        let registry = registered.registry.clone();
+        let projection = record.publication.key.projection.clone();
+        thread::spawn(move || {
+            let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+            let outcome =
+                registry.recover_verified_snapshot(gated, &mut authority, &context, &projection);
+            (authority, outcome)
+        })
+    };
+    entered.wait();
+    interrupted.store(1, Ordering::SeqCst);
+    release.wait();
+    let (mut authority, outcome) = recovery.join().unwrap();
+    assert_eq!(outcome.unwrap_err(), GraphDbError::Cancelled);
+    assert!(
+        authority.read_calls > reads_before,
+        "recovery must read the durable head before cancellation"
+    );
+    assert_eq!(authority.cas_calls, cas_before);
+    assert_eq!(
+        authority.heads.get(&record.publication.key.projection),
+        Some(&expected_head)
+    );
+    assert_eq!(
+        authority.records.get(&record.publication.key),
+        Some(&record)
+    );
+    assert!(
+        registered
+            .registry
+            .verified_snapshot(
+                registration(registered.binding.clone(), temp.path()),
+                &identity,
+            )
+            .is_err(),
+        "cancelled recovery must not install a partial serving generation"
+    );
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let recovered = registered
+        .registry
+        .recover_verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(recovered.verified_head(), &expected_head);
+    drop(recovered);
+    let reads_after = authority.read_calls;
+    let snapshot = registered
+        .registry
+        .verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &identity,
+        )
+        .unwrap();
+    assert_eq!(snapshot.verified_head(), &expected_head);
+    assert_eq!(authority.read_calls, reads_after);
+    assert_eq!(authority.cas_calls, cas_before);
+}
+
 /// A publisher that crashed after the verified-head CAS retries the same
 /// first publication on restart: the head has already moved to its own
 /// journaled publication, and the retry must seat that publication instead
