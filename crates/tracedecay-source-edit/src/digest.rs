@@ -18,6 +18,17 @@ use super::{
     SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1,
 };
 
+/// Canonical spelling of every source-edit candidate: `/`-joined normal
+/// components, on every host.
+///
+/// This string is the candidate's identity — it is matched against the exact
+/// preview plan, digested into the expected/predicted state, and written to
+/// the durable journal. Rendering it through `PathBuf::to_string_lossy` made
+/// that identity platform-dependent: the same edit spelled `src/b.rs` in its
+/// plan came back as `src\b.rs` on Windows, so no candidate matched its own
+/// plan and every apply failed as a missing candidate. Joining the components
+/// explicitly (rather than replacing separators in the rendered string) keeps
+/// a Unix filename that genuinely contains a backslash intact.
 pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Result<Vec<String>> {
     let mut normalized = Vec::with_capacity(files.len());
     for file in files {
@@ -31,15 +42,22 @@ pub(super) fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Resu
                 "source edit candidate path is outside the authorized worktree",
             ));
         }
-        let value = path
+        let components = path
             .components()
             .filter_map(|component| match component {
                 Component::Normal(value) => Some(value),
                 _ => None,
             })
-            .collect::<PathBuf>();
+            .collect::<Vec<_>>();
+        let value = components.iter().collect::<PathBuf>();
         tracedecay_usecases::tracedecay::validate_source_edit_candidate_parent(root, &value)?;
-        normalized.push(value.to_string_lossy().into_owned());
+        normalized.push(
+            components
+                .iter()
+                .map(|component| component.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+        );
     }
     normalized.sort();
     normalized.dedup();
@@ -201,6 +219,25 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
+
+    /// The candidate identity must be spelled the same way the preview plan
+    /// spells it, on every host: the plan uses `/` separators, so normalizing
+    /// through a native `PathBuf` rendering would desynchronize the two on
+    /// Windows and no candidate would match its own plan.
+    #[test]
+    fn candidate_identity_is_slash_separated_on_every_host() {
+        let project = tempdir().unwrap();
+        fs::create_dir_all(project.path().join("src/nested")).unwrap();
+
+        assert_eq!(
+            normalize_candidate_files(
+                project.path(),
+                vec!["./src/nested/deep.rs".to_owned(), "src/b.rs".to_owned()]
+            )
+            .unwrap(),
+            vec!["src/b.rs".to_owned(), "src/nested/deep.rs".to_owned()]
+        );
+    }
 
     #[test]
     fn expected_state_digest_covers_content_and_missing_files() {

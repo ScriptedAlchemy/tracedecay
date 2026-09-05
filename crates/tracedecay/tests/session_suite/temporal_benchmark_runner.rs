@@ -96,8 +96,11 @@ fn diagnostic_runner_reaches_cargo_on_linux_and_macos() {
             .cargo_receipt
             .expect("diagnostic runner must execute cargo");
         assert!(
+            // `eebf0957a` retargeted the shipped runner after the crate move:
+            // the repository root is a virtual workspace, so `cargo bench` must
+            // name `-p tracedecay` to resolve the harness at all.
             receipt.starts_with(
-                "argv=<bench><--bench><session_temporal><--all-features><--><--run>\n"
+                "argv=<bench><-p><tracedecay><--bench><session_temporal><--all-features><--><--run>\n"
             ),
             "{platform} cargo receipt: {receipt}"
         );

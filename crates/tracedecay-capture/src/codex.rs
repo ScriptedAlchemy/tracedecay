@@ -17,9 +17,88 @@ use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
 
 const PROVIDER: &str = "codex";
 
+/// Validated current Codex user-message fields shared by canonical capture and
+/// the session transcript projection.
+pub struct CodexCurrentUserMessage<'a> {
+    pub item_id: &'a str,
+    pub content: &'a Value,
+}
+
+/// Validated Codex goal context carried by a `response_item.message(user)`.
+pub struct CodexResponseGoalContext<'a> {
+    pub item_id: Option<&'a str>,
+    pub content: &'a Value,
+    pub visible_text: String,
+}
+
+/// Validate Codex's current `event_msg.item_completed/UserMessage` contract.
+/// Stable native identity and visible text are both required before the item
+/// can become a canonical or session message.
+pub fn codex_current_user_message(payload: &Value) -> Option<CodexCurrentUserMessage<'_>> {
+    if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+        return None;
+    }
+    let item = payload.get("item")?;
+    if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
+        return None;
+    }
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|item_id| !item_id.is_empty())?;
+    ObservationId::new(item_id).ok()?;
+    let content = item.get("content")?;
+    let visible_text = codex_message_visible_text(content);
+    if visible_text.trim().is_empty() {
+        return None;
+    }
+    Some(CodexCurrentUserMessage { item_id, content })
+}
+
+/// Validate the legacy response-only goal-context shape. A response item may
+/// omit `id` in older rollouts; when present, it must still be a valid native
+/// observation identity. Pair replacement belongs to transactional projection,
+/// after the matching current item has committed successfully.
+pub fn codex_response_goal_context(payload: &Value) -> Option<CodexResponseGoalContext<'_>> {
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return None;
+    }
+    let item_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|item_id| !item_id.is_empty());
+    if item_id.is_some_and(|item_id| ObservationId::new(item_id).is_err()) {
+        return None;
+    }
+    let content = payload.get("content")?;
+    let visible_text = codex_message_visible_text(content);
+    tracedecay_store::codex_goal_context_from_text(&visible_text)?;
+    Some(CodexResponseGoalContext {
+        item_id,
+        content,
+        visible_text,
+    })
+}
+
+/// Collect the visible text carried by current and legacy Codex content bags.
+pub fn codex_message_visible_text(value: &Value) -> String {
+    tracedecay_store::codex_message_visible_text(value)
+}
+
 pub fn codex_observation_record_supported(value: &Value) -> bool {
+    let native_kind = value.get("type").and_then(Value::as_str);
+    if native_kind == Some("event_msg") {
+        let payload = value.get("payload").unwrap_or(value);
+        if payload.get("type").and_then(Value::as_str) == Some("item_completed")
+            && payload.pointer("/item/type").and_then(Value::as_str) == Some("UserMessage")
+        {
+            return codex_current_user_message(payload).is_some();
+        }
+    }
     matches!(
-        value.get("type").and_then(Value::as_str),
+        native_kind,
         Some(
             "session_meta"
                 | "turn_context"
@@ -133,12 +212,20 @@ fn normalize_codex_record(
         native_kind,
         "event_msg" | "response_item" | "compacted" | "inter_agent_communication"
     ) {
-        relations = relations.with_message_id(stable_record_id.clone());
+        let message_id = match native_kind {
+            "event_msg" => codex_current_user_message(payload)
+                .and_then(|message| observation_id_from_native(message.item_id)),
+            "response_item" => codex_response_goal_context(payload)
+                .and_then(|message| message.item_id)
+                .and_then(observation_id_from_native),
+            _ => None,
+        }
+        .unwrap_or_else(|| stable_record_id.clone());
+        relations = relations.with_message_id(message_id);
     }
     if native_kind == "session_meta" {
         relations = append_codex_session_meta_agent_relations(relations, payload, native_thread_id);
     }
-
     let mut facts = Vec::new();
     if let Some(location) = location {
         facts.push(CanonicalObservationFactV1::Session {
@@ -293,6 +380,39 @@ fn append_codex_event_facts(
                     timestamp,
                 });
             }
+        }
+        Some("item_completed") => {
+            let Some(item) = payload.get("item") else {
+                facts.push(CanonicalObservationFactV1::Unknown {
+                    native_kind: "item_completed".to_string(),
+                    state: CanonicalUnknownStateV1::Malformed,
+                });
+                return;
+            };
+            if item.get("type").and_then(Value::as_str) != Some("UserMessage") {
+                facts.push(CanonicalObservationFactV1::Unknown {
+                    native_kind: "item_completed".to_string(),
+                    state: CanonicalUnknownStateV1::Unsupported,
+                });
+                return;
+            }
+            let Some(message) = codex_current_user_message(payload) else {
+                facts.push(CanonicalObservationFactV1::Unknown {
+                    native_kind: "item_completed".to_string(),
+                    state: CanonicalUnknownStateV1::Malformed,
+                });
+                return;
+            };
+            facts.push(CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::User,
+                content: message.content.clone(),
+                model: item
+                    .get("model")
+                    .or_else(|| payload.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                timestamp,
+            });
         }
         Some("token_count") => {
             let info = payload.get("info").unwrap_or(payload);
@@ -600,8 +720,28 @@ fn append_codex_response_item_facts(
     match item_kind {
         "message" => {
             if let Some(content) = payload.get("content").cloned() {
+                let role = payload.get("role").and_then(Value::as_str);
+                if role == Some("user") {
+                    let Some(goal_context) = codex_response_goal_context(payload) else {
+                        facts.push(CanonicalObservationFactV1::Unknown {
+                            native_kind: "response_item.message.user".to_string(),
+                            state: CanonicalUnknownStateV1::Unsupported,
+                        });
+                        return;
+                    };
+                    facts.push(CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::User,
+                        content: goal_context.content.clone(),
+                        model: payload
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        timestamp,
+                    });
+                    return;
+                }
                 facts.push(CanonicalObservationFactV1::Message {
-                    role: canonical_message_role(payload.get("role").and_then(Value::as_str)),
+                    role: canonical_message_role(role),
                     content,
                     model: payload
                         .get("model")
@@ -609,9 +749,6 @@ fn append_codex_response_item_facts(
                         .map(str::to_string),
                     timestamp,
                 });
-                // Goal-context response_item messages stay Message-only.
-                // WorkflowLifecycle Goal is reserved for nested thread_goal_updated
-                // (write_codex_rollout_with_goal_events), not synthetic goal-context text.
             }
         }
         "function_call" | "custom_tool_call" | "tool_search_call" | "web_search_call" => {
@@ -967,5 +1104,52 @@ mod provider_usage_tests {
                     ProviderUsageContractDimensionV1::Model,
                 ])
         )));
+    }
+
+    #[test]
+    fn current_item_completed_user_message_is_a_canonical_message() {
+        let native = json!({
+            "timestamp": "2026-09-04T12:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "user-item-1",
+                    "content": [{
+                        "type": "text",
+                        "text": "Find the callers of publish_generation.",
+                        "text_elements": []
+                    }]
+                }
+            }
+        });
+        let envelope = normalize_codex_observation_with_location(
+            &native,
+            "session.fixture",
+            Some("thread-1"),
+            ObservationId::new("record.fixture").unwrap(),
+            ObservationSourceRangeV1::new(10, 20).unwrap(),
+            CodexObservationLocation {
+                project_path: None,
+                location_path: None,
+            },
+        )
+        .unwrap();
+
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Message {
+                role: tracedecay_domain::CanonicalMessageRoleV1::User,
+                content,
+                ..
+            } if content == &native["payload"]["item"]["content"]
+        )));
+        assert_eq!(
+            envelope.relations().message_id().map(ObservationId::as_str),
+            Some("user-item-1")
+        );
     }
 }

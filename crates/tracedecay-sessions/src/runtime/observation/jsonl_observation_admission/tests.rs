@@ -337,6 +337,7 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
     let path = temp.path().join("aborted-prefetch.jsonl");
     std::fs::write(&path, b"{}\n").expect("JSONL fixture");
     let canonical = std::fs::canonicalize(&path).expect("canonical fixture");
+    let observed_builds = super::SharedJsonlBuildObserver::for_paths(std::slice::from_ref(&path));
     let build_gate = std::sync::Arc::new(std::sync::Barrier::new(2));
     super::SHARED_JSONL_BUILD_GATES
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -345,10 +346,9 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
         .insert(path.clone(), std::sync::Arc::clone(&build_gate));
     let pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
 
-    super::SHARED_JSONL_ACTIVE_BUILDS.store(0, Ordering::Release);
     pin.start_prefetches(std::slice::from_ref(&path));
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while super::SHARED_JSONL_ACTIVE_BUILDS.load(Ordering::Acquire) == 0 {
+        while observed_builds.active() == 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -414,6 +414,86 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
             .iter()
             .all(|key| key.path != canonical),
         "an aborted producer must release the global speculative quota"
+    );
+}
+
+#[tokio::test]
+async fn build_observation_excludes_an_overlapping_sibling_generation() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::TempDir::new().expect("temp directory");
+    let observed_path = temp.path().join("observed-generation.jsonl");
+    let sibling_path = temp.path().join("sibling-generation.jsonl");
+    std::fs::write(&observed_path, b"{}\n").expect("observed JSONL fixture");
+    std::fs::write(&sibling_path, b"{}\n").expect("sibling JSONL fixture");
+    let observed_builds =
+        super::SharedJsonlBuildObserver::for_paths(std::slice::from_ref(&observed_path));
+    let sibling_builds =
+        super::SharedJsonlBuildObserver::for_paths(std::slice::from_ref(&sibling_path));
+    let sibling_gate = Arc::new(std::sync::Barrier::new(2));
+    super::SHARED_JSONL_BUILD_GATES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(sibling_path.clone(), Arc::clone(&sibling_gate));
+
+    let sibling_task = tokio::spawn({
+        let sibling_path = sibling_path.clone();
+        async move {
+            super::shared_jsonl_page(
+                &sibling_path,
+                StoredCursor::default(),
+                Some(1024),
+                None,
+                super::SharedJsonlFramePreparation::Lazy,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while sibling_builds.active() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("sibling generation reached its blocking build");
+
+    super::shared_jsonl_page(
+        &observed_path,
+        StoredCursor::default(),
+        Some(1024),
+        None,
+        super::SharedJsonlFramePreparation::Lazy,
+    )
+    .await
+    .expect("observed generation page");
+    assert_eq!(
+        observed_builds.active(),
+        0,
+        "the completed generation must release its own active-build slot"
+    );
+    assert_eq!(observed_builds.peak(), 1);
+    assert_eq!(
+        sibling_builds.active(),
+        1,
+        "the independently observed sibling must remain blocked"
+    );
+
+    super::SHARED_JSONL_BUILD_GATES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(&sibling_path);
+    tokio::task::spawn_blocking(move || sibling_gate.wait())
+        .await
+        .expect("release sibling build gate");
+    sibling_task
+        .await
+        .expect("sibling generation task")
+        .expect("sibling generation page");
+    assert_eq!(
+        sibling_builds.active(),
+        0,
+        "the sibling generation must release its own active-build slot"
     );
 }
 
@@ -558,8 +638,8 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
         paths.push(path);
     }
     let _pin = super::pin_shared_jsonl_paths(&paths);
+    let observed_builds = super::SharedJsonlBuildObserver::for_paths(&paths);
 
-    super::SHARED_JSONL_PEAK_BUILDS.store(0, Ordering::Release);
     let _prefetches = super::start_shared_jsonl_page_prefetch(&paths);
     for path in &paths {
         super::shared_jsonl_page(
@@ -574,13 +654,13 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
     }
 
     assert_eq!(
-        super::SHARED_JSONL_ACTIVE_BUILDS.load(Ordering::Acquire),
+        observed_builds.active(),
         0,
         "every completed page build must release exactly one active-build slot"
     );
 
     if std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 8) {
-        assert!(super::shared_jsonl_peak_builds_for_test() > 8);
+        assert!(observed_builds.peak() > 8);
     }
     let retained = super::SHARED_JSONL_PAGE_CACHE
         .get()
@@ -939,11 +1019,7 @@ fn rollout_fixture() -> (tempfile::TempDir, PathBuf, u64) {
 }
 
 async fn stored_cursor(spy: &SeamSpyAdmission) -> Option<ObservationSourceCursorV1> {
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
-        SessionId::new(SESSION_ID).unwrap(),
-    )
-    .unwrap();
+    let source = crate::runtime::codex::codex_observation_source_v2(SESSION_ID).unwrap();
     spy.get_source_cursor(&source, &ObservationScopeV1::Profile)
         .await
         .unwrap()

@@ -1089,34 +1089,55 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         String::from_utf8_lossy(&disable_output.stderr)
     );
 
-    let mut run = tracedecay_command(home.path(), project.path());
-    // `tracedecay tool` reaches a retained operation over the MCP
-    // compatibility binding, which answers with the tool-result envelope;
-    // `format: "json"` is what makes the retained document travel inside the
-    // content block instead of its elided markdown rendering. `--json` only
-    // decides whether the CLI prints that envelope or joins its text.
-    run.args([
-        "tool",
-        "fact_store_curate",
-        "--json",
-        "--args",
-        r#"{"format":"json"}"#,
-    ]);
-    let run_output = run_with_timeout(run, cli_timeout());
-    assert!(
-        run_output.status.success(),
-        "manual automation run should skip cleanly when its backend is disabled\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&run_output.stdout),
-        String::from_utf8_lossy(&run_output.stderr)
-    );
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&run_output.stdout).expect("fact_store_curate should print JSON");
-    let document = envelope["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("fact_store_curate returned no content text: {envelope}"))
-        .to_owned();
-    let payload: serde_json::Value =
-        serde_json::from_str(&document).expect("content block should carry the document");
+    // The project's own automation scheduler runs beside this manual call and
+    // takes the same curator lock. While it holds it the manual run reports the
+    // legal transient `scheduler_lock_active` terminal instead of the
+    // backend-disabled skip under test, so retry until the lock is free.
+    let payload = {
+        let mut attempts = 0;
+        loop {
+            let mut run = tracedecay_command(home.path(), project.path());
+            // `tracedecay tool` reaches a retained operation over the MCP
+            // compatibility binding, which answers with the tool-result
+            // envelope; `format: "json"` is what makes the retained document
+            // travel inside the content block instead of its elided markdown
+            // rendering. `--json` only decides whether the CLI prints that
+            // envelope or joins its text.
+            run.args([
+                "tool",
+                "fact_store_curate",
+                "--json",
+                "--args",
+                r#"{"format":"json"}"#,
+            ]);
+            let run_output = run_with_timeout(run, cli_timeout());
+            assert!(
+                run_output.status.success(),
+                "manual automation run should skip cleanly when its backend is disabled\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&run_output.stdout),
+                String::from_utf8_lossy(&run_output.stderr)
+            );
+            let envelope: serde_json::Value = serde_json::from_slice(&run_output.stdout)
+                .expect("fact_store_curate should print JSON");
+            let document = envelope["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("fact_store_curate returned no content text: {envelope}"))
+                .to_owned();
+            let payload: serde_json::Value =
+                serde_json::from_str(&document).expect("content block should carry the document");
+            if payload["outcome"]["value"]["payload"]["terminal"]["reason"]
+                != "scheduler_lock_active"
+            {
+                break payload;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 10,
+                "the automation scheduler held the curator lock for every manual attempt: {payload}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    };
     let run = &payload["outcome"]["value"]["payload"];
     assert_eq!(run["task"], "memory_curator");
     assert_eq!(run["terminal"]["status"], "skipped");
@@ -1196,16 +1217,24 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         .to_path_buf();
     let mut artifact_record: AutomationRunLedgerRecord =
         serde_json::from_value(record).expect("ledger should deserialize as run record");
+    // The ledger is append-only with an enforced lifecycle: a run that already
+    // reached a terminal status cannot be re-appended, so attaching an artifact
+    // to the curate run's own `skipped` row is refused with "invalid lifecycle
+    // transition". Cover the artifact surface on a run of its own instead —
+    // one terminal row that already carries the artifact, which is the only
+    // shape the ledger accepts.
+    let artifact_run_id = format!("{run_id}-artifact");
+    artifact_record.run_id.clone_from(&artifact_run_id);
     let artifact_payload = serde_json::json!({
         "loop_stage": "codex_handoff",
-        "run_id": run_id,
+        "run_id": artifact_run_id,
         "status": "ready_for_review",
     });
     let runtime = create_runtime();
     let artifact = runtime
         .block_on(write_run_artifact(
             &dashboard_root,
-            run_id,
+            &artifact_run_id,
             AutomationRunArtifactKind::CodexHandoff,
             &artifact_payload,
             Some("CLI handoff artifact".to_string()),
@@ -1222,7 +1251,7 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
         "automation",
         "runs",
         "artifact",
-        run_id,
+        artifact_run_id.as_str(),
         "codex_handoff",
         "--json",
     ]);
@@ -1235,7 +1264,7 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     );
     let artifact_view_payload: serde_json::Value =
         serde_json::from_slice(&artifact_output.stdout).expect("artifact view should print JSON");
-    assert_eq!(artifact_view_payload["run_id"], run_id);
+    assert_eq!(artifact_view_payload["run_id"], artifact_run_id);
     assert_eq!(artifact_view_payload["artifact"]["kind"], "codex_handoff");
     assert_eq!(
         artifact_view_payload["payload"]["status"],

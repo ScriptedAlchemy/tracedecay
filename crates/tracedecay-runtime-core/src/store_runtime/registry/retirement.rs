@@ -1062,8 +1062,11 @@ mod tests {
             key: &'a StoreRuntimeKey,
         ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
         {
+            // The locator digest requires `Path::is_absolute`, which is
+            // host-specific: a bare `/...` literal is not absolute on Windows.
             let path = std::path::PathBuf::from(format!(
-                "/retirement-graph/{:?}/{}",
+                "{}retirement-graph/{:?}/{}",
+                if cfg!(windows) { "C:\\" } else { "/" },
                 key.shard_id.scope,
                 key.incarnation.get()
             ));

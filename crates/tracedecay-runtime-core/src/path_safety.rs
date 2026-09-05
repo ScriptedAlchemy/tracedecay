@@ -75,6 +75,43 @@ pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
         || canonicalize_path_or_existing_parent(left) == canonicalize_path_or_existing_parent(right)
 }
 
+/// Rewrites a Windows extended-length (`\\?\`) *disk* path to its ordinary
+/// form, so it can be handed to a tool that does not understand the verbatim
+/// prefix.
+///
+/// [`std::fs::canonicalize`] returns the verbatim form for every Windows path,
+/// so every path this runtime resolves reads `\\?\D:\repo\.git` rather than
+/// `D:\repo\.git`. Git for Windows normalizes the paths it is given and
+/// rejects that spelling — most visibly through
+/// `GIT_ALTERNATE_OBJECT_DIRECTORIES`, where a verbatim entry makes every
+/// object-writing command fail — so a resolved path must be spelled plainly
+/// before it crosses into a child process.
+///
+/// Only a verbatim disk path is shortened. `\\?\UNC\server\share` and device
+/// namespace paths genuinely need the prefix and are returned unchanged, as is
+/// every path that does not carry one (which is every path on Unix).
+#[must_use]
+pub fn plain_host_path(path: &Path) -> PathBuf {
+    // Deliberately a string transform rather than `Path::components`: the
+    // prefix is only *parsed* as a prefix on Windows, and this must behave
+    // identically wherever the path was produced, so it can be exercised on
+    // any host.
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    let bytes = rest.as_bytes();
+    let is_verbatim_disk =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    if is_verbatim_disk {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Drops `.` and resolves `..` lexically, without touching the filesystem.
 ///
 /// This is a separate step rather than part of canonicalization because the
@@ -142,7 +179,7 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 mod tests {
     use super::{
         canonicalize_existing_prefix, collapse_relative_components,
-        normalize_source_edit_relative_path, same_canonical_path,
+        normalize_source_edit_relative_path, plain_host_path, same_canonical_path,
     };
     use std::path::{Path, PathBuf};
 
@@ -214,6 +251,33 @@ mod tests {
             collapse_relative_components(Path::new("/a/./b/../c")),
             PathBuf::from("/a/c")
         );
+    }
+
+    /// Runs on every host: the transform is defined on the spelling, not on
+    /// how the running platform happens to parse it.
+    #[test]
+    fn only_a_verbatim_disk_path_is_spelled_plainly_for_child_processes() {
+        assert_eq!(
+            plain_host_path(Path::new(r"\\?\D:\a\_temp\repo\.git\objects")),
+            PathBuf::from(r"D:\a\_temp\repo\.git\objects")
+        );
+        assert_eq!(
+            plain_host_path(Path::new(r"\\?\c:\repo")),
+            PathBuf::from(r"c:\repo")
+        );
+        for preserved in [
+            r"\\?\UNC\server\share\repo",
+            r"\\?\Volume{9f4c2b1e-0000-0000-0000-100000000000}\repo",
+            r"\\server\share\repo",
+            r"D:\repo",
+            "/home/user/repo",
+        ] {
+            assert_eq!(
+                plain_host_path(Path::new(preserved)),
+                PathBuf::from(preserved),
+                "{preserved} must be handed on unchanged"
+            );
+        }
     }
 
     #[test]

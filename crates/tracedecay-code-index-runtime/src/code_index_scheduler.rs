@@ -647,6 +647,9 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     disposition: CodeIndexPublicationDispositionV1,
     pointer_memo: Arc<ProfiledStdMutex<Option<PublicationPointerMemoV1>>>,
     undecoded_active_expectation: Option<UndecodedActivePublicationExpectationV1>,
+    /// The canonical source-hint authority plus the exact pre-capture epoch
+    /// used by a retained rebuild. Ordinary publication leaves this absent.
+    reconcile_publication_fence: Option<(Arc<Mutex<PendingHintsV1>>, DaemonCodeIndexControlV1)>,
     /// Last generation handed to `publish_atomically`. A transient store
     /// failure must not drop it: the next undecoded retry republishes this
     /// candidate instead of extracting the whole worktree again.
@@ -933,6 +936,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 label = "daemon.code_index.publication.pointer_memo"
             )),
             undecoded_active_expectation: None,
+            reconcile_publication_fence: None,
             unpublished_candidate: Arc::new(Mutex::new(None)),
         })
     }
@@ -945,6 +949,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
             state_digest: pointer.state_digest.clone(),
         });
         publication
+    }
+
+    fn with_reconcile_publication_fence(
+        mut self,
+        hints: Arc<Mutex<PendingHintsV1>>,
+        control: DaemonCodeIndexControlV1,
+    ) -> Self {
+        self.reconcile_publication_fence = Some((hints, control));
+        self
     }
 
     fn retained_history(&self) -> Self {
@@ -2053,6 +2066,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
+
+    fn restore_unpublished(&self, generation: Arc<CodeIndexPublishedGenerationV1>) {
+        let mut candidate = self
+            .unpublished_candidate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if candidate.is_none() {
+            *candidate = Some(generation);
+        }
+    }
 }
 
 impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
@@ -2079,6 +2102,13 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .unpublished_candidate
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&generation));
+        if self
+            .reconcile_publication_fence
+            .as_ref()
+            .is_some_and(|(_, control)| control.is_cancelled())
+        {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
         let store_root = self
             .active_path
             .parent()
@@ -2433,6 +2463,21 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 "publication pointer serialization failed: {error}"
             ))
         })?;
+        // Serialize the final visibility boundary with observed-change wakes.
+        // Immutable segment writes may finish before this point, but a stale
+        // capture cannot replace the active durable pointer.
+        let source_fence = if let Some((hints, control)) = self.reconcile_publication_fence.as_ref()
+        {
+            let guard = hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if control.is_cancelled() {
+                return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let temporary = self
             .active_path
             .with_extension(format!("json.{}.tmp", std::process::id()));
@@ -2450,6 +2495,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             self.remember_publication_pointer(&pointer, &bytes);
             Ok::<(), CodeIndexPublicationStoreErrorV1>(())
         })?;
+        drop(source_fence);
         let mut state = self.cache.lock_state()?;
         if self.undecoded_active_expectation.is_none() {
             let cached_active = state
@@ -2557,6 +2603,7 @@ impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
 struct PendingHintsV1 {
     paths: BTreeSet<PathBuf>,
     overflow: bool,
+    observed_source_change: bool,
 }
 
 impl PendingHintsV1 {
@@ -2583,6 +2630,7 @@ impl PendingHintsV1 {
     }
 
     fn restore(&mut self, pending: Self) {
+        self.observed_source_change |= pending.observed_source_change;
         if self.overflow {
             return;
         }
@@ -2601,10 +2649,19 @@ impl PendingHintsV1 {
 
 /// A drained view of the canonical pending-hint authority. Until committed,
 /// every early return, typed failure, cancellation, or unwind merges the exact
-/// drained paths back with hints that arrived during the reconcile pass.
+/// drained paths and observed-change marker back with hints that arrived
+/// during the reconcile pass.
 struct DrainedPendingHintsV1 {
     authority: Arc<Mutex<PendingHintsV1>>,
     pending: Option<PendingHintsV1>,
+}
+
+struct RetainedReconcileCaptureV1 {
+    captured: CapturedSnapshotV1,
+    drained_hints: DrainedPendingHintsV1,
+    control: DaemonCodeIndexControlV1,
+    git_metadata: identity::GitMetadataFingerprintV1,
+    stat_signature: Option<String>,
 }
 
 impl DrainedPendingHintsV1 {
@@ -5480,6 +5537,14 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     generation_recovery: Arc<RwLock<Option<CodeIndexGenerationRecoveryV1>>>,
     latest_content_identity: Option<ContentDigest>,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    /// Set when a retained generation was refused because its ignored-source
+    /// roster no longer verifies. That refusal also clears the roster, so the
+    /// next pass rebuilds without it — but the refused pass has already
+    /// consumed the wake that ran it, so nothing scheduled that next pass and
+    /// the still-pending source stayed uncaptured with no seat at all. The
+    /// worker takes this flag to re-arm exactly one pass; taking it clears it,
+    /// so a refusal can never spin the worker.
+    ignored_roster_refusal_requires_rebuild: bool,
     query_owners: ProfiledStdMutex<Option<GenerationServingCachesV1>>,
     /// Immutable generation-scoped build snapshot. The registry clones this
     /// slot at mount so dashboard reads never acquire the scheduler mutex.
@@ -5714,6 +5779,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             generation_recovery: Arc::new(RwLock::new(None)),
             latest_content_identity,
             ignored_source_admissions: Vec::new(),
+            ignored_roster_refusal_requires_rebuild: false,
             query_owners: hotpath::mutex!(
                 Mutex::new(None),
                 label = "daemon.code_index.serving_caches"
@@ -5999,27 +6065,32 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// [`Self::request_background_reconcile`] for a caller that has already
     /// proven the worktree moved.
     ///
-    /// The clean-to-dirty transition advances the canonical worktree-change
-    /// generation diagnostics caches key on, and supersedes index work bound
-    /// to the source state that change replaced. Freshness requests coalesce
-    /// until reconciliation drains the marker through `take()`, so a repeated
-    /// read of the same pending drift keeps the same generation.
+    /// The first pending observed-change marker advances the canonical
+    /// worktree-change generation diagnostics caches key on, and supersedes
+    /// index work bound to the source state that change replaced. Freshness
+    /// requests coalesce until reconciliation drains the marker through
+    /// `take()`, so a repeated read of the same pending drift keeps the same
+    /// generation. Source-neutral overflow wakes use a separate marker and
+    /// cannot consume this transition.
     pub fn request_background_reconcile_for_observed_change(&self) {
         self.request_background_reconcile_with_change(true);
     }
 
     fn request_background_reconcile_with_change(&self, source_changed: bool) {
-        let newly_dirty = {
+        {
             let mut hints = self
                 .hints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let newly_dirty = !hints.overflow;
+            let newly_observed_change = source_changed && !hints.observed_source_change;
+            hints.observed_source_change |= source_changed;
+            if newly_observed_change {
+                // Advance while holding the hint authority: a reconciler that
+                // drains the observed-change marker must also observe the
+                // cancellation epoch that marker minted.
+                DaemonCodeIndexControlV1::advance(&self.epoch);
+            }
             hints.overflow();
-            newly_dirty
-        };
-        if source_changed && newly_dirty {
-            DaemonCodeIndexControlV1::advance(&self.epoch);
         }
         // `Notify` already coalesces stored permits. Always refresh the permit:
         // a prior worker may have consumed its wake and then failed before
@@ -6308,43 +6379,82 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn republish_unpublished_retained_generation(
         &mut self,
     ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        let Some(pending) = self.publication.take_unpublished() else {
-            return Ok(None);
-        };
         let Some(pointer) = self
             .publication
             .read_publication_pointer()
             .map_err(CodeIndexProductionErrorV1::Publication)?
         else {
-            *self
-                .publication
-                .unpublished_candidate
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(pending);
             return Ok(None);
         };
-        let scope = CodeIndexGenerationScopeV1::for_snapshot(pending.snapshot());
-        let mut publication = self.publication.for_undecoded_active_rebuild(&pointer);
-        if let Err(error) = publication.publish_atomically(&scope, None, Arc::clone(&pending)) {
-            *self
-                .publication
-                .unpublished_candidate
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(pending);
-            return Err(CodeIndexProductionErrorV1::Publication(error).into());
+        let Some(pending) = self.publication.take_unpublished() else {
+            return Ok(None);
+        };
+        let resolved = match identity::IndexingIdentityV1::resolve(&self.project_root) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.publication.restore_unpublished(pending);
+                return Err(CodeIndexSchedulerErrorV1::Identity(error.to_string()));
+            }
+        };
+        if !resolved.authorizes_reuse_of(&self.identity) {
+            self.publication.restore_unpublished(pending);
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "worktree identity changed under the scheduler".to_owned(),
+            ));
         }
+        self.identity = resolved;
+        let _worker_memory = match self.reserve_incremental_rebuild_memory() {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.publication.restore_unpublished(pending);
+                return Err(error);
+            }
+        };
+        let capture = match self.capture_retained_reconcile_attempt() {
+            Ok(Some(capture)) => capture,
+            Ok(None) => {
+                self.publication.restore_unpublished(pending);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.publication.restore_unpublished(pending);
+                return Err(error);
+            }
+        };
+        let RetainedReconcileCaptureV1 {
+            mut captured,
+            drained_hints,
+            control,
+            git_metadata,
+            stat_signature,
+        } = capture;
+        if pending.snapshot().reference != captured.snapshot.reference
+            || pending.snapshot().source_revision != captured.snapshot.source_revision
+            || pending.snapshot().content_identity != captured.snapshot.content_identity
+        {
+            return Ok(None);
+        }
+        let scope = CodeIndexGenerationScopeV1::for_snapshot(pending.snapshot());
+        let mut publication = self
+            .publication
+            .for_undecoded_active_rebuild(&pointer)
+            .with_reconcile_publication_fence(Arc::clone(&self.hints), control);
+        publication
+            .publish_atomically(&scope, None, Arc::clone(&pending))
+            .map_err(CodeIndexProductionErrorV1::Publication)?;
+        Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
+        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+        self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
         let snapshot_content_identity = pending.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
-        let signature = self.worktree_stat_signature().ok();
-        self.mark_reconciled_state(metadata.clone(), signature.clone());
+        self.mark_reconciled_state(git_metadata.clone(), stat_signature.clone());
         let repository_parse_identity_digest =
             canonical_sha256(pending.repository_parse_identity())
                 .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-        if let Some(stat_signature) = signature {
+        if let Some(stat_signature) = stat_signature {
             RestoreFreshnessWitnessV1 {
                 generation_id: pending.manifest().generation_id.as_str().to_owned(),
-                git_metadata_signature: metadata.stable_signature(),
+                git_metadata_signature: git_metadata.stable_signature(),
                 stat_signature,
                 repository_parse_identity_digest: repository_parse_identity_digest
                     .as_str()
@@ -6369,24 +6479,24 @@ impl CodeIndexWorktreeSchedulerV1 {
             pending.edges(),
         ))
         .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-        Ok(Some(CodeIndexReconcileOutcomeV1::Published(
-            CodeIndexPublishEvidenceV1 {
-                generation_id: pending.manifest().generation_id.clone(),
-                repository_id: self.repository_id.clone(),
-                snapshot_content_identity,
-                lane_digest,
-                file_occurrence_ids: pending
-                    .snapshot()
-                    .files
-                    .iter()
-                    .map(|file| file.file_occurrence_id.clone())
-                    .collect(),
-                reextracted_files: 0,
-                changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
-                reused_chunks: changes.reused.len(),
-                overflow_reconciled: false,
-            },
-        )))
+        let outcome = CodeIndexReconcileOutcomeV1::Published(CodeIndexPublishEvidenceV1 {
+            generation_id: pending.manifest().generation_id.clone(),
+            repository_id: self.repository_id.clone(),
+            snapshot_content_identity,
+            lane_digest,
+            file_occurrence_ids: pending
+                .snapshot()
+                .files
+                .iter()
+                .map(|file| file.file_occurrence_id.clone())
+                .collect(),
+            reextracted_files: 0,
+            changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
+            reused_chunks: changes.reused.len(),
+            overflow_reconciled: drained_hints.overflow(),
+        });
+        drained_hints.commit();
+        Ok(Some(outcome))
     }
 
     fn reconcile_retained_text_generation_with(
@@ -6460,19 +6570,56 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
 
         let _worker_memory = self.reserve_incremental_rebuild_memory()?;
-        let capture_epoch = self.epoch.load(Ordering::Acquire);
-        let mut captured =
-            self.capture_authoritative_snapshot_without_active_generation_reuse(None)?;
+        let Some(capture) = self.capture_retained_reconcile_attempt()? else {
+            return Ok(None);
+        };
+        self.finish_retained_reconcile(metadata, witness, capture)
+    }
+
+    fn capture_retained_reconcile_attempt(
+        &self,
+    ) -> Result<Option<RetainedReconcileCaptureV1>, CodeIndexSchedulerErrorV1> {
+        let control =
+            DaemonCodeIndexControlV1::new(Arc::clone(&self.epoch), Arc::clone(&self.shutting_down));
+        let captured =
+            self.capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))?;
+        let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let stat_signature = self.worktree_stat_signature().ok();
         let drained_hints = {
             let mut hints = self
                 .hints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.epoch.load(Ordering::Acquire) != capture_epoch {
+            if control.is_cancelled() {
                 return Ok(None);
             }
             DrainedPendingHintsV1::new(Arc::clone(&self.hints), hints.take())
         };
+        Ok(Some(RetainedReconcileCaptureV1 {
+            captured,
+            drained_hints,
+            control,
+            git_metadata,
+            stat_signature,
+        }))
+    }
+
+    fn finish_retained_reconcile(
+        &mut self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+        witness: Option<RestoreFreshnessWitnessV1>,
+        capture: RetainedReconcileCaptureV1,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        let RetainedReconcileCaptureV1 {
+            mut captured,
+            drained_hints,
+            control,
+            git_metadata,
+            stat_signature,
+        } = capture;
+        if control.is_cancelled() {
+            return Ok(None);
+        }
         if captured.snapshot.reference != metadata.snapshot().reference
             || captured.snapshot.source_revision != metadata.snapshot().source_revision
             || captured.snapshot.content_identity != metadata.snapshot().content_identity
@@ -6502,19 +6649,27 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             let snapshot_content_identity = captured.snapshot.content_identity.clone();
             let reextracted_files = captured.changed_paths.len();
-            let generation = if let Some(pending) = self.publication.take_unpublished() {
+            let pending = self.publication.take_unpublished().filter(|pending| {
+                pending.snapshot().reference == captured.snapshot.reference
+                    && pending.snapshot().source_revision == captured.snapshot.source_revision
+                    && pending.snapshot().content_identity == captured.snapshot.content_identity
+            });
+            let publication = self
+                .publication
+                .for_undecoded_active_rebuild(&pointer)
+                .with_reconcile_publication_fence(Arc::clone(&self.hints), control.clone());
+            let generation = if let Some(pending) = pending {
                 // The previous pass already built this generation and lost
                 // only the durable write. Republish it without a second
                 // whole-store extract — isolated graph-off retries otherwise
                 // miss their deadline waiting on a cold parser warmup.
                 let scope = CodeIndexGenerationScopeV1::for_snapshot(&captured.snapshot);
-                let mut publication = self.publication.for_undecoded_active_rebuild(&pointer);
+                let mut publication = publication;
                 publication
                     .publish_atomically(&scope, None, Arc::clone(&pending))
                     .map_err(CodeIndexProductionErrorV1::Publication)?;
                 pending
             } else {
-                let publication = self.publication.for_undecoded_active_rebuild(&pointer);
                 let mut owner = open_production_code_index_owner_v1(
                     self.production_config.clone(),
                     publication,
@@ -6522,10 +6677,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 )
                 .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
                 .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
-                let control = DaemonCodeIndexControlV1::new(
-                    Arc::clone(&self.epoch),
-                    Arc::clone(&self.shutting_down),
-                );
                 owner.build_and_publish(
                     CodeIndexBuildRequestV1 {
                         snapshot: captured.snapshot,
@@ -6544,16 +6695,17 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
             self.latest_content_identity = Some(snapshot_content_identity);
-            let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
-            let signature = self.worktree_stat_signature().ok();
-            self.mark_reconciled_retained_generation_state(metadata.clone(), signature.clone());
+            self.mark_reconciled_retained_generation_state(
+                git_metadata.clone(),
+                stat_signature.clone(),
+            );
             let repository_parse_identity_digest =
                 canonical_sha256(generation.repository_parse_identity())
                     .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
-            if let Some(stat_signature) = signature {
+            if let Some(stat_signature) = stat_signature {
                 RestoreFreshnessWitnessV1 {
                     generation_id: generation.manifest().generation_id.as_str().to_owned(),
-                    git_metadata_signature: metadata.stable_signature(),
+                    git_metadata_signature: git_metadata.stable_signature(),
                     stat_signature,
                     repository_parse_identity_digest: repository_parse_identity_digest
                         .as_str()
@@ -6603,13 +6755,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
         let snapshot_content_identity = captured.snapshot.content_identity;
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
-        let signature = self.worktree_stat_signature().ok();
-        self.mark_reconciled_retained_generation_state(metadata.clone(), signature.clone());
-        if let (Some(witness), Some(stat_signature)) = (witness, signature) {
+        self.mark_reconciled_retained_generation_state(
+            git_metadata.clone(),
+            stat_signature.clone(),
+        );
+        if let (Some(witness), Some(stat_signature)) = (witness, stat_signature) {
             RestoreFreshnessWitnessV1 {
                 generation_id: witness.generation_id,
-                git_metadata_signature: metadata.stable_signature(),
+                git_metadata_signature: git_metadata.stable_signature(),
                 stat_signature,
                 repository_parse_identity_digest: witness.repository_parse_identity_digest,
                 ignored_source_admissions_digest: witness.ignored_source_admissions_digest,
@@ -6682,9 +6835,20 @@ impl CodeIndexWorktreeSchedulerV1 {
                  with the sealed generation"
             );
             self.ignored_source_admissions.clear();
+            // The cleared roster is the remedy, and the pass that must apply
+            // it needs a wake this refused pass already consumed.
+            self.ignored_roster_refusal_requires_rebuild = true;
             return None;
         }
         Some(self.bind_latest_complete(generation, retained_text))
+    }
+
+    /// Claim the one rebuild pass a refused ignored-source roster requires.
+    ///
+    /// Taking clears the claim, so the refusal arms exactly one follow-up pass
+    /// no matter how many times the worker asks.
+    pub fn take_ignored_roster_refusal_rebuild(&mut self) -> bool {
+        std::mem::take(&mut self.ignored_roster_refusal_requires_rebuild)
     }
 
     /// Bind exact/lexical serving directly from the canonical active pointer.
@@ -6918,6 +7082,21 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn reconcile_now(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        self.reconcile_now_with_capture(|scheduler, control| {
+            scheduler.capture_authoritative_snapshot(Some(control))
+        })
+    }
+
+    fn reconcile_now_with_capture<C>(
+        &mut self,
+        mut capture: C,
+    ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1>
+    where
+        C: FnMut(
+            &Self,
+            &DaemonCodeIndexControlV1,
+        ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1>,
+    {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -6950,13 +7129,41 @@ impl CodeIndexWorktreeSchedulerV1 {
         // the next ready probe does not see this pass as stale.
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
-            let hints = self
-                .hints
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
+            let control = DaemonCodeIndexControlV1::new(
+                Arc::clone(&self.epoch),
+                Arc::clone(&self.shutting_down),
+            );
+            let mut captured = match capture(self, &control) {
+                Ok(captured) => captured,
+                Err(CodeIndexSchedulerErrorV1::Production(
+                    CodeIndexProductionErrorV1::Interrupted(
+                        crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                    ),
+                )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
+                    && !self.shutting_down.load(Ordering::Acquire) =>
+                {
+                    std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let hints = {
+                let mut hints = self
+                    .hints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (!control.is_cancelled()).then(|| hints.take())
+            };
+            let Some(hints) = hints else {
+                if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
+                    && !self.shutting_down.load(Ordering::Acquire)
+                {
+                    std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
+                    continue;
+                }
+                return Err(cancelled_code_index_reconcile());
+            };
             overflow_reconciled |= hints.overflow;
-            let mut captured = self.capture_authoritative_snapshot(None)?;
             let active_generation = self
                 .publication
                 .load_active_shared()
@@ -6985,6 +7192,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                     == Some(&captured.snapshot.content_identity)
                 && unchanged_source
             {
+                if control.is_cancelled() {
+                    if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
+                        && !self.shutting_down.load(Ordering::Acquire)
+                    {
+                        std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
+                        continue;
+                    }
+                    return Err(cancelled_code_index_reconcile());
+                }
                 drop(std::mem::take(&mut captured.captured_files));
                 Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
                 self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
@@ -6998,10 +7214,6 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }));
             }
 
-            let control = DaemonCodeIndexControlV1::new(
-                Arc::clone(&self.epoch),
-                Arc::clone(&self.shutting_down),
-            );
             // Only the content identity and changed-path count are needed after
             // the build request takes ownership of the captured snapshot, so
             // keep those instead of cloning every file record and changed path.

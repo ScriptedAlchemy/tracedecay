@@ -3259,19 +3259,19 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         ..test_handshake_defaults()
     };
 
-    let store_administration = engine.store_administration.clone();
-    let writer_held = Arc::new(tokio::sync::Notify::new());
-    let writer_held_by_blocker = Arc::clone(&writer_held);
-    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
-    let blocker = tokio::spawn(async move {
-        store_administration
-            .with_writer(|| async move {
-                writer_held_by_blocker.notify_one();
-                writer_release.await.expect("release writer gate");
-            })
-            .await;
-    });
-    writer_held.notified().await;
+    // The lever must be one a cold project open actually takes. The daemon-wide
+    // writer gate is not: the open path takes no writer at all any more (only
+    // owner rekey and background refresh do), so blocking `WriterScope::Daemon`
+    // let the open publish inside the bound and the request returned a result
+    // instead of the warming refusal. `production_project_server_inner` blocks
+    // on the project-open capacity gate before it counts an open attempt, so
+    // holding that gate keeps every route cold for exactly as long as the test
+    // holds it, then releases the background warm-up this test goes on to await.
+    let capacity_gate = {
+        let gates = engine.project_open_gates.lock().await;
+        Arc::clone(&gates.capacity_gate)
+    };
+    let capacity_admission = capacity_gate.lock_owned().await;
 
     let request = json!({
         "jsonrpc": "2.0",
@@ -3290,8 +3290,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     let response_within_bound =
         tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut request_task).await;
 
-    release_writer.send(()).expect("signal writer gate release");
-    blocker.await.expect("writer gate blocker task");
+    drop(capacity_admission);
     if response_within_bound.is_err() {
         let _ = request_task.await;
     }

@@ -199,6 +199,24 @@ opt-level = 2
 [profile.perf.package.regex]
 opt-level = 2
 
+# CI runs `cargo nextest run --profile ci`, which is a nextest profile: the
+# cargo profile stays `test`, so the `perf` overrides above never applied to
+# the gate. That left the seconds-long unoptimized BPE load inside deadlines
+# that bound a model call — `context_scout_model` gives its proposal one
+# second in total, and the cold tokenizer spent it before the backend was
+# ever raced. Optimize the loader wherever tests run, not only under `perf`.
+[profile.dev.package.tiktoken-rs]
+opt-level = 2
+
+[profile.dev.package.regex]
+opt-level = 2
+
+[profile.test.package.tiktoken-rs]
+opt-level = 2
+
+[profile.test.package.regex]
+opt-level = 2
+
 # Graph publication digest checks hash multi-megabyte canonical replay
 # sources on every durable read/write; unoptimized sha2 alone exceeds the
 # exact-SQL test transaction budget.

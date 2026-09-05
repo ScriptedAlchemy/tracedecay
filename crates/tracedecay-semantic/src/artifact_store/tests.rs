@@ -234,6 +234,43 @@ mod tests {
         );
     }
 
+    /// Every terminal import outcome must leave the staging root empty, which
+    /// is only possible when the session's directory handles are released
+    /// before the removal. Windows refuses to remove a directory while any
+    /// handle to it is open, so a session that outlives its own cleanup turns
+    /// a typed import failure into an opaque `StorageFailure` and leaks the
+    /// staged bytes.
+    #[test]
+    fn terminal_imports_release_their_handles_and_empty_the_staging_root() {
+        let (root, store) = store();
+        let model = model_bytes();
+        let manifest = manifest_for(&model);
+        let package = root.path().join("package");
+        write_local_package(&package, &manifest, &model);
+        let staging_root = store.staging_root();
+
+        fs::write(package.join("undeclared.bin"), b"no").unwrap();
+        assert_eq!(
+            store
+                .import_local_directory(&manifest, &package, NOW)
+                .unwrap_err(),
+            ArtifactImportErrorV1::UndeclaredMember
+        );
+        assert!(
+            fs::read_dir(&staging_root).unwrap().next().is_none(),
+            "a discarded import must not retain its staging directory"
+        );
+
+        // A distinct payload, because the discarded identity is retained as
+        // quarantined and can never be re-staged.
+        let (_, digest) = import_ok(&store, b"a second deterministic model");
+        assert!(store.artifact_path(&digest).exists());
+        assert!(
+            fs::read_dir(&staging_root).unwrap().next().is_none(),
+            "a finalized import must not retain its staging directory"
+        );
+    }
+
     #[test]
     fn explicit_https_import_uses_only_pinned_ranges() {
         let (_root, store) = store();

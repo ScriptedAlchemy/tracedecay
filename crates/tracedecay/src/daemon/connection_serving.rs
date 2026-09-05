@@ -219,6 +219,81 @@ async fn refuse_unauthenticated_client(
     write_refusal_and_drain(transport, &refusal).await;
 }
 
+/// The typed refusal a connection answers with when its profile-identity
+/// binding did not settle inside [`PROJECT_OPEN_REQUEST_DEADLINE`].
+///
+/// It carries [`PROJECT_WARMING_RETRY_HINT`], so every client surface already
+/// classifies it as retryable through `error_message_is_project_open_retryable`.
+fn profile_identity_warming_error() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("TraceDecay profile runtime {PROJECT_WARMING_RETRY_HINT}"),
+    }
+}
+
+/// Binds the handshake's authenticated profile identity under the same deadline
+/// every other project-scoped open answers to.
+///
+/// The stage reaches a cold `DaemonSessionRuntimeRegistryV1::open` through
+/// `registered_profile_database`, and the only other arm the callers raced it
+/// against was peer full close — which a half-closed one-shot client never
+/// satisfies while it is still waiting for its response. A contended cold open
+/// therefore pinned the connection, its lifecycle activity permit and its
+/// admission slot for as long as the open took.
+///
+/// The binding runs on its own task so the deadline yields the warming refusal
+/// *without* cancelling the open: the registry is a per-profile `OnceCell`, so
+/// dropping the initializer future would abandon the partially finished open
+/// and make the next client start over. Detaching it instead lets this client's
+/// retry — or the next one — find the registry already warm.
+async fn bind_authenticated_profile_identity_within_deadline(
+    handshake: &mut DaemonHandshake,
+    store_administration: &StoreAdministration,
+) -> Result<StoreAdministration> {
+    let mut binding_handshake = handshake.clone();
+    let binding_administration = store_administration.clone();
+    let binding = tokio::spawn(async move {
+        Box::pin(bind_authenticated_profile_identity(
+            &mut binding_handshake,
+            &binding_administration,
+        ))
+        .await
+        .map(|administration| (binding_handshake, administration))
+    });
+    match tokio::time::timeout(PROFILE_IDENTITY_BIND_DEADLINE, binding).await {
+        Ok(Ok(Ok((bound_handshake, administration)))) => {
+            *handshake = bound_handshake;
+            Ok(administration)
+        }
+        Ok(Ok(Err(error))) => Err(error),
+        Ok(Err(join)) => Err(TraceDecayError::Config {
+            message: format!("daemon profile identity binding failed to join: {join}"),
+        }),
+        Err(_) => Err(profile_identity_warming_error()),
+    }
+}
+
+/// Answers the first request with the retryable warming refusal its
+/// profile-identity binding produced, so a client that missed the deadline
+/// sees a typed retry instead of a closed socket.
+async fn refuse_warming_profile_identity(
+    transport: &mut (impl tracedecay_mcp::McpTransport + Send),
+    request: &AuthenticatedFirstRequest,
+    error: &TraceDecayError,
+) -> Result<()> {
+    // JSON-RPC 2.0 forbids answering a notification, and a stray null-id frame
+    // desynchronizes strict MCP clients mid-handshake. Only an unparseable line
+    // falls back to the null id, exactly as `reject_admitted_request` does.
+    if request.parsed().is_some_and(|request| request.id.is_none()) {
+        return Ok(());
+    }
+    let request_id = request
+        .parsed()
+        .and_then(|request| request.id.clone())
+        .unwrap_or(serde_json::Value::Null);
+    let response = JsonRpcResponse::error(request_id, ErrorCode::InternalError, error.to_string());
+    write_json_rpc_response(transport, &response).await
+}
+
 async fn write_refusal_and_drain(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
     refusal: &tracedecay_daemon_protocol::DaemonHandshakeRefusal,
@@ -252,6 +327,24 @@ async fn write_refusal_and_drain(
 
 const MAX_PENDING_PROJECT_OPEN_LINES: usize = 64;
 const PROJECT_OWNER_HALF_CLOSE_GRACE: Duration = Duration::from_millis(750);
+
+/// Bounds the handshake's profile-identity binding.
+///
+/// Deliberately *not* `PROJECT_OPEN_REQUEST_DEADLINE`. That 500 ms bound
+/// answers "has this route's already-admitted open published yet", and the
+/// route keeps warming behind the refusal. The binding stage is a different
+/// question — it performs the profile's one cold
+/// `DaemonSessionRuntimeRegistryV1::open`, schema convergence included — and
+/// measurement says 500 ms is inside that open's normal range, not past it: on
+/// this workspace's daemon suite a cold profile open measured 4 ms warm, 331 ms
+/// uncontended and over 500 ms with six connections opening their own profiles
+/// at once. Refusing at 500 ms therefore turns every contended first request
+/// into a retry, which is what `daemon::tests::handshake` and
+/// `daemon::tests::socket` observed when this stage was first bounded there.
+///
+/// This bound exists only so a stuck open can never pin a connection, its
+/// lifecycle activity permit and its admission slot for the life of the daemon.
+const PROFILE_IDENTITY_BIND_DEADLINE: Duration = Duration::from_secs(10);
 
 struct DaemonWorkDeliveryDescriptorV1 {
     owner_event_id: String,
@@ -740,14 +833,6 @@ fn serve_broker_socket_client_inner(
                 return Ok(None);
             }
         };
-        let peer_full_close = transport.peer_fully_closed_after_eof();
-        tokio::pin!(peer_full_close);
-        let store_administration = tokio::select! {
-            result = bind_authenticated_profile_identity(&mut handshake, &engine.store_administration) => result?,
-            () = &mut peer_full_close => return Ok(None),
-        };
-        let mut engine = engine;
-        engine.store_administration = store_administration;
         let first_request_line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
             () = engine.lifecycle.wait_for_draining() => return Ok(None),
@@ -756,6 +841,28 @@ fn serve_broker_socket_client_inner(
             return Ok(None);
         };
         let first_request = AuthenticatedFirstRequest::new(first_request_line);
+        // Ordered after the first request, exactly as the portable broker does,
+        // so a binding that misses its deadline is answered as a typed retry on
+        // that request's id instead of closing the socket with no evidence.
+        let peer_full_close = transport.peer_fully_closed_after_eof();
+        tokio::pin!(peer_full_close);
+        let store_administration = tokio::select! {
+            result = bind_authenticated_profile_identity_within_deadline(
+                &mut handshake,
+                &engine.store_administration,
+            ) => match result {
+                Ok(store_administration) => store_administration,
+                Err(error) if error_message_is_project_warming(&error.to_string()) => {
+                    drop(setup_activity);
+                    refuse_warming_profile_identity(&mut transport, &first_request, &error).await?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            },
+            () = &mut peer_full_close => return Ok(None),
+        };
+        let mut engine = engine;
+        engine.store_administration = store_administration;
         let reserved_control_request = is_reserved_control_request(&first_request);
         if admission_class == DaemonClientAdmissionClass::ReservedControl
             && !reserved_control_request
@@ -1465,7 +1572,18 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let peer_full_close = transport.peer_fully_closed_after_eof();
     tokio::pin!(peer_full_close);
     let store_administration = tokio::select! {
-        result = Box::pin(bind_authenticated_profile_identity(&mut handshake, &store_administration)) => result?,
+        result = Box::pin(bind_authenticated_profile_identity_within_deadline(
+            &mut handshake,
+            &store_administration,
+        )) => match result {
+            Ok(store_administration) => store_administration,
+            Err(error) if error_message_is_project_warming(&error.to_string()) => {
+                drop(setup_activity);
+                refuse_warming_profile_identity(&mut transport, &first_request, &error).await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        },
         () = &mut peer_full_close => return Ok(()),
     };
     let reserved_control_request = is_reserved_control_request(&first_request);

@@ -310,14 +310,27 @@ async fn wait_for_initial_generation(registry: &CodeIndexSchedulerRegistryV1, pr
     .expect("initial generation publication");
 }
 
+/// Wait for the complete serving generation, not merely its publication.
+///
+/// The generation-publication broadcast and `latest_generation_id` both fire
+/// on the reconcile pass, ahead of the bind and the serving swap that fill
+/// `serving_generation`. Reading the complete arm the instant
+/// `wait_for_initial_generation` returns therefore raced the seat and reported
+/// a missing generation for a store that had one.
 async fn latest(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> LatestCompleteCodeIndexV1 {
-    registry
-        .latest_complete_fresh(project_root)
-        .await
-        .expect("fresh serving generation")
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh(project_root).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fresh serving generation")
 }
 
 fn git(root: &Path, arguments: &[&str]) {

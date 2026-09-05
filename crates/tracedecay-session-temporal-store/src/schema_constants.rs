@@ -32,6 +32,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "graph_watermark",
             "created_at",
             "applied_at",
+            "recovery_state",
+            "recovery_failure_code",
+            "recovery_failure_count",
+            "recovery_next_attempt_at",
         ],
     ),
     (

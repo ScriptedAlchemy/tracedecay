@@ -15,7 +15,8 @@ use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
     MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
 };
-use tracedecay_domain::{CodeGenerationId, canonical_sha256};
+use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1, canonical_sha256};
+use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 use super::{
     CapturedSnapshotV1, CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1,
@@ -558,16 +559,44 @@ fn validate_admitted_source(
         return Err(CodeIndexIgnoredDependencyRefusalV1::UnsupportedLanguage.into());
     };
     let registry = StaticLanguageRegistry::new();
-    let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
+    if registry
+        .descriptor_for_extension(&extension.to_lowercase())
+        .is_none()
+    {
         return Err(CodeIndexIgnoredDependencyRefusalV1::UnsupportedLanguage.into());
-    };
-    let language = descriptor.language.clone();
+    }
     let bytes = read_bounded_source(&canonical_entrypoint, control)?;
     checkpoint_if_present(control)?;
-    super::privacy::sanitize_code_file(&language, &bytes)
-        .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused)?;
+    admit_privacy_cleared_source(&bytes)?;
     checkpoint_if_present(control)?;
     Ok(bytes)
+}
+
+/// The privacy fence for one third-party entrypoint admitted from outside git.
+///
+/// A captured project source declares its language through the repository's
+/// own file, so deriving the sanitizer shape from that language is evidence
+/// about the bytes. An ignored dependency declares it through the extension
+/// the dependency itself chose, which is not: taking that label lets a package
+/// present a structured document under the weaker code-or-prose credential
+/// scan, which cannot refuse anything it fails to understand. Every admitted
+/// entrypoint is therefore evaluated under the whole-document structured
+/// semantics, which fail closed when a document announces a format it does not
+/// satisfy.
+///
+/// Only bytes the sanitizer accepts verbatim are admitted. The caller returns
+/// the raw bytes it read, so a redaction decided here would be computed and
+/// then discarded — the redacted source would still reach the durable index.
+fn admit_privacy_cleared_source(bytes: &[u8]) -> Result<(), CodeIndexSchedulerErrorV1> {
+    let sanitized = sanitize_code_source_bytes(bytes, CodeSourceShapeV1::StructuredData)
+        .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused)?;
+    let (sanitized_bytes, receipt) = sanitized.into_parts();
+    if !matches!(receipt.disposition(), SanitizerDispositionV1::Accepted)
+        || sanitized_bytes != bytes
+    {
+        return Err(CodeIndexIgnoredDependencyRefusalV1::PrivacyRefused.into());
+    }
+    Ok(())
 }
 
 fn read_bounded_source(

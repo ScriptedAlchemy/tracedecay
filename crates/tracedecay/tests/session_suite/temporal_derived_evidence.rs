@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, MessageOccurrenceRecordV1, RetrievalGrainV1, SessionId,
-    TemporalModeV1,
+    AnchorProvenanceRelationV2, CopyProofV1, LogicalCopyRecordV1, MessageOccurrenceRecordV1,
+    RetrievalGrainV1, SessionId, TemporalModeV1,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
@@ -46,12 +46,7 @@ async fn project_and_activate<O, T>(
     temporal_store: &T,
     session_name: &str,
     candidate_generation: u64,
-) -> (
-    SessionId,
-    Vec<String>,
-    MessageOccurrenceRecordV1,
-    MessageOccurrenceRecordV1,
-)
+) -> (SessionId, Vec<String>, Vec<MessageOccurrenceRecordV1>)
 where
     O: ObservationStore + ObservationProjectionStore,
     T: SessionTemporalProjectionStore,
@@ -74,6 +69,35 @@ where
         )
         .await,
     );
+    // A reply link is conversation threading, not a copy: the retained
+    // derivation only emits a logical copy for a re-emission of the same
+    // logical message, and `CopiedFrom` lineage stays explicit
+    // (`derive_retained_projection_relations`). So the copy edge under test is
+    // a third occurrence carrying real `CopiedFrom` anchor provenance and the
+    // matching explicit-assertion proof.
+    let copied = occurrence(
+        &session_id,
+        &persist_observation_with_lineage(
+            observation_store,
+            &session_id,
+            2,
+            "derived-alpha pipeline copied",
+            AnchorProvenanceRelationV2::CopiedFrom,
+            first.retrieval_anchor_id.clone(),
+            None,
+        )
+        .await,
+    );
+    let copy = LogicalCopyRecordV1 {
+        occurrence_id: copied.occurrence_id.clone(),
+        copied_from_occurrence_id: first.occurrence_id.clone(),
+        proof: CopyProofV1::ExplicitAnchorAssertion {
+            source_occurrence_id: first.occurrence_id.clone(),
+            assertion_anchor_id: first.retrieval_anchor_id.clone(),
+        },
+        knowledge_at: copied.knowledge_at,
+        valid_time: copied.valid_time,
+    };
     // Observation sequences are DB-global; pin the frontier to the current max
     // so later sessions in the same DB are not rejected as watermark mismatches.
     let source_frontier = u64::try_from(
@@ -100,8 +124,8 @@ where
             &session_id,
             candidate_generation,
             source_frontier,
-            vec![first.clone(), second.clone()],
-            vec![parent_message_copy(&second, &first)],
+            vec![first.clone(), second.clone(), copied.clone()],
+            vec![copy],
             vec![assertion(&second, &first)],
         ))
         .await
@@ -136,7 +160,7 @@ where
         BTreeSet::from(["burst", "span"]),
         "projection must materialize both derived evidence kinds"
     );
-    (session_id, derived, first, second)
+    (session_id, derived, vec![first, second, copied])
 }
 
 #[tokio::test]
@@ -271,7 +295,7 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
     let store = runtime
         .session_temporal_store(HostAdmissionScope::Profile)
         .unwrap();
-    let (session_id, _, first, second) = project_and_activate(
+    let (session_id, _, expected_occurrences) = project_and_activate(
         &runtime,
         &observation_store,
         &store,
@@ -299,7 +323,10 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
         .await
         .unwrap();
 
-    let mut expected_occurrence_ids = vec![first.occurrence_id, second.occurrence_id];
+    let mut expected_occurrence_ids = expected_occurrences
+        .iter()
+        .map(|occurrence| occurrence.occurrence_id.clone())
+        .collect::<Vec<_>>();
     expected_occurrence_ids.sort_unstable();
     assert_eq!(
         page.occurrences()
@@ -309,6 +336,19 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
         expected_occurrence_ids
     );
     assert_eq!(page.copies().len(), 1);
+    assert_eq!(
+        page.copies()[0].occurrence_id,
+        expected_occurrences[2].occurrence_id
+    );
+    assert_eq!(
+        page.copies()[0].copied_from_occurrence_id,
+        expected_occurrences[0].occurrence_id
+    );
+    assert_ne!(
+        page.copies()[0].occurrence_id,
+        expected_occurrences[1].occurrence_id,
+        "a reply link alone must not fabricate logical-copy evidence"
+    );
     assert_eq!(page.assertions().len(), 1);
     assert!(page.next_after_occurrence_id().is_none());
 

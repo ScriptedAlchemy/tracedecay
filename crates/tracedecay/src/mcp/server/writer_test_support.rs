@@ -83,9 +83,22 @@ pub(super) fn registered_context(
     context
 }
 
+/// Base directory for fixture temporary roots, resolved through every symlink.
+///
+/// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
+/// `/private/var`. The registered runtime canonicalizes a project root before
+/// it keys the retained graph and the code-index scope, so a fixture that
+/// hands out the symlinked path names a different project than the one the
+/// server mounted. Create the repository inside the canonical temporary
+/// directory so `dir.path()` is already canonical.
+fn canonical_temp_root() -> std::path::PathBuf {
+    let base = std::env::temp_dir();
+    base.canonicalize().unwrap_or(base)
+}
+
 pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
     let pin = PinnedUserDataDir::new();
-    let dir = TempDir::new().expect("temp repo");
+    let dir = TempDir::new_in(canonical_temp_root()).expect("temp repo");
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
     git(root, &["config", "user.email", "t@t.com"]);

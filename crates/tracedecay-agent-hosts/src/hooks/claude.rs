@@ -301,7 +301,7 @@ pub async fn hook_claude_post_compact() -> i32 {
     if let Err(error) =
         super::daemon_hook_action(root.as_deref(), args, Some(&hook_telemetry)).await
     {
-        eprintln!("[tracedecay] Claude PostCompact daemon call failed: {error}");
+        tracing::warn!(%error, "Claude PostCompact daemon call failed");
     }
     if !super::write_hook_output(
         root.as_deref(),

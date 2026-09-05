@@ -258,6 +258,28 @@ fn hook_lifecycle() -> ContextScoutLifecycleAddressV1 {
     }
 }
 
+/// An absolute project root and the `file:` URI that resolves back to it on
+/// the running host.
+///
+/// The daemon maps an admitted root URI to the owning project by converting it
+/// with `Url::to_file_path`, and that conversion rejects a drive-less path on
+/// Windows. A hardcoded `file:///name` fixture is therefore a Unix-only shape:
+/// it resolves to no owner on Windows and every LSP open is refused.
+/// `name` is a `/`-separated relative path such as `projects/recovery-a`.
+pub(super) fn admitted_root_fixture(name: &str) -> (std::path::PathBuf, String) {
+    if cfg!(windows) {
+        (
+            std::path::PathBuf::from(format!("C:\\{}", name.replace('/', "\\"))),
+            format!("file:///C:/{name}"),
+        )
+    } else {
+        (
+            std::path::PathBuf::from(format!("/{name}")),
+            format!("file:///{name}"),
+        )
+    }
+}
+
 mod configuration_registrars_tests;
 mod lsp_lease_tests;
 mod lsp_tests;

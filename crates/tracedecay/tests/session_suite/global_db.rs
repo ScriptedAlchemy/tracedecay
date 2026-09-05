@@ -32,6 +32,30 @@ async fn open_isolated_project_db(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     .expect("registered project session runtime")
 }
 
+/// Column list of the retired pre-marker `sessions` shape, used to prove a
+/// refused open migrated nothing.
+const LEGACY_SESSIONS_COLUMNS: &[&str] = &[
+    "provider",
+    "session_id",
+    "project_key",
+    "project_path",
+    "title",
+    "started_at",
+    "ended_at",
+    "transcript_path",
+    "metadata_json",
+];
+
+fn legacy_sessions_columns(database_path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(database_path).unwrap();
+    conn.prepare("PRAGMA table_info(sessions)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
 fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
@@ -427,13 +451,23 @@ async fn analytics_events_query_since_bounds_timestamp() {
     assert_eq!(events[0].timestamp, 1_715_000_200);
 }
 
+/// A registered profile store that predates the final schema marker is not
+/// upgraded in place.
+///
+/// `5eecf6f3a` ("reject non-final registered schemas") made every non-final
+/// registered schema a terminal `ResetRequired`, and the storage suite's
+/// `incompatible_profile_store_requires_reset_without_in_place_changes` pins
+/// the same rule for an aged stamp. So the retired legacy `sessions` shape
+/// proves the refusal is typed and byte-preserving, and the analytics
+/// aggregate indexes are proved on the admissible open that follows.
 #[tokio::test]
-async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
+async fn open_at_refuses_a_pre_marker_store_and_migrates_analytics_indexes() {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("global.db");
-    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let legacy_root = tmp.path().join("legacy").join(".tracedecay");
+    let legacy_db = legacy_root.join("global.db");
+    std::fs::create_dir_all(&legacy_root).unwrap();
 
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -451,9 +485,28 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
     .unwrap();
     drop(conn);
 
-    let db = HostAdmissionTestRuntimeV1::profile(db_path.parent().expect("profile root"))
-        .await
-        .expect("registered profile runtime");
+    let error = match HostAdmissionTestRuntimeV1::profile(&legacy_root).await {
+        Ok(_) => panic!("a pre-marker registered store must not be admitted"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("a pre-marker store returned the wrong error: {error}"));
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("final schema marker"),
+        "the refusal must name the missing final marker: {reason}"
+    );
+    // The refused open still opens the file (journal-mode pragmas are a
+    // connection concern), so the durable claim is the retired *shape*: no
+    // column was migrated onto it.
+    assert_eq!(
+        legacy_sessions_columns(&legacy_db),
+        LEGACY_SESSIONS_COLUMNS,
+        "a refused open must not migrate the retired store"
+    );
+
+    let db = open_isolated_db(&tmp).await;
     let event = AnalyticsEventInsert {
         hook_name: Some("post-tool-use".to_string()),
         tool_name: Some("shell".to_string()),
@@ -462,12 +515,12 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
         metadata_json: Some(r#"{"upgraded":true}"#.to_string()),
         ..analytics_event(None, 1_715_000_126, "hook")
     };
-    let id = append_analytics_event(&db, &event, "append analytics event after upgrade").await;
+    let id = append_analytics_event(&db, &event, "append analytics event after open").await;
 
     let events = db
         .query_analytics_events(&analytics_query(None, Some("hook"), 5))
         .await
-        .expect("query analytics events after upgrade");
+        .expect("query analytics events after open");
 
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].id, id);
@@ -790,7 +843,16 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .await
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::External);
-    assert!(raw.content.is_empty());
+    // An externalized raw row does not serve an empty body: it serves the
+    // non-secret inline placeholder that names the payload it owns, which the
+    // LCM payload suite pins directly (`lcm_payload.rs`). What this case owns
+    // is that neither secret reaches that projection.
+    assert!(
+        raw.content
+            .contains("[Externalized LCM ingest payload: kind=tool_result;"),
+        "external raw content must be the payload placeholder: {}",
+        raw.content
+    );
     assert!(!raw.content.contains(body_secret));
     assert!(
         !raw.metadata_json
@@ -1083,14 +1145,21 @@ async fn search_session_messages_filters_by_message_timestamp() {
     assert_eq!(results[0].message.message_id, "target-time-msg");
 }
 
+/// The retired pre-marker `sessions` shape carries no session rows forward.
+///
+/// Since `5eecf6f3a` a non-final registered schema is a terminal
+/// `ResetRequired`, so a legacy row cannot "survive a schema upgrade": the open
+/// refuses and leaves the retired file byte-identical. The parent/subagent
+/// columns are then proved where they are actually reachable, on an admitted
+/// store.
 #[tokio::test]
-async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
+async fn pre_marker_sessions_table_is_refused_and_parent_columns_round_trip() {
     let tmp = TempDir::new().unwrap();
-    let profile_root = tmp.path().join(".tracedecay");
-    let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
-    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let legacy_root = tmp.path().join("legacy").join(".tracedecay");
+    let legacy_db = tracedecay_sessions::runtime::user_sessions_db_path(&legacy_root);
+    std::fs::create_dir_all(legacy_db.parent().unwrap()).unwrap();
 
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -1115,22 +1184,64 @@ async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
     .unwrap();
     drop(conn);
 
-    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .expect("registered profile runtime");
-    let session = db
-        .get_session("cursor", "old-parent")
-        .await
-        .expect("old row should survive schema upgrade");
+    let error = match HostAdmissionTestRuntimeV1::profile(&legacy_root).await {
+        Ok(_) => panic!("a pre-marker sessions table must not be admitted"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("a pre-marker sessions table returned the wrong error: {error}"));
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("final schema marker"),
+        "the refusal must name the missing final marker: {reason}"
+    );
+    // A refused open leaves the retired shape and its rows exactly as found:
+    // the legacy row is neither migrated onto new columns nor dropped.
+    assert_eq!(
+        legacy_sessions_columns(&legacy_db),
+        LEGACY_SESSIONS_COLUMNS,
+        "a refused open must not migrate the retired sessions table"
+    );
+    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+    let retained = conn
+        .query_row(
+            "SELECT session_id, title, metadata_json FROM sessions",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        retained,
+        (
+            "old-parent".to_owned(),
+            "Old title".to_owned(),
+            r#"{"source":"old"}"#.to_owned()
+        )
+    );
 
-    assert_eq!(session.parent_session_id, None);
-    assert!(!session.is_subagent);
-    assert_eq!(session.agent_id, None);
-    assert_eq!(session.parent_tool_use_id, None);
+    let db = open_isolated_db(&tmp).await;
+    let parent = sample_session("cursor", "root-parent", "project-a");
+    assert!(db.upsert_session(&parent).await);
+    let stored_parent = db
+        .get_session("cursor", "root-parent")
+        .await
+        .expect("parent row should round-trip");
+    assert_eq!(stored_parent.parent_session_id, None);
+    assert!(!stored_parent.is_subagent);
+    assert_eq!(stored_parent.agent_id, None);
+    assert_eq!(stored_parent.parent_tool_use_id, None);
 
     let child = SessionRecord {
         session_id: "child-agent".to_string(),
-        parent_session_id: Some("old-parent".to_string()),
+        parent_session_id: Some("root-parent".to_string()),
         is_subagent: true,
         agent_id: Some("child-agent".to_string()),
         ..sample_session("cursor", "child-agent", "project-a")
@@ -1141,7 +1252,7 @@ async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
         .get_session("cursor", "child-agent")
         .await
         .expect("child row should round-trip");
-    assert_eq!(fetched.parent_session_id.as_deref(), Some("old-parent"));
+    assert_eq!(fetched.parent_session_id.as_deref(), Some("root-parent"));
     assert!(fetched.is_subagent);
     assert_eq!(fetched.agent_id.as_deref(), Some("child-agent"));
 }

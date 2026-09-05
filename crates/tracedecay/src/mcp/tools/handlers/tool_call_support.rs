@@ -50,6 +50,76 @@ pub(super) fn rejected_tool_project_selector_present(_tool_name: &str, args: &Va
     args.get("project_selector").is_some()
 }
 
+/// The registered project a selector-bound retained route names, if any.
+///
+/// Selector-bound retained routes (`RegisteredProjectAccess::SelectorOnly`)
+/// are never re-dispatched onto the selected project's server: the retained
+/// owner opens that project's memory store read-only from the calling
+/// session's own admitted runtime. The selector is therefore the only place
+/// the served project appears at this boundary, and it is read before the
+/// request body is normalized (normalization strips `project_selector`).
+pub(super) fn selected_project_id_argument(args: &Value) -> Option<String> {
+    args.get("project_selector")?
+        .get("project_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|project_id| !project_id.is_empty())
+        .map(str::to_owned)
+}
+
+/// What the result envelope's scope must say once a selector-bound retained
+/// route has been served.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SelectedProjectScopeV1 {
+    /// The selector named the calling session's own admitted project; the
+    /// scope the daemon already resolved is the exact served scope.
+    Unchanged,
+    /// The selector named another registered project, whose exact scope this
+    /// is. The envelope must report it instead of the admitted scope.
+    Restated(Box<tracedecay_application::ResolvedScope>),
+    /// The selected project could not be resolved to an exact registered
+    /// scope. The route fails closed rather than reporting a result under a
+    /// project the caller did not select.
+    Refused,
+}
+
+/// Resolve the exact application scope a selector-bound retained read was
+/// served from.
+///
+/// Every unresolved state — no project registry at this boundary, an
+/// unregistered project id, a registry row whose identity does not match the
+/// selector, or a root that no longer resolves to a valid scope — fails
+/// closed. The surface never substitutes the calling session's scope for the
+/// selected one.
+pub(super) async fn selected_project_scope(
+    selected_project_id: &str,
+    served: &tracedecay_application::ResolvedScope,
+    global_db: Option<&RegisteredGlobalDb>,
+) -> SelectedProjectScopeV1 {
+    if served.project_id.as_str() == selected_project_id {
+        return SelectedProjectScopeV1::Unchanged;
+    }
+    let Some(database) = global_db else {
+        return SelectedProjectScopeV1::Refused;
+    };
+    let Ok(Some(context)) = database
+        .project_registry_context_by_id(selected_project_id)
+        .await
+    else {
+        return SelectedProjectScopeV1::Refused;
+    };
+    if context.project.project_id != selected_project_id {
+        return SelectedProjectScopeV1::Refused;
+    }
+    let requested_root = context.project.canonical_root.clone();
+    match crate::mcp::scope::resolve_query_scope(&context, Path::new(&requested_root)) {
+        Ok((_, scope)) if scope.project_id.as_str() == selected_project_id => {
+            SelectedProjectScopeV1::Restated(Box::new(scope))
+        }
+        Ok(_) | Err(_) => SelectedProjectScopeV1::Refused,
+    }
+}
+
 #[hotpath::measure(future = true, label = "mcp.project.route.resolve")]
 pub(crate) async fn resolve_registered_project_route_for_tool(
     tool_name: String,
@@ -264,4 +334,73 @@ fn char_offset_to_byte(content: &str, offset: usize) -> usize {
         .char_indices()
         .nth(offset)
         .map_or(content.len(), |(index, _)| index)
+}
+
+#[cfg(test)]
+mod selected_project_scope_tests {
+    use serde_json::json;
+    use tracedecay_application::ResolvedScope;
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+
+    use super::{SelectedProjectScopeV1, selected_project_id_argument, selected_project_scope};
+
+    fn scope(project_id: &str) -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new(project_id).expect("fixture project id"),
+            RepositoryId::new("repository.selected-scope.fixture").expect("fixture repository id"),
+            WorktreeId::new("worktree.selected-scope.fixture").expect("fixture worktree id"),
+            None,
+        )
+        .expect("fixture scope is valid")
+    }
+
+    #[test]
+    fn reads_only_a_non_empty_selector_project_id() {
+        assert_eq!(
+            selected_project_id_argument(&json!({
+                "fact_id": "fact.alpha",
+                "project_selector": {"project_id": " project.beta "},
+            }))
+            .as_deref(),
+            Some("project.beta")
+        );
+        assert_eq!(selected_project_id_argument(&json!({})), None);
+        assert_eq!(
+            selected_project_id_argument(&json!({"project_selector": {"project_id": "   "}})),
+            None
+        );
+        assert_eq!(
+            selected_project_id_argument(&json!({"project_selector": {"project_id": 7}})),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_selector_naming_the_admitted_project_keeps_the_resolved_scope() {
+        assert_eq!(
+            selected_project_scope(
+                "project.selected-scope.alpha",
+                &scope("project.selected-scope.alpha"),
+                None,
+            )
+            .await,
+            SelectedProjectScopeV1::Unchanged
+        );
+    }
+
+    /// Without a project registry at this boundary the served project cannot
+    /// be named, so the route must fail closed instead of reporting the
+    /// calling session's own scope for another project's fact.
+    #[tokio::test]
+    async fn a_foreign_selector_without_a_registry_fails_closed() {
+        assert_eq!(
+            selected_project_scope(
+                "project.selected-scope.beta",
+                &scope("project.selected-scope.alpha"),
+                None,
+            )
+            .await,
+            SelectedProjectScopeV1::Refused
+        );
+    }
 }

@@ -40,8 +40,22 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+/// Base directory for fixture temporary roots, resolved through every symlink.
+///
+/// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
+/// `/private/var`. Production canonicalizes a project root before it hashes
+/// the code-index scope and before it decides whether a dependency escaped the
+/// worktree, so a fixture path that still carries the symlink names a
+/// different scope than the one the scheduler writes and reads. Create the
+/// fixture inside the canonical temporary directory so every path taken from
+/// it is already canonical.
+fn canonical_temp_root() -> std::path::PathBuf {
+    let base = std::env::temp_dir();
+    base.canonicalize().unwrap_or(base)
+}
+
 fn fixture() -> TempDir {
-    let root = TempDir::new().expect("fixture root");
+    let root = TempDir::new_in(canonical_temp_root()).expect("fixture root");
     git(root.path(), &["init", "-q"]);
     git(
         root.path(),

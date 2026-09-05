@@ -9,17 +9,24 @@ use crate::common;
 #[tokio::test]
 async fn sqlite_writer_uses_production_wal_normal_policy() {
     let tmp = tempfile::TempDir::new().expect("create SQLite policy fixture");
-    let (database, _) = common::initialize_test_database(&tmp.path().join("policy.db"))
+    let database_path = tmp.path().join("policy.db");
+    let (database, _) = common::initialize_test_database(&database_path)
         .await
         .expect("initialize SQLite policy fixture");
+
+    // `journal_mode` is a database-level property, so any connection observes
+    // the writer's WAL choice. `synchronous` and `wal_autocheckpoint` are
+    // connection-scoped, and production applies them only to the writer
+    // (`apply_pragmas` under `ConnectionMode::Writer`), which then verifies
+    // `synchronous == NORMAL` and `wal_autocheckpoint == 0` and refuses to
+    // publish the connection otherwise. Reading those two from
+    // `read_connection()` measured the reader's SQLite defaults (FULL, 1000),
+    // never the writer's policy -- so this asserts the writer's policy through
+    // what it durably produces instead.
     let reader = database.read_connection();
-    let (journal_mode, synchronous) = {
+    let journal_mode = {
         let mut rows = reader
-            .query(
-                "SELECT lower(journal_mode), synchronous
-                 FROM pragma_journal_mode(), pragma_synchronous()",
-                (),
-            )
+            .query("SELECT lower(journal_mode) FROM pragma_journal_mode()", ())
             .await
             .expect("inspect production SQLite journal policy");
         let row = rows
@@ -27,27 +34,29 @@ async fn sqlite_writer_uses_production_wal_normal_policy() {
             .await
             .expect("read production SQLite journal policy")
             .expect("production SQLite journal policy row");
-        (
-            row.get::<String>(0).expect("journal_mode"),
-            row.get::<i64>(1).expect("synchronous"),
-        )
+        row.get::<String>(0).expect("journal_mode")
     };
-    let wal_autocheckpoint = {
-        let mut rows = reader
-            .query("PRAGMA wal_autocheckpoint", ())
-            .await
-            .expect("inspect production SQLite checkpoint policy");
-        let row = rows
-            .next()
-            .await
-            .expect("read production SQLite checkpoint policy")
-            .expect("production SQLite checkpoint policy row");
-        row.get::<i64>(0).expect("wal_autocheckpoint")
-    };
-
     assert_eq!(journal_mode, "wal");
-    assert_eq!(synchronous, 1);
-    assert_eq!(wal_autocheckpoint, 0);
+
+    database
+        .execute_write(
+            "production WAL policy fixture",
+            "CREATE TABLE wal_policy_probe (id INTEGER PRIMARY KEY)",
+            (),
+        )
+        .await
+        .expect("commit through the production writer broker");
+
+    // With the writer's auto-checkpoint disabled, a committed write stays in
+    // the write-ahead log instead of being folded back into the database file.
+    let wal = database_path.with_extension("db-wal");
+    let wal_bytes = std::fs::metadata(&wal)
+        .unwrap_or_else(|error| panic!("production writer must retain {}: {error}", wal.display()))
+        .len();
+    assert!(
+        wal_bytes > 0,
+        "an unchecked-pointed production writer must retain its write-ahead log"
+    );
 }
 
 mod temporal_kernel_behavior {

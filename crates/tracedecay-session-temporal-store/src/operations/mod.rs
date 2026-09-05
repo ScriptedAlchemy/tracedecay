@@ -13,6 +13,7 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 
+pub use generation::{RawSummaryInvalidation, invalidate_raw_summary_revision};
 pub(crate) use publication::load_and_verify_receipt;
 pub use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 

@@ -564,10 +564,22 @@ mod tests {
         }
     }
 
+    /// `Path::is_absolute` is host-specific: a bare `/workspace/...` literal
+    /// is not absolute on Windows, where an absolute path needs a drive or a
+    /// UNC prefix. The fixture must name a root the running host agrees is
+    /// absolute, or the contract rejects it as `InvalidTargetRoot`.
+    fn absolute_root(posix: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{}", posix.replace('/', "\\"))
+        } else {
+            posix.to_owned()
+        }
+    }
+
     fn linked() -> WorkPlacementTargetV1 {
         WorkPlacementTargetV1::new(
             WorkPlacementKindV1::LinkedWorktree,
-            Some("/workspace/linked".to_owned()),
+            Some(absolute_root("/workspace/linked")),
             false,
             true,
         )
@@ -584,7 +596,7 @@ mod tests {
         assert_eq!(
             WorkPlacementTargetV1::new(
                 WorkPlacementKindV1::NoManagedPlacement,
-                Some("/workspace".to_owned()),
+                Some(absolute_root("/workspace")),
                 false,
                 false,
             )

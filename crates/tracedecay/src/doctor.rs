@@ -430,7 +430,11 @@ fn report_daemon_diagnostics_unavailable(
     db_path: Option<&Path>,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) {
-    dc.warn(&format!(
+    // The sole daemon owner is the only authority that can report storage
+    // health, so losing it is an issue Doctor must exit non-zero on, not a
+    // warning: nothing else in this run observed the store, and a zero exit
+    // reads as "checked and fine" to every caller and CI gate.
+    dc.fail(&format!(
         "Canonical Doctor report unavailable from the sole daemon owner: {error}. Health remains unknown; Doctor did not open SQLite."
     ));
     if let Some(path) = db_path {

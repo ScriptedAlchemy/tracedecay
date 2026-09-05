@@ -15,7 +15,7 @@ use super::compression_decision::{
 };
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
-use super::types::{LcmExtractionResult, LcmRelationProjectionStatus};
+use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
 use super::{
     LCM_DEFAULT_FRESH_TAIL_COUNT, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
@@ -85,6 +85,17 @@ struct CompressionTransactionContext {
     window: CompressionWindow,
     plan: compression_decision::CompressionPlan,
     overflow_assembly_cap: Option<i64>,
+    raw_rows_scanned: usize,
+    raw_bytes_scanned: u64,
+    raw_has_more: bool,
+    retained: bool,
+}
+
+#[derive(Clone)]
+pub struct RetainedCompressionGuard {
+    pub row_limit: usize,
+    pub byte_limit: u64,
+    pub expected_summary_source_range: Option<LcmSummarySourceRange>,
 }
 
 pub async fn update_lifecycle(
@@ -365,9 +376,46 @@ pub async fn compress(
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<LcmCompressionResponse, LcmError> {
-    let response = compress_inner(conn, publisher, storage_root, request, payload_rollback).await;
+    let response = compress_inner(
+        conn,
+        publisher,
+        storage_root,
+        request,
+        payload_rollback,
+        None,
+    )
+    .await
+    .map(|bounded| bounded.response);
     // A failed compression discarded its ingest writes, assembled backlog,
     // and summary drafts; success-only gauges would hide exactly that waste.
+    if response.is_err() {
+        crate::metrics::record_lcm_compress_failed();
+    }
+    response
+}
+
+/// Runs canonical compression over one bounded retained-session raw page.
+///
+/// This is the background-convergence entry point. Interactive compression
+/// keeps its complete replay contract, while retained convergence advances the
+/// same lifecycle CAS without materializing a mega-session in one future.
+pub async fn compress_retained_page(
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
+    storage_root: &Path,
+    request: LcmCompressionRequest,
+    payload_rollback: &mut payload::PayloadFileRollback,
+    guard: RetainedCompressionGuard,
+) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
+    let response = compress_inner(
+        conn,
+        publisher,
+        storage_root,
+        request,
+        payload_rollback,
+        Some(guard),
+    )
+    .await;
     if response.is_err() {
         crate::metrics::record_lcm_compress_failed();
     }
@@ -380,7 +428,8 @@ async fn compress_inner(
     storage_root: &Path,
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
-) -> Result<LcmCompressionResponse, LcmError> {
+    retained_scan: Option<RetainedCompressionGuard>,
+) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
     let mut request = request;
     request.max_assembly_tokens =
         compression_decision::effective_assembly_token_cap(AssemblyCapInput {
@@ -400,15 +449,20 @@ async fn compress_inner(
             &request.session_id,
         )
         .await?;
-        return Ok(record_compression_gauges(compression_response(
-            "ok",
-            reason,
-            Vec::new(),
-            request.messages,
-            frontier,
-            None,
-            request.max_assembly_tokens,
-        )));
+        return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
+            response: record_compression_gauges(compression_response(
+                "ok",
+                reason,
+                Vec::new(),
+                request.messages,
+                frontier,
+                None,
+                request.max_assembly_tokens,
+            )),
+            rows_scanned: 0,
+            bytes_scanned: 0,
+            has_more: false,
+        });
     }
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
@@ -442,12 +496,22 @@ async fn compress_inner(
             None,
             request.max_assembly_tokens,
         );
-        return Ok(record_compression_gauges(response));
+        return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
+            response: record_compression_gauges(response),
+            rows_scanned: 0,
+            bytes_scanned: 0,
+            has_more: false,
+        });
     }
 
-    Ok(record_compression_gauges(
-        compress_in_transaction(conn, publisher, request, &summarizer).await?,
-    ))
+    let (response, rows_scanned, bytes_scanned, has_more) =
+        compress_in_transaction(conn, publisher, request, &summarizer, retained_scan).await?;
+    Ok(super::summary_convergence::LcmBoundedCompressionResponse {
+        response: record_compression_gauges(response),
+        rows_scanned,
+        bytes_scanned,
+        has_more,
+    })
 }
 
 fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompressionResponse {
@@ -464,24 +528,57 @@ async fn compress_in_transaction(
     publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
-) -> Result<LcmCompressionResponse, LcmError> {
-    let context = prepare_compression_context(conn, &request).await?;
+    retained_scan: Option<RetainedCompressionGuard>,
+) -> Result<(LcmCompressionResponse, usize, u64, bool), LcmError> {
+    let expected_summary_source_range = retained_scan
+        .as_ref()
+        .and_then(|guard| guard.expected_summary_source_range.as_ref())
+        .cloned();
+    let context = prepare_compression_context(conn, &request, retained_scan).await?;
+    if let Some(expected) = &expected_summary_source_range {
+        let actual_from = context
+            .plan
+            .selected_backlog
+            .first()
+            .map(|message| message.store_id);
+        let actual_to = context
+            .plan
+            .selected_backlog
+            .last()
+            .map(|message| message.store_id);
+        if actual_from != Some(expected.from_store_id) || actual_to != Some(expected.to_store_id) {
+            return Err(LcmError::StaleSummarySourceRange {
+                expected_from: expected.from_store_id,
+                expected_to: expected.to_store_id,
+                actual_from,
+                actual_to,
+            });
+        }
+    }
+    let scan = (
+        context.raw_rows_scanned,
+        context.raw_bytes_scanned,
+        context.raw_has_more,
+    );
     if let Some(response) = frontier_changed_response(&request, &context) {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
     if let Some(response) =
         no_backlog_compression_response(conn, publisher, &request, summarizer, &context).await?
     {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
     if let Some(response) = backlog_below_threshold_response(conn, &request, &context).await? {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
     if let Some(response) = auxiliary_summary_response(&request, summarizer, &context) {
-        return Ok(response);
+        return Ok((response, scan.0, scan.1, scan.2));
     }
 
-    persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context).await
+    let response =
+        persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context)
+            .await?;
+    Ok((response, scan.0, scan.1, scan.2))
 }
 
 // The read phase: whole-session raw load plus window/plan derivation.
@@ -491,8 +588,10 @@ async fn compress_in_transaction(
 async fn prepare_compression_context(
     conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
+    retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<CompressionTransactionContext, LcmError> {
     let conversation_id = request.session_id.clone();
+    let retained = retained_scan.is_some();
     let existing_frontier = lifecycle_state_or_default(
         conn,
         &request.provider,
@@ -500,8 +599,28 @@ async fn prepare_compression_context(
         &request.session_id,
     )
     .await?;
-    let raw_messages =
-        load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+    let (raw_messages, raw_rows_scanned, raw_bytes_scanned, raw_has_more) =
+        if let Some(limit) = retained_scan {
+            let page = load_raw_messages_for_session_page(
+                conn,
+                &request.provider,
+                &request.session_id,
+                existing_frontier.current_frontier_store_id.unwrap_or(0),
+                limit,
+            )
+            .await?;
+            (
+                page.messages,
+                page.rows_scanned,
+                page.bytes_scanned,
+                page.has_more,
+            )
+        } else {
+            let messages =
+                load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+            let rows_scanned = messages.len();
+            (messages, rows_scanned, 0, false)
+        };
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
@@ -527,6 +646,10 @@ async fn prepare_compression_context(
         window,
         plan,
         overflow_assembly_cap,
+        raw_rows_scanned,
+        raw_bytes_scanned,
+        raw_has_more,
+        retained,
     })
 }
 
@@ -566,6 +689,21 @@ async fn no_backlog_compression_response(
 ) -> Result<Option<LcmCompressionResponse>, LcmError> {
     if !context.window.backlog.is_empty() {
         return Ok(None);
+    }
+    if context.retained {
+        return Ok(Some(compression_response(
+            "ok",
+            "no_backlog_to_compress",
+            Vec::new(),
+            retained_replay_messages(
+                &context.window.pinned_anchors,
+                &[],
+                &context.window.fresh_tail,
+            ),
+            context.existing_frontier.clone(),
+            None,
+            request.max_assembly_tokens,
+        )));
     }
     if context.plan.forced_overflow_recovery {
         return Ok(Some(
@@ -674,19 +812,27 @@ async fn backlog_below_threshold_response(
         return Ok(None);
     }
 
-    let replay_messages = assemble_replay_context(
-        conn,
-        &request.provider,
-        &request.session_id,
-        &context.raw_messages,
-        ReplayWindowParts {
-            pinned_anchors: &context.window.pinned_anchors,
-            deferred_backlog: &context.window.backlog,
-            fresh_tail: &context.window.fresh_tail,
-        },
-        request.max_assembly_tokens,
-    )
-    .await?;
+    let replay_messages = if context.retained {
+        retained_replay_messages(
+            &context.window.pinned_anchors,
+            &context.window.backlog,
+            &context.window.fresh_tail,
+        )
+    } else {
+        assemble_replay_context(
+            conn,
+            &request.provider,
+            &request.session_id,
+            &context.raw_messages,
+            ReplayWindowParts {
+                pinned_anchors: &context.window.pinned_anchors,
+                deferred_backlog: &context.window.backlog,
+                fresh_tail: &context.window.fresh_tail,
+            },
+            request.max_assembly_tokens,
+        )
+        .await?
+    };
     Ok(Some(compression_response(
         "ok",
         "backlog_below_leaf_chunk_threshold",
@@ -758,7 +904,13 @@ async fn persist_and_replay_backlog_compression(
         deferred_backlog: &write_result.remaining_backlog,
         fresh_tail: &context.window.fresh_tail,
     };
-    let replay_messages = if context.plan.forced_overflow_recovery {
+    let replay_messages = if context.retained {
+        retained_replay_messages(
+            &context.window.pinned_anchors,
+            &write_result.remaining_backlog,
+            &context.window.fresh_tail,
+        )
+    } else if context.plan.forced_overflow_recovery {
         assemble_overflow_recovery_replay(
             conn,
             &request.provider,
@@ -1096,6 +1248,20 @@ fn replay_without_summary(
             .map(replay_transactions::raw_replay_message),
     );
     replay_transactions::normalize_replay_tool_pairs(&replay_messages)
+}
+
+fn retained_replay_messages(
+    pinned_anchors: &[LcmRawMessage],
+    deferred_backlog: &[LcmRawMessage],
+    fresh_tail: &[LcmRawMessage],
+) -> Vec<Value> {
+    let replay = pinned_anchors
+        .iter()
+        .chain(deferred_backlog)
+        .chain(fresh_tail)
+        .map(replay_transactions::raw_replay_message)
+        .collect::<Vec<_>>();
+    replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
 const SUMMARY_REPLAY_PRIORITY: u8 = 0;
@@ -1736,11 +1902,30 @@ async fn load_condensation_candidates(
                       n.source_time_end, n.expand_hint, n.metadata_json, n.created_at,
                       source_order.first_source_id
                FROM lcm_summary_nodes n
+               JOIN session_temporal_generations generation
+                 ON generation.session_id = n.session_id
+                AND generation.state = 'active'
+               JOIN session_summary_availability availability
+                 ON availability.session_id = generation.session_id
+                AND availability.generation = generation.generation
+                AND availability.summary_id = n.node_id
+                AND availability.availability = 'available'
                LEFT JOIN source_order ON source_order.node_id = n.node_id
                WHERE n.provider = ?1 AND n.session_id = ?2
                  AND NOT EXISTS (
                    SELECT 1
+                   FROM lcm_summary_convergence_dirty_raw dirty
+                   WHERE dirty.provider = n.provider
+                     AND dirty.session_id = n.session_id
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
                    FROM lcm_summary_sources s
+                   JOIN session_summary_availability parent_availability
+                     ON parent_availability.session_id = generation.session_id
+                    AND parent_availability.generation = generation.generation
+                    AND parent_availability.summary_id = s.node_id
+                    AND parent_availability.availability = 'available'
                    WHERE s.source_kind = 'summary_node'
                      AND s.source_id = n.node_id
                  )
@@ -2355,6 +2540,64 @@ async fn load_raw_messages_for_session(
     })
 }
 
+struct RetainedRawMessagePage {
+    messages: Vec<LcmRawMessage>,
+    rows_scanned: usize,
+    bytes_scanned: u64,
+    has_more: bool,
+}
+
+async fn load_raw_messages_for_session_page(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    session_id: &str,
+    after_store_id: i64,
+    limit: RetainedCompressionGuard,
+) -> Result<RetainedRawMessagePage, LcmError> {
+    let row_limit = i64::try_from(limit.row_limit.max(1))
+        .map_err(|_| LcmError::Db("retained compression row limit overflow".to_string()))?;
+    let mut rows = conn
+        .query(
+            "SELECT provider, message_id, session_id, store_id, role, ordinal,
+                    timestamp, content, content_hash, storage_kind, payload_ref,
+                    snippet_text, legacy_source, legacy_truncated, metadata_json,
+                    length(CAST(COALESCE(content, '') AS BLOB))
+                      + length(CAST(snippet_text AS BLOB))
+                      + length(CAST(index_text AS BLOB))
+                      + length(CAST(COALESCE(metadata_json, '') AS BLOB))
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND session_id = ?2 AND store_id > ?3
+             ORDER BY store_id
+             LIMIT ?4",
+            params![provider, session_id, after_store_id, row_limit],
+        )
+        .await?;
+    let mut messages = Vec::new();
+    let mut bytes_scanned = 0_u64;
+    let mut byte_limited = false;
+    while let Some(row) = rows.next().await? {
+        let row_bytes = u64::try_from(row.get::<i64>(15)?).map_err(|error| {
+            LcmError::Db(format!("invalid retained compression byte count: {error}"))
+        })?;
+        if bytes_scanned.saturating_add(row_bytes) > limit.byte_limit {
+            if messages.is_empty() {
+                return Err(LcmError::BudgetExhausted);
+            }
+            byte_limited = true;
+            break;
+        }
+        bytes_scanned = bytes_scanned.saturating_add(row_bytes);
+        messages.push(raw::verified_raw_message_from_row(&row)?);
+    }
+    let rows_scanned = messages.len();
+    Ok(RetainedRawMessagePage {
+        messages,
+        rows_scanned,
+        bytes_scanned,
+        has_more: byte_limited || rows_scanned == limit.row_limit.max(1),
+    })
+}
+
 fn deterministic_message_id(
     provider: &str,
     session_id: &str,
@@ -2513,6 +2756,70 @@ mod authority_tests {
             .expect("count row present");
         let stored: i64 = row.get(0).expect("count value");
         assert_eq!(stored, 2, "role-less message must not be stored");
+    }
+
+    #[tokio::test]
+    async fn condensation_uses_only_available_nodes_from_the_active_generation() {
+        let temp = tempfile::TempDir::new().expect("create lcm tempdir");
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("sessions.db"),
+        );
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+             );
+             INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'active-condensation', 'fixture', 'fixture');",
+        )
+        .await
+        .unwrap();
+        schema::ensure_lcm_schema(&conn).await.unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL
+             );
+             CREATE TABLE session_summary_availability (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                summary_id TEXT NOT NULL,
+                availability TEXT NOT NULL
+             );
+             INSERT INTO session_temporal_generations(session_id, generation, state)
+             VALUES ('active-condensation', 2, 'active');
+             INSERT INTO lcm_summary_nodes(
+                node_id, provider, conversation_id, session_id, depth,
+                summary_text, summary_hash, summary_token_count, source_token_count,
+                created_at
+             ) VALUES
+                ('current', 'cursor', 'active-condensation', 'active-condensation', 0,
+                 'current summary', 'current-hash', 2, 4, 1),
+                ('stale-parent', 'cursor', 'active-condensation', 'active-condensation', 1,
+                 'stale summary', 'stale-hash', 2, 4, 2);
+             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal) VALUES
+                ('current', 'raw_message', '1', 0),
+                ('stale-parent', 'summary_node', 'current', 0);
+             INSERT INTO session_summary_availability(
+                session_id, generation, summary_id, availability
+             ) VALUES
+                ('active-condensation', 2, 'current', 'available'),
+                ('active-condensation', 2, 'stale-parent', 'stale');",
+        )
+        .await
+        .unwrap();
+
+        let candidates = load_condensation_candidates(&conn, "cursor", "active-condensation", 1, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_id, "current");
+        assert_eq!(candidates[0].summary_text, "current summary");
     }
 
     #[test]

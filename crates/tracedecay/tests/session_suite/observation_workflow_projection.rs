@@ -982,6 +982,17 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
     raw_conn
         .execute("DROP TRIGGER fail_workflow_projection", ())
         .unwrap();
+    // A storage failure arms the durable retry backoff on this mount, so the
+    // very next call on the same store is `RetryDeferred` by design — that
+    // bound is what keeps a persistently failing projection from spinning.
+    // Removing the injected failure does not rewind the backoff clock, so
+    // recovery is proved the way production reaches it: through a remount.
+    drop(store);
+    drop(runtime);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
     assert!(matches!(
         store.project_observation(&observation_id).await.unwrap(),
         ProjectionPersistOutcome::Projected(_)
@@ -1015,6 +1026,7 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
         .execute("DROP TRIGGER fail_workflow_rebuild_activation", ())
         .unwrap();
     drop(raw_conn);
+    drop(store);
     drop(runtime);
 
     let reopened = profile_runtime(&tmp).await;
@@ -1029,6 +1041,7 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
         table_count(&database_path, "observation_projection_rebuilds"),
         0
     );
+    drop(reopened_store);
     drop(reopened);
 
     let raw_conn = rusqlite::Connection::open(&database_path).unwrap();

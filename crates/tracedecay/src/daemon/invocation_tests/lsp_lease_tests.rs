@@ -34,7 +34,7 @@ async fn open_session(
     registry: &Arc<Mutex<LspSessionRegistry>>,
     request_id: &str,
 ) -> DaemonLspSessionAccess {
-    let project_root = PathBuf::from("/authoritative");
+    let (project_root, root_uri) = admitted_root_fixture("authoritative");
     DaemonLspOwnerRegistrar::new(service)
         .register_factory_for_project(
             project_root.clone(),
@@ -49,7 +49,7 @@ async fn open_session(
             registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                root_uri.clone(),
             ))),
             None,
             None,
@@ -161,7 +161,7 @@ async fn rejected_lsp_open_does_not_initialize_analyzer_or_mint_session_access()
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                admitted_root_fixture("authoritative").1,
             ))),
             None,
             None,
@@ -284,7 +284,10 @@ async fn explicit_detach_accepts_an_actor_that_already_exited_gracefully() {
             .expect("runtime session")
             .actor;
         for frame in [
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///authoritative","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"rootUri":"{}","capabilities":{{"general":{{"positionEncodings":["utf-16"]}}}}}}}}"#,
+                admitted_root_fixture("authoritative").1
+            ),
             r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"shutdown","params":{}}"#,
             r#"{"jsonrpc":"2.0","method":"exit","params":{}}"#,
@@ -563,7 +566,7 @@ async fn shutdown_fences_racing_lsp_open_before_it_can_publish_state() {
         .open_lsp_session(
             &registry,
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                admitted_root_fixture("authoritative").1,
             ))),
             "request.open-during-shutdown".to_owned(),
             env!("CARGO_PKG_VERSION").to_owned(),
@@ -613,7 +616,7 @@ async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() 
             .open_lsp_session(
                 &open_state.lsp_session_registry,
                 Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                    "file:///authoritative",
+                    admitted_root_fixture("authoritative").1,
                 ))),
                 "request.state-shutdown-race".to_owned(),
                 env!("CARGO_PKG_VERSION").to_owned(),

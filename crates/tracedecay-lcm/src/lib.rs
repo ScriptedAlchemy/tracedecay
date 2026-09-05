@@ -28,6 +28,9 @@ pub mod retrieval_content;
 pub mod schema;
 pub mod security;
 mod summarizer;
+pub mod summary_convergence;
+#[cfg(test)]
+mod summary_convergence_tests;
 pub mod types;
 pub mod util;
 
@@ -64,9 +67,10 @@ pub use types::{
     LcmRawMessageMetadata, LcmRawMessageOverview, LcmRecentSession, LcmRelationProjectionStatus,
     LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionBoundaryRequest,
     LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
-    LcmStatus, LcmStorageKind, LcmStoreStatus, LcmSummaryExpansion, LcmSummaryNode,
-    LcmSummaryNodeDraft, LcmSummaryNodeOverview, LcmSummaryRequest, LcmSummarySourceMessage,
-    LcmSummarySourceRange, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
+    LcmStatus, LcmStorageKind, LcmStoreStatus, LcmSummaryConvergenceStatus, LcmSummaryExpansion,
+    LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryNodeOverview, LcmSummaryRequest,
+    LcmSummarySourceMessage, LcmSummarySourceRange, MAX_DERIVED_SNIPPET_CHARS,
+    MAX_DERIVED_TEXT_CHARS,
 };
 
 pub use gc::LcmGcReport;

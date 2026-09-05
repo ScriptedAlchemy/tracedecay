@@ -208,6 +208,65 @@ impl GraphSeatGateV1 {
     }
 }
 
+/// Whether a prepared generation still owes native graph activation.
+///
+/// Preparation binds the complete generation and hands it to the serving
+/// swap; activation installs its native graph. The two used to share one
+/// gate, so refusing a redundant activation also refused the seat — a restart
+/// that restored an owner whose graph was already Ready therefore left the
+/// serving slot empty forever while status read the same owner and reported
+/// Ready. Every arm here refuses activation only; the seat always happens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphActivationGateV1 {
+    /// Install this generation's native graph.
+    Activate,
+    /// The bound owner already serves a native graph. Replaying activation
+    /// reopened the persistent graph, so shutdown cancelled the duplicate
+    /// projection and then conflicted closing the live reconciliation owner.
+    AlreadyServing,
+    /// Nothing new to install: the serving slot already holds this exact
+    /// generation and its graph is terminal (Ready, Refused, or Unavailable).
+    UnchangedGraph,
+    /// A generation whose graph is still Pending gets exactly one further
+    /// attempt per worker; this one is already spent.
+    PendingAttemptSpent,
+}
+
+impl GraphActivationGateV1 {
+    /// Decide activation for a generation this pass prepared and will seat.
+    ///
+    /// `graph_already_serves` is the retained/restored text owner's own
+    /// readiness, not the bound generation's: a restored owner carries its
+    /// Ready graph across the bind, and that owner is the authority status
+    /// reads.
+    #[hotpath::skip]
+    pub const fn decide(
+        graph_already_serves: bool,
+        replaces_serving_generation: bool,
+        graph_activation_is_pending: bool,
+        pending_attempt_spent: bool,
+    ) -> Self {
+        if graph_already_serves {
+            return Self::AlreadyServing;
+        }
+        if replaces_serving_generation {
+            return Self::Activate;
+        }
+        if !graph_activation_is_pending {
+            return Self::UnchangedGraph;
+        }
+        if pending_attempt_spent {
+            return Self::PendingAttemptSpent;
+        }
+        Self::Activate
+    }
+
+    #[hotpath::skip]
+    pub const fn activates(self) -> bool {
+        matches!(self, Self::Activate)
+    }
+}
+
 /// What the serving swap did with a reconciled generation.
 ///
 /// The swap is the only writer of the serving slot, so every arm here is a
@@ -218,11 +277,12 @@ impl GraphSeatGateV1 {
 pub enum ServingSwapOutcomeV1 {
     /// The generation is the active durable publication and now serves.
     Seated,
-    /// The durable pointer already names a successor, but nothing was serving:
-    /// a stale seat beats an empty route and the successor supersedes it.
+    /// The durable pointer already names a successor, and the slot holds
+    /// nothing the store still calls active: a stale seat beats an empty or
+    /// equally superseded route, and the next publication supersedes it.
     SeatedStale,
-    /// The durable pointer already names a successor and a generation is
-    /// already serving, so the slot keeps what it has.
+    /// The durable pointer already names a successor and the incumbent *is*
+    /// that active publication, so the slot keeps what it has.
     Superseded,
     /// The generation already serves; only semantic admission was re-offered.
     Offered,
@@ -236,13 +296,21 @@ impl ServingSwapOutcomeV1 {
     /// checkout it sealed from, and refusing that seat left the graph route
     /// serving nothing at all rather than serving something stale.
     #[hotpath::skip]
-    pub const fn decide(publication_matches: bool, serving_is_seated: bool, replace: bool) -> Self {
+    pub const fn decide(
+        publication_matches: bool,
+        incumbent_is_active: bool,
+        replace: bool,
+    ) -> Self {
         if !publication_matches {
-            if serving_is_seated {
-                // Something already serves; a superseded generation must not
-                // move the slot backwards.
+            if incumbent_is_active {
+                // The active durable publication already serves; a superseded
+                // generation must not move the slot backwards.
                 return Self::Superseded;
             }
+            // Nothing active holds the slot — it is empty, or its incumbent
+            // was superseded too. Either way this generation is no worse than
+            // what is there, and refusing left the route wedged on a
+            // generation the store no longer publishes.
             return Self::SeatedStale;
         }
         if replace { Self::Seated } else { Self::Offered }
@@ -568,10 +636,6 @@ pub struct MountedCodeIndexWorktreeV1 {
             >,
         >,
     >,
-    /// Durable id from the last `Published` broadcast. Serving and text can
-    /// lag until graph/text seating; observers of "latest" must not stay on
-    /// the prior seated generation after a new id is published.
-    published_generation_id: Arc<RwLock<Option<CodeGenerationId>>>,
     /// The exact-source currency witness for the seated generation, readable
     /// without the scheduler mutex. Armed when the quiet exact-source probe
     /// passes or when a generation extracted this pass seats as the active
@@ -2102,7 +2166,6 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_epoch,
             active_installation,
             text_generation,
-            published_generation_id,
             serving_source_witness,
         ) = {
             let mounted = self.mounted.lock().await;
@@ -2114,7 +2177,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation_epoch),
                 Arc::clone(&worktree.serving_generation_installation),
                 Arc::clone(&worktree.text_generation),
-                Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_source_witness),
             )
         };
@@ -2154,15 +2216,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 current.metadata().manifest().generation_id == installation.generation_id
             }) {
                 *text = None;
-            }
-            // `latest_generation_id` prefers the published id over both
-            // serving and text. A matching rollback must withdraw that
-            // broadcast too, or the retired generation stays addressable.
-            let mut published = published_generation_id
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if published.as_ref() == Some(&installation.generation_id) {
-                *published = None;
             }
         }
         ServingGenerationRollbackOutcomeV1::Cleared
@@ -2491,16 +2544,16 @@ impl CodeIndexSchedulerRegistryV1 {
         seats.send_modify(|seats| *seats = seats.wrapping_add(1));
     }
 
-    fn publish_generation(
+    /// Announce a durable publication.
+    ///
+    /// Announcing is not seating: the durable pointer has moved, but the
+    /// generation becomes addressable through [`Self::latest_generation_id`]
+    /// only once a swap installs it in a serving slot.
+    fn broadcast_generation_publication(
         sender: &tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
-        published_generation_id: &RwLock<Option<CodeGenerationId>>,
         project_root: PathBuf,
         evidence: &CodeIndexPublishEvidenceV1,
     ) {
-        *published_generation_id
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(evidence.generation_id.clone());
         let _ = sender.send(CodeIndexGenerationPublishedV1 {
             project_root,
             repository_id: evidence.repository_id.clone(),
@@ -2838,8 +2891,6 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::new(RwLock::new(None));
         let convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>> =
             Arc::new(RwLock::new(None));
-        let published_generation_id: Arc<RwLock<Option<CodeGenerationId>>> =
-            Arc::new(RwLock::new(None));
         let serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>> =
             Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
@@ -2861,7 +2912,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_text_generation = Arc::clone(&text_generation);
         let worker_convergence_park = Arc::clone(&convergence_park);
-        let worker_published_generation_id = Arc::clone(&published_generation_id);
         let worker_serving_source_witness = Arc::clone(&serving_source_witness);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
@@ -3386,9 +3436,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &source_result {
-                    Self::publish_generation(
+                    // Announce only. This pass has not seated anything yet:
+                    // the replacement text owner reopens below and the serving
+                    // swap runs after graph work, so recording the id here
+                    // made `latest_generation_id` name a generation every
+                    // serving arm still answered the *previous* id for.
+                    Self::broadcast_generation_publication(
                         &worker_generation_publications,
-                        &worker_published_generation_id,
                         worker_project_root.clone(),
                         evidence,
                     );
@@ -3674,13 +3728,19 @@ impl CodeIndexSchedulerRegistryV1 {
                         worker_wake.notify_one();
                     }
                 }
-                if prepare_graph
-                    && graph_text
-                        .as_ref()
-                        .is_some_and(|retained| retained.interactive_graph_store().is_ok())
-                {
-                    prepare_graph = false;
-                }
+                // A text owner that already serves a native graph must not be
+                // activated a second time, but preparation is not activation.
+                // Clearing `prepare_graph` here also skipped the bind and the
+                // serving swap, so a restart that restored a Ready retained
+                // graph left `serving_generation` empty forever: every
+                // complete-generation demand (`latest_complete_ready`,
+                // `latest_complete_fresh`, `latest_complete_serving_for_scope`)
+                // answered unavailable while `dashboard_code_graph_serving`
+                // read the same text owner and reported Ready. Prepare, bind
+                // and seat as usual; only the activation call is suppressed.
+                let graph_already_serves = graph_text
+                    .as_ref()
+                    .is_some_and(|retained| retained.interactive_graph_store().is_ok());
                 if prepare_graph
                     && !published_pass
                     && !retained_graph_head_recovery_attempted
@@ -3726,13 +3786,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                         &worker_project_root,
                                     )
                                     .await;
-                                    // The retained pass intentionally did not
-                                    // capture the dirty checkout. Wake one
-                                    // successor pass now that its stale graph
-                                    // is queryable; the Pending guard above
-                                    // becomes false after recovery, so this
-                                    // cannot spin another retained-seat Noop.
-                                    worker_wake.notify_one();
                                 }
                                 Ok(false) => {}
                                 Err(error) => {
@@ -3763,6 +3816,19 @@ impl CodeIndexSchedulerRegistryV1 {
                             );
                         }
                     }
+                    // The reserved pass deliberately did not capture the
+                    // checkout, and it consumed whatever wake ran it. Schedule
+                    // the successor for every outcome of the attempt, not only
+                    // the recovered one: an abstaining or degraded attempt
+                    // leaves exactly the same uncaptured source behind, and
+                    // the reservation is armed once per worker, so a quiet
+                    // reserved pass that answered `Noop` for a checkout with
+                    // hook hints already pending stranded them with no wake at
+                    // all and never published the successor generation. The
+                    // `retained_graph_head_recovery_attempted` guard above is
+                    // now false for every later pass, so this cannot spin
+                    // another retained-recovery Noop.
+                    worker_wake.notify_one();
                 }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
@@ -3808,6 +3874,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                     ),
                                     None => None,
                                 };
+                                // A refused ignored-source roster clears
+                                // itself, so the very next pass can publish
+                                // the successor — but this pass consumed the
+                                // wake that would have run it.
+                                let roster_refusal_rebuild = latest.is_none()
+                                    && Self::lock_scheduler_unless_shutting_down(
+                                        &graph_scheduler,
+                                        &shutting_down,
+                                    )?
+                                    .take_ignored_roster_refusal_rebuild();
                                 let replay_binding = match latest.as_ref() {
                                     Some(latest) => Some(
                                         Self::lock_scheduler_unless_shutting_down(
@@ -3820,20 +3896,29 @@ impl CodeIndexSchedulerRegistryV1 {
                                     ),
                                     None => None,
                                 };
-                                replay_binding.transpose().map(|binding| (latest, binding))
+                                replay_binding
+                                    .transpose()
+                                    .map(|binding| (latest, binding, roster_refusal_rebuild))
                             }),
                             label = "daemon.code_index.graph_prepare"
                         )
                         .await
                         {
-                            Ok(Ok((latest, replay_binding))) => {
+                            Ok(Ok((latest, replay_binding, roster_refusal_rebuild))) => {
                                 if latest.is_none() {
                                     tracing::warn!(
                                         event = "code_index_graph_prepare_no_servable_generation",
                                         published_pass,
+                                        roster_refusal_rebuild,
                                         "graph prepare produced no servable generation; \
                                          the sealed generation cannot seat"
                                     );
+                                }
+                                if roster_refusal_rebuild {
+                                    // One pass, claimed from the scheduler, so
+                                    // a refusal that keeps reproducing cannot
+                                    // spin this worker.
+                                    worker_wake.notify_one();
                                 }
                                 Ok((outcome, latest, replay_binding))
                             }
@@ -3860,27 +3945,18 @@ impl CodeIndexSchedulerRegistryV1 {
                     Ok((Ok(_), Some(_), Some(_))) => true,
                     _ => false,
                 };
-                // An unchanged reconcile over the exact serving generation has
-                // no graph effect to install. Replaying activation here opened
-                // the persistent graph again, so daemon shutdown cancelled the
-                // duplicate projection and then conflicted while closing the
-                // still-running graph reconciliation owner.
-                //
-                // Identity alone is not that proof, though: a generation seated
-                // by the exact route, or one whose activation failed earlier,
-                // serves text under the very same id with no native graph at
-                // all. Leaving the replace gate as the only door left those
-                // generations answering "not ready" forever. A generation whose
-                // graph is still Pending - never Ready, never Refused - gets
-                // exactly one further attempt per worker, so nothing is
-                // replayed over a graph that already serves.
+                // Activation is decided independently of the seat: every arm
+                // below refuses only the native graph call, and the serving
+                // swap still installs the prepared generation.
                 let activate_graph = match &result {
-                    Ok((Ok(_), Some(latest), Some(_))) => {
-                        replace_serving_generation
-                            || (latest.graph_activation_is_pending()
-                                && graph_seat_attempted.as_ref()
-                                    != Some(&latest.generation().manifest().generation_id))
-                    }
+                    Ok((Ok(_), Some(latest), Some(_))) => GraphActivationGateV1::decide(
+                        graph_already_serves,
+                        replace_serving_generation,
+                        latest.graph_activation_is_pending(),
+                        graph_seat_attempted.as_ref()
+                            == Some(&latest.generation().manifest().generation_id),
+                    )
+                    .activates(),
                     _ => false,
                 };
                 if activate_graph && let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
@@ -4004,16 +4080,33 @@ impl CodeIndexSchedulerRegistryV1 {
                             // Refusing the swap outright then left the route
                             // serving nothing at all, so an empty serving slot
                             // takes the stale seat and the next publication
-                            // supersedes it; a slot that already serves keeps what
-                            // it has rather than moving backwards.
+                            // supersedes it.
+                            //
+                            // Only the *active* publication may refuse that
+                            // stale seat. Asking merely whether something was
+                            // seated let an incumbent the canonical store had
+                            // already superseded keep the slot forever: both
+                            // candidate and incumbent were then non-active, so
+                            // every later pass refused too and serving never
+                            // converged on the durable head.
                             let publication_matches =
                                 scheduler.active_publication_matches(&latest)?;
                             let mut serving = serving_generation
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let incumbent_is_active = serving.as_ref().is_some_and(|incumbent| {
+                                // The active generation is already loaded
+                                // and cached by the check above, so this
+                                // is a second comparison, not a second
+                                // decode. A store that cannot answer keeps
+                                // the incumbent rather than displacing it.
+                                scheduler
+                                    .active_publication_matches(incumbent)
+                                    .unwrap_or(true)
+                            });
                             let outcome = ServingSwapOutcomeV1::decide(
                                 publication_matches,
-                                serving.is_some(),
+                                incumbent_is_active,
                                 replace_serving_generation,
                             );
                             if outcome.installs() {
@@ -4252,7 +4345,6 @@ impl CodeIndexSchedulerRegistryV1 {
             text_generation,
             convergence_park,
             generation_recovery,
-            published_generation_id,
             serving_source_witness,
             build_progress,
             serving_generation_epoch,
@@ -4976,37 +5068,35 @@ impl CodeIndexSchedulerRegistryV1 {
         // so one warmup/dashboard call during a rebuild parked a runtime worker
         // for the reconcile's whole duration AND serialized every code-index
         // query behind it: a silent, daemon-wide code-index outage.
-        let (serving, text, published) = {
+        let (serving, text) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.text_generation),
-                Arc::clone(&worktree.published_generation_id),
             )
         };
-        // Publication broadcasts before graph/text seating. A later id must
-        // not stay hidden behind a still-serving prior generation.
-        if let Some(generation_id) = published
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            return Some(generation_id);
-        }
-        let text_id = text
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|latest| latest.metadata().manifest().generation_id.clone());
-        if text_id.is_some() {
-            return text_id;
-        }
-        serving
+        // Only a seat answers here. A durable publication moves the pointer
+        // long before either swap installs the generation it sealed, and a
+        // slot fed from that broadcast named a generation every serving arm
+        // still answered the *previous* id for: a caller that polled for a
+        // changed id and then asked for the generation was handed the one it
+        // had already seen. The complete serving slot is the swap's own
+        // witness, so it answers first; the text slot covers a graph-off or
+        // still-activating mount that deliberately leaves the complete slot
+        // empty.
+        let serving_id = serving
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|latest| latest.generation.manifest().generation_id.clone())
+            .map(|latest| latest.generation.manifest().generation_id.clone());
+        if serving_id.is_some() {
+            return serving_id;
+        }
+        text.read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|latest| latest.metadata().manifest().generation_id.clone())
     }
 
     /// Re-offer the exact serving generation to its installed semantic hook.

@@ -238,6 +238,22 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.session_temporal.recover_relation_projection_page"
+    )]
+    pub async fn recover_pending_session_relation_projection_page(
+        &self,
+        limit: usize,
+        cancellation: std::sync::Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    ) -> tracedecay_store::SessionStoreResult<
+        tracedecay_session_temporal_store::SessionRelationRecoveryPage,
+    > {
+        SessionTemporalAccess::new(self)
+            .recover_pending_session_relation_projection_page(limit, cancellation)
+            .await
+    }
+
     #[hotpath::measure(future = true, label = "global_db.session_temporal.refresh_recovery")]
     pub async fn session_refresh_recovery_result(
         &self,

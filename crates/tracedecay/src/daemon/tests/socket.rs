@@ -6,6 +6,17 @@ use super::*;
 use tracedecay_daemon_protocol::{FramePoll, FrameSend};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+/// How long a half-closed one-shot client may wait for its single response.
+///
+/// This bound proves the daemon cannot pin a half-closed connection; it is not
+/// a latency budget. It used to be 2s, which the whole-suite run exceeded
+/// whenever several of these tests opened their own cold profile runtimes at
+/// once — a measured 500ms+ per `DaemonSessionRuntimeRegistryV1::open` under
+/// six-way contention, on top of the route open each request still needs. That
+/// made an environment-speed reading look like a daemon hang. The portable
+/// broker tests use it too, so it is not gated on unix.
+const HALF_CLOSE_ROUND_TRIP_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[cfg(unix)]
 fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::Deadline {
     let now = std::time::SystemTime::now()
@@ -694,7 +705,7 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     writer.shutdown().await.expect("shutdown writer");
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+    let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
         .await
         .expect("projectless rejection should not time out")
         .expect("read response")
@@ -779,7 +790,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     writer.shutdown().await.expect("shutdown writer");
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
-    let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+    let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
         .await
         .expect("user session read should not time out")
         .expect("read response")
@@ -840,7 +851,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
             .expect("write invocation");
         writer.write_all(b"\n").await.expect("newline");
 
-        let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
             .await
             .expect("invocation response should not time out")
             .expect("read invocation response")
@@ -1260,7 +1271,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
             .expect("write invocation");
         writer.write_all(b"\n").await.expect("invocation newline");
 
-        let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        let line = tokio::time::timeout(HALF_CLOSE_ROUND_TRIP_BOUND, lines.next_line())
             .await
             .expect("invocation response should not time out")
             .expect("read invocation response")

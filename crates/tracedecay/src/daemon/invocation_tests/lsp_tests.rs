@@ -22,7 +22,7 @@ fn bridge_lsp_cancellation() -> CancellationContext {
 #[tokio::test]
 async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/bridge-backpressure");
+    let (project_root, root_uri) = admitted_root_fixture("bridge-backpressure");
     DaemonLspOwnerRegistrar::new(&service)
         .register_factory_for_project(
             project_root.clone(),
@@ -38,14 +38,14 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///bridge-backpressure",
+                root_uri.clone(),
             ))),
             None,
             None,
             DaemonInvocationRequest::lsp_open(
                 "request.bridge.open",
                 "client.bridge",
-                Some("file:///bridge-backpressure".to_owned()),
+                Some(root_uri.clone()),
                 Vec::new(),
                 bridge_lsp_deadline(),
                 bridge_lsp_cancellation(),
@@ -211,6 +211,8 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
 
 #[test]
 fn lsp_scope_roots_canonicalize_independent_of_folder_order() {
+    let (path_a, uri_a) = admitted_root_fixture("a");
+    let (path_b, uri_b) = admitted_root_fixture("b");
     let scope_a = ResolvedScope::new(
         ProjectId::new("project.a").unwrap(),
         tracedecay_domain::RepositoryId::new("repository.a").unwrap(),
@@ -229,43 +231,33 @@ fn lsp_scope_roots_canonicalize_independent_of_folder_order() {
         ProjectId::new("project.a").unwrap(),
         tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
         "store.a",
-        "/a",
+        &path_a,
     )
     .unwrap();
     let locator_b = tracedecay_application::RegisteredRootLocatorV1::new(
         ProjectId::new("project.b").unwrap(),
         tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
         "store.b",
-        "/b",
+        &path_b,
     )
     .unwrap();
     let mut forward = vec![
         (
-            PathBuf::from("/a"),
-            "file:///a".to_owned(),
+            path_a.clone(),
+            uri_a.clone(),
             scope_a.clone(),
             locator_a.clone(),
         ),
         (
-            PathBuf::from("/b"),
-            "file:///b".to_owned(),
+            path_b.clone(),
+            uri_b.clone(),
             scope_b.clone(),
             locator_b.clone(),
         ),
     ];
     let mut reverse = vec![
-        (
-            PathBuf::from("/b"),
-            "file:///b".to_owned(),
-            scope_b,
-            locator_b,
-        ),
-        (
-            PathBuf::from("/a"),
-            "file:///a".to_owned(),
-            scope_a,
-            locator_a,
-        ),
+        (path_b, uri_b, scope_b, locator_b),
+        (path_a, uri_a, scope_a, locator_a),
     ];
 
     assert!(canonicalize_lsp_roots(&mut forward));

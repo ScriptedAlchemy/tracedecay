@@ -996,6 +996,54 @@ fn next_retention_plan_limits_collection_to_one_generation() {
     assert_eq!(plan.superseded_generations.len(), 7);
 }
 
+/// The bounded collection unit must name the OLDEST collectable generation.
+///
+/// Planning newest-first meant a store that publishes at least as fast as
+/// maintenance collects never reclaimed its floor: every single-unit plan
+/// named the generation sealed a moment ago, and the first generation ever
+/// sealed stayed on disk forever.
+#[test]
+fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
+    let (store, generations) = fixture_store(5);
+
+    let plan = plan_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        &|| false,
+    )
+    .expect("plan one retention unit");
+
+    assert_eq!(
+        plan.collectable_generations
+            .iter()
+            .map(|generation| generation.generation_id.clone())
+            .collect::<Vec<_>>(),
+        vec![generations[0].id.clone()],
+        "the bounded unit must reclaim the oldest superseded generation"
+    );
+}
+
+/// The rollback reserve still holds the NEWEST superseded generations while
+/// the batch sweeps from the oldest end, so the two orders cannot collapse
+/// into one another.
+#[test]
+fn retention_reserves_the_newest_superseded_window_and_sweeps_from_the_oldest() {
+    let (store, generations) = fixture_store(6);
+
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention with a rollback reserve");
+
+    assert_eq!(
+        plan.collectable_generations
+            .iter()
+            .map(|generation| generation.generation_id.clone())
+            .collect::<Vec<_>>(),
+        vec![generations[0].id.clone(), generations[1].id.clone()],
+        "generations 2..4 are the newest superseded rollback reserve"
+    );
+}
+
 #[test]
 fn unpublished_store_collects_sealed_crash_debris_under_the_absent_pointer() {
     let (store, generations) = fixture_store(2);
@@ -1047,6 +1095,65 @@ fn idle_maintenance_preparation_stays_metadata_only() {
         GenerationDigestVerificationV1::MetadataOnly,
         "an idle maintenance tick must not re-hash every retained generation"
     );
+}
+
+#[test]
+fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
+    let store = tempfile::TempDir::new().expect("create unpublished store");
+    std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("create generation root");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    for index in 0..256 {
+        std::fs::write(
+            segments_root.join(format!("crash-debris-{index:04}")),
+            b"debris",
+        )
+        .expect("write crash debris");
+    }
+
+    let cancellation_observations = std::cell::Cell::new(0_usize);
+    let holds_segments = store_may_hold_generation_segments(store.path(), &|| {
+        cancellation_observations.set(cancellation_observations.get() + 1);
+        cancellation_observations.get() > 1
+    })
+    .expect("one observed entry conservatively proves possible segment work");
+
+    assert!(holds_segments);
+    assert_eq!(
+        cancellation_observations.get(),
+        1,
+        "metadata-only diagnostics must not exhaust an arbitrarily large debris directory"
+    );
+    let plan = plan_code_generation_retention_with_verification(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        GenerationDigestVerificationV1::MetadataOnly,
+    )
+    .expect("plan bounded metadata-only census");
+    assert_eq!(
+        plan.generation_segment_census(),
+        GenerationSegmentCensusV1::Unknown,
+        "any observed entry remains typed unknown until the full mark-and-sweep"
+    );
+}
+
+#[test]
+fn metadata_only_segment_census_distinguishes_empty_and_cancelled() {
+    let store = tempfile::TempDir::new().expect("create unpublished store");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+
+    assert!(
+        !store_may_hold_generation_segments(store.path(), &|| false)
+            .expect("empty segment directory")
+    );
+
+    std::fs::write(segments_root.join("crash-debris"), b"debris").expect("write crash debris");
+    let error = store_may_hold_generation_segments(store.path(), &|| true)
+        .expect_err("cancellation wins before an observed entry is accepted");
+    assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
 }
 
 #[test]

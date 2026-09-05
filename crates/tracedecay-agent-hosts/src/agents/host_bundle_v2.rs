@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use fs2::FileExt;
@@ -4468,11 +4468,15 @@ fn atomic_write_nofollow(
     Err(host_bundle_storage_failure!())
 }
 
+/// Flushes the deploy parent so a preceding rename, hard link, or unlink is
+/// durable.
+///
+/// Delegates to the shared capability-directory primitive rather than issuing
+/// the fsync here: Windows has no directory flush, and `FlushFileBuffers` on a
+/// directory handle fails with `ERROR_ACCESS_DENIED`, which turned every
+/// atomic host-bundle publication into a storage failure.
 fn sync_cap_dir(dir: &Dir) -> Result<(), HostBundleError> {
-    let mut options = CapOpenOptions::new();
-    options.read(true).maybe_dir(true);
-    dir.open_with(".", &options)
-        .and_then(|file| file.sync_all())
+    tracedecay_private_fs::capability_dir::sync_directory(dir)
         .map_err(|_| host_bundle_storage_failure!())
 }
 

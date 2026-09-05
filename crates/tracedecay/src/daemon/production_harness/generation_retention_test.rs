@@ -325,7 +325,21 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         .collectable_generations
         .iter()
         .find(|generation| generation.generation_id == first_source)
-        .expect("vector source is old enough to collect");
+        .unwrap_or_else(|| {
+            panic!(
+                "vector source is old enough to collect: first_source={first_source} \
+                 active={:?} collectable={:?} superseded={:?}",
+                plan.active_generation_id,
+                plan.collectable_generations
+                    .iter()
+                    .map(|generation| generation.generation_id.as_str())
+                    .collect::<Vec<_>>(),
+                plan.superseded_generations
+                    .iter()
+                    .map(|generation| generation.generation_id.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        });
     let first_source_file = code_store_root
         .join("code-generations-v1")
         .join(&first_candidate.generation_file);

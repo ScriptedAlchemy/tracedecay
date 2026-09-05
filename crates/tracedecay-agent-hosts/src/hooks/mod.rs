@@ -417,7 +417,7 @@ pub(crate) async fn ingest_user_session(
             .and_then(Value::as_u64)
             .is_some_and(|count| count > 0),
         Err(error) => {
-            eprintln!("[tracedecay] user {provider} ingest daemon call failed: {error}");
+            tracing::warn!(provider, %error, "user transcript ingest daemon call failed");
             false
         }
     }
@@ -556,7 +556,7 @@ pub(crate) async fn reset_counter_for_project(
     )
     .await
     {
-        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
+        tracing::warn!(%error, "local counter reset daemon call failed");
     }
 }
 

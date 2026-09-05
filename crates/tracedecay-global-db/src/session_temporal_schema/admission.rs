@@ -207,7 +207,9 @@ pub(super) async fn validate_released_v3_session_temporal_schema(
         .iter()
         .map(|(table, _)| *table)
         .filter(|table| {
-            !table.ends_with("_fts") && *table != "session_temporal_projection_receipts"
+            !table.ends_with("_fts")
+                && *table != "session_temporal_projection_receipts"
+                && *table != "session_relation_receipts"
         })
         .collect::<Vec<_>>();
     validate_session_temporal_schema_contract(conn, &tables)
