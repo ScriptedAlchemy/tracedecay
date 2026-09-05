@@ -27,7 +27,6 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
     session_runtime_registries: super::SharedSessionRuntimeRegistries,
     invocation: super::super::DaemonInvocationState,
-    lsp_session_registry: Arc<tokio::sync::Mutex<tracedecay_lsp::LspSessionRegistry>>,
     project_open_gates: Arc<tokio::sync::Mutex<super::super::ProjectOpenGates>>,
     session_temporal_refresh_schedulers: Arc<
         tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
@@ -146,7 +145,6 @@ impl RemoteRecoveryProjectLifecycleV1 {
             gate: Arc::clone(&administration.gate),
             project_servers: Arc::clone(&administration.project_servers),
             session_runtime_registries: Arc::clone(&administration.session_runtime_registries),
-            lsp_session_registry: Arc::clone(&invocation.lsp_session_registry),
             invocation,
             project_open_gates,
             session_temporal_refresh_schedulers: Arc::clone(
@@ -214,19 +212,19 @@ impl RemoteRecoveryProjectLifecycleV1 {
                     project_id.as_str()
                 ),
             })?;
+        // Remote recovery drains the same invocation runtime owners every
+        // other project drain does. Calling `service.quiesce_project` alone
+        // left the code-index scheduler root, the query authority and the
+        // semantic projection work mounted, and the code-index observability
+        // lane keeps a counted client on the project-session store, so the
+        // store retirement this quiescence exists to admit was refused.
         let invocation = self
             .invocation
-            .service
-            .quiesce_project(
-                &self.lsp_session_registry,
-                &self.profile_id,
-                project_id,
-                &roots,
-            )
+            .quiesce_project_runtime_owners(&self.profile_id, project_id, &roots)
             .await
-            .ok_or_else(|| TraceDecayError::Config {
+            .map_err(|error| TraceDecayError::Config {
                 message: format!(
-                    "remote recovery project '{}' invocation owners did not drain",
+                    "remote recovery project '{}' invocation owners did not drain: {error}",
                     project_id.as_str()
                 ),
             })?;
