@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::time::timeout;
+use tokio::time::Instant;
 
 use super::{DaemonHandshake, StoreAdministration};
 use tracedecay_code_index_runtime::code_index_scheduler::{
@@ -21,6 +21,9 @@ const CODE_INDEX_ACTIVATION_UNAVAILABLE: &str = "code_index_activation_unavailab
 const CODE_INDEX_IDENTITY_MISMATCH: &str = "code_index_scheduler_identity_mismatch";
 const GIT_SNAPSHOT_UNAVAILABLE: &str = "git_snapshot_unavailable";
 const BRANCH_TRACKING_FAILED: &str = "branch_tracking_failed";
+const BRANCH_GENERATION_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+const BRANCH_GENERATION_HARD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const BRANCH_GENERATION_SEATING_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(super) struct BranchAddRequest {
     pub(super) id: serde_json::Value,
@@ -755,7 +758,8 @@ fn await_exact_branch_generation_inner<'a>(
                 ),
             ));
         }
-        timeout(Duration::from_secs(20), async {
+        let hard_deadline = Instant::now() + BRANCH_GENERATION_HARD_TIMEOUT;
+        let mut idle_deadline = Instant::now() + BRANCH_GENERATION_IDLE_TIMEOUT;
         loop {
             let scope = schedulers
                 .serving_code_scope(canonical_worktree_root)
@@ -789,6 +793,25 @@ fn await_exact_branch_generation_inner<'a>(
             {
                 return Ok(generation);
             }
+            let now = Instant::now();
+            if now >= hard_deadline {
+                return Err(branch_generation_timeout_error(
+                    canonical_worktree_root,
+                    source,
+                ));
+            }
+            if schedulers
+                .dashboard_freshness(canonical_worktree_root)
+                .await
+                .is_some_and(|freshness| freshness.rebuild_in_flight)
+            {
+                idle_deadline = now + BRANCH_GENERATION_IDLE_TIMEOUT;
+            } else if now >= idle_deadline {
+                return Err(branch_generation_timeout_error(
+                    canonical_worktree_root,
+                    source,
+                ));
+            }
             tokio::select! {
                 result = publications.recv() => match result {
                     Ok(event) if event.project_root == canonical_worktree_root => {}
@@ -807,24 +830,26 @@ fn await_exact_branch_generation_inner<'a>(
                 // Publication is broadcast before graph seating. The serving
                 // slot may therefore become exact after the matching event,
                 // without a second event to wake this waiter.
-                () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                () = tokio::time::sleep(BRANCH_GENERATION_SEATING_POLL_INTERVAL) => {}
             }
         }
     })
-    .await
-    .map_err(|_| {
-        TraceDecayError::project_route(
-            CODE_INDEX_ACTIVATION_UNAVAILABLE,
-            true,
-            format!(
-                "code-index scheduler did not publish exact branch source '{}' at '{}' for '{}'",
-                source.reference,
-                source.source_oid,
-                canonical_worktree_root.display()
-            ),
-        )
-    })?
-    })
+}
+
+fn branch_generation_timeout_error(
+    canonical_worktree_root: &Path,
+    source: &tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1,
+) -> TraceDecayError {
+    TraceDecayError::project_route(
+        CODE_INDEX_ACTIVATION_UNAVAILABLE,
+        true,
+        format!(
+            "code-index scheduler did not publish exact branch source '{}' at '{}' for '{}'",
+            source.reference,
+            source.source_oid,
+            canonical_worktree_root.display()
+        ),
+    )
 }
 
 fn generation_matches_branch_source(
