@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 // The census gates on the exact revision the publisher writes. A second copy of
 // that number here let the writer be versioned to 3 while retention still
 // demanded 1: every real sealed file was refused as "incompatible" and the store
@@ -133,6 +133,11 @@ const STORE_LOCK_FILE: &str = ".code-generation-retention.lock";
 const RECEIPT_SCHEMA: &str = "tracedecay.code-generation-retention-receipt.v1";
 const TRANSACTION_FILE: &str = ".code-generation-retention-transaction-v1.json";
 const TRANSACTION_SCHEMA: &str = "tracedecay.code-generation-retention-transaction.v1";
+/// Write context for the durable index rewrite that precedes every unlink.
+pub(crate) const RETENTION_POINTER_WRITE_CONTEXT: &str = "code-generation-retention-index-rewrite";
+/// Write context for restoring the pre-collection pointer during rollback.
+pub(crate) const RETENTION_POINTER_ROLLBACK_CONTEXT: &str =
+    "code-generation-retention-index-rollback";
 const TEXT_ARTIFACT_RECEIPTS_DIRECTORY: &str = "code-text-artifact-retention-receipts-v1";
 const TEXT_ARTIFACT_QUARANTINE_DIRECTORY: &str = ".code-text-artifact-retention-quarantine-v1";
 const TEXT_ARTIFACT_TRANSACTION_FILE: &str = ".code-text-artifact-retention-transaction-v1.json";
@@ -565,6 +570,40 @@ struct CodeGenerationRetentionTransactionV1 {
     receipt: CodeGenerationRetentionReceiptV1,
 }
 
+impl CodeGenerationRetentionTransactionV1 {
+    /// The pointer this unit publishes before it unlinks anything: the same
+    /// active generation with every collected id dropped from the durable
+    /// `generation_index`. `None` means the index named none of the collected
+    /// generations, so the pointer is untouched by this unit.
+    ///
+    /// Derived rather than journaled. The inputs -- the pre-collection pointer
+    /// and the exact deleted set -- are already in the journal, and a second
+    /// durable pointer copy would push the transaction past
+    /// [`MAX_TRANSACTION_BYTES`] on a store whose pointer is near its own
+    /// bound. Both states this unit can be observed in are therefore
+    /// reconstructible from one journal, which is what makes the unlink
+    /// recoverable in either direction.
+    fn rewritten_pointer(
+        &self,
+    ) -> Result<Option<DurablePublicationPointerV1>, CodeGenerationRetentionErrorV1> {
+        match self.active_pointer.as_ref() {
+            Some(pointer) => {
+                pointer_without_collected_generations(pointer, &self.receipt.deleted_generations)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The pointer the store must carry once the rewrite is durable.
+    fn committed_pointer(
+        &self,
+    ) -> Result<Option<DurablePublicationPointerV1>, CodeGenerationRetentionErrorV1> {
+        Ok(self
+            .rewritten_pointer()?
+            .or_else(|| self.active_pointer.clone()))
+    }
+}
+
 #[derive(Serialize)]
 struct CodeTextArtifactRetentionReceiptMaterialV1<'a> {
     schema: &'static str,
@@ -864,14 +903,17 @@ fn plan_code_generation_retention_with_verification_cancellable(
         }
     }
 
-    let mut pointer_generations = BTreeSet::new();
     if let Some(pointer) = active_pointer.as_ref() {
         if active_state_digest.as_deref() != Some(pointer.state_digest.as_str()) {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                 "active generation file is missing or does not match the pointer digest".to_owned(),
             ));
         }
-        pointer_generations = pointer
+        // Referential integrity of the pointer's own history, not a liveness
+        // mark: every entry must still name a present sealed file of the
+        // recorded size, because the executor rewrites this index durably
+        // before it unlinks anything.
+        let pointer_generations = pointer
             .generation_index
             .iter()
             .map(|entry| {
@@ -930,10 +972,20 @@ fn plan_code_generation_retention_with_verification_cancellable(
 
     // Mark before sweeping. An omitted mark retains a derived file and costs
     // space; unlike refcounting, no accounting drift can silently delete a live
-    // generation. Pointer-addressable and vector-readable marks are exact
-    // liveness, while the newest superseded floor is the bounded rollback
-    // reserve.
-    let mut marked = pointer_generations;
+    // generation. The active generation and the vector-readable sources are
+    // exact liveness, while the newest superseded floor is the bounded
+    // rollback reserve.
+    //
+    // Membership of the durable `generation_index` is deliberately *not* a
+    // mark. That index is the pointer's own bounded history
+    // (`MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1` entries / the TTL), so
+    // marking every entry made `rollback_floor` dead and moved the real floor
+    // onto those bounds: an instrumented run observed `collectable=[]` with
+    // four superseded generations all held live purely by the index. The
+    // index is a reference the executor *rewrites* -- it drops every collected
+    // id from the active pointer durably before a single file is unlinked --
+    // rather than a liveness claim retention must obey.
+    let mut marked = BTreeSet::new();
     marked.extend(vector_readable_sources.iter().cloned());
     marked.extend(active_generation_id.clone());
     marked.extend(
@@ -1382,6 +1434,12 @@ pub fn execute_code_generation_retention_cancellable(
             active_pointer: plan.active_pointer.clone(),
             receipt: receipt.clone(),
         };
+        // The durable `generation_index` is a reference into the generation
+        // directory, so a unit that unlinks a referenced file without first
+        // dropping its entry leaves a pointer naming a missing generation --
+        // a state every later census refuses as unsafe.
+        let rewritten_pointer = transaction.rewritten_pointer()?;
+        let committed_pointer = transaction.committed_pointer()?;
         // Canonical order is code-generation store first, then graph replay
         // pool. Hold the pool lock through durable release publication and
         // committed cleanup so the reconciler cannot race an orphaning unlink.
@@ -1400,8 +1458,13 @@ pub fn execute_code_generation_retention_cancellable(
         persist_transaction(store_root, &transaction)?;
 
         let result = (|| {
+            // Durable before the first unlink: the pointer must never name a
+            // generation this unit is about to move out of the directory.
+            if let Some(rewritten) = rewritten_pointer.as_ref() {
+                write_active_pointer(store_root, RETENTION_POINTER_WRITE_CONTEXT, rewritten)?;
+            }
             stage_collectable_generations(store_root, &transaction)?;
-            if read_optional_active_pointer(store_root)? != transaction.active_pointer {
+            if read_optional_active_pointer(store_root)? != committed_pointer {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                     "active generation changed while retention candidates were quarantined"
                         .to_owned(),
@@ -1447,9 +1510,14 @@ pub fn execute_code_generation_retention_cancellable(
         if plan.collectable_text_artifacts.is_empty() {
             (Vec::new(), None)
         } else {
+            // The generation phase above may have rewritten the durable index
+            // out from under `plan.active_pointer`; the artifact phase's own
+            // compare-and-swap has to bind the pointer the store carries now.
+            let active_pointer = read_optional_active_pointer(store_root)?;
             execute_text_artifact_retention_under_store_lock(
                 store_root,
                 &plan,
+                active_pointer.as_ref(),
                 completed_at,
                 is_cancelled,
             )?
@@ -1705,6 +1773,77 @@ fn read_optional_active_pointer(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(storage(error)),
     }
+}
+
+/// Durably replace the active publication pointer.
+///
+/// Every writer of this file re-validates the index it is about to publish and
+/// refuses a pointer above its durable byte bound, so a caller cannot install
+/// a pointer that the next reader would classify as corrupt.
+pub(crate) fn write_active_pointer(
+    store_root: &Path,
+    write_context: &str,
+    pointer: &DurablePublicationPointerV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    validate_durable_generation_index(pointer)?;
+    let bytes = serde_json::to_vec(pointer).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "publication pointer serialization failed: {error}"
+        ))
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1 {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "publication pointer exceeds its durable byte bound".to_owned(),
+        ));
+    }
+    atomic_write(
+        &store_root.join(ACTIVE_POINTER_FILE),
+        write_context,
+        &bytes,
+        DirectorySyncPolicy::Strict,
+    )
+    .map_err(storage)
+}
+
+/// The pointer this collection unit must publish before it unlinks anything.
+///
+/// Returns `None` when the durable index names none of the collected
+/// generations, which is the only case where retention may unlink without
+/// first rewriting the pointer.
+fn pointer_without_collected_generations(
+    pointer: &DurablePublicationPointerV1,
+    collected: &[CodeGenerationRetentionGenerationV1],
+) -> Result<Option<DurablePublicationPointerV1>, CodeGenerationRetentionErrorV1> {
+    let collected_ids = collected
+        .iter()
+        .map(|generation| generation.generation_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if !pointer
+        .generation_index
+        .iter()
+        .any(|entry| collected_ids.contains(entry.generation_id.as_str()))
+    {
+        return Ok(None);
+    }
+    if collected_ids.contains(pointer.generation_id.as_str()) {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "retention would drop the active generation from its own pointer".to_owned(),
+        ));
+    }
+    let mut rewritten = pointer.clone();
+    rewritten
+        .generation_index
+        .retain(|entry| !collected_ids.contains(entry.generation_id.as_str()));
+    // The retained history is no longer complete, and that is exactly what
+    // this latch means: an absent entry stops proving the revision was never
+    // indexed. Readers treat a truncated index as an ordinary miss.
+    rewritten.generation_index_truncated = true;
+    rewritten.generation_index_digest = Some(durable_generation_index_digest(
+        &rewritten.generation_index,
+        rewritten.generation_index_truncated,
+    )?);
+    validate_durable_generation_index(&rewritten)?;
+    Ok(Some(rewritten))
 }
 
 fn validate_durable_generation_index(
