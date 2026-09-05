@@ -808,6 +808,8 @@ fn mutating_inspection_families_keep_full_startup_policy() {
             "Title",
             "--summary",
             "Summary",
+            "--routing-description",
+            "Use when checking the startup command route.",
             "--category",
             "testing",
             "--body",
