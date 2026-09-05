@@ -386,19 +386,19 @@ pub enum GenerationDigestVerificationV1 {
 /// the same multi-gigabyte read [`GenerationDigestVerificationV1::MetadataOnly`]
 /// exists to avoid, and one that fails closed when a manifest no longer matches
 /// its content-addressed file name. A metadata-only census therefore refuses to
-/// guess: it reports [`Self::NoneFound`] only from the bounded directory listing
-/// that proves no segment file exists at all, and [`Self::Unknown`] otherwise.
-/// `Unknown` counts as collectable work so the segment sweep is still reached,
-/// never skipped.
+/// guess: it reports [`Self::NoneFound`] when the directory is absent or its
+/// one-entry observation proves it empty, and [`Self::Unknown`] for any observed
+/// entry without classifying its name. `Unknown` counts as collectable work so
+/// the segment sweep is still reached, never skipped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenerationSegmentCensusV1 {
-    /// The mark-and-sweep proved no unreferenced segment exists, or the store
-    /// holds no segment files at all.
+    /// The mark-and-sweep proved no unreferenced segment exists, or the segment
+    /// directory is absent or empty.
     NoneFound,
     /// The mark-and-sweep found at least one unreferenced segment.
     Present,
-    /// Segment files exist and this census did not pay the mark phase that
-    /// would classify them. Only a full-verification census resolves this.
+    /// The segment directory contains at least one unclassified entry. Only a
+    /// full-verification census resolves whether it is collectable segment work.
     Unknown,
 }
 
@@ -986,7 +986,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
             }
         }
         GenerationDigestVerificationV1::MetadataOnly => {
-            if store_holds_generation_segments(store_root, is_cancelled)? {
+            if store_may_hold_generation_segments(store_root, is_cancelled)? {
                 GenerationSegmentCensusV1::Unknown
             } else {
                 GenerationSegmentCensusV1::NoneFound
@@ -1217,39 +1217,31 @@ fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
     })
 }
 
-/// Whether the store holds any content-addressed segment file at all.
+/// Whether the store may hold content-addressed segment work.
 ///
-/// A bounded directory listing: no manifest is opened, so this is the only
-/// segment question a metadata-only census may answer. An empty or absent
-/// directory proves there is nothing to collect; anything else stays typed
-/// unknown until the mark-and-sweep runs.
-fn store_holds_generation_segments(
+/// A one-entry directory observation: no manifest is opened, so this is the
+/// only segment question a metadata-only census may answer. An empty or absent
+/// directory proves there is nothing to collect; any observed entry, including
+/// unrecognized crash debris, stays typed unknown until the mark-and-sweep
+/// runs. Classifying names here would let arbitrary debris turn an operator
+/// diagnostic into an exhaustive directory scan.
+fn store_may_hold_generation_segments(
     store_root: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    let entries = match std::fs::read_dir(store_root.join(GENERATION_SEGMENTS_DIRECTORY)) {
+    let mut entries = match std::fs::read_dir(store_root.join(GENERATION_SEGMENTS_DIRECTORY)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(storage(error)),
     };
-    for entry in entries {
-        if observe_cancel(is_cancelled) {
-            return Err(CodeGenerationRetentionErrorV1::Cancelled);
-        }
-        let entry = entry.map_err(storage)?;
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if file_name
-            .strip_prefix("segment-")
-            .and_then(|name| name.strip_suffix(".json"))
-            .is_some_and(|digest| is_lowercase_hex(digest, 64))
-        {
-            return Ok(true);
-        }
+    if observe_cancel(is_cancelled) {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    Ok(false)
+    entries
+        .next()
+        .transpose()
+        .map(|entry| entry.is_some())
+        .map_err(storage)
 }
 
 fn has_unreferenced_generation_segments(

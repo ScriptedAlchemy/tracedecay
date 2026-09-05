@@ -1098,6 +1098,65 @@ fn idle_maintenance_preparation_stays_metadata_only() {
 }
 
 #[test]
+fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
+    let store = tempfile::TempDir::new().expect("create unpublished store");
+    std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
+        .expect("create generation root");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+    for index in 0..256 {
+        std::fs::write(
+            segments_root.join(format!("crash-debris-{index:04}")),
+            b"debris",
+        )
+        .expect("write crash debris");
+    }
+
+    let cancellation_observations = std::cell::Cell::new(0_usize);
+    let holds_segments = store_may_hold_generation_segments(store.path(), &|| {
+        cancellation_observations.set(cancellation_observations.get() + 1);
+        cancellation_observations.get() > 1
+    })
+    .expect("one observed entry conservatively proves possible segment work");
+
+    assert!(holds_segments);
+    assert_eq!(
+        cancellation_observations.get(),
+        1,
+        "metadata-only diagnostics must not exhaust an arbitrarily large debris directory"
+    );
+    let plan = plan_code_generation_retention_with_verification(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        GenerationDigestVerificationV1::MetadataOnly,
+    )
+    .expect("plan bounded metadata-only census");
+    assert_eq!(
+        plan.generation_segment_census(),
+        GenerationSegmentCensusV1::Unknown,
+        "any observed entry remains typed unknown until the full mark-and-sweep"
+    );
+}
+
+#[test]
+fn metadata_only_segment_census_distinguishes_empty_and_cancelled() {
+    let store = tempfile::TempDir::new().expect("create unpublished store");
+    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
+    std::fs::create_dir_all(&segments_root).expect("create segment root");
+
+    assert!(
+        !store_may_hold_generation_segments(store.path(), &|| false)
+            .expect("empty segment directory")
+    );
+
+    std::fs::write(segments_root.join("crash-debris"), b"debris").expect("write crash debris");
+    let error = store_may_hold_generation_segments(store.path(), &|| true)
+        .expect_err("cancellation wins before an observed entry is accepted");
+    assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+}
+
+#[test]
 fn maintenance_preparation_wakes_for_an_unreferenced_final_segment() {
     let store = tempfile::TempDir::new().expect("create unpublished store");
     std::fs::create_dir_all(store.path().join(GENERATIONS_DIRECTORY))
