@@ -294,7 +294,7 @@ pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );";
 
-/// V4 anchor-binding triggers, shared with the scoped observation reset like
+/// Anchor-binding triggers, shared with the scoped observation reset like
 /// [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
 pub(crate) const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
     include_str!("projection_v4_binding_triggers.sql");

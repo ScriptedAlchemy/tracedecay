@@ -1732,11 +1732,16 @@ mod tests {
     use tracedecay_domain::{
         CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
         ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-        PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, UtcMicros,
     };
-    use tracedecay_store::{ObservationProjection, SESSION_MESSAGE_PROJECTOR_VERSION};
+    use tracedecay_store::{
+        AnchoredObservationWrite, ObservationProjection, ObservationStore, ObservationWrite,
+        SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
+        build_observation_retrieval_anchor_v2,
+    };
 
     use super::{
         AuditCheckpoint, BTreeSet, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
@@ -2058,38 +2063,34 @@ mod tests {
     /// decode. The observation's own projection outcome is irrelevant here: the
     /// resolver only selects and decodes the owner row.
     async fn seed_authority_observation(
-        conn: &impl Executor,
+        conn: &RegisteredGlobalDbTestFixture,
         index: usize,
     ) -> DurableObservationV1 {
         let observation = skipped_observation(index);
-        let receipt = observation.receipt();
-        conn.execute(
-            "INSERT INTO sanitization_receipts (
-                receipt_id, sanitizer_version, payload_digest, receipt_json
-             ) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                receipt.receipt().receipt_id().as_str(),
-                receipt.receipt().sanitizer_version().as_str(),
-                observation.payload_reference().digest().as_str(),
-                serde_json::to_string(receipt).unwrap()
-            ],
+        let cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
         )
-        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO observations (
-                observation_id, payload_digest, receipt_id,
-                observation_json, committed_cursor_json
-             ) VALUES (?1, ?2, ?3, ?4, '{}')",
-            params![
-                observation.observation_id().as_str(),
-                observation.payload_reference().digest().as_str(),
-                receipt.receipt().receipt_id().as_str(),
-                serde_json::to_string(&observation).unwrap()
-            ],
+        let generation = ProjectionGenerationId::new("projection.audit-test").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(&observation, "audit-test").unwrap();
+        let anchor = build_observation_retrieval_anchor_v2(
+            &observation,
+            generation.clone(),
+            UtcMicros(1),
+            authorization,
         )
-        .await
         .unwrap();
+        let write = ObservationWrite::new(observation.clone(), None, cursor).unwrap();
+        conn.database()
+            .observation_store()
+            .persist_observation(AnchoredObservationWrite::new(write, anchor, generation).unwrap())
+            .await
+            .unwrap();
         observation
     }
 
@@ -2108,7 +2109,7 @@ mod tests {
                 projector_version, observation_id, output_ordinal, receipt_id,
                 output_provider, output_message_id, output_digest, message_created,
                 retrieval_anchor_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 projector_version,
                 observation.observation_id().as_str(),
@@ -2117,7 +2118,13 @@ mod tests {
                 output_provider,
                 output_message_id,
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                message_created
+                message_created,
+                tracedecay_domain::derive_exact_observation_anchor_id(
+                    observation.scope(),
+                    observation.observation_id(),
+                )
+                .unwrap()
+                .as_str(),
             ],
         )
         .await
