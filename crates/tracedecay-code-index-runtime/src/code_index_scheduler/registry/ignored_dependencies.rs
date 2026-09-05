@@ -429,7 +429,6 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation,
             serving_source_witness,
             text_generation,
-            published_generation_id,
             serving_generation_epoch,
             graph_activation,
             publication_gate,
@@ -453,7 +452,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.serving_source_witness),
                 Arc::clone(&worktree.text_generation),
-                Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_generation_epoch),
                 worktree.graph_activation.clone(),
                 Arc::clone(&worktree.semantic_evaluation_publication_gate),
@@ -635,9 +633,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     (build.outcome.generation_id.clone(), authority),
                 );
         }
-        Self::publish_generation(
+        // The swap above already installed this candidate in the serving
+        // slot, so the broadcast follows a witnessed seat.
+        Self::broadcast_generation_publication(
             &self.generation_publications,
-            &published_generation_id,
             project_root.to_path_buf(),
             &build.publication,
         );

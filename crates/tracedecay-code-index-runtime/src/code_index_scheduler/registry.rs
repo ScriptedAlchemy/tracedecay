@@ -627,10 +627,6 @@ pub struct MountedCodeIndexWorktreeV1 {
             >,
         >,
     >,
-    /// Durable id from the last `Published` broadcast. Serving and text can
-    /// lag until graph/text seating; observers of "latest" must not stay on
-    /// the prior seated generation after a new id is published.
-    published_generation_id: Arc<RwLock<Option<CodeGenerationId>>>,
     /// The exact-source currency witness for the seated generation, readable
     /// without the scheduler mutex. Armed when the quiet exact-source probe
     /// passes or when a generation extracted this pass seats as the active
@@ -2155,7 +2151,6 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_epoch,
             active_installation,
             text_generation,
-            published_generation_id,
             serving_source_witness,
         ) = {
             let mounted = self.mounted.lock().await;
@@ -2167,7 +2162,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation_epoch),
                 Arc::clone(&worktree.serving_generation_installation),
                 Arc::clone(&worktree.text_generation),
-                Arc::clone(&worktree.published_generation_id),
                 Arc::clone(&worktree.serving_source_witness),
             )
         };
@@ -2207,15 +2201,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 current.metadata().manifest().generation_id == installation.generation_id
             }) {
                 *text = None;
-            }
-            // `latest_generation_id` prefers the published id over both
-            // serving and text. A matching rollback must withdraw that
-            // broadcast too, or the retired generation stays addressable.
-            let mut published = published_generation_id
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if published.as_ref() == Some(&installation.generation_id) {
-                *published = None;
             }
         }
         ServingGenerationRollbackOutcomeV1::Cleared
@@ -2532,16 +2517,16 @@ impl CodeIndexSchedulerRegistryV1 {
         self.generation_publications.subscribe()
     }
 
-    fn publish_generation(
+    /// Announce a durable publication.
+    ///
+    /// Announcing is not seating: the durable pointer has moved, but the
+    /// generation becomes addressable through [`Self::latest_generation_id`]
+    /// only once a swap installs it in a serving slot.
+    fn broadcast_generation_publication(
         sender: &tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
-        published_generation_id: &RwLock<Option<CodeGenerationId>>,
         project_root: PathBuf,
         evidence: &CodeIndexPublishEvidenceV1,
     ) {
-        *published_generation_id
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(evidence.generation_id.clone());
         let _ = sender.send(CodeIndexGenerationPublishedV1 {
             project_root,
             repository_id: evidence.repository_id.clone(),
@@ -2879,8 +2864,6 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::new(RwLock::new(None));
         let convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>> =
             Arc::new(RwLock::new(None));
-        let published_generation_id: Arc<RwLock<Option<CodeGenerationId>>> =
-            Arc::new(RwLock::new(None));
         let serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>> =
             Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
@@ -2902,7 +2885,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_text_generation = Arc::clone(&text_generation);
         let worker_convergence_park = Arc::clone(&convergence_park);
-        let worker_published_generation_id = Arc::clone(&published_generation_id);
         let worker_serving_source_witness = Arc::clone(&serving_source_witness);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let worker_wake = Arc::clone(&wake);
@@ -3426,9 +3408,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &source_result {
-                    Self::publish_generation(
+                    // Announce only. This pass has not seated anything yet:
+                    // the replacement text owner reopens below and the serving
+                    // swap runs after graph work, so recording the id here
+                    // made `latest_generation_id` name a generation every
+                    // serving arm still answered the *previous* id for.
+                    Self::broadcast_generation_publication(
                         &worker_generation_publications,
-                        &worker_published_generation_id,
                         worker_project_root.clone(),
                         evidence,
                     );
@@ -4288,7 +4274,6 @@ impl CodeIndexSchedulerRegistryV1 {
             text_generation,
             convergence_park,
             generation_recovery,
-            published_generation_id,
             serving_source_witness,
             build_progress,
             serving_generation_epoch,
@@ -5012,37 +4997,35 @@ impl CodeIndexSchedulerRegistryV1 {
         // so one warmup/dashboard call during a rebuild parked a runtime worker
         // for the reconcile's whole duration AND serialized every code-index
         // query behind it: a silent, daemon-wide code-index outage.
-        let (serving, text, published) = {
+        let (serving, text) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.text_generation),
-                Arc::clone(&worktree.published_generation_id),
             )
         };
-        // Publication broadcasts before graph/text seating. A later id must
-        // not stay hidden behind a still-serving prior generation.
-        if let Some(generation_id) = published
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            return Some(generation_id);
-        }
-        let text_id = text
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|latest| latest.metadata().manifest().generation_id.clone());
-        if text_id.is_some() {
-            return text_id;
-        }
-        serving
+        // Only a seat answers here. A durable publication moves the pointer
+        // long before either swap installs the generation it sealed, and a
+        // slot fed from that broadcast named a generation every serving arm
+        // still answered the *previous* id for: a caller that polled for a
+        // changed id and then asked for the generation was handed the one it
+        // had already seen. The complete serving slot is the swap's own
+        // witness, so it answers first; the text slot covers a graph-off or
+        // still-activating mount that deliberately leaves the complete slot
+        // empty.
+        let serving_id = serving
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|latest| latest.generation.manifest().generation_id.clone())
+            .map(|latest| latest.generation.manifest().generation_id.clone());
+        if serving_id.is_some() {
+            return serving_id;
+        }
+        text.read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|latest| latest.metadata().manifest().generation_id.clone())
     }
 
     /// Re-offer the exact serving generation to its installed semantic hook.
