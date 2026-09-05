@@ -107,6 +107,17 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
     .unwrap()
 }
 
+/// `WorkExecutionEnvelopeV1` requires `Path::is_absolute`, which is
+/// host-specific: a bare `/tmp/...` literal is not absolute on Windows, where
+/// an absolute path needs a drive or a UNC prefix.
+fn absolute_root(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{}", posix.replace('/', "\\"))
+    } else {
+        posix.to_owned()
+    }
+}
+
 fn execution(
     attempt_identity: WorkAttemptIdentityV1,
     projection_binding: WorkAttemptProjectionBindingV1,
@@ -119,7 +130,7 @@ fn execution(
         id::<ProjectId>("project.work.runtime"),
         id::<RepositoryId>("repository.work.runtime"),
         id::<WorktreeId>("worktree.work.runtime"),
-        "/tmp/work-runtime".to_owned(),
+        absolute_root("/tmp/work-runtime"),
         Some(id::<RefId>("refs/heads/work-runtime")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         "Execute the admitted provider step.".to_owned(),

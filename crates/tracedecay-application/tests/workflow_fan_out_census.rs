@@ -451,7 +451,7 @@ fn work_attempt_with_progress(
         id::<ProjectId>("project.workflow.census"),
         id::<RepositoryId>("repository.workflow.census"),
         id::<WorktreeId>("worktree.workflow.census"),
-        "/tmp/workflow-census".to_owned(),
+        common::fixture_abs_root("/tmp/workflow-census"),
         None,
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         child.instructions.clone(),

@@ -142,7 +142,7 @@ fn authorized_scope_set_preserves_registered_root_locator() {
         context.scope().project_id.clone(),
         UserProfileId::new("profile.fixture").unwrap(),
         "store.fixture".to_owned(),
-        "/workspace/main".to_owned(),
+        common::fixture_abs_root("/workspace/main"),
     )
     .unwrap();
     let set = AuthorizedScopeSetAuthority::authorize_registered(
@@ -167,11 +167,11 @@ fn scope_set_cas_selects_exact_registered_roots() {
         "roots": [
             {
                 "project_id": "project.same",
-                "root": "/workspace/linked"
+                "root": common::fixture_abs_root("/workspace/linked")
             },
             {
                 "project_id": "project.same",
-                "root": "/workspace/main"
+                "root": common::fixture_abs_root("/workspace/main")
             }
         ]
     }))
@@ -179,7 +179,13 @@ fn scope_set_cas_selects_exact_registered_roots() {
     request.validate().expect("canonical exact root order");
 
     let encoded = serde_json::to_value(request).expect("serialize selector");
-    assert_eq!(encoded["roots"][0]["root"], "/workspace/linked");
-    assert_eq!(encoded["roots"][1]["root"], "/workspace/main");
+    assert_eq!(
+        encoded["roots"][0]["root"],
+        common::fixture_abs_root("/workspace/linked")
+    );
+    assert_eq!(
+        encoded["roots"][1]["root"],
+        common::fixture_abs_root("/workspace/main")
+    );
     assert!(encoded.get("project_ids").is_none());
 }

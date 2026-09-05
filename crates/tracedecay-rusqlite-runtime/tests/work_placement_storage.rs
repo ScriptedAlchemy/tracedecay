@@ -66,18 +66,25 @@ fn authority_in_worktree_a_targeting_root_b_blocks_cleanup_of_b_across_lineage()
         "worktree.placement.other-actor",
         'a',
     );
-    let old_root = "/workspace/placement-target-b";
-    let other_root = "/workspace/placement-other-actor";
+    let old_root = fixture_abs_root("/workspace/placement-target-b");
+    let other_root = fixture_abs_root("/workspace/placement-other-actor");
     store
         .storage()
-        .publish_placement(&old_policy, None, &admitted("run.old-policy", old_root))
+        .publish_placement(&old_policy, None, &admitted("run.old-policy", &old_root))
         .unwrap();
     store
         .storage()
-        .publish_placement(&other_actor, None, &admitted("run.other-actor", other_root))
+        .publish_placement(
+            &other_actor,
+            None,
+            &admitted("run.other-actor", &other_root),
+        )
         .unwrap();
 
-    for (authority, root) in [(&old_policy, old_root), (&other_actor, other_root)] {
+    for (authority, root) in [
+        (&old_policy, old_root.as_str()),
+        (&other_actor, other_root.as_str()),
+    ] {
         assert!(
             store
                 .storage()
@@ -96,7 +103,7 @@ fn authority_in_worktree_a_targeting_root_b_blocks_cleanup_of_b_across_lineage()
             .has_target_holder_in_exact_repository_root(
                 old_policy.project_id(),
                 old_policy.repository_id(),
-                "/workspace/placement-unrelated",
+                &fixture_abs_root("/workspace/placement-unrelated"),
             )
             .unwrap()
     );
@@ -205,7 +212,10 @@ fn the_database_refuses_a_second_holder_of_the_same_managed_root() {
         .publish_placement(
             &authority,
             None,
-            &admitted("run.c", "/workspace/placement-storage-other"),
+            &admitted(
+                "run.c",
+                &fixture_abs_root("/workspace/placement-storage-other"),
+            ),
         )
         .unwrap();
     assert_eq!(store.count("work_placements_v1"), 2);

@@ -29,6 +29,10 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+mod common;
+
+use common::fixture_abs_root;
+
 const CAPABILITY: &str = "capability.multi-root.query";
 const USE_CASE: &str = "use-case.multi-root.query";
 
@@ -202,7 +206,7 @@ fn scope_set_for_id_actor(revision: u64, scope_set_id: &str, actor: &str) -> Aut
                 project_id,
                 UserProfileId::new("profile.fixture").unwrap(),
                 "store.fixture".to_owned(),
-                format!("/workspace/{}", worktree_id.as_str()),
+                fixture_abs_root(&format!("/workspace/{}", worktree_id.as_str())),
             )
             .unwrap(),
         )
@@ -277,7 +281,7 @@ fn scope_set_cas_rejects_stale_revision_and_survives_restart() {
             .unwrap()
             .canonical_root
             .as_path(),
-        std::path::Path::new("/workspace/worktree.main")
+        std::path::Path::new(&fixture_abs_root("/workspace/worktree.main"))
     );
 }
 
