@@ -791,7 +791,9 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
 /// instead of exercising the backfill. Probing keeps the coverage everywhere
 /// the bytes are accepted while propagating unrelated storage failures.
 #[cfg(unix)]
-fn non_utf8_file_names_supported(directory: &std::path::Path) -> std::io::Result<bool> {
+pub(in crate::runtime::git_correlation::backfill::bounded) fn non_utf8_file_names_supported(
+    directory: &std::path::Path,
+) -> std::io::Result<bool> {
     use std::os::unix::ffi::OsStringExt as _;
 
     let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));

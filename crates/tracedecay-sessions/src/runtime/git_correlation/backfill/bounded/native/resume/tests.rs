@@ -279,6 +279,17 @@ fn non_utf8_local_ref_is_sealed_without_fabricated_branch_text() {
     use std::os::unix::ffi::OsStrExt as _;
 
     let fixture = fixture();
+    if !crate::runtime::git_correlation::backfill::bounded::tests::non_utf8_file_names_supported(
+        fixture.path(),
+    )
+    .expect("probe non-UTF-8 file-name support without hiding storage failures")
+    {
+        println!(
+            "skipping non_utf8_local_ref_is_sealed_without_fabricated_branch_text: \
+             this filesystem refuses non-UTF-8 file names"
+        );
+        return;
+    }
     let branch = std::ffi::OsStr::from_bytes(b"topic-\xff");
     let output = Command::new(
         tracedecay_runtime_core::git::try_git_program()
