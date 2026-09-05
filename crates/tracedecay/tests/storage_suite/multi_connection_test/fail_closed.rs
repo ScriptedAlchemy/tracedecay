@@ -98,12 +98,27 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         let output = command
             .output()
             .unwrap_or_else(|error| panic!("run {label}: {error}"));
-        assert!(
-            !output.status.success(),
-            "{label} must fail closed while daemon is unavailable\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
+        if label == "doctor" {
+            // Doctor reports unavailable diagnostics as Unknown, not a
+            // diagnosed storage failure. The byte fence below still proves
+            // that this diagnostic command left profile storage unchanged.
+            assert!(
+                output.status.success(),
+                "Doctor must report unknown health without fabricating failure: {output:?}"
+            );
+            let diagnostics = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                diagnostics.contains("Health remains unknown; Doctor did not open SQLite"),
+                "Doctor must disclose unavailable canonical diagnostics: {diagnostics}"
+            );
+        } else {
+            assert!(
+                !output.status.success(),
+                "{label} must fail closed while daemon is unavailable\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
         assert_storage_unchanged(
             &format!("{label} used a local profile-database fallback"),
             &before,
