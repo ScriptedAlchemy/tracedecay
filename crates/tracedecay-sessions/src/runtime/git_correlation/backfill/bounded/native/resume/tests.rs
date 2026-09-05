@@ -336,3 +336,46 @@ fn reflog_oid_discontinuity_is_unsupported_framing() {
         BoundedBackfillInterruption::UnsupportedSourceFraming
     );
 }
+
+#[test]
+fn unborn_source_rejects_first_commit_and_repository_replacement() {
+    let fixture = tempfile::tempdir().unwrap();
+    git(fixture.path(), &["init", "-b", "main"]);
+    let HistorySource::Unborn(source) =
+        initialize_history_source(fixture.path(), 1, &control()).unwrap()
+    else {
+        panic!("expected unborn source");
+    };
+    verify_unborn_source(fixture.path(), &source, &control()).unwrap();
+    git(fixture.path(), &["commit", "--allow-empty", "-m", "first"]);
+    assert_eq!(
+        verify_unborn_source(fixture.path(), &source, &control()).unwrap_err(),
+        BoundedBackfillInterruption::SourceChanged
+    );
+    std::fs::rename(fixture.path().join(".git"), fixture.path().join(".git.old")).unwrap();
+    git(fixture.path(), &["init", "-b", "main"]);
+    assert_eq!(
+        verify_unborn_source(fixture.path(), &source, &control()).unwrap_err(),
+        BoundedBackfillInterruption::SourceChanged
+    );
+}
+
+#[test]
+fn unborn_source_preserves_retained_history_and_cancellation() {
+    let fixture = fixture();
+    git(fixture.path(), &["checkout", "--orphan", "new"]);
+    assert!(matches!(
+        initialize_history_source(fixture.path(), 1, &control()),
+        Err(BoundedBackfillInterruption::UnsupportedSourceFraming)
+    ));
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+    assert!(matches!(
+        initialize_history_source(
+            fixture.path(),
+            1,
+            &BoundedGitControl::new(cancellation, Duration::from_secs(10))
+        ),
+        Err(BoundedBackfillInterruption::Cancelled)
+    ));
+}

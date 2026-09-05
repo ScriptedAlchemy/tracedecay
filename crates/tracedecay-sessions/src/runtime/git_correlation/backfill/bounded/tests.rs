@@ -493,6 +493,80 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
 }
 
 #[tokio::test]
+async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
+    let repository = tempfile::tempdir().unwrap();
+    git(repository.path(), &["init", "-b", "main"]);
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    store
+        .connection
+        .execute_batch("UPDATE sessions SET ended_at = 1")
+        .await
+        .unwrap();
+    let dry = run_bounded_history_index_page(
+        &store,
+        &options(true),
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dry.interruption, None);
+    assert!(!dry.committed);
+    assert_eq!(dry.stats.commits_attributed, 0);
+    store.fail_next_write();
+    let failed = run_bounded_history_index_page(
+        &store,
+        &options(false),
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        failed.interruption,
+        Some(BoundedBackfillInterruption::SourceUnavailable)
+    );
+    assert_eq!(failed.frontier.activity_timestamp, -1);
+    let completed = run_bounded_history_index_page(
+        &store,
+        &options(false),
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed.interruption, None);
+    assert_eq!(completed.remaining_sessions, 0);
+    assert_eq!(completed.frontier.activity_timestamp, 1);
+    assert_eq!(completed.stats.spans_written, 0);
+    assert_eq!(completed.stats.commits_attributed, 0);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
+        0
+    );
+
+    git(
+        repository.path(),
+        &["commit", "--allow-empty", "-m", "first"],
+    );
+    let committed_at = head_commit_time(repository.path());
+    store
+        .connection
+        .execute("UPDATE sessions SET ended_at = ?1", params![committed_at])
+        .await
+        .unwrap();
+    let completed = run_bounded_history_index_page(
+        &store,
+        &options(false),
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed.interruption, None);
+    assert_eq!(completed.frontier.activity_timestamp, committed_at);
+    assert_eq!(completed.stats.commits_attributed, 1);
+    assert!(completed.stats.spans_written > 0);
+}
+
+#[tokio::test]
 async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     let repository = repository_fixture();
     append_linear_history(repository.path(), MAX_GRAPH_PAGE_EXAMINED_NODES + 1);
