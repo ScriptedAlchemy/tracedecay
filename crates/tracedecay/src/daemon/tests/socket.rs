@@ -13,8 +13,8 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 /// whenever several of these tests opened their own cold profile runtimes at
 /// once — a measured 500ms+ per `DaemonSessionRuntimeRegistryV1::open` under
 /// six-way contention, on top of the route open each request still needs. That
-/// made an environment-speed reading look like a daemon hang.
-#[cfg(unix)]
+/// made an environment-speed reading look like a daemon hang. The portable
+/// broker tests use it too, so it is not gated on unix.
 const HALF_CLOSE_ROUND_TRIP_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[cfg(unix)]
