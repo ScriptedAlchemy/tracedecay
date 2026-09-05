@@ -1,0 +1,18 @@
+{
+  "id": "routing_known_file_read",
+  "category": "routing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Read Cargo.toml and tell me the package name and edition.",
+  "ground_truth": [
+    "orders_fixture",
+    "2021"
+  ],
+  "max_tool_calls": 2,
+  "allowed_skills": [],
+  "max_tracedecay_calls": 0
+}

@@ -1,3 +1,8 @@
+> Historical experiment: this document records earlier adoption hypotheses, not
+> current runtime policy. Invocation rate alone does not establish usefulness.
+> Current evaluation separates task outcomes, useful routing, false triggers, and
+> call efficiency; bundled guidance does not require startup skill invocation.
+
 # Skill & Tool Adoption Research: Why superpowers gets invoked and TraceDecay doesn't
 
 *Research date: 2026-07-02. Read-only study of the local superpowers plugin
