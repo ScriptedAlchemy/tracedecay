@@ -86,6 +86,20 @@ use tracedecay_runtime_core::resident_memory::{
 mod noop_reconcile_tests;
 mod semantic_schedule_order_tests;
 
+/// Base directory for fixture temporary roots, resolved through every symlink.
+///
+/// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
+/// `/private/var`. Production canonicalizes a project root before it hashes
+/// the code-index scope and before it decides whether a dependency escaped the
+/// worktree, so a fixture path that still carries the symlink names a
+/// different scope than the one the scheduler writes and reads. Create the
+/// fixture inside the canonical temporary directory so every path taken from
+/// it is already canonical.
+fn canonical_temp_root() -> std::path::PathBuf {
+    let base = std::env::temp_dir();
+    base.canonicalize().unwrap_or(base)
+}
+
 struct GitFixture {
     root: TempDir,
 }
@@ -109,7 +123,7 @@ impl GitFixture {
     }
 
     fn build_fresh(files: &[(&str, &str)]) -> Self {
-        let root = TempDir::new().expect("fixture root");
+        let root = TempDir::new_in(canonical_temp_root()).expect("fixture root");
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.name", "TraceDecay Test"]);
         git(
@@ -135,7 +149,7 @@ impl GitFixture {
     }
 
     fn from_template(template: &Path) -> Self {
-        let root = TempDir::new().expect("fixture root");
+        let root = TempDir::new_in(canonical_temp_root()).expect("fixture root");
         copy_dir_recursive(template, root.path());
         Self { root }
     }
@@ -16329,7 +16343,7 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
             if revision.is_multiple_of(10) {
                 churn_registry.notify_hook_overflow(&churn_root).await;
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
     });
 
@@ -16533,12 +16547,14 @@ fn serving_swap_seats_a_generation_whose_publication_moved_while_it_activated() 
     assert_eq!(
         ServingSwapOutcomeV1::decide(false, false, true),
         ServingSwapOutcomeV1::SeatedStale,
-        "an activated generation whose pointer moved must seat when nothing serves"
+        "an activated generation whose pointer moved must seat when no active \
+         publication holds the slot — empty, or an incumbent the store \
+         superseded as well"
     );
     assert_eq!(
         ServingSwapOutcomeV1::decide(false, true, true),
         ServingSwapOutcomeV1::Superseded,
-        "a superseded generation must not displace one that already serves"
+        "a superseded generation must not displace the active durable publication"
     );
     assert_eq!(
         ServingSwapOutcomeV1::decide(true, false, true),

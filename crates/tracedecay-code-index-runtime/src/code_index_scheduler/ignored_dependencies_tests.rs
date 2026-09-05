@@ -29,13 +29,27 @@ mod retained_roster_tests;
 
 const PROJECT_ID: &str = "project.ignored-dependency-scheduler-tests";
 
+/// Base directory for fixture temporary roots, resolved through every symlink.
+///
+/// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
+/// `/private/var`. Production canonicalizes a project root before it hashes
+/// the code-index scope and before it decides whether a dependency escaped the
+/// worktree, so a fixture path that still carries the symlink names a
+/// different scope than the one the scheduler writes and reads. Create the
+/// fixture inside the canonical temporary directory so every path taken from
+/// it is already canonical.
+fn canonical_temp_root() -> std::path::PathBuf {
+    let base = std::env::temp_dir();
+    base.canonicalize().unwrap_or(base)
+}
+
 struct GitFixture {
     root: TempDir,
 }
 
 impl GitFixture {
     fn new(source: &str) -> Self {
-        let root = TempDir::new().expect("fixture root");
+        let root = TempDir::new_in(canonical_temp_root()).expect("fixture root");
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.name", "TraceDecay Test"]);
         git(
@@ -790,6 +804,65 @@ async fn ordinary_reconcile_retains_the_exact_ignored_source_roster() {
     assert_eq!(changed, served.generation().manifest().generation_id);
     assert_eq!(roster_paths(&served), ["node_modules/pkg/index.d.ts"]);
     assert!(snapshot_paths(&served).contains(&"node_modules/pkg/index.d.ts"));
+    registry.shutdown().await;
+}
+
+/// A changed `latest_generation_id` must already be seated.
+///
+/// The durable pointer moves before either serving swap installs the
+/// generation it sealed. While the id was fed from that publication
+/// broadcast, a caller that polled for a change and then asked for the
+/// generation was handed the *previous* one — the id had advanced, the
+/// serving slot had not. This asserts the seat with no retry window at all:
+/// any gap between the two reads is exactly that defect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_latest_generation_id_is_already_seated() {
+    let fixture =
+        GitFixture::new("import type { Widget } from \"pkg\";\nexport const revision = 1;\n");
+    write_types_package(
+        fixture.path(),
+        "pkg",
+        "export interface Widget { value: string }\n",
+    );
+    let store = TempDir::new().expect("store root");
+    let registry = mount(fixture.path(), &store, 1).await;
+    let baseline = latest(&registry, fixture.path()).await;
+    // Admission seats its candidate without rewriting the text slot, so the
+    // id it exposes is the one the serving swap installed.
+    let admitted = index_dependency(
+        &registry,
+        fixture.path(),
+        request_for(&baseline, "pkg"),
+        StaticControl::active(),
+    )
+    .await
+    .expect("initial ignored admission");
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(admitted.generation_id.clone()),
+        "the admitted candidate seats before admission returns"
+    );
+
+    fixture.write(
+        "src/app.ts",
+        "import type { Widget } from \"pkg\";\nexport const revision = 2;\n",
+    );
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/app.ts"))
+            .await
+    );
+    let changed =
+        wait_for_generation_change(&registry, fixture.path(), &admitted.generation_id).await;
+    let seated = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("a changed generation id must name a seated generation");
+    assert_eq!(
+        seated.generation().manifest().generation_id,
+        changed,
+        "latest_generation_id advanced past the generation the serving slot holds"
+    );
     registry.shutdown().await;
 }
 
