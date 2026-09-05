@@ -185,11 +185,27 @@ impl<'a> AdminCliContext<'a> {
         Ok(Some(ObservationScopeV1::Project { project_id }))
     }
 
-    fn require_registered_project_session_db(&self) -> Result<&'a RegisteredGlobalDbLeaseV1> {
-        self.registered_project_session_db
+    async fn registered_project_session_db(&self) -> Result<RegisteredGlobalDbLeaseV1> {
+        let project = self.require_project()?;
+        let project_id = project
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
             .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon registered project session database is unavailable".to_string(),
+                message: "daemon project identity is unavailable".to_owned(),
             })
+            .and_then(|value| {
+                ProjectId::new(value).map_err(|error| TraceDecayError::Config {
+                    message: error.to_string(),
+                })
+            })?;
+        // Core servers do not retain session clients. The registered runtime
+        // issues an exact project lease and enforces recovery/retirement fences.
+        project
+            .store_runtime_registry()
+            .mount_registered_project_sessions(project_id)
+            .await
     }
 
     fn require_profile_identity(
@@ -306,7 +322,8 @@ async fn dispatch_admin_cli(
             control_session_sync(&context, idempotency_key, true).await?
         }
         AdminCliAction::SessionsUnfinished { limit } => {
-            sessions_unfinished(context.require_registered_project_session_db()?, limit).await?
+            let database = context.registered_project_session_db().await?;
+            sessions_unfinished(&database, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
             tracedecay_usecases::analytics_bridge::analytics_sync_with_db(
@@ -830,6 +847,87 @@ async fn sessions_unfinished(db: &RegisteredGlobalDbLeaseV1, limit: usize) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn project_fixture(
+        root: &Path,
+        profile: &Path,
+        project_id: &str,
+    ) -> (
+        TraceDecay,
+        crate::host_admission::HostAdmissionTestRuntimeV1,
+    ) {
+        std::fs::create_dir_all(root).unwrap();
+        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile,
+            root,
+            ProjectId::new(project_id).unwrap(),
+        )
+        .await
+        .unwrap();
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                root,
+                crate::tracedecay::TraceDecayOpenOptions {
+                    profile_root: Some(profile.to_owned()),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .unwrap();
+        (graph, runtime)
+    }
+
+    #[tokio::test]
+    async fn unfinished_session_read_uses_exact_registered_project_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profile");
+        let (project, _runtime) = project_fixture(
+            &directory.path().join("project"),
+            &profile,
+            "project.unfinished",
+        )
+        .await;
+        let (foreign, _foreign_runtime) = project_fixture(
+            &directory.path().join("foreign"),
+            &directory.path().join("foreign-profile"),
+            "project.foreign",
+        )
+        .await;
+        let foreign_database = foreign
+            .store_runtime_registry()
+            .mount_registered_project_sessions(ProjectId::new("project.foreign").unwrap())
+            .await
+            .unwrap();
+        let profile_database = project
+            .store_runtime_registry()
+            .profile_sessions()
+            .await
+            .unwrap();
+        let mut context = AdminCliContext::projectless(&profile_database, None, &profile);
+        context.project = Some(&project);
+        // A supplied foreign session pointer must never substitute for the
+        // current project's registered runtime authority.
+        context.registered_project_session_db = Some(&foreign_database);
+        let selected = context.registered_project_session_db().await.unwrap();
+        let expected = project
+            .store_runtime_registry()
+            .mount_registered_project_sessions(ProjectId::new("project.unfinished").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(selected.binding(), expected.binding());
+        assert_eq!(selected.verified_locator(), expected.verified_locator());
+        assert_ne!(selected.binding(), foreign_database.binding());
+        assert!(!selected.shares_client_with(&expected));
+
+        context.project = None;
+        let error = context.registered_project_session_db().await.err().unwrap();
+        assert!(matches!(error, TraceDecayError::Config { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("requires an initialized project")
+        );
+    }
 
     #[test]
     fn parses_projectless_and_project_scoped_actions() {
