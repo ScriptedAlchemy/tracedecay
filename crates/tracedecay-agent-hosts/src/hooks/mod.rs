@@ -82,6 +82,66 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
     analytics::aggregate_hook_completed_readiness(rows)
 }
 
+/// Records the `hook_invoked`/`hook_completed` pair for a native callback that
+/// the capture fast path answers without entering a host response handler.
+///
+/// Every other hook entry point opens its span through the same recorder. The
+/// capture path did not, so each capture-only callback fired silently: the
+/// project's `hook_analytics.jsonl` gained no row, `tracedecay analytics`
+/// reported the host as never having invoked a hook, and that is exactly the
+/// signal a broken install gives. Attribution follows the host's own event name
+/// — read the way the Hermes terminal-receipt handler reads it — so a capture
+/// row is indistinguishable from the response row the same event produces.
+///
+/// `hook_name` overrides that read for the one surface whose payload carries no
+/// event name (Claude's `TOOL_INPUT`-driven `preToolUse`).
+#[hotpath::measure(label = "agent_hosts.hooks.record_native_capture")]
+pub fn record_native_capture_invoked(
+    project_root: Option<&Path>,
+    host: tracedecay_hooks::HookHostV1,
+    hook_name: Option<&str>,
+    event_json: &str,
+) {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let hook_name = hook_name
+        .or_else(|| {
+            parsed
+                .get("hook_event_name")
+                .or_else(|| parsed.get("type"))
+                .or_else(|| parsed.get("event"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("nativeCallback");
+    match native_capture_agent(host) {
+        Some(agent) => {
+            record_hook_invoked_parsed(project_root, agent, hook_name, event_json, &parsed);
+        }
+        None => {
+            record_other_hook_invoked(project_root, hook_name, event_json);
+        }
+    }
+}
+
+/// Analytics agent key for a native host. Hosts outside the five typed
+/// integrations record under the shared `other` key, matching the OpenCode and
+/// Kimi dispatchers above.
+const fn native_capture_agent(host: tracedecay_hooks::HookHostV1) -> Option<HintAgent> {
+    use tracedecay_hooks::HookHostV1;
+
+    match host {
+        HookHostV1::ClaudeCode => Some(HintAgent::Claude),
+        HookHostV1::Codex => Some(HintAgent::Codex),
+        HookHostV1::CursorDesktop | HookHostV1::CursorCloud => Some(HintAgent::Cursor),
+        HookHostV1::Hermes => Some(HintAgent::Hermes),
+        HookHostV1::Kiro => Some(HintAgent::Kiro),
+        HookHostV1::Cline
+        | HookHostV1::RooCode
+        | HookHostV1::Kilo
+        | HookHostV1::KimiCode
+        | HookHostV1::OpenCode => None,
+    }
+}
+
 use tool_hints::{HintAgent, ToolHint};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
