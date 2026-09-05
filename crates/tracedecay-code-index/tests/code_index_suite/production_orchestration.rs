@@ -2923,6 +2923,112 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
     }
 }
 
+#[test]
+fn partitioned_descriptor_readers_share_validation_without_sharing_authentication() {
+    let (_, manifest, _) = partitioned_codec_fixture();
+    let authenticated = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("authenticate current manifest")
+        .expect("supported partitioned format");
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            manifest.as_slice(),
+        )
+        .expect("read caller-authenticated descriptors"),
+        Some(authenticated.clone()),
+    );
+    let original: serde_json::Value = serde_json::from_slice(&manifest).expect("fixture envelope");
+    for mutation in [
+        "empty_pages",
+        "null_pages",
+        "missing_pages",
+        "duplicate_ordinal",
+        "out_of_order",
+        "zero_page",
+        "oversized_page",
+        "aggregate_mismatch",
+        "aggregate_maximum",
+        "missing_file",
+        "wrong_file_key",
+        "wrong_file_binding",
+    ] {
+        let mut envelope = original.clone();
+        let generation = &mut envelope["generation"];
+        match mutation {
+            "empty_pages" => generation["generation_evidence"]["pages"] = serde_json::json!([]),
+            "null_pages" => generation["generation_evidence"]["pages"] = serde_json::Value::Null,
+            "missing_pages" => {
+                generation["generation_evidence"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("pages");
+            }
+            "duplicate_ordinal" => {
+                let pages = generation["generation_evidence"]["pages"]
+                    .as_array_mut()
+                    .unwrap();
+                pages.push(pages[0].clone());
+            }
+            "out_of_order" => {
+                generation["generation_evidence"]["pages"][0]["page_ordinal"] = serde_json::json!(1)
+            }
+            "zero_page" => {
+                generation["generation_evidence"]["pages"][0]["page_size_bytes"] =
+                    serde_json::json!(0)
+            }
+            "oversized_page" => {
+                generation["generation_evidence"]["pages"][0]["page_size_bytes"] =
+                    serde_json::json!(256 * 1024 + 1)
+            }
+            "aggregate_mismatch" => {
+                generation["generation_evidence"]["segment_size_bytes"] = serde_json::json!(1)
+            }
+            "aggregate_maximum" => {
+                generation["generation_evidence"]["segment_size_bytes"] =
+                    serde_json::json!(u64::MAX)
+            }
+            "missing_file" => {
+                generation["file_segments"].as_array_mut().unwrap().pop();
+            }
+            "wrong_file_key" => generation["file_segments"][0]["file_key"] = serde_json::json!(1),
+            "wrong_file_binding" => {
+                generation["file_segments"][0]["file_occurrence_id"] =
+                    serde_json::json!("file.foreign")
+            }
+            _ => unreachable!(),
+        }
+        // Authenticate the mutation so refusal exercises descriptors rather
+        // than being masked by the full reader's outer digest check.
+        let digest =
+            sealed_generation_payload_digest(SEALED_GENERATION_FORMAT_REVISION_V1, generation)
+                .expect("mutated payload digest");
+        envelope["state_digest"] = serde_json::json!(digest.as_str());
+        let bytes = serde_json::to_vec(&envelope).expect("mutated envelope");
+        assert!(
+            CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes).is_err(),
+            "full reader accepted {mutation}"
+        );
+        assert!(
+            CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+                bytes.as_slice()
+            )
+            .is_err(),
+            "retention reader accepted {mutation}"
+        );
+    }
+
+    let mut unauthenticated = original;
+    unauthenticated["state_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let bytes = serde_json::to_vec(&unauthenticated).expect("unauthenticated envelope");
+    assert!(CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes).is_err());
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            bytes.as_slice()
+        )
+        .expect("retention leaves outer authentication to its caller"),
+        Some(authenticated),
+    );
+}
+
 /// One edited file must publish exactly one file segment, whatever the rest of
 /// the repository holds: every unchanged file keeps the parent generation's
 /// content address, so its bytes are never re-encoded, re-hashed or rewritten.

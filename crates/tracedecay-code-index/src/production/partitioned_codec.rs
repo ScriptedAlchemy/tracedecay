@@ -1004,6 +1004,78 @@ fn decode_generation_evidence(
     Ok(evidence)
 }
 
+fn validate_file_segment_bindings<'a>(
+    snapshot: impl ExactSizeIterator<Item = &'a FileOccurrenceId>,
+    segments: impl ExactSizeIterator<Item = (u32, &'a FileOccurrenceId)>,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    if segments.len() != snapshot.len() {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment count does not match its snapshot".to_owned(),
+        ));
+    }
+    for (expected_key, (occurrence, (file_key, segment_occurrence))) in
+        snapshot.zip(segments).enumerate()
+    {
+        let expected_key = u32::try_from(expected_key).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation file key exceeds u32".to_owned(),
+            )
+        })?;
+        if file_key != expected_key || occurrence != segment_occurrence {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation file segments are not canonically keyed".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_evidence_pages(
+    pages: impl ExactSizeIterator<Item = (u32, u64)>,
+    segment_size_bytes: u64,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    if pages.len() == 0 {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence has no pages".to_owned(),
+        ));
+    }
+    let mut evidence_size_bytes = 0_u64;
+    for (expected_ordinal, (page_ordinal, page_size_bytes)) in pages.enumerate() {
+        let expected_ordinal = u32::try_from(expected_ordinal).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence page count exceeds u32".to_owned(),
+            )
+        })?;
+        if page_ordinal != expected_ordinal
+            || page_size_bytes == 0
+            || page_size_bytes
+                > u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed generation evidence page bound exceeds u64".to_owned(),
+                    )
+                })?
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence pages are not canonically bounded and ordered"
+                    .to_owned(),
+            ));
+        }
+        evidence_size_bytes = evidence_size_bytes
+            .checked_add(page_size_bytes)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation evidence segment length exceeds u64".to_owned(),
+                )
+            })?;
+    }
+    if evidence_size_bytes != segment_size_bytes {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence segment byte size does not match its pages".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_partitioned_manifest(
     bytes: &[u8],
 ) -> Result<Option<PartitionedPublishedGenerationV1>, CodeIndexProductionErrorV1> {
@@ -1035,65 +1107,25 @@ fn parse_partitioned_manifest(
             "sealed generation manifest payload decoding failed: {error}"
         ))
     })?;
-    if generation.file_segments.len() != generation.snapshot.files.len() {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation segment count does not match its snapshot".to_owned(),
-        ));
-    }
-    for (expected_key, descriptor) in generation.file_segments.iter().enumerate() {
-        let expected_key = u32::try_from(expected_key).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation file key exceeds u32".to_owned(),
-            )
-        })?;
-        if descriptor.file_key != expected_key
-            || generation.snapshot.files[expected_key as usize].file_occurrence_id
-                != descriptor.file_occurrence_id
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation file segments are not canonically keyed".to_owned(),
-            ));
-        }
-    }
-    if generation.generation_evidence.pages.is_empty() {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation evidence has no pages".to_owned(),
-        ));
-    }
-    let mut evidence_size_bytes = 0_u64;
-    for (expected_ordinal, descriptor) in generation.generation_evidence.pages.iter().enumerate() {
-        let expected_ordinal = u32::try_from(expected_ordinal).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation evidence page count exceeds u32".to_owned(),
-            )
-        })?;
-        if descriptor.page_ordinal != expected_ordinal
-            || descriptor.page_size_bytes == 0
-            || descriptor.page_size_bytes
-                > u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation evidence page bound exceeds u64".to_owned(),
-                    )
-                })?
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation evidence pages are not canonically bounded and ordered"
-                    .to_owned(),
-            ));
-        }
-        evidence_size_bytes = evidence_size_bytes
-            .checked_add(descriptor.page_size_bytes)
-            .ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence segment length exceeds u64".to_owned(),
-                )
-            })?;
-    }
-    if evidence_size_bytes != generation.generation_evidence.segment_size_bytes {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation evidence segment byte size does not match its pages".to_owned(),
-        ));
-    }
+    validate_file_segment_bindings(
+        generation
+            .snapshot
+            .files
+            .iter()
+            .map(|file| &file.file_occurrence_id),
+        generation
+            .file_segments
+            .iter()
+            .map(|segment| (segment.file_key, &segment.file_occurrence_id)),
+    )?;
+    validate_evidence_pages(
+        generation
+            .generation_evidence
+            .pages
+            .iter()
+            .map(|page| (page.page_ordinal, page.page_size_bytes)),
+        generation.generation_evidence.segment_size_bytes,
+    )?;
     Ok(Some(generation))
 }
 
@@ -1530,70 +1562,32 @@ impl CodeIndexPublishedGenerationV1 {
         if generation.format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
             return Ok(None);
         }
-        if generation.file_segments.len() != generation.snapshot.files.len() {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment count does not match its snapshot".to_owned(),
-            ));
-        }
+        validate_file_segment_bindings(
+            generation
+                .snapshot
+                .files
+                .iter()
+                .map(|file| &file.file_occurrence_id),
+            generation
+                .file_segments
+                .iter()
+                .map(|segment| (segment.file_key, &segment.file_occurrence_id)),
+        )?;
+        validate_evidence_pages(
+            generation
+                .generation_evidence
+                .pages
+                .iter()
+                .map(|page| (page.page_ordinal, page.page_size_bytes)),
+            generation.generation_evidence.segment_size_bytes,
+        )?;
         let mut identities = Vec::with_capacity(generation.file_segments.len().saturating_add(1));
-        for (expected_key, segment) in generation.file_segments.into_iter().enumerate() {
-            let expected_key = u32::try_from(expected_key).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation file key exceeds u32".to_owned(),
-                )
-            })?;
-            if segment.file_key != expected_key
-                || generation.snapshot.files[expected_key as usize].file_occurrence_id
-                    != segment.file_occurrence_id
-            {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation file segments are not canonically keyed".to_owned(),
-                ));
-            }
-            identities.push(SealedGenerationSegmentIdentityV1 {
+        identities.extend(generation.file_segments.into_iter().map(|segment| {
+            SealedGenerationSegmentIdentityV1 {
                 digest: segment.segment_digest,
                 size_bytes: segment.segment_size_bytes,
-            });
-        }
-        if generation.generation_evidence.pages.is_empty() {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation evidence has no pages".to_owned(),
-            ));
-        }
-        let page_max = u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation evidence page bound exceeds u64".to_owned(),
-            )
-        })?;
-        let mut evidence_size_bytes = 0_u64;
-        for (expected_ordinal, page) in generation.generation_evidence.pages.iter().enumerate() {
-            let expected_ordinal = u32::try_from(expected_ordinal).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence page count exceeds u32".to_owned(),
-                )
-            })?;
-            if page.page_ordinal != expected_ordinal
-                || page.page_size_bytes == 0
-                || page.page_size_bytes > page_max
-            {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation evidence pages are not canonically bounded and ordered"
-                        .to_owned(),
-                ));
             }
-            evidence_size_bytes = evidence_size_bytes
-                .checked_add(page.page_size_bytes)
-                .ok_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(
-                        "sealed generation evidence segment length exceeds u64".to_owned(),
-                    )
-                })?;
-        }
-        if evidence_size_bytes != generation.generation_evidence.segment_size_bytes {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation evidence segment byte size does not match its pages".to_owned(),
-            ));
-        }
+        }));
         identities.push(SealedGenerationSegmentIdentityV1 {
             digest: generation.generation_evidence.segment_digest,
             size_bytes: generation.generation_evidence.segment_size_bytes,
