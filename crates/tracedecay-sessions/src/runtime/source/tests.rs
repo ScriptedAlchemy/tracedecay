@@ -18,7 +18,7 @@ struct ReadFailureStore(ReadFailure);
 struct SinglePathSource;
 
 #[derive(Default)]
-struct CountingStore(AtomicUsize);
+struct CountingStore(AtomicUsize, Mutex<Vec<TranscriptWriteBatch>>);
 
 struct MixedPathSource;
 
@@ -244,6 +244,77 @@ impl tracedecay_store::TranscriptStore for CountingStore {
     }
 }
 
+#[tokio::test]
+async fn physical_transcript_locations_do_not_replace_opaque_checkpoint_identity() {
+    let store = CountingStore::default();
+    let source = crate::runtime::codex::CodexSource::with_home(Path::new("fixture-home"));
+    let paths = vec![PathBuf::from("archived-rollout.jsonl")];
+    #[cfg(unix)]
+    let paths = {
+        use std::os::unix::ffi::OsStringExt;
+        let mut paths = paths;
+        paths.push(PathBuf::from(std::ffi::OsString::from_vec(
+            b"rollout-\xff.jsonl".to_vec(),
+        )));
+        paths.push(PathBuf::from(std::ffi::OsString::from_vec(
+            b"rollout-\xfe.jsonl".to_vec(),
+        )));
+        paths
+    };
+    let mut checkpoint_keys = std::collections::BTreeSet::new();
+    for path in paths {
+        let key = source.cursor_key(&path);
+        assert!(checkpoint_keys.insert(key.durable_text()));
+        let loaded = load_transcript_cursor(&store, key.clone()).await.unwrap();
+        let previous = loaded.checkpoint.clone();
+        let mut parsed = MixedPathSource
+            .try_parse_new(
+                Path::new("good-first.jsonl"),
+                StoredCursor::default(),
+                Path::new("mixed-project"),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        parsed.messages.push(SessionMessageRecord {
+            provider: "mixed".to_owned(),
+            message_id: "message".to_owned(),
+            session_id: parsed.draft.session_id.clone(),
+            role: "user".to_owned(),
+            timestamp: None,
+            ordinal: 0,
+            text: "Archived source".to_owned(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        });
+        persist_parsed_transcript(
+            &store,
+            "mixed",
+            &path,
+            Path::new("mixed-project"),
+            loaded,
+            &previous,
+            parsed,
+        )
+        .await
+        .unwrap();
+        let batch = store.1.lock().unwrap().pop().unwrap();
+        let (cursor_path, kind) = batch.into_parts();
+        assert_eq!(cursor_path, key.store_path());
+        let tracedecay_store::TranscriptWriteKind::Upsert { session, .. } = kind else {
+            panic!("message ingestion must persist session metadata");
+        };
+        let expected = path
+            .to_str()
+            .map_or_else(|| key.durable_text(), str::to_owned);
+        assert_eq!(session.transcript_path.as_deref(), Some(expected.as_str()));
+    }
+}
+
 impl TranscriptIngestStore for CountingStore {
     fn get_session(
         &self,
@@ -257,11 +328,12 @@ impl TranscriptIngestStore for CountingStore {
 
     fn persist_transcript_batch_with_git_evidence(
         &self,
-        _batch: TranscriptWriteBatch,
+        batch: TranscriptWriteBatch,
         _commit_records: &[crate::runtime::git_correlation::CommitSessionRecord],
         _span_observations: &[crate::runtime::git_correlation::SpanObservation],
     ) -> impl std::future::Future<Output = tracedecay_store::TranscriptStoreResult<()>> + Send {
         self.0.fetch_add(1, Ordering::Relaxed);
+        self.1.lock().unwrap().push(batch);
         std::future::ready(Ok(()))
     }
 }

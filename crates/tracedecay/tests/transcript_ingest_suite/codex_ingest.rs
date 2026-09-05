@@ -141,6 +141,14 @@ async fn codex_archived_rollout_is_ingested() {
         session.transcript_path.as_deref(),
         Some(path.to_string_lossy().as_ref())
     );
+    let checkpoint = db
+        .get_parse_offset(&source.cursor_key(&path).durable_text())
+        .await
+        .expect("archive checkpoint retains its provider-specific identity");
+    assert_eq!(
+        checkpoint.byte_offset,
+        std::fs::metadata(&path).unwrap().len()
+    );
 }
 #[tokio::test]
 async fn codex_rollout_ingest_is_incremental() {

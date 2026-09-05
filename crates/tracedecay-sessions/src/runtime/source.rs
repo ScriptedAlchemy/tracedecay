@@ -666,7 +666,7 @@ async fn persist_prepared_transcript<S: TranscriptIngestStore>(
 pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store: &S,
     provider: &'static str,
-    _path: &Path,
+    path: &Path,
     project_root: &Path,
     loaded: LoadedTranscriptCursor,
     expected_previous: &TranscriptCursorCheckpoint,
@@ -761,7 +761,13 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         title,
         started_at,
         ended_at,
-        transcript_path: Some(cursor_key.durable_text()),
+        // A provider's opaque checkpoint is not the physical Unicode path.
+        // Preserve Codex/Claude's opaque identities for non-Unicode paths;
+        // rendering their bytes lossily would alias distinct files.
+        transcript_path: Some(
+            path.to_str()
+                .map_or_else(|| cursor_key.durable_text(), str::to_owned),
+        ),
         metadata_json,
         parent_session_id,
         is_subagent,
