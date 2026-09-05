@@ -1372,6 +1372,23 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             .saturating_add(self.maximum_page_bytes)
     }
 
+    /// Halve the chunk bound used to mint the next page after a downstream
+    /// batch authority refuses the current page. The source cursor is not
+    /// advanced until the downstream callback accepts a page, so tightening
+    /// here safely re-mints only the refused suffix while preserving every
+    /// already admitted page and its cumulative authority.
+    ///
+    /// A one-chunk page cannot be subdivided and remains a typed refusal.
+    pub fn tighten_page_chunk_bound(&mut self) -> Option<(usize, usize)> {
+        let previous = self.maximum_page_chunks;
+        if previous <= 1 {
+            return None;
+        }
+        let tightened = (previous / 2).max(1);
+        self.maximum_page_chunks = tightened;
+        Some((previous, tightened))
+    }
+
     /// Fixed retained authority for locating files after the authenticated
     /// opening scan. This remains constant as the generation's file count
     /// grows; individual file boundaries are discovered from the byte cursor.
@@ -3142,11 +3159,18 @@ mod lexical_page_source_tests {
 
     impl SealedSourceFixture {
         fn open(&self) -> VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>> {
+            self.open_with_page_chunks(1)
+        }
+
+        fn open_with_page_chunks(
+            &self,
+            maximum_page_chunks: usize,
+        ) -> VerifiedSealedLexicalPageSourceV1<Cursor<Vec<u8>>> {
             VerifiedSealedLexicalPageSourceV1::open(
                 Cursor::new(self.sealed.clone()),
                 u64::try_from(self.sealed.len()).expect("sealed fixture length fits u64"),
                 self.state_digest.clone(),
-                1,
+                maximum_page_chunks,
                 1024 * 1024,
                 &ActiveControl,
             )
@@ -3641,6 +3665,44 @@ mod lexical_page_source_tests {
             VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
         };
         assert_page_matches(&retried, &expected[0]);
+    }
+
+    #[test]
+    fn rejected_page_can_tighten_future_chunk_bound_without_advancing_cursor() {
+        let fixture = fixture();
+        let mut source = fixture.open_with_page_chunks(4);
+        let cursor_before = source
+            .cursor()
+            .persisted_bytes()
+            .expect("initial cursor persists");
+        let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 128 * 1024 * 1024)
+            .expect("one-page fixture bound is valid");
+        let rejected = source
+            .next_page_batch_if(&ActiveControl, bounds, |pages| {
+                assert_eq!(pages.len(), 1);
+                assert_eq!(pages[0].chunk_count(), 4);
+                Err::<NonZeroUsize, _>("builder rejects the four-chunk page")
+            })
+            .expect("source stages the rejected page");
+        assert_eq!(
+            rejected.expect_err("callback refusal must be surfaced"),
+            "builder rejects the four-chunk page"
+        );
+        assert_eq!(
+            source
+                .cursor()
+                .persisted_bytes()
+                .expect("rejected cursor persists"),
+            cursor_before,
+        );
+
+        assert_eq!(source.tighten_page_chunk_bound(), Some((4, 2)));
+        let retried = match source.next_page(&ActiveControl).expect("tightened retry") {
+            VerifiedSealedLexicalPageReadV1::Page(page) => page,
+            VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must retain pages"),
+        };
+        assert_eq!(retried.chunk_count(), 2);
+        assert_eq!(retried.page_ordinal(), 0);
     }
 
     #[test]

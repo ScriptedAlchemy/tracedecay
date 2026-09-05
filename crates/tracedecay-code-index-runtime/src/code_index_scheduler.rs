@@ -4819,6 +4819,19 @@ impl LatestCodeTextGenerationV1 {
                 Ok(Err(error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. })) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("query.artifact.batch.refusal_total").inc(1u64);
+                    if let Some((previous_page_chunks, tightened_page_chunks)) =
+                        artifact_build.source.tighten_page_chunk_bound()
+                    {
+                        tracing::warn!(
+                            event = "code_index_text_projection_page_bound_tightened",
+                            previous_page_chunks,
+                            tightened_page_chunks,
+                            error = %error,
+                            "code-index text projection subdivided a refused lexical page and \
+                             will resume from the unchanged source cursor"
+                        );
+                        return Ok(false);
+                    }
                     return Err(map_text_artifact_error(error));
                 }
                 Ok(Err(error)) => {
