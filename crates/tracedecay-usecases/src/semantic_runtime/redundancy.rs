@@ -769,7 +769,7 @@ mod tests {
             matches!(
                 raced.state,
                 SemanticRuntimeStateV1::Degraded {
-                    reason: SemanticFallbackReasonV1::InvalidRuntimeStatus,
+                    reason: SemanticFallbackReasonV1::NotActivated,
                     ..
                 }
             ),

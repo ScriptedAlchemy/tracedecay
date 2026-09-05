@@ -95,6 +95,11 @@ pub enum SemanticFallbackReasonV1 {
     Indexing,
     RuntimeFailure,
     RollbackInProgress,
+    /// A vector generation is current but no durable activation receipt has
+    /// ever been issued for it. This is the ordinary pre-activation state of a
+    /// fresh profile, not a malformed runtime status: the operator's next step
+    /// is `tracedecay semantic activate`.
+    NotActivated,
     InvalidRuntimeStatus,
     SelectedNotDownloaded,
     Downloading,

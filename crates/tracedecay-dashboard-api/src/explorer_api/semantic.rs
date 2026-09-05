@@ -183,6 +183,7 @@ fn semantic_reason_source(
         | SemanticFallbackReasonV1::IncompatibleRuntime
         | SemanticFallbackReasonV1::ResourceCeilingExceeded
         | SemanticFallbackReasonV1::CorruptArtifact
+        | SemanticFallbackReasonV1::NotActivated
         | SemanticFallbackReasonV1::InvalidRuntimeStatus
         | SemanticFallbackReasonV1::ResetRequired => {
             ExplorerSourceProgressV1::unavailable(ExplorerSourceIdV1::Semantic, code, message)
@@ -201,6 +202,7 @@ const fn semantic_reason_code(reason: SemanticFallbackReasonV1) -> &'static str 
         SemanticFallbackReasonV1::Indexing => "semantic_indexing",
         SemanticFallbackReasonV1::RuntimeFailure => "semantic_runtime_failure",
         SemanticFallbackReasonV1::RollbackInProgress => "semantic_rollback",
+        SemanticFallbackReasonV1::NotActivated => "semantic_not_activated",
         SemanticFallbackReasonV1::InvalidRuntimeStatus => "semantic_invalid_runtime_status",
         SemanticFallbackReasonV1::SelectedNotDownloaded => "semantic_model_not_downloaded",
         SemanticFallbackReasonV1::Downloading => "semantic_model_downloading",
