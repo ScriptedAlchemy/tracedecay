@@ -231,7 +231,13 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     assert!(surfaces.contains(&BindingSurface::Http));
     assert!(surfaces.contains(&BindingSurface::Mcp));
     assert!(surfaces.contains(&BindingSurface::Cli));
-    assert!(surfaces.contains(&BindingSurface::Lsp));
+    assert!(surfaces.contains(&BindingSurface::Dashboard));
+    // The feedback catalog deliberately publishes no LSP binding: LSP and
+    // native delivery are an internal event path, not a JSON-RPC method
+    // binding (see `ADVISORY_SURFACES` in the feedback catalog). The
+    // publication-read assertion above pins the same four callable surfaces,
+    // so requiring an LSP binding here contradicted both.
+    assert!(!surfaces.contains(&BindingSurface::Lsp));
 
     let registrations = stock_host_registration_evidence(HostKindV1::ClaudeCode)
         .into_iter()
