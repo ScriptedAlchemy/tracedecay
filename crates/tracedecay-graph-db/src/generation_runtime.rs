@@ -790,12 +790,7 @@ impl GraphDb {
                 match prepared_next.take() {
                     Some(prepared) => Some(prepared),
                     None => self.construct_generation_stage_page_if_needed(
-                        manifest,
-                        identity,
-                        expected,
-                        context,
-                        page,
-                        check,
+                        manifest, identity, expected, context, page, check,
                     )?,
                 }
             };
@@ -803,10 +798,7 @@ impl GraphDb {
             let successor_needs_construct = match successor {
                 Some(next_page) if !first_page_blocked => !self
                     .generation_stage_page_already_applied(
-                        identity,
-                        expected,
-                        context,
-                        next_page,
+                        identity, expected, context, next_page,
                     )?,
                 Some(_) | None => false,
             };
@@ -912,8 +904,9 @@ impl GraphDb {
             // it suppress every later construct dropped rows the apply then
             // demanded ("owned generation stage page was not prepared").
             let successor_needs_construct = match successor {
-                Some(next_page) => !self
-                    .generation_stage_page_already_applied(identity, expected, context, next_page)?,
+                Some(next_page) => !self.generation_stage_page_already_applied(
+                    identity, expected, context, next_page,
+                )?,
                 None => false,
             };
             current = thread::scope(|scope| {
