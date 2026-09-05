@@ -105,19 +105,6 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
         EnvVarGuard::set("HOME", &home),
         EnvVarGuard::set("USERPROFILE", &home),
     ];
-    let project_id = mark_test_project(&project);
-    // The hook resolves the project root through the initialized-store gate,
-    // exactly like production installs: `init` creates the project store
-    // first, then daemon enrollment mounts the already-initialized layout
-    // (the canonical enrollment composition itself creates the project graph
-    // database, so init must come first — as it does in a real install).
-    crate::common::initialize_tracedecay_cli_project(&home, &project);
-    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
-        .await
-        .unwrap();
-    drop(enrollment);
-    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
-
     let codex_bin = tmp.path().join("codex");
     std::fs::write(
         &codex_bin,
@@ -141,6 +128,21 @@ done
         EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &codex_bin),
         EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
     ];
+    // Init starts the managed daemon, so its provider environment must already
+    // point at this fixture before initialization captures the process environment.
+    let project_id = mark_test_project(&project);
+    // The hook resolves the project root through the initialized-store gate,
+    // exactly like production installs: `init` creates the project store
+    // first, then daemon enrollment mounts the already-initialized layout
+    // (the canonical enrollment composition itself creates the project graph
+    // database, so init must come first — as it does in a real install).
+    crate::common::initialize_tracedecay_cli_project(&home, &project);
+    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+        .await
+        .unwrap();
+    drop(enrollment);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
     let daemon = spawn_tracedecay_daemon(&home);
     let event = serde_json::json!({
         "hook_event_name": "PostCompact",
@@ -212,12 +214,16 @@ done
     assert_eq!(summary.source_count, 2);
     // Provenance metadata rides the node-level describe; the session-level
     // summary listing is a lightweight overview without metadata_json.
-    assert!(
+    let metadata: serde_json::Value = serde_json::from_str(
         summary
             .metadata_json
             .as_deref()
-            .unwrap_or_default()
-            .contains("codex_app_server:codex-hook-test")
+            .expect("summary provenance"),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata["summary_route"], "codex_app_server:codex-hook-test",
+        "summary provenance must retain the actual app-server model: {metadata}"
     );
 
     let expansion = runtime
