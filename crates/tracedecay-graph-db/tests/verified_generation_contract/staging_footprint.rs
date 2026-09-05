@@ -1564,12 +1564,21 @@ fn a_partially_released_generation_restages_every_row_it_lost() {
         &manifest,
     ));
 
-    // Walk the cancellation budget upward until exactly one durable entity
-    // release page has committed. The release is resumable, so each attempt
-    // resumes where the last stopped and the first attempt that removes rows
-    // removes one bounded page.
+    // Walk the cancellation budget upward until a durable entity release page
+    // has committed. The release is resumable, so each attempt resumes where
+    // the last stopped and the first attempt that removes rows removes one
+    // bounded page.
+    //
+    // The budget is measured in cancellation *polls*, and a release page polls
+    // once per row it enumerates before it commits `RELEASE_PAGE_MUTATIONS` of
+    // them -- so the first durable page costs on the order of the whole row
+    // count in polls, not the few dozen a short linear walk reaches. Start at
+    // that scale and double: the first budget that commits cannot reach a
+    // second page (which costs another full enumeration), so the fixture
+    // still lands in the one-page-removed geometry the assertion below reads.
     let mut partial = None;
-    for cancel_after in 0..64 {
+    let mut cancel_after = entity_count;
+    while cancel_after <= 4 * entity_count {
         let probe = CancelAfterPolls::new(cancel_after);
         let control = probe.control();
         let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
@@ -1589,6 +1598,7 @@ fn a_partially_released_generation_restages_every_row_it_lost() {
             partial = Some(counts);
             break;
         }
+        cancel_after *= 2;
     }
     let counts =
         partial.expect("an interrupted release must commit at least one durable entity page");
