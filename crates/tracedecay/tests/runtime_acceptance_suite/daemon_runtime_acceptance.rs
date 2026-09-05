@@ -289,7 +289,9 @@ async fn exact_search_does_not_wait_for_semantic_projection() {
     );
     let _daemon = common::spawn_tracedecay_daemon(environment.home());
     let initialized = common::tracedecay_command_with_home(environment.home())
-        .args(["init", "--quiet"])
+        // `tracedecay init` has no `--quiet`; clap refuses the whole command
+        // with "unexpected argument", so the project was never initialized.
+        .args(["init"])
         .current_dir(&project)
         .stdin(Stdio::null())
         .output()

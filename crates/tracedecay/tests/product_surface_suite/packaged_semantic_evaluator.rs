@@ -63,35 +63,37 @@ fn packaged_evaluator_binary_validates_without_a_source_checkout() {
 }
 
 #[test]
-fn qualify_native_rejects_an_unparseable_candidate_without_writing_output() {
+fn qualify_native_refuses_an_incomplete_request_without_writing_output() {
+    // `qualify-native` no longer parses a local candidate file: the native
+    // evaluator now runs inside the owning daemon and the packaged binary only
+    // carries `--project-root`, `--profile`, and `--output`. The retained
+    // guarantee is that a request the packaged surface cannot serve is refused
+    // before anything is written, so this asserts that contract instead of the
+    // removed `--candidate` argument (which clap rejected with an empty stdout,
+    // leaving the old assertion parsing nothing at all).
     let project = tempfile::tempdir().expect("temporary project");
-    let candidate = project.path().join("candidate.json");
     let output_path = project.path().join("qualification.json");
-    std::fs::write(&candidate, b"not semantic candidate JSON").expect("invalid candidate");
 
     let output = Command::new(search_eval_direct_bin())
         .current_dir(project.path())
         .args(["qualify-native", "--project-root"])
         .arg(project.path())
-        .arg("--candidate")
-        .arg(&candidate)
         .arg("--output")
         .arg(&output_path)
         .output()
         .expect("run packaged evaluator binary");
 
-    assert_eq!(output.status.code(), Some(2));
-    let response: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("typed evaluator JSON");
-    assert_eq!(response["command"], "qualify_native");
-    assert_eq!(response["status"], "fail");
     assert!(
-        response["rationale"]
-            .as_str()
-            .is_some_and(|rationale| rationale.contains("parse"))
+        !output.status.success(),
+        "an incomplete qualification request must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--profile"),
+        "the refusal must name the missing evaluated profile: {stderr}"
     );
     assert!(
         !output_path.exists(),
-        "candidate parsing failure must not create a qualification artifact"
+        "a refused qualification must not create a qualification artifact"
     );
 }
