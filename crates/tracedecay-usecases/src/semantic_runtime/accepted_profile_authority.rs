@@ -751,7 +751,7 @@ mod tests {
     use super::*;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_query::search_quality::{
-        PackagedNativeQualificationV1, packaged_native_qualification_bytes,
+        PackagedNativeQualificationV1, compute_workload_digest, packaged_native_qualification_bytes,
     };
 
     fn digest(byte: char) -> ManifestDigest {
@@ -759,15 +759,28 @@ mod tests {
     }
 
     #[test]
-    fn stale_portable_report_is_rejected_after_workload_revision() {
+    fn portable_report_requires_the_current_workload_digest() {
         let qualification: PackagedNativeQualificationV1 =
             serde_json::from_slice(packaged_native_qualification_bytes())
                 .expect("reviewed packaged qualification");
         let workload: CandidateWorkloadV1 =
             serde_json::from_str(ACTIVATION_WORKLOAD_JSON).expect("activation workload");
 
+        let mut report = qualification.portable_evidence.report;
         assert_eq!(
-            validate_report_authority(&qualification.portable_evidence.report, &workload),
+            validate_report_authority(&report, &workload),
+            Ok(EvaluationEvidenceKindV1::PackagedPortable)
+        );
+
+        let mut previous_workload = workload.clone();
+        previous_workload
+            .execution_contract
+            .runtime_revision
+            .push_str("-previous");
+        report.workload_digest =
+            compute_workload_digest(&previous_workload).expect("previous workload digest");
+        assert_eq!(
+            validate_report_authority(&report, &workload),
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)
         );
     }
