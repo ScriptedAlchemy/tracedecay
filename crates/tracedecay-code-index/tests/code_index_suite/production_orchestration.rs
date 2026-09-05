@@ -2948,6 +2948,7 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
         serde_json::to_vec(&envelope).expect("pre-paging partitioned manifest JSON");
     let whole_evidence_reads = Cell::new(0_usize);
     let ranged_evidence_reads = Cell::new(0_usize);
+    let largest_evidence_read = Cell::new(0_u64);
 
     let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &legacy_manifest,
@@ -2967,6 +2968,7 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
                 } => {
                     if digest.as_str() == evidence_digest {
                         ranged_evidence_reads.set(ranged_evidence_reads.get() + 1);
+                        largest_evidence_read.set(largest_evidence_read.get().max(length));
                     }
                     (digest, offset, length)
                 }
@@ -2984,8 +2986,15 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
     .expect("pre-paging partitioned bytes decode")
     .expect("revision seven partitioned manifest");
 
-    assert_eq!(whole_evidence_reads.get(), 1);
-    assert_eq!(ranged_evidence_reads.get(), 0);
+    // A pre-paging segment carries no page table, but it is still read in
+    // bounded ranges: restoring it must never materialize the whole segment.
+    assert_eq!(whole_evidence_reads.get(), 0);
+    assert!(ranged_evidence_reads.get() > 0);
+    assert!(
+        largest_evidence_read.get() <= 256 * 1024,
+        "a pre-paging evidence read must stay within one page: {} bytes",
+        largest_evidence_read.get()
+    );
     assert_eq!(
         restored.encode_sealed().expect("restored generation seals"),
         expected.encode_sealed().expect("expected generation seals"),
@@ -3068,5 +3077,250 @@ fn partitioned_encode_publishes_only_the_edited_file_segment() {
         carried,
         child.snapshot().files.len() - 1,
         "every unchanged file must keep the parent generation's content address"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Peak-RSS bound for the pre-paging (legacy) generation restore.
+//
+// The corpus is deliberately small so the check runs with the rest of the
+// suite; the bound it asserts is a ratio, so a larger `TD_LEGACY_RSS_FILES`
+// only widens the margin. Run it with `--nocapture` to read the numbers.
+// ---------------------------------------------------------------------------
+
+fn rss_proc_kib(field: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let prefix = format!("{field}:");
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
+fn rss_reset_peak() -> bool {
+    std::fs::write("/proc/self/clear_refs", b"5\n").is_ok()
+}
+
+fn rss_scaled_request(file_count: usize) -> CodeIndexBuildRequestV1 {
+    let mut identity = Sha256::new();
+    let mut files = Vec::with_capacity(file_count);
+    let mut captured_files = Vec::with_capacity(file_count);
+    let mut receipts = Vec::with_capacity(file_count);
+    for index in 0..file_count {
+        let logical_path = format!("src/generated/module_{index:05}.rs");
+        // Distinct bytes per file: identical bodies would collapse into shared
+        // content addresses and understate the corpus the restore must carry.
+        let source = format!("{RUST_SOURCE}\npub const MODULE_INDEX_{index}: u32 = {index};\n");
+        identity.update(logical_path.as_bytes());
+        identity.update([0]);
+        identity.update(source.as_bytes());
+        let file_occurrence_id = id::<FileOccurrenceId>(&format!("file.rss.{index:05}"));
+        files.push(SanitizedCodeFileV1 {
+            file_occurrence_id: file_occurrence_id.clone(),
+            logical_path,
+            language: Some(id::<LanguageId>("rust")),
+            content_digest: content_digest(source.as_bytes()),
+            disposition: SnapshotFileDispositionV1::Present,
+        });
+        captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::from(source.as_bytes()),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
+        });
+        receipts.push(id::<SanitizationReceiptId>(&format!(
+            "receipt.rss.{index:05}"
+        )));
+    }
+    CodeIndexBuildRequestV1 {
+        snapshot: SanitizedCodeSnapshotV1 {
+            repository: id::<RepositoryId>("repository.production"),
+            worktree: None,
+            reference: None,
+            source_revision: None,
+            sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
+            sanitization_receipts: receipts,
+            content_identity: content_digest(&identity.finalize()),
+            captured_at: UtcMicros(1_000_000),
+            files,
+        },
+        captured_files,
+        changed_files: BTreeSet::new(),
+        invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
+        sealed_at: UtcMicros(1_100_000),
+        target_projection_key: projection_key(),
+    }
+}
+
+/// Decode `manifest`, serving every segment read from `segments`, and return
+/// the peak RSS growth over a freshly reset high water mark.
+fn rss_measure_decode(label: &str, manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> u64 {
+    assert!(rss_reset_peak(), "reset VmHWM");
+    let hwm_before = rss_proc_kib("VmHWM").expect("VmHWM");
+    let mut whole_reads = 0_usize;
+    let mut ranged_reads = 0_usize;
+    let restored =
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(manifest, |request, buffer| {
+            let (digest, offset, length) = match request {
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                    whole_reads += 1;
+                    (digest, 0, size_bytes)
+                }
+                SealedGenerationSegmentReadV1::Range {
+                    digest,
+                    offset,
+                    length,
+                    ..
+                } => {
+                    ranged_reads += 1;
+                    (digest, offset, length)
+                }
+            };
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("measured segment is missing".to_owned())
+            })?;
+            let start = usize::try_from(offset).expect("segment offset");
+            let end = start + usize::try_from(length).expect("segment length");
+            buffer.clear();
+            buffer.extend_from_slice(&bytes[start..end]);
+            Ok(())
+        })
+        .expect("measured manifest decodes")
+        .expect("measured manifest is revision seven");
+    let hwm_after = rss_proc_kib("VmHWM").expect("VmHWM");
+    let file_count = restored.snapshot().files.len();
+    drop(restored);
+    let hwm_delta = hwm_after.saturating_sub(hwm_before);
+    println!(
+        "rss_probe form={label} files={file_count} whole_reads={whole_reads} \
+ranged_reads={ranged_reads} hwm_before_kib={hwm_before} hwm_after_kib={hwm_after} \
+hwm_delta_kib={hwm_delta}"
+    );
+    hwm_delta
+}
+
+/// Restoring a pre-paging generation must not materialize its evidence
+/// segment.
+///
+/// The shipped restore read the whole segment, parsed a `serde_json::Value`
+/// from it, rewrote identities in that tree and deserialized the tree again:
+/// peak memory was 2.35x the on-disk generation and grew with the corpus. The
+/// paged restore of the same generation runs first here, so the allocator
+/// already holds the arena a restored generation needs; the legacy restore's
+/// own peak growth over that baseline is therefore the extra cost of the
+/// pre-paging path alone, and it must stay far below the generation's on-disk
+/// size rather than scaling with it.
+#[test]
+fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
+    const RSS_CHILD: &str = "TD_LEGACY_RSS_CHILD";
+    const RSS_TEST: &str = concat!(
+        "production_orchestration::",
+        "legacy_generation_restore_does_not_materialize_its_evidence_segment"
+    );
+
+    // VmHWM and `clear_refs` are Linux-only; elsewhere there is nothing to read.
+    if rss_proc_kib("VmHWM").is_none() || !rss_reset_peak() {
+        return;
+    }
+    // VmHWM is process-wide, so the reading only means anything while nothing
+    // else is allocating: take it in a child that runs this test alone.
+    if std::env::var_os(RSS_CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([RSS_TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .env(RSS_CHILD, "1")
+            .status()
+            .expect("run the peak-RSS measurement alone");
+        assert!(status.success(), "isolated peak-RSS measurement failed");
+        return;
+    }
+
+    let file_count: usize = std::env::var("TD_LEGACY_RSS_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(300);
+
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("rss fixture owner");
+    let generation = owner
+        .build_and_publish(rss_scaled_request(file_count), &ActiveControl)
+        .expect("rss fixture generation");
+
+    let mut segments: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let mut evidence_digest = String::new();
+    let paged_manifest = generation
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    evidence_digest = segment_digest.as_str().to_owned();
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
+        .expect("rss fixture encodes");
+
+    // Rewrite the descriptor into the pre-paging shape a historical writer
+    // emitted: one whole authenticated evidence segment, no page table.
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&paged_manifest).expect("manifest JSON");
+    envelope["generation"]["generation_evidence"]
+        .as_object_mut()
+        .expect("evidence descriptor")
+        .remove("pages")
+        .expect("current descriptor carries evidence pages");
+    let state_digest = sealed_generation_payload_digest(
+        SEALED_GENERATION_FORMAT_REVISION_V1,
+        &envelope["generation"],
+    )
+    .expect("legacy payload digest");
+    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
+    let legacy_manifest = serde_json::to_vec(&envelope).expect("legacy manifest JSON");
+    drop(envelope);
+
+    let segment_bytes: usize = segments.values().map(Vec::len).sum();
+    let evidence_bytes = segments
+        .get(evidence_digest.as_str())
+        .map(Vec::len)
+        .expect("evidence segment");
+    let generation_bytes = segment_bytes + paged_manifest.len();
+    drop(generation);
+    drop(owner);
+
+    let paged_hwm = rss_measure_decode("paged", &paged_manifest, &segments);
+    let legacy_hwm = rss_measure_decode("legacy", &legacy_manifest, &segments);
+    let legacy_bytes = legacy_hwm * 1024;
+
+    println!(
+        "rss_summary files={file_count} generation_on_disk_bytes={generation_bytes} \
+evidence_segment_bytes={evidence_bytes} paged_hwm_delta_kib={paged_hwm} \
+legacy_hwm_delta_kib={legacy_hwm} legacy_over_generation={:.3} legacy_over_evidence={:.3}",
+        legacy_bytes as f64 / generation_bytes as f64,
+        legacy_bytes as f64 / evidence_bytes as f64,
+    );
+
+    assert!(
+        legacy_bytes * 2 < generation_bytes as u64,
+        "restoring a pre-paging generation grew peak RSS by {legacy_bytes} bytes over a warmed \
+         baseline, which is not far below the {generation_bytes}-byte on-disk generation \
+         ({evidence_bytes}-byte evidence segment): the segment is being materialized"
     );
 }

@@ -40,7 +40,7 @@ use std::fmt::Write as _;
 use std::io::{Read, Seek, Write as IoWrite};
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Value, value::RawValue};
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{FileOccurrenceId, ManifestDigest, SymbolOccurrenceId};
 
@@ -678,7 +678,53 @@ where
         std::io::Error::other("sealed generation evidence page read failed")
     }
 
+    /// A pre-paging segment carries no page table, so it is read in the same
+    /// bounded ranges a paged segment would have used. Only the aggregate
+    /// digest authenticates it — there are no per-page digests to check — and
+    /// `finish` still refuses a segment whose bytes do not hash to its
+    /// manifest identity.
+    fn load_next_legacy_chunk(&mut self) -> std::io::Result<bool> {
+        let Some(remaining) = self
+            .descriptor
+            .segment_size_bytes
+            .checked_sub(self.segment_offset)
+            .filter(|remaining| *remaining > 0)
+        else {
+            return Ok(false);
+        };
+        let page_max = u64::try_from(GENERATION_EVIDENCE_PAGE_MAX_BYTES_V1).map_err(|_| {
+            self.remember_error(CodeIndexProductionErrorV1::Contract(
+                "sealed generation evidence page bound exceeds u64".to_owned(),
+            ))
+        })?;
+        let length = remaining.min(page_max);
+        self.page.clear();
+        self.page_offset = 0;
+        if let Err(error) = (self.read_segment)(
+            SealedGenerationSegmentReadV1::Range {
+                digest: &self.descriptor.segment_digest,
+                size_bytes: self.descriptor.segment_size_bytes,
+                offset: self.segment_offset,
+                length,
+            },
+            &mut self.page,
+        ) {
+            return Err(self.remember_error(error));
+        }
+        if u64::try_from(self.page.len()).is_ok_and(|read| read == length) {
+            self.next_page += 1;
+            self.segment_offset += length;
+            return Ok(true);
+        }
+        Err(self.remember_error(CodeIndexProductionErrorV1::Contract(
+            "sealed generation evidence byte size does not match its manifest".to_owned(),
+        )))
+    }
+
     fn load_next_page(&mut self) -> std::io::Result<bool> {
+        if self.descriptor.legacy_unpaged {
+            return self.load_next_legacy_chunk();
+        }
         let Some(descriptor) = self.descriptor.pages.get(self.next_page) else {
             return Ok(false);
         };
@@ -726,7 +772,9 @@ where
         if let Some(error) = self.read_error.take() {
             return Err(error);
         }
-        if self.next_page != self.descriptor.pages.len()
+        let pages_drained =
+            self.descriptor.legacy_unpaged || self.next_page == self.descriptor.pages.len();
+        if !pages_drained
             || self.page_offset != self.page.len()
             || self.segment_offset != self.descriptor.segment_size_bytes
         {
@@ -1101,78 +1149,769 @@ fn legacy_chunk_identity<'a>(
         })
 }
 
-fn restore_legacy_evidence_identities(
-    value: &mut Value,
-    key: Option<&str>,
-    generation_id: &str,
-    file_segments: &[PartitionedFileSegmentDescriptorV1],
-    files: &[PersistedFileGenerationArtifactsV1],
-) -> Result<(), CodeIndexProductionErrorV1> {
-    match value {
-        Value::String(identity) => {
-            if key.is_some_and(legacy_generation_identity_field) && identity == GENERATION_ID_MARKER
-            {
-                *identity = generation_id.to_owned();
-            } else if key.is_some_and(legacy_symbol_identity_field)
-                && identity.starts_with(SYMBOL_OCCURRENCE_ID_MARKER_PREFIX)
-            {
-                *identity = legacy_symbol_identity(identity, file_segments)?.to_owned();
-            } else if key.is_some_and(legacy_chunk_identity_field)
-                && identity.starts_with(CHUNK_ID_MARKER_PREFIX)
-            {
-                *identity = legacy_chunk_identity(identity, files)?.to_owned();
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                restore_legacy_evidence_identities(
-                    value,
-                    key,
-                    generation_id,
-                    file_segments,
-                    files,
-                )?;
-            }
-        }
-        Value::Object(values) => {
-            for (key, value) in values {
-                restore_legacy_evidence_identities(
-                    value,
-                    Some(key),
-                    generation_id,
-                    file_segments,
-                    files,
-                )?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
+/// Streaming identity restoration for the pre-paging evidence segment.
+///
+/// The shipped restore read the whole evidence segment, parsed it into a
+/// `serde_json::Value`, substituted identities in that tree, then deserialized
+/// the tree into the typed payload — peak memory was the segment plus a DOM
+/// plus the payload, measured at 2.35x the on-disk generation and linear in
+/// corpus size. This module runs the identical substitution as a `serde`
+/// transcoder wrapped around the same bounded page reader the paged form uses,
+/// so a legacy restore retains one page and the typed payload and nothing else.
+///
+/// The classification rules are the replaced DOM walk's, unchanged: a string is
+/// substituted by the object key that encloses it, the classification resets at
+/// every object member and is inherited through arrays.
+mod legacy_identity {
+    use std::cell::Cell;
+    use std::fmt;
 
-fn decode_legacy_generation_evidence(
-    bytes: &[u8],
-    generation_id: &CodeGenerationId,
-    file_segments: &[PartitionedFileSegmentDescriptorV1],
-    files: &[PersistedFileGenerationArtifactsV1],
-) -> Result<PartitionedGenerationEvidenceV1, CodeIndexProductionErrorV1> {
-    let mut evidence: Value = serde_json::from_slice(bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation evidence decoding failed: {error}"
-        ))
-    })?;
-    restore_legacy_evidence_identities(
-        &mut evidence,
-        None,
-        generation_id.as_str(),
-        file_segments,
-        files,
-    )?;
-    serde_json::from_value(evidence).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation evidence payload decoding failed: {error}"
-        ))
-    })
+    use serde::de::{
+        self, DeserializeOwned, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess,
+        VariantAccess, Visitor,
+    };
+
+    use super::{
+        CHUNK_ID_MARKER_PREFIX, CodeIndexProductionErrorV1, GENERATION_ID_MARKER,
+        PartitionedFileSegmentDescriptorV1, PersistedFileGenerationArtifactsV1,
+        SYMBOL_OCCURRENCE_ID_MARKER_PREFIX, legacy_chunk_identity, legacy_chunk_identity_field,
+        legacy_generation_identity_field, legacy_symbol_identity, legacy_symbol_identity_field,
+    };
+
+    #[derive(Clone, Copy)]
+    enum LegacyIdentityFieldV1 {
+        Other,
+        Generation,
+        SymbolOccurrence,
+        Chunk,
+    }
+
+    fn field_for_key(key: &str) -> LegacyIdentityFieldV1 {
+        if legacy_generation_identity_field(key) {
+            LegacyIdentityFieldV1::Generation
+        } else if legacy_symbol_identity_field(key) {
+            LegacyIdentityFieldV1::SymbolOccurrence
+        } else if legacy_chunk_identity_field(key) {
+            LegacyIdentityFieldV1::Chunk
+        } else {
+            LegacyIdentityFieldV1::Other
+        }
+    }
+
+    /// The index the markers address: identities are resolved by position, so
+    /// the lookup borrows from the already-restored manifest and files instead
+    /// of building a map.
+    pub(super) struct LegacyIdentityIndexV1<'a> {
+        pub(super) generation_id: &'a str,
+        pub(super) file_segments: &'a [PartitionedFileSegmentDescriptorV1],
+        pub(super) files: &'a [PersistedFileGenerationArtifactsV1],
+    }
+
+    impl<'a> LegacyIdentityIndexV1<'a> {
+        fn restore(
+            &self,
+            field: LegacyIdentityFieldV1,
+            value: &str,
+        ) -> Result<Option<&'a str>, CodeIndexProductionErrorV1> {
+            match field {
+                LegacyIdentityFieldV1::Generation if value == GENERATION_ID_MARKER => {
+                    Ok(Some(self.generation_id))
+                }
+                LegacyIdentityFieldV1::SymbolOccurrence
+                    if value.starts_with(SYMBOL_OCCURRENCE_ID_MARKER_PREFIX) =>
+                {
+                    legacy_symbol_identity(value, self.file_segments).map(Some)
+                }
+                LegacyIdentityFieldV1::Chunk if value.starts_with(CHUNK_ID_MARKER_PREFIX) => {
+                    legacy_chunk_identity(value, self.files).map(Some)
+                }
+                LegacyIdentityFieldV1::Other
+                | LegacyIdentityFieldV1::Generation
+                | LegacyIdentityFieldV1::SymbolOccurrence
+                | LegacyIdentityFieldV1::Chunk => Ok(None),
+            }
+        }
+    }
+
+    /// The transcoder's shared state. `failure` carries a restore rejection out
+    /// of `serde`'s error type unchanged; `captured_key` hands one object key's
+    /// classification from the key seed back to the map that read it, which is
+    /// sound because JSON object keys are strings and never nest.
+    struct RestoreContextV1<'a> {
+        index: LegacyIdentityIndexV1<'a>,
+        failure: Cell<Option<CodeIndexProductionErrorV1>>,
+        captured_key: Cell<LegacyIdentityFieldV1>,
+    }
+
+    impl<'a> RestoreContextV1<'a> {
+        fn restore<E: de::Error>(
+            &self,
+            field: LegacyIdentityFieldV1,
+            value: &str,
+        ) -> Result<Option<&'a str>, E> {
+            self.index.restore(field, value).map_err(|error| {
+                let message = error.to_string();
+                self.failure.set(Some(error));
+                E::custom(message)
+            })
+        }
+    }
+
+    /// Deserialize `reader` into `T`, restoring legacy identity markers as the
+    /// stream is read. The restore rejection, when there is one, is returned
+    /// beside the `serde` error so the caller reports the original contract
+    /// message rather than its stringified form.
+    pub(super) fn deserialize_restored<T, R>(
+        reader: R,
+        index: LegacyIdentityIndexV1<'_>,
+    ) -> (
+        Result<T, serde_json::Error>,
+        Option<CodeIndexProductionErrorV1>,
+    )
+    where
+        T: DeserializeOwned,
+        R: std::io::Read,
+    {
+        let context = RestoreContextV1 {
+            index,
+            failure: Cell::new(None),
+            captured_key: Cell::new(LegacyIdentityFieldV1::Other),
+        };
+        let mut deserializer = serde_json::Deserializer::from_reader(reader);
+        // `serde_json::from_reader` is `T::deserialize` followed by `end()`;
+        // keep the trailing-byte rejection the replaced call had.
+        let decoded = T::deserialize(RestoringDeserializerV1 {
+            inner: &mut deserializer,
+            field: LegacyIdentityFieldV1::Other,
+            capture_key: false,
+            context: &context,
+        })
+        .and_then(|value| deserializer.end().map(|()| value));
+        (decoded, context.failure.take())
+    }
+
+    struct RestoringDeserializerV1<'c, 'a, D> {
+        inner: D,
+        field: LegacyIdentityFieldV1,
+        capture_key: bool,
+        context: &'c RestoreContextV1<'a>,
+    }
+
+    macro_rules! forward_deserialize {
+        ($($method:ident),* $(,)?) => {
+            $(
+                fn $method<V>(self, visitor: V) -> Result<V::Value, D::Error>
+                where
+                    V: Visitor<'de>,
+                {
+                    let Self { inner, field, capture_key, context } = self;
+                    inner.$method(RestoringVisitorV1 { inner: visitor, field, capture_key, context })
+                }
+            )*
+        };
+    }
+
+    impl<'de, 'c, 'a, D> Deserializer<'de> for RestoringDeserializerV1<'c, 'a, D>
+    where
+        D: Deserializer<'de>,
+    {
+        type Error = D::Error;
+
+        forward_deserialize!(
+            deserialize_any,
+            deserialize_bool,
+            deserialize_i8,
+            deserialize_i16,
+            deserialize_i32,
+            deserialize_i64,
+            deserialize_i128,
+            deserialize_u8,
+            deserialize_u16,
+            deserialize_u32,
+            deserialize_u64,
+            deserialize_u128,
+            deserialize_f32,
+            deserialize_f64,
+            deserialize_char,
+            deserialize_str,
+            deserialize_string,
+            deserialize_bytes,
+            deserialize_byte_buf,
+            deserialize_option,
+            deserialize_unit,
+            deserialize_seq,
+            deserialize_map,
+            deserialize_identifier,
+            deserialize_ignored_any,
+        );
+
+        fn deserialize_unit_struct<V>(
+            self,
+            name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, D::Error>
+        where
+            V: Visitor<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            inner.deserialize_unit_struct(
+                name,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field,
+                    capture_key,
+                    context,
+                },
+            )
+        }
+
+        fn deserialize_newtype_struct<V>(
+            self,
+            name: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, D::Error>
+        where
+            V: Visitor<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            inner.deserialize_newtype_struct(
+                name,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field,
+                    capture_key,
+                    context,
+                },
+            )
+        }
+
+        fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, D::Error>
+        where
+            V: Visitor<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            inner.deserialize_tuple(
+                len,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field,
+                    capture_key,
+                    context,
+                },
+            )
+        }
+
+        fn deserialize_tuple_struct<V>(
+            self,
+            name: &'static str,
+            len: usize,
+            visitor: V,
+        ) -> Result<V::Value, D::Error>
+        where
+            V: Visitor<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            inner.deserialize_tuple_struct(
+                name,
+                len,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field,
+                    capture_key,
+                    context,
+                },
+            )
+        }
+
+        fn deserialize_struct<V>(
+            self,
+            name: &'static str,
+            fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, D::Error>
+        where
+            V: Visitor<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            inner.deserialize_struct(
+                name,
+                fields,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field,
+                    capture_key,
+                    context,
+                },
+            )
+        }
+
+        fn deserialize_enum<V>(
+            self,
+            name: &'static str,
+            variants: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, D::Error>
+        where
+            V: Visitor<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            inner.deserialize_enum(
+                name,
+                variants,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field,
+                    capture_key,
+                    context,
+                },
+            )
+        }
+
+        fn is_human_readable(&self) -> bool {
+            self.inner.is_human_readable()
+        }
+    }
+
+    struct RestoringVisitorV1<'c, 'a, V> {
+        inner: V,
+        field: LegacyIdentityFieldV1,
+        capture_key: bool,
+        context: &'c RestoreContextV1<'a>,
+    }
+
+    macro_rules! forward_visit {
+        ($($method:ident($argument:ty)),* $(,)?) => {
+            $(
+                fn $method<E>(self, value: $argument) -> Result<V::Value, E>
+                where
+                    E: de::Error,
+                {
+                    self.inner.$method(value)
+                }
+            )*
+        };
+    }
+
+    impl<'de, 'c, 'a, V> Visitor<'de> for RestoringVisitorV1<'c, 'a, V>
+    where
+        V: Visitor<'de>,
+    {
+        type Value = V::Value;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.inner.expecting(formatter)
+        }
+
+        forward_visit!(
+            visit_bool(bool),
+            visit_i8(i8),
+            visit_i16(i16),
+            visit_i32(i32),
+            visit_i64(i64),
+            visit_i128(i128),
+            visit_u8(u8),
+            visit_u16(u16),
+            visit_u32(u32),
+            visit_u64(u64),
+            visit_u128(u128),
+            visit_f32(f32),
+            visit_f64(f64),
+            visit_char(char),
+            visit_bytes(&[u8]),
+            visit_borrowed_bytes(&'de [u8]),
+            visit_byte_buf(Vec<u8>),
+        );
+
+        fn visit_none<E>(self) -> Result<V::Value, E>
+        where
+            E: de::Error,
+        {
+            self.inner.visit_none()
+        }
+
+        fn visit_unit<E>(self) -> Result<V::Value, E>
+        where
+            E: de::Error,
+        {
+            self.inner.visit_unit()
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<V::Value, E>
+        where
+            E: de::Error,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            if capture_key {
+                context.captured_key.set(field_for_key(value));
+                return inner.visit_str(value);
+            }
+            match context.restore::<E>(field, value)? {
+                Some(restored) => inner.visit_str(restored),
+                None => inner.visit_str(value),
+            }
+        }
+
+        fn visit_borrowed_str<E>(self, value: &'de str) -> Result<V::Value, E>
+        where
+            E: de::Error,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            if capture_key {
+                context.captured_key.set(field_for_key(value));
+                return inner.visit_borrowed_str(value);
+            }
+            match context.restore::<E>(field, value)? {
+                Some(restored) => inner.visit_str(restored),
+                None => inner.visit_borrowed_str(value),
+            }
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<V::Value, E>
+        where
+            E: de::Error,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            if capture_key {
+                context.captured_key.set(field_for_key(value.as_str()));
+                return inner.visit_string(value);
+            }
+            let restored = context.restore::<E>(field, value.as_str())?;
+            match restored {
+                Some(restored) => inner.visit_str(restored),
+                None => inner.visit_string(value),
+            }
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<V::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                context,
+                ..
+            } = self;
+            inner.visit_some(RestoringDeserializerV1 {
+                inner: deserializer,
+                field,
+                capture_key: false,
+                context,
+            })
+        }
+
+        fn visit_newtype_struct<D>(self, deserializer: D) -> Result<V::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                context,
+                ..
+            } = self;
+            inner.visit_newtype_struct(RestoringDeserializerV1 {
+                inner: deserializer,
+                field,
+                capture_key: false,
+                context,
+            })
+        }
+
+        fn visit_seq<A>(self, seq: A) -> Result<V::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                context,
+                ..
+            } = self;
+            inner.visit_seq(RestoringSeqV1 {
+                inner: seq,
+                field,
+                context,
+            })
+        }
+
+        fn visit_map<A>(self, map: A) -> Result<V::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let Self { inner, context, .. } = self;
+            inner.visit_map(RestoringMapV1 {
+                inner: map,
+                field: LegacyIdentityFieldV1::Other,
+                context,
+            })
+        }
+
+        fn visit_enum<A>(self, data: A) -> Result<V::Value, A::Error>
+        where
+            A: EnumAccess<'de>,
+        {
+            let Self { inner, context, .. } = self;
+            inner.visit_enum(RestoringEnumV1 {
+                inner: data,
+                context,
+            })
+        }
+    }
+
+    struct RestoringSeedV1<'c, 'a, T> {
+        inner: T,
+        field: LegacyIdentityFieldV1,
+        capture_key: bool,
+        context: &'c RestoreContextV1<'a>,
+    }
+
+    impl<'de, 'c, 'a, T> DeserializeSeed<'de> for RestoringSeedV1<'c, 'a, T>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        type Value = T::Value;
+
+        fn deserialize<D>(self, deserializer: D) -> Result<T::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let Self {
+                inner,
+                field,
+                capture_key,
+                context,
+            } = self;
+            inner.deserialize(RestoringDeserializerV1 {
+                inner: deserializer,
+                field,
+                capture_key,
+                context,
+            })
+        }
+    }
+
+    /// Array elements inherit the enclosing key's classification, matching the
+    /// replaced `Value::Array` arm.
+    struct RestoringSeqV1<'c, 'a, A> {
+        inner: A,
+        field: LegacyIdentityFieldV1,
+        context: &'c RestoreContextV1<'a>,
+    }
+
+    impl<'de, 'c, 'a, A> SeqAccess<'de> for RestoringSeqV1<'c, 'a, A>
+    where
+        A: SeqAccess<'de>,
+    {
+        type Error = A::Error;
+
+        fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, A::Error>
+        where
+            T: DeserializeSeed<'de>,
+        {
+            self.inner.next_element_seed(RestoringSeedV1 {
+                inner: seed,
+                field: self.field,
+                capture_key: false,
+                context: self.context,
+            })
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            self.inner.size_hint()
+        }
+    }
+
+    /// Object members reset the classification to their own key, matching the
+    /// replaced `Value::Object` arm.
+    struct RestoringMapV1<'c, 'a, A> {
+        inner: A,
+        field: LegacyIdentityFieldV1,
+        context: &'c RestoreContextV1<'a>,
+    }
+
+    impl<'de, 'c, 'a, A> MapAccess<'de> for RestoringMapV1<'c, 'a, A>
+    where
+        A: MapAccess<'de>,
+    {
+        type Error = A::Error;
+
+        fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, A::Error>
+        where
+            K: DeserializeSeed<'de>,
+        {
+            self.context.captured_key.set(LegacyIdentityFieldV1::Other);
+            let key = self.inner.next_key_seed(RestoringSeedV1 {
+                inner: seed,
+                field: LegacyIdentityFieldV1::Other,
+                capture_key: true,
+                context: self.context,
+            })?;
+            self.field = self.context.captured_key.get();
+            Ok(key)
+        }
+
+        fn next_value_seed<T>(&mut self, seed: T) -> Result<T::Value, A::Error>
+        where
+            T: DeserializeSeed<'de>,
+        {
+            self.inner.next_value_seed(RestoringSeedV1 {
+                inner: seed,
+                field: self.field,
+                capture_key: false,
+                context: self.context,
+            })
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            self.inner.size_hint()
+        }
+    }
+
+    /// An externally tagged variant is one object member, so its content is
+    /// classified by the variant name exactly as an object key would classify
+    /// it.
+    struct RestoringEnumV1<'c, 'a, A> {
+        inner: A,
+        context: &'c RestoreContextV1<'a>,
+    }
+
+    impl<'de, 'c, 'a, A> EnumAccess<'de> for RestoringEnumV1<'c, 'a, A>
+    where
+        A: EnumAccess<'de>,
+    {
+        type Error = A::Error;
+        type Variant = RestoringVariantV1<'c, 'a, A::Variant>;
+
+        fn variant_seed<T>(self, seed: T) -> Result<(T::Value, Self::Variant), A::Error>
+        where
+            T: DeserializeSeed<'de>,
+        {
+            self.context.captured_key.set(LegacyIdentityFieldV1::Other);
+            let (value, variant) = self.inner.variant_seed(RestoringSeedV1 {
+                inner: seed,
+                field: LegacyIdentityFieldV1::Other,
+                capture_key: true,
+                context: self.context,
+            })?;
+            Ok((
+                value,
+                RestoringVariantV1 {
+                    inner: variant,
+                    field: self.context.captured_key.get(),
+                    context: self.context,
+                },
+            ))
+        }
+    }
+
+    struct RestoringVariantV1<'c, 'a, A> {
+        inner: A,
+        field: LegacyIdentityFieldV1,
+        context: &'c RestoreContextV1<'a>,
+    }
+
+    impl<'de, 'c, 'a, A> VariantAccess<'de> for RestoringVariantV1<'c, 'a, A>
+    where
+        A: VariantAccess<'de>,
+    {
+        type Error = A::Error;
+
+        fn unit_variant(self) -> Result<(), A::Error> {
+            self.inner.unit_variant()
+        }
+
+        fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, A::Error>
+        where
+            T: DeserializeSeed<'de>,
+        {
+            self.inner.newtype_variant_seed(RestoringSeedV1 {
+                inner: seed,
+                field: self.field,
+                capture_key: false,
+                context: self.context,
+            })
+        }
+
+        fn tuple_variant<V>(self, len: usize, visitor: V) -> Result<V::Value, A::Error>
+        where
+            V: Visitor<'de>,
+        {
+            self.inner.tuple_variant(
+                len,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field: self.field,
+                    capture_key: false,
+                    context: self.context,
+                },
+            )
+        }
+
+        fn struct_variant<V>(
+            self,
+            fields: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, A::Error>
+        where
+            V: Visitor<'de>,
+        {
+            self.inner.struct_variant(
+                fields,
+                RestoringVisitorV1 {
+                    inner: visitor,
+                    field: self.field,
+                    capture_key: false,
+                    context: self.context,
+                },
+            )
+        }
+    }
 }
 
 fn decode_generation_evidence(
@@ -1185,33 +1924,25 @@ fn decode_generation_evidence(
         &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<PartitionedGenerationEvidenceV1, CodeIndexProductionErrorV1> {
-    if descriptor.legacy_unpaged {
-        let mut bytes = Vec::new();
-        read_segment(
-            SealedGenerationSegmentReadV1::Whole {
-                digest: &descriptor.segment_digest,
-                size_bytes: descriptor.segment_size_bytes,
-            },
-            &mut bytes,
-        )?;
-        verify_segment_identity(
-            &bytes,
-            &descriptor.segment_digest,
-            descriptor.segment_size_bytes,
-            "sealed generation evidence length exceeds u64",
-            "sealed generation evidence byte size does not match its manifest",
-            "sealed generation evidence digest does not match its manifest",
-        )?;
-        return decode_legacy_generation_evidence(
-            bytes.as_slice(),
-            generation_id,
-            file_segments,
-            files,
-        );
-    }
     let mut reader = PartitionedEvidencePageReaderV1::new(descriptor, &mut read_segment);
-    let decoded = serde_json::from_reader(&mut reader);
+    // A pre-paging segment carries identity markers; restore them while the
+    // stream is read rather than materializing the segment and a DOM.
+    let (decoded, restore_failure) = if descriptor.legacy_unpaged {
+        legacy_identity::deserialize_restored(
+            &mut reader,
+            legacy_identity::LegacyIdentityIndexV1 {
+                generation_id: generation_id.as_str(),
+                file_segments,
+                files,
+            },
+        )
+    } else {
+        (serde_json::from_reader(&mut reader), None)
+    };
     if let Some(error) = reader.take_read_error() {
+        return Err(error);
+    }
+    if let Some(error) = restore_failure {
         return Err(error);
     }
     let evidence = decoded.map_err(|error| {
@@ -1760,37 +2491,18 @@ impl CodeIndexPublishedGenerationV1 {
                 "sealed generation segment does not match its content address",
             )?;
         }
-        if generation.generation_evidence.legacy_unpaged {
-            segment.clear();
-            read_segment(
-                SealedGenerationSegmentReadV1::Whole {
-                    digest: &generation.generation_evidence.segment_digest,
-                    size_bytes: generation.generation_evidence.segment_size_bytes,
-                },
-                &mut segment,
-            )?;
-            verify_segment_identity(
-                &segment,
-                &generation.generation_evidence.segment_digest,
-                generation.generation_evidence.segment_size_bytes,
-                "sealed generation evidence length exceeds u64",
-                "sealed generation evidence byte size does not match its manifest",
-                "sealed generation evidence digest does not match its manifest",
-            )?;
-        } else {
-            let mut evidence = PartitionedEvidencePageReaderV1::new(
-                &generation.generation_evidence,
-                &mut read_segment,
-            );
-            std::io::copy(&mut evidence, &mut std::io::sink()).map_err(|error| {
-                evidence.take_read_error().unwrap_or_else(|| {
-                    CodeIndexProductionErrorV1::Contract(format!(
-                        "sealed generation evidence verification failed: {error}"
-                    ))
-                })
-            })?;
-            evidence.finish()?;
-        }
+        let mut evidence = PartitionedEvidencePageReaderV1::new(
+            &generation.generation_evidence,
+            &mut read_segment,
+        );
+        std::io::copy(&mut evidence, &mut std::io::sink()).map_err(|error| {
+            evidence.take_read_error().unwrap_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation evidence verification failed: {error}"
+                ))
+            })
+        })?;
+        evidence.finish()?;
         Ok(true)
     }
 }
