@@ -26,9 +26,8 @@ use super::{
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
     GRAPH_REPLAY_POOL_ACQUIRE_BUDGET, GRAPH_REPLAY_POOL_ACQUIRE_POLL, MAX_TRANSACTION_BYTES,
     QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, RETENTION_POINTER_WRITE_CONTEXT,
-    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel,
-    read_optional_active_pointer, storage, sync_directory, total_bytes, validate_generation_file,
-    write_active_pointer,
+    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel, read_optional_active_pointer, storage,
+    sync_directory, total_bytes, validate_generation_file, write_active_pointer,
 };
 
 const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<CodeGenerationRetentionTransactionV1> =

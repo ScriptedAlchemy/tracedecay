@@ -2080,7 +2080,9 @@ impl GraphDbRegistry {
         // separate a complete staged row set from that hole; anything else
         // falls back to the sealed artifact, and a republication restages
         // every page.
-        if sealed_code_generation && database.staging_generation_rows(&locator)? != expected_row_counts {
+        if sealed_code_generation
+            && database.staging_generation_rows(&locator)? != expected_row_counts
+        {
             if !dependencies.is_empty() {
                 return Err(GraphDbError::ResetRequired {
                     message: "dependency-bearing graph generation lost its staging rows; republish from the canonical manifest".to_owned(),
