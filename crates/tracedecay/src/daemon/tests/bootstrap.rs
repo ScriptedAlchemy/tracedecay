@@ -3259,19 +3259,11 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         ..test_handshake_defaults()
     };
 
-    let store_administration = engine.store_administration.clone();
-    let writer_held = Arc::new(tokio::sync::Notify::new());
-    let writer_held_by_blocker = Arc::clone(&writer_held);
-    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
-    let blocker = tokio::spawn(async move {
-        store_administration
-            .with_writer(|| async move {
-                writer_held_by_blocker.notify_one();
-                writer_release.await.expect("release writer gate");
-            })
-            .await;
-    });
-    writer_held.notified().await;
+    // Project composition admits through its own capacity gate. The global
+    // store writer does not block route publication and cannot hold this open.
+    let capacity_gate =
+        super::super::project_open_capacity_gate(engine.project_open_gates.as_ref()).await;
+    let capacity_admission = capacity_gate.lock().await;
 
     let request = json!({
         "jsonrpc": "2.0",
@@ -3290,8 +3282,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     let response_within_bound =
         tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut request_task).await;
 
-    release_writer.send(()).expect("signal writer gate release");
-    blocker.await.expect("writer gate blocker task");
+    drop(capacity_admission);
     if response_within_bound.is_err() {
         let _ = request_task.await;
     }
