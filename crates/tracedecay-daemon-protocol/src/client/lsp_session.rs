@@ -185,8 +185,22 @@ impl DaemonLspSessionClient {
     ) -> Result<(), InvocationError> {
         let request_id = self.next_request_id()?;
         let cancellation_context = cancellation.context();
+        // Reconnect exists because the pinned connection is already known
+        // broken: an interrupted invocation took its transport out of the
+        // lease. Reusing it would fail every reconnect with `Unavailable`, so
+        // retire the lease without returning it to the pool — its drop also
+        // discards any idle sibling that shared the same failed daemon
+        // process — and resume the session over a freshly handshaked one.
+        drop(self.connection.take());
+        let (mut connection, _in_flight) = self
+            .invocation
+            .checkout_connection_controlled(&deadline, &cancellation)
+            .await
+            .map_err(map_invocation_error)?;
         let response = self
-            .invoke(
+            .invocation
+            .invoke_controlled_on_connection(
+                &mut connection,
                 crate::contract::DaemonInvocationRequest::lsp_reconnect(
                     request_id,
                     self.session.clone(),
@@ -195,11 +209,14 @@ impl DaemonLspSessionClient {
                 ),
                 deadline,
                 cancellation,
+                InvocationCancellationPolicy::ReadOnly,
             )
-            .await?;
+            .await
+            .map_err(map_invocation_error)?;
         match response.outcome {
             crate::contract::DaemonInvocationOutcome::LspReconnected { session } => {
                 self.session = session;
+                self.connection = Some(connection);
                 Ok(())
             }
             outcome => Err(invocation_outcome_error(outcome)),
