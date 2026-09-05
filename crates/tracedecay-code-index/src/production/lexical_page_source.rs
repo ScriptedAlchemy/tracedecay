@@ -1402,6 +1402,20 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             .saturating_add(self.maximum_page_bytes)
     }
 
+    /// Reduce the next page after downstream admission refuses it. Acceptance
+    /// alone advances the cursor, so this remints only the uncommitted suffix.
+    /// The chunk bound also caps import records, so import-only pages shrink.
+    /// A single record cannot be subdivided and keeps its typed refusal.
+    pub fn tighten_page_record_bound(&mut self) -> Option<(usize, usize)> {
+        let previous = self.maximum_page_chunks;
+        if previous <= 1 {
+            return None;
+        }
+        let tightened = (previous / 2).max(1);
+        self.maximum_page_chunks = tightened;
+        Some((previous, tightened))
+    }
+
     /// Compact retained file positions and partitioned content identities.
     /// These scale with file count; decoded chunks only occupy the admission window.
     pub fn retained_layout_bytes(&self) -> usize {
@@ -1709,11 +1723,12 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                     ));
                 }
                 if (!chunks.is_empty() || !imports.is_empty())
-                    && page_bytes
-                        .saturating_add(symbol_display_bytes)
-                        .saturating_add(import_bytes)
-                        .saturating_add(serialized.len())
-                        > self.maximum_page_bytes
+                    && (chunks.len().saturating_add(imports.len()) >= self.maximum_page_chunks
+                        || page_bytes
+                            .saturating_add(symbol_display_bytes)
+                            .saturating_add(import_bytes)
+                            .saturating_add(serialized.len())
+                            > self.maximum_page_bytes)
                 {
                     return self.commit_page(
                         previous_cursor,

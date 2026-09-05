@@ -5708,6 +5708,86 @@ fn text_artifact_hash_rejects_a_named_file_replaced_during_hashing() {
 }
 
 #[test]
+fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
+    struct SubdivisionControl {
+        cancelled: bool,
+    }
+    impl CodeIndexExecutionControlV1 for SubdivisionControl {
+        fn is_cancelled(&self) -> bool {
+            self.cancelled
+        }
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+    let source = (0..256)
+        .map(|ordinal| format!("pub fn subdivision_{ordinal}() -> usize {{ {ordinal} }}\n"))
+        .collect::<String>();
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().unwrap();
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().unwrap());
+    let latest = scheduler.latest_complete().unwrap();
+    assert!(!latest.advance_text_serving(1).unwrap());
+    let before = {
+        let mut slot = latest.text_projection_build.lock_slot();
+        let super::CodeTextProjectionSlotV1::Building(build) = &mut *slot else {
+            panic!("partial text build");
+        };
+        let progress = build.builder.progress().unwrap();
+        assert!(progress.next_page_ordinal > 0);
+        build.builder =
+            CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &build.staging_path,
+                latest.text_projection_metadata().unwrap(),
+                build.builder.fixed_ledger_charge_bytes() + 1,
+                &SubdivisionControl { cancelled: false },
+            )
+            .unwrap();
+        progress
+    };
+    let mut retries = 0;
+    loop {
+        match latest.advance_text_serving(1) {
+            Ok(false) => {
+                retries += 1;
+                assert!(
+                    retries <= 16,
+                    "subdivision must terminate within the initial page bound"
+                );
+                assert_eq!(
+                    latest
+                        .advance_artifact_text_serving(1, &SubdivisionControl { cancelled: true }),
+                    Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
+                );
+            }
+            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => break,
+            other => panic!("unexpected projection outcome: {other:?}"),
+        }
+        let slot = latest.text_projection_build.lock_slot();
+        let super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
+            panic!("refusal keeps resumable build");
+        };
+        assert_eq!(build.builder.progress().unwrap(), before);
+        assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
+    }
+    assert!(
+        retries > 0,
+        "oversized page must subdivide before terminal refusal"
+    );
+    let slot = latest.text_projection_build.lock_slot();
+    let super::CodeTextProjectionSlotV1::Building(build) = &*slot else {
+        panic!("indivisible refusal keeps durable prefix");
+    };
+    assert_eq!(build.builder.progress().unwrap(), before);
+    assert_eq!(Some(build.source.cursor()), before.next_cursor.as_ref());
+}
+
+#[test]
 fn source_window_and_builder_share_one_memory_reservation() {
     let ceiling =
         tracedecay_query::retrieval::lexical::CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1;
