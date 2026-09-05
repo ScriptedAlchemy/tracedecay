@@ -219,7 +219,7 @@ impl ModelArtifactStore {
             Ok(files) => files,
             Err(error) => {
                 self.quarantine_and_discard(
-                    &session,
+                    session,
                     quarantine_reason_for_import_error(&error),
                     now_unix,
                 )?;
@@ -236,11 +236,11 @@ impl ModelArtifactStore {
             .keys()
             .any(|path| !declared.contains_key(path.as_str()))
         {
-            self.quarantine_and_discard(&session, QuarantineReasonV1::UndeclaredMember, now_unix)?;
+            self.quarantine_and_discard(session, QuarantineReasonV1::UndeclaredMember, now_unix)?;
             return Err(ArtifactImportErrorV1::UndeclaredMember);
         }
         if files.len() != declared.len() {
-            self.quarantine_and_discard(&session, QuarantineReasonV1::IdentityMismatch, now_unix)?;
+            self.quarantine_and_discard(session, QuarantineReasonV1::IdentityMismatch, now_unix)?;
             return Err(ArtifactImportErrorV1::MemberMismatch);
         }
 
@@ -251,7 +251,7 @@ impl ModelArtifactStore {
             let result = stream_local_member(self, &mut session, member, path, now_unix);
             if let Err(error) = result {
                 self.quarantine_and_discard(
-                    &session,
+                    session,
                     quarantine_reason_for_import_error(&error),
                     now_unix,
                 )?;
@@ -281,7 +281,7 @@ impl ModelArtifactStore {
         if let Some(pinned) = &session.meta.immutable_source_revision {
             if pinned != &source.immutable_revision {
                 self.quarantine_and_discard(
-                    &session,
+                    session,
                     QuarantineReasonV1::IdentityMismatch,
                     now_unix,
                 )?;
@@ -324,7 +324,7 @@ impl ModelArtifactStore {
                     || response_len > request.max_bytes
                 {
                     self.quarantine_and_discard(
-                        &session,
+                        session,
                         QuarantineReasonV1::IdentityMismatch,
                         now_unix,
                     )?;
@@ -335,7 +335,7 @@ impl ModelArtifactStore {
                     self.stage_member_chunk(&mut session, member.role, &response.bytes, now_unix)
                 }) {
                     self.quarantine_and_discard(
-                        &session,
+                        session,
                         quarantine_reason_for_import_error(&error),
                         now_unix,
                     )?;
@@ -458,6 +458,10 @@ impl ModelArtifactStore {
                 .records
                 .insert(record.artifact_digest.to_string(), record.clone());
             self.save_inventory_locked(&inventory)?;
+            // The published bytes are already durable; release the staging
+            // handle before the cleanup because Windows refuses to remove a
+            // directory while any handle to it is open.
+            drop(staging_dir);
             self.remove_staging_dir_path(&staging_id)?;
             self.clear_recovery_locked()?;
         });
@@ -484,18 +488,24 @@ impl ModelArtifactStore {
         self.save_inventory_locked(&inventory)
     }
 
+    /// Takes the session by value: Windows refuses to remove a directory while
+    /// any handle to it is open, and the session owns `Dir` handles on both the
+    /// staging directory and its `members` child. Those handles must be
+    /// released before the discard, so a discarded session can never be reused.
     pub(super) fn quarantine_and_discard(
         &self,
-        session: &ImportSession,
+        session: ImportSession,
         reason: QuarantineReasonV1,
         now_unix: u64,
     ) -> Result<(), ArtifactImportErrorV1> {
         {
             let _lock = self.acquire_lock()?;
             self.recover_locked()?;
-            self.quarantine_staging_locked(session, reason, now_unix)?;
+            self.quarantine_staging_locked(&session, reason, now_unix)?;
         }
-        self.remove_staging_dir_path(&session.staging_id)
+        let staging_id = session.staging_id.clone();
+        drop(session);
+        self.remove_staging_dir_path(&staging_id)
     }
 
     /// Mark an installed artifact revoked. Revoked artifacts are never
