@@ -884,7 +884,7 @@ fn plugin_permission_coverage_accepts_wildcard_or_full_per_tool_grants() {
     );
     assert!(
         plugin_perms_covered(&[wildcard.as_str()], &[]),
-        "the wildcard rule covers the namespace even without a registered catalog"
+        "the wildcard rule covers the namespace even with no per-tool list"
     );
 }
 

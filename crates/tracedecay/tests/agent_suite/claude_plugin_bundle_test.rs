@@ -465,12 +465,11 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
     const PLUGIN_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
 
     let source_agents = crate::common::repository_path("plugin/agents");
-    // `read_only_tool_names()` reads the MCP catalog through the registered
-    // `ports::mcp_tools` slot, which answers empty until the composition root
-    // wires it. Only the root can register it and no test binary runs `main`,
-    // so an unwired process would fail every agent on its first tool.
-    tracedecay::agents::register_mcp_tool_catalog_ports().expect("MCP tool catalog ports");
+    // `read_only_tool_names()` reads the catalog straight from the crate that
+    // owns it, so no composition-root registration precedes this and an
+    // unavailable catalog is an error rather than an empty allowlist.
     let live_read_only: BTreeSet<String> = tracedecay::agents::read_only_tool_names()
+        .expect("the advertised tool catalog")
         .into_iter()
         .collect();
     assert!(

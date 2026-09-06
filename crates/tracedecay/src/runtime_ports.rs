@@ -10,9 +10,11 @@
 //! Only the composition root can fill them, and it must do so before any
 //! transcript ingest, host installer, hook, or branch lock runs. That is what
 //! [`register_runtime_ports`] is: the complete, idempotent, root-owned wiring
-//! call. The CLI first installs the non-catalog subset and then completes the
-//! registration for commands that can reach host integration. Composition-root
-//! registry wrappers (`join_standalone_session_registry`, session-runtime
+//! call. There is no partial form: an earlier split that installed everything
+//! *except* the agent-host MCP tool catalog let any installer reached on that
+//! path write an empty tool permission set with no error, so the catalog is
+//! now read directly from `tracedecay-mcp` by the crate that needs it and is
+//! not wired here at all. Composition-root registry wrappers (`join_standalone_session_registry`, session-runtime
 //! shutdown, host admission) invoke the complete form for embedded and
 //! integration-test runtimes that never pass through `main`. The extracted
 //! store-runtime crate never calls this.
@@ -35,26 +37,13 @@ use tracedecay_domain::errors::Result;
 /// which fail quietly (or fail closed) when the root never registered.
 #[hotpath::measure(label = "runtime_ports.register")]
 pub fn register_runtime_ports() -> Result<()> {
-    register_runtime_ports_without_mcp_tool_catalog();
-    crate::agents::register_mcp_tool_catalog_ports()
-}
-
-/// Installs the runtime ports needed by ordinary command execution without
-/// assembling the agent-host MCP schema catalog.
-///
-/// `tracedecay tool` resolves its selected operation itself, while daemon and
-/// host lifecycle entrypoints still call [`register_runtime_ports`] and retain
-/// the eager catalog failure check before serving or changing integrations.
-#[hotpath::measure(label = "runtime_ports.register_without_mcp_catalog")]
-pub fn register_runtime_ports_without_mcp_tool_catalog() {
     register_session_ports();
     register_agent_host_ports();
-    tracedecay_code_index_runtime::install_application_catalog_snapshot(
-        compose_application_catalog_snapshot,
-    );
+    Ok(())
 }
 
-fn compose_application_catalog_snapshot() -> std::result::Result<
+/// Adapts the root catalog composer to the code-index runtime's provider seam.
+pub(crate) fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
 > {
@@ -120,21 +109,20 @@ fn register_agent_host_ports() {
     automation_ports::session_store::register_canonical_project_key(
         tracedecay_global_db::RegisteredGlobalDb::canonical_project_key,
     );
-    ports::hook_runtime::register_daemon_tool_invoker(daemon_tool_json);
-    ports::hook_runtime::register_project_root_resolver(resolve_project_root_with_identity);
-    ports::hook_runtime::register_hook_scope_resolver(resolve_hook_scope);
-    ports::hook_runtime::register_hook_event_notifier(notify_hook_event);
-    ports::hook_runtime::register_hook_timing_gate(hook_timings_enabled);
-    ports::hook_runtime::register_project_initialization_gate(
-        crate::tracedecay::TraceDecay::is_initialized,
-    );
-    ports::hook_runtime::register_store_layout_resolver(resolve_hook_store_layout);
-    ports::hook_runtime::register_memory_injection_gate(
-        tracedecay_agent_hosts::hooks::memory_inject::memory_injection_enabled,
-    );
-    ports::hook_runtime::register_cursor_catch_up_ingest_max_bytes(
-        cursor_catch_up_ingest_max_bytes,
-    );
+    // One handle, built here and installed whole: a hook path either has every
+    // root capability or the process reports a bootstrap failure. Two former
+    // slots are absent by design — the memory-injection gate and the Cursor
+    // ingest ceiling were agent-hosts' own function and constant round-tripped
+    // through the root, and their readers now call them directly.
+    ports::hook_runtime::install(ports::hook_runtime::HookRuntimeV1 {
+        daemon_tool: daemon_tool_json,
+        project_root_resolver: resolve_project_root_with_identity,
+        scope_resolver: resolve_hook_scope,
+        event_notifier: notify_hook_event,
+        timing_gate: hook_timings_enabled,
+        project_initialization_gate: crate::tracedecay::TraceDecay::is_initialized,
+        store_layout_resolver: resolve_hook_store_layout,
+    });
 }
 
 #[hotpath::measure(label = "runtime_ports.codex_app_server")]
@@ -233,10 +221,6 @@ fn resolve_hook_store_layout(
     ))
 }
 
-fn cursor_catch_up_ingest_max_bytes() -> u64 {
-    tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,30 +282,26 @@ mod tests {
         );
     }
 
+    /// The whole hook runtime arrives as one handle, so this is the single
+    /// assertion that the composition root is complete for every hook path.
     #[test]
-    fn memory_injection_gate_matches_the_root_reader() {
+    fn the_hook_runtime_handle_is_installed_after_registration() {
         let _pinned = registered();
-        assert_eq!(
-            tracedecay_agent_hosts::ports::hook_runtime::memory_injection_enabled(),
-            tracedecay_agent_hosts::hooks::memory_inject::memory_injection_enabled(),
-            "registered gate must back the memory-injection port"
+        assert!(
+            tracedecay_agent_hosts::ports::hook_runtime::installed().is_some(),
+            "register_runtime_ports must install the hook runtime handle"
         );
     }
 
+    /// The tool catalog is no longer wired here at all: host installers read
+    /// it from its owning crate, so it is readable with no registration and an
+    /// unavailable catalog is an error rather than an empty tool set.
     #[test]
-    fn cursor_catch_up_ceiling_is_bounded_after_registration() {
+    fn the_advertised_tool_catalog_needs_no_registration() {
         let _pinned = registered();
-        let ceiling =
-            tracedecay_agent_hosts::ports::hook_runtime::cursor_catch_up_ingest_max_bytes();
-        assert_ne!(
-            ceiling,
-            u64::MAX,
-            "an unwired ceiling reads as u64::MAX and silences the doctor check"
-        );
-        assert_eq!(
-            ceiling,
-            tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
-        );
+        let tools = tracedecay_agent_hosts::ports::mcp_tools::advertised_tools()
+            .expect("the advertised tool catalog");
+        assert!(!tools.is_empty());
     }
 
     #[test]

@@ -1020,6 +1020,10 @@ mod tests {
     /// `afterFileEdit` surfaces).
     #[test]
     fn cursor_after_file_edit_decision_dedupes_per_session() {
+        // States the dependency explicitly: this path gates on
+        // `is_project_initialized`, which is a composition capability, not a
+        // value this crate can default.
+        crate::ports::hook_runtime::install_crate_test_runtime();
         let _lock = crate::hooks::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();

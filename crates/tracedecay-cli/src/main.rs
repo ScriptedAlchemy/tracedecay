@@ -557,11 +557,10 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // the composition root. Must precede argument parsing: hook, install, and
     // ingest paths all read these slots, and an unregistered slot fails quietly
     // (no LCM redaction, no memory injection, zero turn costs) rather than
-    // loudly. The agent-host MCP catalog is the one exception: assembling all
-    // schemas costs hundreds of milliseconds and `tool` resolves its selected
-    // operation directly, so that port is installed only after parsing proves
-    // another command needs the eager catalog check.
-    tracedecay::register_runtime_ports_without_mcp_tool_catalog();
+    // loudly. The agent-host MCP catalog is no longer among them — host
+    // installers read it from `tracedecay-mcp` on demand, so `tool` still
+    // pays nothing for the ~160 schemas it never looks at.
+    tracedecay::register_runtime_ports()?;
     let args: Vec<String> = std::env::args().collect();
     #[cfg(feature = "hotpath")]
     if let Some(command) = args.get(1) {
@@ -591,9 +590,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         }
     };
     normalize_tool_reserved_global_flags(&mut cli);
-    if requires_eager_mcp_tool_catalog(cli.command.as_ref()) {
-        tracedecay::agents::register_mcp_tool_catalog_ports()?;
-    }
     if let Some(Commands::Daemon {
         action:
             DaemonAction::Run {
@@ -1976,10 +1972,6 @@ fn should_skip_agent_install_check(command: &Commands) -> bool {
 
 fn is_local_install_command(command: &Commands) -> bool {
     matches!(command, Commands::Install { local: true, .. })
-}
-
-fn requires_eager_mcp_tool_catalog(command: Option<&Commands>) -> bool {
-    !matches!(command, Some(Commands::Tool { .. }))
 }
 
 fn normalize_tool_reserved_global_flags(cli: &mut Cli) {

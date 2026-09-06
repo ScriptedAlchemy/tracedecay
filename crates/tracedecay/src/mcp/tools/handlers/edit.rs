@@ -669,7 +669,7 @@ mod tests {
         // composition root fills. Without this the fixture fails closed with
         // `cannot resolve Hook repository/worktree scope: no Hook scope
         // resolver is registered`. Registration is first-wins and idempotent.
-        crate::register_runtime_ports_without_mcp_tool_catalog();
+        crate::register_runtime_ports().expect("root runtime ports");
         let profile_root = project_root.join(".tracedecay-test-profile");
         let open_options = TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
