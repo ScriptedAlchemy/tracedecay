@@ -294,8 +294,8 @@ pub fn create_private_file_retained(
 }
 
 /// Atomically replace one sibling file with another through exact file and
-/// parent-directory handles.
-pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
+/// parent-directory handles, returning the exact published file handle.
+pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<File> {
     const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
     const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
 
@@ -332,6 +332,7 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
         ));
     }
 
+    let ancestor_handles = hold_directory_ancestors(&source)?;
     let parent = open_raw_handle(
         source_parent,
         OPEN_EXISTING,
@@ -410,7 +411,8 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     {
         return Err(io::Error::last_os_error());
     }
-    source_file.sync_all()
+    drop(ancestor_handles);
+    Ok(source_file)
 }
 
 /// Returns bytes available to the current user at `path` (quota-aware).
@@ -1176,7 +1178,8 @@ mod tests {
         replacement_file.write_all(b"new").unwrap();
         drop(replacement_file);
 
-        replace_file_atomically(&replacement, &path).unwrap();
+        let published = replace_file_atomically(&replacement, &path).unwrap();
+        drop(published);
         let mut old_contents = Vec::new();
         reader.read_to_end(&mut old_contents).unwrap();
         assert_eq!(old_contents, b"old");
@@ -1214,7 +1217,8 @@ mod tests {
         assert_eq!(held_contents, b"old");
 
         drop(held_reader);
-        replace_file_atomically(&source, &destination).unwrap();
+        let published = replace_file_atomically(&source, &destination).unwrap();
+        drop(published);
         assert_eq!(std::fs::read(&destination).unwrap(), b"new");
         assert_eq!(
             std::fs::read(&source).unwrap_err().kind(),
