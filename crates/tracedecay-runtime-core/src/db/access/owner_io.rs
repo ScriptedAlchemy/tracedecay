@@ -417,10 +417,20 @@ pub(super) fn replace_file_atomically(
     path: &Path,
     record_name: &str,
 ) -> Result<()> {
-    crate::storage::retry_transient_file_op(|| {
-        tracedecay_private_fs::replace_file_atomically(temporary, path)
-    })
-    .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
+    let mut published = None;
+    let result = crate::storage::retry_transient_file_op(|| {
+        if published.is_none() {
+            published = Some(tracedecay_private_fs::replace_file_atomically(
+                temporary, path,
+            )?);
+        }
+        published
+            .as_ref()
+            .expect("published handle was retained")
+            .sync_all()
+    });
+    drop(published);
+    result.map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
 
 pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()> {
