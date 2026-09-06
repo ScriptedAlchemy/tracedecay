@@ -16,7 +16,7 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 
 use super::fence::{
     StoreContentFence, capture_store_content_fence_in_dir_controlled,
-    open_store_directory_nofollow, open_store_parent_nofollow,
+    open_store_directory_nofollow, open_store_parent_nofollow, store_root_identity,
 };
 use super::{
     CollectionControl, CollectionFailureKind, CollectionMutationFailure,
@@ -699,14 +699,6 @@ pub(super) fn recover_existing_store_quarantine(
         if quarantine_original_name(name) != Some(original) {
             continue;
         }
-        let journal = journal_name(name);
-        if capability.parent.symlink_metadata(&journal).is_ok() {
-            outcomes.push(QuarantineRecoveryOutcome::Retained {
-                quarantine_path: parent_path.join(&file_name),
-                failure: None,
-            });
-            continue;
-        }
         if let Some(outcome) =
             recover_named_store_quarantine(profile_root, data_root, &file_name, parent_path)?
         {
@@ -738,28 +730,89 @@ pub(super) fn recover_named_store_quarantine(
     quarantine_name: &OsStr,
     parent_path: &Path,
 ) -> Result<Option<QuarantineRecoveryOutcome>, CollectionFailureKind> {
+    recover_named_store_quarantine_inner(
+        profile_root,
+        data_root,
+        quarantine_name,
+        parent_path,
+        || {},
+    )
+}
+
+#[cfg(test)]
+pub(super) fn recover_named_store_quarantine_controlled(
+    profile_root: &Path,
+    data_root: &Path,
+    quarantine_name: &OsStr,
+    parent_path: &Path,
+    after_rename: impl FnOnce(),
+) -> Result<Option<QuarantineRecoveryOutcome>, CollectionFailureKind> {
+    recover_named_store_quarantine_inner(
+        profile_root,
+        data_root,
+        quarantine_name,
+        parent_path,
+        after_rename,
+    )
+}
+
+fn recover_named_store_quarantine_inner(
+    profile_root: &Path,
+    data_root: &Path,
+    quarantine_name: &OsStr,
+    parent_path: &Path,
+    after_rename: impl FnOnce(),
+) -> Result<Option<QuarantineRecoveryOutcome>, CollectionFailureKind> {
     let capability = open_store_parent_nofollow(profile_root, data_root)?;
     let quarantine_path = parent_path.join(quarantine_name);
-    match capability.parent.open_dir_nofollow(quarantine_name) {
-        Ok(root) => drop(root),
+    let quarantine_root = match capability.parent.open_dir_nofollow(quarantine_name) {
+        Ok(root) => root,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => {
+        Err(error) => {
             return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                failure: Some(CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                    quarantine_path.clone(),
+                    None,
+                    &error,
+                )),
                 quarantine_path,
-                failure: None,
             }));
         }
-    }
+    };
+    let expected_root_identity = match store_root_identity(&quarantine_root) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(quarantine_root);
+            return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                failure: Some(CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                    quarantine_path.clone(),
+                    None,
+                    &error,
+                )),
+                quarantine_path,
+            }));
+        }
+    };
+    drop(quarantine_root);
+
     let journal = quarantine_name
         .to_str()
         .map(journal_name)
         .ok_or(CollectionFailureKind::InspectFailed)?;
-    if capability.parent.symlink_metadata(&journal).is_ok() {
+    let journal_path = parent_path.join(&journal);
+    if classify_recovery_journal_probe(
+        capability.parent.symlink_metadata(&journal),
+        journal_path,
+        &expected_root_identity,
+    )? {
         return Ok(Some(QuarantineRecoveryOutcome::Retained {
             quarantine_path,
             failure: None,
         }));
     }
+
     match rename_noreplace(
         &capability.parent,
         quarantine_name,
@@ -767,28 +820,177 @@ pub(super) fn recover_named_store_quarantine(
         &capability.leaf_name,
     ) {
         Ok(()) => {
+            after_rename();
+            let restored_root = match capability.parent.open_dir_nofollow(&capability.leaf_name) {
+                Ok(root) => root,
+                Err(error) => {
+                    let failure = CollectionMutationFailure::from_io_error(
+                        CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                        data_root.to_path_buf(),
+                        Some(expected_root_identity.clone()),
+                        &error,
+                    );
+                    return Ok(Some(retain_failed_legacy_restore(
+                        &capability.parent,
+                        &capability.leaf_name,
+                        quarantine_name,
+                        data_root,
+                        &quarantine_path,
+                        &expected_root_identity,
+                        failure,
+                    )));
+                }
+            };
+            let restored_identity = match store_root_identity(&restored_root) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    drop(restored_root);
+                    let failure = CollectionMutationFailure::from_io_error(
+                        CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                        data_root.to_path_buf(),
+                        Some(expected_root_identity.clone()),
+                        &error,
+                    );
+                    return Ok(Some(retain_failed_legacy_restore(
+                        &capability.parent,
+                        &capability.leaf_name,
+                        quarantine_name,
+                        data_root,
+                        &quarantine_path,
+                        &expected_root_identity,
+                        failure,
+                    )));
+                }
+            };
+            if restored_identity != expected_root_identity {
+                drop(restored_root);
+                let failure = CollectionMutationFailure::without_native_error(
+                    CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                    data_root.to_path_buf(),
+                    Some(expected_root_identity.clone()),
+                );
+                return Ok(Some(retain_failed_legacy_restore(
+                    &capability.parent,
+                    &capability.leaf_name,
+                    quarantine_name,
+                    data_root,
+                    &quarantine_path,
+                    &expected_root_identity,
+                    failure,
+                )));
+            }
             let failure = sync_directory(&capability.parent).err().map(|error| {
                 CollectionMutationFailure::from_io_error(
                     CollectionMutationOperation::ParentSync,
                     parent_path.to_path_buf(),
-                    None,
+                    Some(expected_root_identity),
                     &error,
                 )
             });
+            drop(restored_root);
             Ok(Some(QuarantineRecoveryOutcome::Restored {
                 restored_path: data_root.to_path_buf(),
                 failure,
             }))
         }
         Err(error) => Ok(Some(QuarantineRecoveryOutcome::Retained {
-            quarantine_path,
             failure: Some(CollectionMutationFailure::from_io_error(
                 CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
                 data_root.to_path_buf(),
-                None,
+                Some(expected_root_identity),
                 &error,
             )),
+            quarantine_path,
         })),
+    }
+}
+
+fn retain_failed_legacy_restore(
+    parent: &Dir,
+    live_name: &OsStr,
+    quarantine_name: &OsStr,
+    data_root: &Path,
+    quarantine_path: &Path,
+    expected_root_identity: &StoreRootIdentity,
+    primary_failure: CollectionMutationFailure,
+) -> QuarantineRecoveryOutcome {
+    match rename_noreplace(parent, live_name, parent, quarantine_name) {
+        Ok(()) => {
+            let failure = match sync_directory(parent) {
+                Err(error) if primary_failure.raw_os_error.is_none() => {
+                    CollectionMutationFailure::from_io_error(
+                        CollectionMutationOperation::ParentSync,
+                        quarantine_path
+                            .parent()
+                            .map_or_else(PathBuf::new, Path::to_path_buf),
+                        Some(expected_root_identity.clone()),
+                        &error,
+                    )
+                }
+                Ok(()) | Err(_) => primary_failure,
+            };
+            QuarantineRecoveryOutcome::Retained {
+                quarantine_path: quarantine_path.to_path_buf(),
+                failure: Some(failure),
+            }
+        }
+        Err(error) => {
+            let reverse_failure = CollectionMutationFailure::from_io_error(
+                CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+                quarantine_path.to_path_buf(),
+                Some(expected_root_identity.clone()),
+                &error,
+            );
+            let failure = if primary_failure.raw_os_error.is_some() {
+                primary_failure
+            } else {
+                reverse_failure
+            };
+            if child_has_store_identity(parent, quarantine_name, expected_root_identity) {
+                QuarantineRecoveryOutcome::Retained {
+                    quarantine_path: quarantine_path.to_path_buf(),
+                    failure: Some(failure),
+                }
+            } else if child_has_store_identity(parent, live_name, expected_root_identity)
+                || parent.open_dir_nofollow(live_name).is_ok()
+            {
+                QuarantineRecoveryOutcome::Restored {
+                    restored_path: data_root.to_path_buf(),
+                    failure: Some(failure),
+                }
+            } else {
+                QuarantineRecoveryOutcome::Retained {
+                    quarantine_path: quarantine_path.to_path_buf(),
+                    failure: Some(failure),
+                }
+            }
+        }
+    }
+}
+
+fn child_has_store_identity(parent: &Dir, name: &OsStr, expected: &StoreRootIdentity) -> bool {
+    let Ok(root) = parent.open_dir_nofollow(name) else {
+        return false;
+    };
+    store_root_identity(&root).is_ok_and(|identity| identity == *expected)
+}
+
+pub(super) fn classify_recovery_journal_probe(
+    probe: std::io::Result<cap_std::fs::Metadata>,
+    journal_path: PathBuf,
+    expected_root_identity: &StoreRootIdentity,
+) -> Result<bool, CollectionFailureKind> {
+    match probe {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(CollectionFailureKind::RemoveFailed(
+            CollectionMutationFailure::from_io_error(
+                CollectionMutationOperation::ProbeRecoveryJournal,
+                journal_path,
+                Some(expected_root_identity.clone()),
+                &error,
+            ),
+        )),
     }
 }
 

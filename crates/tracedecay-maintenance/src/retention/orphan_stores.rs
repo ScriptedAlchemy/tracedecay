@@ -301,6 +301,8 @@ pub enum CollectionMutationOperation {
     PublishQuarantineRenameMarker,
     RenameLiveLeafToQuarantine,
     RestoreLiveLeafFromQuarantine,
+    ProbeRecoveryJournal,
+    ValidateRestoredStoreIdentity,
     ClearRecoveryJournal,
     MarkRetirementCommitted,
     RecursiveRemove,
