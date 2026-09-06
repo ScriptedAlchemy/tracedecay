@@ -972,6 +972,61 @@ mod tests {
         assert_eq!(cursor.position(), 65);
     }
 
+    /// Pins the contract the in-batch cursor cache depends on: a covered
+    /// duplicate's receipt names the *candidate* frontier the coverage
+    /// reached, not the cursor the retained commit wrote. Re-offering a whole
+    /// committed window under a later generation makes every record a covered
+    /// duplicate, so each one chains the next from a cached receipt cursor. A
+    /// receipt carrying the retained frontier would leave the second record
+    /// expecting a cursor the store has already moved past and fail the sweep
+    /// with a cursor conflict.
+    #[tokio::test]
+    async fn covered_duplicates_chain_the_next_record_from_the_candidate_frontier() {
+        let admission = MemoryHostAdmission::default();
+        let records = (0..65).map(test_record_at).collect::<Vec<_>>();
+        let sweep = |generation: ObservationSourceGenerationV1| {
+            let admission = &admission;
+            let records = records.clone();
+            async move {
+                capture_snapshot_observations(
+                    admission,
+                    "test",
+                    ObservationScopeV1::Profile,
+                    &ObservationCancellation::default(),
+                    None,
+                    || discovery(vec![PathBuf::from("session-window.snapshot")]),
+                    |_| Ok(1),
+                    |_| Ok(Some((generation, records.clone()))),
+                )
+                .await
+            }
+        };
+
+        let committed = sweep(ObservationSourceGenerationV1::new(7).unwrap())
+            .await
+            .expect("first snapshot capture");
+        assert_eq!(committed.stats.messages_upserted, 65);
+
+        let later = ObservationSourceGenerationV1::new(8).unwrap();
+        let recovered = sweep(later)
+            .await
+            .expect("re-offering the committed window under a later generation must not conflict");
+
+        assert_eq!(
+            recovered.stats.messages_upserted, 0,
+            "covered duplicates write no new rows"
+        );
+        assert_eq!(admission.observations().len(), 65);
+        let source = snapshot_source_identity("test", "session-window").unwrap();
+        let cursor = admission
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .expect("windowed source cursor");
+        assert_eq!(cursor.generation(), later);
+        assert_eq!(cursor.position(), 65);
+    }
+
     #[tokio::test]
     async fn pre_cancelled_snapshot_sweep_returns_control_error_before_admission() {
         let cancellation = ObservationCancellation::default();

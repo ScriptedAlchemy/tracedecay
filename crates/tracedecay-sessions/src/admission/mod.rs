@@ -709,6 +709,27 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A covered duplicate's receipt names the retained immutable row but the
+    /// *candidate* frontier the coverage reached — never the cursor the
+    /// original commit wrote. The durable adapter builds it exactly this way
+    /// (`observation_adapter.rs`, all three `CoveredDuplicate` arms, each with
+    /// `write.next_cursor()`), so this double must too: a caller that caches
+    /// `receipt().committed_cursor()` would otherwise chain from a stale link
+    /// under the double and a fresh one in production.
+    fn covered_duplicate_receipt(
+        retained: &tracedecay_store::ObservationCommitReceipt,
+        covered_cursor: tracedecay_domain::ObservationSourceCursorV1,
+    ) -> ObservationStoreResult<tracedecay_store::ObservationCommitReceipt> {
+        tracedecay_store::ObservationCommitReceipt::new(
+            retained.sequence(),
+            retained.observation().clone(),
+            covered_cursor,
+            retained.retrieval_anchor().clone(),
+            retained.projection_generation().clone(),
+        )?
+        .with_repository_provenance_attachment(retained.repository_provenance_attachment().clone())
+    }
+
     impl MemoryObservationStore {
         fn persist_one(
             state: &mut MemoryObservationState,
@@ -737,7 +758,7 @@ pub(crate) mod test_support {
                 && actual.as_ref() == Some(write.next_cursor())
             {
                 return Ok(ObservationPersistOutcome::CoveredDuplicate(
-                    retained.clone(),
+                    covered_duplicate_receipt(retained, write.next_cursor().clone())?,
                 ));
             }
             if actual.as_ref() != write.expected_cursor() {
@@ -751,8 +772,9 @@ pub(crate) mod test_support {
                 // generation: the committed row stays immutable, but its
                 // coverage still advances the source cursor, exactly as the
                 // durable store does for a covered duplicate.
+                let receipt = covered_duplicate_receipt(&retained, write.next_cursor().clone())?;
                 Self::replace_cursor(state, write.next_cursor().clone());
-                return Ok(ObservationPersistOutcome::CoveredDuplicate(retained));
+                return Ok(ObservationPersistOutcome::CoveredDuplicate(receipt));
             }
             let sequence = u64::try_from(state.observations.len())
                 .unwrap_or(u64::MAX)
