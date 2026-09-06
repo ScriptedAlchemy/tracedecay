@@ -155,10 +155,12 @@ impl GraphDb {
         persistent_store_state: Option<PersistentGraphStoreState>,
     ) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate(persistent_store_state)?;
-        // The container's identity has to be read *before* grafeo opens it: an
-        // open may replay and checkpoint the WAL, which moves the modification
-        // time and length before any later caller could observe the identity
-        // the marker was written against.
+        // The container's identity has to be read from an opened handle
+        // *before* grafeo opens it: an open may replay and checkpoint the WAL,
+        // which moves the modification time and length before any later caller
+        // could observe the identity the marker was written against. The
+        // durable file-id half is taken from that handle so a pathname
+        // replacement cannot reuse a stale witness.
         let markers = match validated.config.path.as_deref() {
             Some(container) => {
                 GenerationMarkers::open(container, ContainerIdentity::read(container))
