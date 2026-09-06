@@ -584,6 +584,59 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
 
 pub(crate) use tracedecay_session_temporal_store::TEMPORAL_TABLE_COLUMNS;
 
+/// Additive receipt-recovery step shared by every store that predates it:
+/// retained receipts keep their rows and take the contract defaults.
+const SESSION_RELATION_RECEIPT_RECOVERY_DDL: &str = "
+    ALTER TABLE session_relation_receipts
+        ADD COLUMN recovery_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(recovery_state IN ('pending', 'retryable', 'permanent'));
+    ALTER TABLE session_relation_receipts
+        ADD COLUMN recovery_failure_code TEXT;
+    ALTER TABLE session_relation_receipts
+        ADD COLUMN recovery_failure_count INTEGER NOT NULL DEFAULT 0
+        CHECK(recovery_failure_count >= 0);
+    ALTER TABLE session_relation_receipts
+        ADD COLUMN recovery_next_attempt_at INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_recovery_due
+        ON session_relation_receipts(
+            state, recovery_state, recovery_next_attempt_at,
+            created_at, session_id, generation
+        );";
+
+/// Converges a v4 store persisted before receipt recovery onto the final v4
+/// contract inside the caller's admission transaction. The marker stays at
+/// v4 — this shape never shipped as its own version — but its `applied_at`
+/// is compare-and-swapped so a marker that moved underneath the migration
+/// rolls the whole step back instead of stamping a shape it did not verify.
+#[hotpath::measure(
+    future = true,
+    label = "session_temporal.schema.migrate_receipt_recovery"
+)]
+pub(crate) async fn migrate_session_relation_receipt_recovery(
+    conn: &impl Executor,
+) -> tracedecay_domain::errors::Result<()> {
+    admission::validate_without_receipt_recovery_session_temporal_schema(conn).await?;
+    conn.execute_batch(SESSION_RELATION_RECEIPT_RECOVERY_DDL)
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let updated = conn
+        .execute(
+            "UPDATE session_temporal_schema_migrations
+             SET applied_at = unixepoch()
+             WHERE name = ?1 AND version = ?2",
+            params![MIGRATION_NAME, SESSION_TEMPORAL_SCHEMA_VERSION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if updated != 1 {
+        return Err(admission::session_temporal_reset_required(
+            "v4 temporal schema marker changed during receipt recovery migration",
+        ));
+    }
+    validate_temporal_table_shapes(conn).await?;
+    admission::validate_current_session_temporal_schema(conn).await
+}
+
 #[hotpath::measure(future = true, label = "session_temporal.schema.migrate")]
 pub(crate) async fn migrate_released_v3_session_temporal_schema(
     conn: &impl Executor,
@@ -599,25 +652,13 @@ pub(crate) async fn migrate_released_v3_session_temporal_schema(
              CHECK(committed_item_count >= 0);
          ALTER TABLE session_temporal_projection_receipts
              ADD COLUMN committed_copy_count INTEGER NOT NULL DEFAULT 0
-             CHECK(committed_copy_count >= 0);
-         ALTER TABLE session_relation_receipts
-             ADD COLUMN recovery_state TEXT NOT NULL DEFAULT 'pending'
-             CHECK(recovery_state IN ('pending', 'retryable', 'permanent'));
-         ALTER TABLE session_relation_receipts
-             ADD COLUMN recovery_failure_code TEXT;
-         ALTER TABLE session_relation_receipts
-             ADD COLUMN recovery_failure_count INTEGER NOT NULL DEFAULT 0
-             CHECK(recovery_failure_count >= 0);
-         ALTER TABLE session_relation_receipts
-             ADD COLUMN recovery_next_attempt_at INTEGER NOT NULL DEFAULT 0;
-         CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_recovery_due
-             ON session_relation_receipts(
-                 state, recovery_state, recovery_next_attempt_at,
-                 created_at, session_id, generation
-             );",
+             CHECK(committed_copy_count >= 0);",
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    conn.execute_batch(SESSION_RELATION_RECEIPT_RECOVERY_DDL)
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
     let mut ambiguous = conn
         .query(
