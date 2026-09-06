@@ -616,6 +616,7 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
             id: "job-context".to_string(),
             title: "Job context".to_string(),
             summary: "Adds job context.".to_string(),
+            routing_description: "Adds job context.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -689,6 +690,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
             id: "archived-job-context".to_string(),
             title: "Archived job context".to_string(),
             summary: "Must not be attached after archival.".to_string(),
+            routing_description: "Must not be attached after archival.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
