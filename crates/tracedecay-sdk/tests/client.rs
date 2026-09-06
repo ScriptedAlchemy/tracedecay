@@ -1,8 +1,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, mpsc};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay_application::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
@@ -79,34 +79,54 @@ fn serve(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<String>>) {
     (format!("http://{address}"), task)
 }
 
-fn serve_until_stopped(
-    responses: Vec<String>,
-) -> (String, mpsc::Sender<()>, thread::JoinHandle<Vec<String>>) {
+/// A fixture HTTP server whose blocking accept loop can be stopped early.
+///
+/// The listener stays in blocking mode: a nonblocking listener hands out
+/// nonblocking accepted sockets on Windows, so the request reader would fail
+/// with `WouldBlock` (WSAEWOULDBLOCK 10035) instead of waiting for bytes.
+/// Stopping sets the flag and then opens one wake-up connection so a pending
+/// `accept` observes the flag instead of busy-polling for it.
+struct StoppableServer {
+    address: SocketAddr,
+    stop_requested: Arc<AtomicBool>,
+    task: thread::JoinHandle<Vec<String>>,
+}
+
+impl StoppableServer {
+    fn stop(self) -> Vec<String> {
+        self.stop_requested.store(true, Ordering::SeqCst);
+        if !self.task.is_finished() {
+            let _ = TcpStream::connect(self.address);
+        }
+        self.task.join().unwrap()
+    }
+}
+
+fn serve_until_stopped(responses: Vec<String>) -> (String, StoppableServer) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
-    let (stop, stopped) = mpsc::channel();
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let stop_observed = Arc::clone(&stop_requested);
     let task = thread::spawn(move || {
         let mut requests = Vec::new();
         for response in responses {
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if !matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
-                            return requests;
-                        }
-                        thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(error) => panic!("test HTTP listener failed: {error}"),
-                }
-            };
+            let (mut stream, _) = listener.accept().unwrap();
+            if stop_observed.load(Ordering::SeqCst) {
+                return requests;
+            }
             requests.push(request(&mut stream));
             stream.write_all(response.as_bytes()).unwrap();
         }
         requests
     });
-    (format!("http://{address}"), stop, task)
+    (
+        format!("http://{address}"),
+        StoppableServer {
+            address,
+            stop_requested,
+            task,
+        },
+    )
 }
 
 fn json_response(status: &str, value: serde_json::Value) -> String {
@@ -561,7 +581,7 @@ fn callable_code_uses_the_mounted_http_route_without_an_mcp_transport() {
 #[test]
 fn multi_root_operations_reach_their_exact_project_application_routes() {
     let response = json_response("200 OK", json!({}));
-    let (base_url, stop_server, server) =
+    let (base_url, server) =
         serve_until_stopped(vec![response.clone(), response.clone(), response]);
     let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
         .build()
@@ -602,8 +622,7 @@ fn multi_root_operations_reach_their_exact_project_application_routes() {
         );
     }
 
-    let _ = stop_server.send(());
-    let requests = server.join().unwrap();
+    let requests = server.stop();
     assert_eq!(requests.len(), 3, "every typed operation must issue HTTP");
     assert!(
         requests[0].starts_with(
