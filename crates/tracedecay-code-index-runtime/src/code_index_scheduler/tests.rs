@@ -10791,6 +10791,7 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
 struct IsolatedSemanticVectorGraphProviderV1 {
     graph: Arc<tracedecay_usecases::store::vector_generations::IsolatedSemanticEvaluationGraphV1>,
     current: tracedecay_domain::CodeGenerationId,
+    generation_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(feature = "semantic-fastembed")]
@@ -10807,7 +10808,13 @@ impl IsolatedSemanticVectorGraphProviderV1 {
         Arc::new(Self {
             graph,
             current: generation.manifest().generation_id.clone(),
+            generation_reads: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    fn generation_reads(&self) -> usize {
+        self.generation_reads
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -10818,6 +10825,8 @@ impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
         generation: &'a tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> SemanticRuntimeFuture<'a, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
     {
+        self.generation_reads
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Box::pin(async move {
             self.graph
                 .retained(&generation.manifest().generation_id)
@@ -10979,11 +10988,17 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         },
         tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
     );
+    let generation_reads_before_restore = vector_graph.generation_reads();
     assert!(
         restarted
-            .restore_current(&latest.generation, &current.generation)
+            .restore_current(latest.metadata().manifest(), &current.generation)
             .await
             .expect("restore current generation")
+    );
+    assert_eq!(
+        vector_graph.generation_reads(),
+        generation_reads_before_restore,
+        "restart restore must read vector provenance through current metadata identity, not a decoded generation"
     );
     assert_eq!(restarted_handle.current(), Some(current.clone()));
     assert!(
