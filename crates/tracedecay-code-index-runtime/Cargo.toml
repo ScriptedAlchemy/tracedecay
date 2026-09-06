@@ -112,8 +112,6 @@ test-helpers = [
 ]
 
 [dependencies]
-cap-fs-ext = "4.0.2"
-cap-std = "4.0.2"
 futures-util = "0.3.33"
 gix = { version = "=0.86.0", default-features = false, features = [
     "revision",
