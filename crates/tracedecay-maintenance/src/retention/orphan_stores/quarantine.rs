@@ -546,38 +546,73 @@ fn reserve_quarantine_name(
             expected_root_identity,
         ));
     };
-    let mut last_probe_error = None;
+    reserve_quarantine_name_with_sequence(
+        parent,
+        data_root,
+        original,
+        expected_root_identity,
+        || QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    )
+}
+
+pub(super) fn reserve_quarantine_name_with_sequence(
+    parent: &Dir,
+    data_root: &Path,
+    original: &str,
+    expected_root_identity: Option<StoreRootIdentity>,
+    mut next_sequence: impl FnMut() -> u64,
+) -> Result<String, CollectionMutationFailure> {
     for _ in 0..QUARANTINE_ATTEMPTS {
-        let sequence = QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let sequence = next_sequence();
         let candidate = format!(
             ".tracedecay-orphan-quarantine-{original}-{}-{sequence}",
             std::process::id()
         );
-        match parent.symlink_metadata(&candidate) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
-            Ok(_) => {}
-            Err(error) => last_probe_error = Some((candidate, error)),
+        match quarantine_candidate_namespace_available(parent, &candidate) {
+            Ok(true) => return Ok(candidate),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::ReserveQuarantineName,
+                    data_root
+                        .parent()
+                        .map_or_else(PathBuf::new, |parent| parent.join(candidate)),
+                    expected_root_identity,
+                    &error,
+                ));
+            }
         }
     }
-    Err(last_probe_error.map_or_else(
-        || {
-            CollectionMutationFailure::without_native_error(
-                CollectionMutationOperation::ReserveQuarantineName,
-                data_root.to_path_buf(),
-                expected_root_identity.clone(),
-            )
-        },
-        |(candidate, error)| {
-            CollectionMutationFailure::from_io_error(
-                CollectionMutationOperation::ReserveQuarantineName,
-                data_root
-                    .parent()
-                    .map_or_else(PathBuf::new, |parent| parent.join(candidate)),
-                expected_root_identity.clone(),
-                &error,
-            )
-        },
+    Err(CollectionMutationFailure::without_native_error(
+        CollectionMutationOperation::ReserveQuarantineName,
+        data_root.to_path_buf(),
+        expected_root_identity,
     ))
+}
+
+pub(super) fn quarantine_candidate_namespace_available(
+    parent: &Dir,
+    candidate: &str,
+) -> std::io::Result<bool> {
+    // A journal or marker carries authority over the candidate name even when
+    // its directory is gone. Reusing any part of that namespace could let a
+    // new quarantine inherit stale rename or retirement authority.
+    let journal = journal_name(candidate);
+    let renamed_marker = renamed_marker_name(&journal);
+    let retired_marker = retired_marker_name(&journal);
+    for name in [
+        candidate,
+        journal.as_str(),
+        renamed_marker.as_str(),
+        retired_marker.as_str(),
+    ] {
+        match parent.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
 }
 
 fn journal_name(quarantine_name: &str) -> String {
