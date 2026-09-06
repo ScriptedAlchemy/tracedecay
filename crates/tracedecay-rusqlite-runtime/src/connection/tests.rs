@@ -33,6 +33,29 @@ fn sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn writer_policy_ignores_tracedecay_sqlite_unsafe_fast() {
+    let previous = std::env::var_os("TRACEDECAY_SQLITE_UNSAFE_FAST");
+    unsafe {
+        std::env::set_var("TRACEDECAY_SQLITE_UNSAFE_FAST", "1");
+    }
+    let file = database();
+    let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");
+    let journal: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .expect("journal mode");
+    assert_eq!(journal.to_ascii_lowercase(), "wal");
+    assert_eq!(pragma_i64(&connection, "synchronous"), 1);
+    assert_eq!(pragma_i64(&connection, "wal_autocheckpoint"), 0);
+    drop(connection);
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("TRACEDECAY_SQLITE_UNSAFE_FAST", value),
+            None => std::env::remove_var("TRACEDECAY_SQLITE_UNSAFE_FAST"),
+        }
+    }
+}
+
+#[test]
 fn writer_mode_applies_wal_integrity_and_write_policy() {
     let file = database();
     let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");

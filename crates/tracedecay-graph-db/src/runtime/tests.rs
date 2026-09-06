@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
@@ -524,9 +525,17 @@ fn snapshots_can_cross_daemon_worker_boundaries() {
     assert_send_sync::<super::GraphSnapshot>();
 }
 
+const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
+const GRAPH_CRASH_CHILD_ROOT_ENV: &str = "TRACEDECAY_GRAPH_CRASH_CHILD_ROOT";
+const GRAPH_CRASH_CHILD_READY: &str = "durable-phase.ready";
+
 fn walsync_db(dir: &tempfile::TempDir) -> GraphDbLeaseV1 {
+    walsync_db_at(dir.path())
+}
+
+fn walsync_db_at(root: &Path) -> GraphDbLeaseV1 {
     GraphDbOwner::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(dir.path().join("graph.grafeo")),
+        location: GraphDbLocation::Persistent(root.join("graph.grafeo")),
         expected_format: GraphFormatVersion::new(2).unwrap(),
         durability: GraphDurability::WalSync,
         cancellation: Arc::new(NeverCancelled),
@@ -534,6 +543,52 @@ fn walsync_db(dir: &tempfile::TempDir) -> GraphDbLeaseV1 {
     .unwrap()
     .issue_lease()
     .unwrap()
+}
+
+fn refuse_sqlite_unsafe_fast() {
+    unsafe {
+        std::env::remove_var(SQLITE_UNSAFE_FAST_ENV);
+    }
+    assert!(
+        std::env::var_os(SQLITE_UNSAFE_FAST_ENV).is_none(),
+        "WalSync crash fixtures must not credit {SQLITE_UNSAFE_FAST_ENV}"
+    );
+}
+
+fn capture_unclean_walsync_image(destination: &Path) {
+    let source = tempfile::tempdir().unwrap();
+    let test_name = std::env::var("NEXTEST_TEST_NAME")
+        .ok()
+        .or_else(|| std::thread::current().name().map(str::to_owned))
+        .expect("crash child spawn needs the libtest/nextest test name");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test_name, "--nocapture"])
+        .env(GRAPH_CRASH_CHILD_ROOT_ENV, source.path())
+        .env_remove(SQLITE_UNSAFE_FAST_ENV)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "crash child {test_name} failed ({:?})\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        source.path().join(GRAPH_CRASH_CHILD_READY).is_file(),
+        "crash child must reach the durable phase before exiting"
+    );
+    let source_store = source.path().join("graph.grafeo");
+    let target = destination.join("graph.grafeo");
+    std::fs::copy(&source_store, &target).unwrap_or_else(|error| {
+        panic!(
+            "copy abandoned crash container {} -> {}: {error}",
+            source_store.display(),
+            target.display()
+        );
+    });
+    copy_directory(&sidecar_wal_path(&source_store), &sidecar_wal_path(&target));
 }
 
 fn vector_batch(value: &str) -> GraphWriteBatch {
@@ -666,27 +721,50 @@ fn clean_shutdown_checkpoints_the_wal_so_reopen_has_no_journal_to_replay() {
 /// commit `WalSync` already acknowledged.
 #[test]
 fn reopen_of_a_dirty_store_copy_replays_the_walled_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    let live = walsync_db(&dir);
-    live.apply_unverified(scalar_batch("unclean")).unwrap();
+    refuse_sqlite_unsafe_fast();
+    if let Some(root) = std::env::var_os(GRAPH_CRASH_CHILD_ROOT_ENV) {
+        let live = walsync_db_at(Path::new(&root));
+        assert_eq!(live.inner.durability, GraphDurability::WalSync);
+        live.apply_unverified(scalar_batch("unclean")).unwrap();
+        std::fs::write(
+            Path::new(&root).join(GRAPH_CRASH_CHILD_READY),
+            b"wal-synced",
+        )
+        .unwrap();
+        std::mem::forget(live);
+        std::process::exit(0);
+    }
 
-    // Simulate the crash by snapshotting the on-disk state while the store is
-    // still open: nothing has checkpointed yet, so the committed batch exists
-    // only in the WAL sidecar the copy carries along.
-    let source = dir.path().join("graph.grafeo");
-    let source_wal = sidecar_wal_path(&source);
+    // A child writes the WalSync commit, exits without a clean close, and only
+    // then is the abandoned image copied. Copying the live parent handle is
+    // illegal on Windows (lock violation 33; issue #933).
+    let crash_dir = tempfile::tempdir().unwrap();
+    capture_unclean_walsync_image(crash_dir.path());
+    let target = crash_dir.path().join("graph.grafeo");
     assert!(
-        source_wal.is_dir(),
+        sidecar_wal_path(&target).is_dir(),
         "a WalSync store must journal into its sidecar before checkpoint"
     );
-    let crash_dir = tempfile::tempdir().unwrap();
-    let target = crash_dir.path().join("graph.grafeo");
-    std::fs::copy(&source, &target).unwrap();
-    copy_directory(&source_wal, &sidecar_wal_path(&target));
 
     let recovered = walsync_db(&crash_dir);
     assert_eq!(entity_marker(&recovered), Some("unclean".to_owned()));
     recovered.close().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn live_walsync_store_refuses_raw_byte_copy() {
+    refuse_sqlite_unsafe_fast();
+    let dir = tempfile::tempdir().unwrap();
+    let live = walsync_db(&dir);
+    live.apply_unverified(scalar_batch("live")).unwrap();
+    let source = dir.path().join("graph.grafeo");
+    let dest = dir.path().join("illegal-copy.grafeo");
+    let error = std::fs::copy(&source, &dest).expect_err("copying a live Windows store must fail");
+    assert!(
+        matches!(error.raw_os_error(), Some(32 | 33)),
+        "expected sharing/lock violation, got {error}"
+    );
     live.close().unwrap();
 }
 
