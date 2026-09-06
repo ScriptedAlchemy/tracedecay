@@ -31,6 +31,10 @@ use tracedecay_usecases::semantic_runtime::{
     project_semantic_retained_code_generation,
 };
 
+/// Observation step that refuses a committed activation the serving
+/// generation has moved past.
+const SUPERSEDED_COMMITTED_ACTIVATION: &str = "superseded_committed_activation";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueryAuthorityUnavailableReasonV1 {
     ActivationUnavailable,
@@ -316,7 +320,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     ) {
                         tracing::warn!(
                             event = "semantic_query_activation",
-                            step = "superseded_committed_activation",
+                            step = SUPERSEDED_COMMITTED_ACTIVATION,
                             project_root = %project_root.display(),
                             serving_generation = %generation.manifest().generation_id,
                             vector_source_generation = %vectors.source_generation(),
@@ -324,10 +328,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                             "the committed activation projected a superseded source; it is not \
                              reinstalled over the generation now being served"
                         );
-                        return Err((
-                            "superseded_committed_activation",
-                            ObserverError::Rejected,
-                        ));
+                        return Err((SUPERSEDED_COMMITTED_ACTIVATION, ObserverError::Rejected));
                     }
                     let source_generation = vectors.source_generation().clone();
                     // Queries pin the serving publication, so the semantic
@@ -481,8 +482,17 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     })?;
                 Ok(())
             }
-            .await
-            .map_err(|(step, error)| {
+            .await;
+            // A superseded activation did not fail: it is simply not
+            // applicable to the generation now being served. Tearing down the
+            // query activation the previous successful observation installed
+            // would strand the still-committed profile, so only real failures
+            // reach the clearing path below.
+            let superseded = matches!(
+                &observed,
+                Err((step, _)) if *step == SUPERSEDED_COMMITTED_ACTIVATION
+            );
+            let observed = observed.map_err(|(step, error)| {
                 tracing::warn!(
                     event = "semantic_query_activation",
                     outcome = "failed",
@@ -494,7 +504,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 );
                 error
             });
-            if observed.is_err() {
+            if observed.is_err() && !superseded {
                 let cache_generation = active_semantic_generation
                     .as_ref()
                     .or(rollback_semantic_generation.as_ref());
