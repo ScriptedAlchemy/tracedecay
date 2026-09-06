@@ -158,7 +158,8 @@ for path, text in ((stable_path, stable), (beta_path, beta)):
     release_test = re.search(
         r"- name: Test release distribution\n"
         r"\s+if: matrix\.name == 'x86_64-linux'\n"
-        r"\s+run: cargo test --workspace --release --target",
+        r"\s+run: (?:(?!- name:)[\s\S])*?"
+        r"cargo test --workspace --release --target",
         text,
     )
     if release_test is None:
