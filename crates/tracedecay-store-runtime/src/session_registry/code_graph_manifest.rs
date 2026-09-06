@@ -1145,6 +1145,10 @@ pub(super) struct DaemonCodeGraphManifestProviderV1 {
     /// `Arc` so the pressure reclaimer can reach exactly this state through a
     /// `Weak` without keeping the provider alive.
     decoded: Arc<DecodedCodeGenerationOffersV1>,
+    /// The measured-RSS cell this provider's offers answer to. Sealed
+    /// publication consults the same cell so the one admission authority
+    /// governs both the retained accelerators and the corpus-sized build.
+    pressure: Arc<ResidentMemoryPressureV1>,
     /// Keeps the pressure reclaimer registered for this provider's lifetime.
     _pressure_registration: Option<ResidentMemoryPressureRegistrationV1>,
 }
@@ -1179,8 +1183,14 @@ impl DaemonCodeGraphManifestProviderV1 {
         Self {
             sources: RwLock::new(BTreeMap::new()),
             decoded,
+            pressure: Arc::clone(pressure),
             _pressure_registration: registration,
         }
+    }
+
+    /// The measured-RSS pressure cell this provider was bound to.
+    pub(super) fn resident_memory_pressure(&self) -> &Arc<ResidentMemoryPressureV1> {
+        &self.pressure
     }
 }
 

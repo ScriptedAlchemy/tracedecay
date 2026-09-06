@@ -13,6 +13,12 @@ pub enum GraphBudgetKind {
     Write,
     Capacity,
     Mutation,
+    /// The process-wide measured-RSS admission watermark. A corpus-sized
+    /// publication that trips it is refused with the daemon still alive and
+    /// its text serving intact, instead of growing until the kernel kills the
+    /// whole process. The scheduler treats this name as a typed graph
+    /// refusal, never a retryable fault.
+    ResidentMemory,
 }
 
 impl GraphBudgetKind {
@@ -24,6 +30,7 @@ impl GraphBudgetKind {
             Self::Write => "write",
             Self::Capacity => "capacity",
             Self::Mutation => "mutation",
+            Self::ResidentMemory => "resident_memory",
         }
     }
 
@@ -36,6 +43,7 @@ impl GraphBudgetKind {
             "write" => Some(Self::Write),
             "capacity" => Some(Self::Capacity),
             "mutation" => Some(Self::Mutation),
+            "resident_memory" => Some(Self::ResidentMemory),
             _ => None,
         }
     }
