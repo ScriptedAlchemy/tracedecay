@@ -123,8 +123,21 @@ fn cursor_skill_references_resolve() {
     let skill_ref_re = Regex::new(r"tracedecay:([a-z0-9][a-z0-9-]*)").unwrap();
     let slash_ref_re = Regex::new(r"`/([a-z0-9][a-z0-9-]*)`").unwrap();
     let tool_ref_re = Regex::new(r"tracedecay_[a-z_]+").unwrap();
-    let mut skill_refs_seen = 0usize;
-    let mut tool_refs_seen = 0usize;
+    // Regex self-check on literals: the rules below must not pass merely
+    // because an extraction regex rotted. The bundle itself may legitimately
+    // carry few or no such mentions after a prose rewrite.
+    assert_eq!(
+        skill_ref_re
+            .captures("see tracedecay:exploring-code.")
+            .map(|capture| capture[1].to_string()),
+        Some("exploring-code".to_string())
+    );
+    assert_eq!(
+        tool_ref_re
+            .find("call tracedecay_grep first")
+            .map(|found| found.as_str()),
+        Some("tracedecay_grep")
+    );
 
     for skill in &skills {
         let at = skill.path.display();
@@ -162,7 +175,6 @@ fn cursor_skill_references_resolve() {
         // Bundle convention: `tracedecay:<skill>` hands off to another
         // bundled skill; a stale slug strands the agent mid-workflow.
         for capture in skill_ref_re.captures_iter(&skill.raw) {
-            skill_refs_seen += 1;
             let slug = &capture[1];
             if !skill_names.contains(slug) {
                 violations.push(format!(
@@ -185,7 +197,6 @@ fn cursor_skill_references_resolve() {
         // Stale tool references: every `tracedecay_*` identifier must be a
         // live MCP tool (or a documented non-tool artifact).
         for found in tool_ref_re.find_iter(&skill.raw) {
-            tool_refs_seen += 1;
             let identifier = found.as_str().trim_end_matches('_');
             if !tool_names.contains(identifier) && !NON_TOOL_IDENTIFIERS.contains(&identifier) {
                 violations.push(format!(
@@ -210,14 +221,6 @@ fn cursor_skill_references_resolve() {
         }
     }
 
-    // Self-check: the bundle is known to cross-reference skills and mention
-    // MCP tools heavily; zero matches would mean the extraction regexes
-    // rotted and the rules above passed vacuously.
-    assert!(
-        skill_refs_seen > 0 && tool_refs_seen > 0,
-        "reference extraction found no tracedecay:<skill> or tracedecay_<tool> mentions; \
-         the lint regexes are broken"
-    );
     assert_no_violations("reference integrity", &violations);
 }
 

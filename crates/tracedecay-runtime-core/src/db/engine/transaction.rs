@@ -1,16 +1,12 @@
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{path::Path, sync::Arc};
+
+use tokio::sync::Mutex;
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlAttachment, ExactSqlTransaction as RuntimeTransaction,
+    ExactSqlAttachment, ExactSqlHandle, ExactSqlTransaction as RuntimeTransaction,
 };
 
-use super::{
-    Error, IntoParams, Result, Rows, Value, WriteStatement,
-    connection::{Runtime, statement},
-};
+use super::{Error, IntoParams, Result, Rows, Value, WriteStatement, connection::statement};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionBehavior {
@@ -20,22 +16,18 @@ pub enum TransactionBehavior {
 }
 
 pub struct Transaction {
-    /// Serializes every statement issued against one open write transaction.
-    /// The lock is held across the blocking rusqlite call, so it is where a
-    /// transaction that has already won `BEGIN IMMEDIATE` makes its remaining
-    /// statements queue behind each other. Transactions are short-lived and
-    /// created per operation, so per-instance lock profiling would retain two
-    /// HDR histograms for every transaction. The measured statement methods
-    /// provide the stable timing boundary instead.
+    /// An owned async operation holds this gate until the writer acknowledges
+    /// its command. Dropping the caller cannot release serialization early or
+    /// truncate an already admitted statement batch.
     runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
     #[cfg(any(test, feature = "test-helpers"))]
-    connection_runtime: Arc<dyn Runtime>,
+    connection_runtime: Arc<ExactSqlHandle>,
 }
 
 impl Transaction {
     pub(super) fn from_runtime(
         runtime: RuntimeTransaction,
-        connection_runtime: Arc<dyn Runtime>,
+        connection_runtime: Arc<ExactSqlHandle>,
     ) -> Self {
         #[cfg(not(any(test, feature = "test-helpers")))]
         let _ = connection_runtime;
@@ -53,11 +45,14 @@ impl Transaction {
     {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
+        tokio::spawn(async move {
+            runtime
+                .lock()
+                .await
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
-                .execute(statement)
+                .execute_async(statement)
+                .await
                 .map_err(super::Error::from)
         })
         .await
@@ -75,13 +70,14 @@ impl Transaction {
             .into_iter()
             .map(WriteStatement::into_exact)
             .collect::<Vec<_>>();
-        tokio::task::spawn_blocking(move || {
-            let runtime = lock_runtime(&runtime)?;
+        tokio::spawn(async move {
+            let runtime = runtime.lock().await;
             let runtime = runtime.as_ref().ok_or(Error::TransactionClosed)?;
             let mut results = Vec::with_capacity(statements.len());
             for (index, statement) in statements.into_iter().enumerate() {
                 let result = runtime
-                    .execute(statement)
+                    .execute_async(statement)
+                    .await
                     .map_err(Error::from)
                     .map_err(|error| Error::statement_batch(index, error))?;
                 results.push(result.changed_rows as u64);
@@ -99,11 +95,14 @@ impl Transaction {
             super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
         })?;
         let attachment = ExactSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
+        tokio::spawn(async move {
+            runtime
+                .lock()
+                .await
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
-                .attach_database(attachment)
+                .attach_database_async(attachment)
+                .await
                 .map_err(super::Error::from)
         })
         .await
@@ -117,11 +116,14 @@ impl Transaction {
     {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        let rows = tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
+        let rows = tokio::spawn(async move {
+            runtime
+                .lock()
+                .await
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
-                .query(statement)
+                .query_async(statement)
+                .await
                 .map_err(super::Error::from)
         })
         .await
@@ -141,11 +143,14 @@ impl Transaction {
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
+        tokio::spawn(async move {
+            runtime
+                .lock()
+                .await
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
-                .execute_batch(sql)
+                .execute_batch_async(sql)
+                .await
                 .map(|_| ())
                 .map_err(super::Error::from)
         })
@@ -159,11 +164,14 @@ impl Transaction {
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
+        tokio::spawn(async move {
+            runtime
+                .lock()
+                .await
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
-                .execute_authority_revalidated_batch(sql)
+                .execute_authority_revalidated_batch_async(sql)
+                .await
                 .map(|_| ())
                 .map_err(super::Error::from)
         })
@@ -175,11 +183,14 @@ impl Transaction {
     pub async fn validate(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
+        tokio::spawn(async move {
+            runtime
+                .lock()
+                .await
                 .as_ref()
                 .ok_or(super::Error::TransactionClosed)?
-                .validate(statement)
+                .validate_async(statement)
+                .await
                 .map_err(super::Error::from)
         })
         .await
@@ -193,9 +204,18 @@ impl Transaction {
 
     #[hotpath::skip]
     pub async fn commit(self) -> Result<()> {
-        let runtime = self.take_runtime()?;
-        tokio::task::spawn_blocking(move || {
-            runtime.commit().map(|_| ()).map_err(super::Error::from)
+        let runtime = Arc::clone(&self.runtime);
+        tokio::spawn(async move {
+            let transaction = runtime
+                .lock()
+                .await
+                .take()
+                .ok_or(Error::TransactionClosed)?;
+            transaction
+                .commit_async()
+                .await
+                .map(|_| ())
+                .map_err(super::Error::from)
         })
         .await
         .map_err(join_error)?
@@ -203,25 +223,22 @@ impl Transaction {
 
     #[hotpath::skip]
     pub async fn rollback(self) -> Result<()> {
-        let runtime = self.take_runtime()?;
-        tokio::task::spawn_blocking(move || {
-            runtime.rollback().map(|_| ()).map_err(super::Error::from)
+        let runtime = Arc::clone(&self.runtime);
+        tokio::spawn(async move {
+            let transaction = runtime
+                .lock()
+                .await
+                .take()
+                .ok_or(Error::TransactionClosed)?;
+            transaction
+                .rollback_async()
+                .await
+                .map(|_| ())
+                .map_err(super::Error::from)
         })
         .await
         .map_err(join_error)?
     }
-
-    fn take_runtime(&self) -> Result<RuntimeTransaction> {
-        lock_runtime(&self.runtime)?
-            .take()
-            .ok_or(super::Error::TransactionClosed)
-    }
-}
-
-fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
-    runtime
-        .lock()
-        .map_err(|_| super::Error::Runtime("exact SQL transaction lock poisoned".to_owned()))
 }
 
 fn join_error(error: tokio::task::JoinError) -> super::Error {
@@ -230,16 +247,13 @@ fn join_error(error: tokio::task::JoinError) -> super::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use tracedecay_rusqlite_runtime::exact_sql::{
         ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
     };
 
-    use super::{
-        super::{Error, TestConnection},
-        lock_runtime,
-    };
+    use super::super::{Error, TestConnection};
 
     struct AllowWrites;
 
@@ -247,21 +261,6 @@ mod tests {
         fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
             Ok(())
         }
-    }
-
-    #[test]
-    fn poisoned_transaction_lock_returns_a_typed_error() {
-        let runtime = Mutex::new(());
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = runtime.lock().unwrap();
-            panic!("poison transaction lock");
-        });
-
-        let result = lock_runtime(&runtime);
-        let Err(Error::Runtime(message)) = result else {
-            panic!("poisoned transaction lock must return a runtime error");
-        };
-        assert_eq!(message, "exact SQL transaction lock poisoned");
     }
 
     #[tokio::test]
