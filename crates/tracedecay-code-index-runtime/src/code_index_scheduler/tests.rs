@@ -12219,34 +12219,29 @@ fn reparse_matches_full_parse_chunks() {
 // is served generation-bound and read-only, bypassing freshness entirely.
 // ---------------------------------------------------------------------------
 
-fn canonical_fixture_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Wait for the registry-mounted worktree to publish its first generation.
-/// Prefers the existing generation-publication broadcast over sleep polling.
+/// Wait until the registry-mounted worktree seats its first generation.
+///
+/// This must not join the generation-publication broadcast. Publication is an
+/// edge the background worker emits the moment reconcile seals, while
+/// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] — the value returned
+/// here — answers only from a serving or text seat installed strictly later.
+/// A waiter that subscribes after that edge has already fired never hears it
+/// again, and no second publication follows a quiet mount, so the guard-then-
+/// subscribe pattern deadlocked for the whole timeout. Poll the seat itself.
 async fn wait_for_initial_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> tracedecay_domain::CodeGenerationId {
-    if let Some(generation) = registry.latest_generation_id(path).await {
-        return generation;
-    }
-    let mut publications = registry.subscribe_generation_publications();
-    if let Some(generation) = registry.latest_generation_id(path).await {
-        return generation;
-    }
-    let canonical = canonical_fixture_path(path);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let event = publications.recv().await.expect("generation publication");
-            if event.project_root == canonical {
-                break event.generation_id;
+            if let Some(generation) = registry.latest_generation_id(path).await {
+                break generation;
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("initial generation published")
+    .expect("initial generation seated")
 }
 
 /// Publication now broadcasts as soon as reconcile publishes, before graph
@@ -12368,34 +12363,28 @@ async fn wait_for_queryable_text_generation_change(
     .expect("changed queryable text generation seated")
 }
 
-/// Wait until the mounted worktree publishes a generation distinct from `previous`.
+/// Wait until the mounted worktree seats a generation distinct from `previous`.
+///
+/// Same seat-not-edge rule as [`wait_for_initial_generation`]: the successor's
+/// publication can land before this wait subscribes, and a caller that then
+/// read the serving slot would still be handed `previous`.
 async fn wait_for_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
     previous: &tracedecay_domain::CodeGenerationId,
 ) -> tracedecay_domain::CodeGenerationId {
-    if let Some(generation) = registry.latest_generation_id(path).await
-        && &generation != previous
-    {
-        return generation;
-    }
-    let mut publications = registry.subscribe_generation_publications();
-    if let Some(generation) = registry.latest_generation_id(path).await
-        && &generation != previous
-    {
-        return generation;
-    }
-    let canonical = canonical_fixture_path(path);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let event = publications.recv().await.expect("generation publication");
-            if event.project_root == canonical && &event.generation_id != previous {
-                break event.generation_id;
+            if let Some(generation) = registry.latest_generation_id(path).await
+                && &generation != previous
+            {
+                break generation;
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("changed generation published")
+    .expect("changed generation seated")
 }
 
 #[tokio::test]
