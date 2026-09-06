@@ -510,8 +510,9 @@ async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progr
         }),
         Arc::clone(retained.cancellation()),
     );
-    let store =
-        GraphVectorGenerationStoreV1::open(&probed).expect("open semantic vector generation store");
+    let store = GraphVectorGenerationStoreV1::open(&probed)
+        .await
+        .expect("open semantic vector generation store");
     let prepared = prepared_vector(&source);
     store
         .configure_stage(

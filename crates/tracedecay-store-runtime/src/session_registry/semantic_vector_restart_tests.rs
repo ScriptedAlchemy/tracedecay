@@ -826,8 +826,10 @@ async fn linked_worktrees_keep_exact_semantic_bindings_and_publication_dependenc
     let first_retained = retain_semantic_graph(first_runtime, &first_root);
     let second_retained = retain_semantic_graph(second_runtime, &second_root);
     let first_store = GraphVectorGenerationStoreV1::open(&first_retained)
+        .await
         .expect("open first semantic vector store");
     let second_store = GraphVectorGenerationStoreV1::open(&second_retained)
+        .await
         .expect("open second semantic vector store");
     let (first_plan, first_prepared, first_descriptor) = prepared_generation(
         &first_generation.manifest().generation_id,
@@ -881,6 +883,7 @@ async fn linked_worktrees_keep_exact_semantic_bindings_and_publication_dependenc
 
     let retention = first_store
         .reserve_one_generation(None, Arc::new(NeverCancelled))
+        .await
         .expect("read project vector census");
     let revision = match retention {
         tracedecay_graph_db::SemanticVectorRetentionStep::Census(census) => census.revision,
@@ -890,6 +893,7 @@ async fn linked_worktrees_keep_exact_semantic_bindings_and_publication_dependenc
         } => {
             first_store
                 .release_reserved_generation(*reservation)
+                .await
                 .expect("release census reservation");
             census.revision
         }
@@ -907,12 +911,14 @@ async fn linked_worktrees_keep_exact_semantic_bindings_and_publication_dependenc
     assert_eq!(
         first_store
             .source_scope_binding(&first_code_scope, revision, Arc::new(NeverCancelled),)
+            .await
             .expect("first durable source binding"),
         SemanticVectorSourceScopeBindingLookup::Exact(first_source_scope.clone())
     );
     assert_eq!(
         first_store
             .source_scope_binding(&second_code_scope, revision, Arc::new(NeverCancelled),)
+            .await
             .expect("second durable source binding"),
         SemanticVectorSourceScopeBindingLookup::Exact(second_source_scope.clone())
     );
@@ -922,6 +928,7 @@ async fn linked_worktrees_keep_exact_semantic_bindings_and_publication_dependenc
             revision,
             Arc::new(NeverCancelled),
         )
+        .await
         .expect("first publication dependency")
     {
         SemanticVectorPublishedGenerationDependencyLookup::Published(dependency) => dependency,
@@ -935,6 +942,7 @@ async fn linked_worktrees_keep_exact_semantic_bindings_and_publication_dependenc
             revision,
             Arc::new(NeverCancelled),
         )
+        .await
         .expect("second publication dependency")
     {
         SemanticVectorPublishedGenerationDependencyLookup::Published(dependency) => dependency,
