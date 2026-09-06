@@ -2185,6 +2185,116 @@ async fn empty_plan_restores_registered_quarantine_when_exact_row_remains() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registered_recovery_holds_writer_exclusion_through_exact_restore() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"registry deletion waits until exact recovery is durable";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_serialized_restore",
+        "store_registered_serialized_restore",
+        payload,
+    )
+    .await;
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    let (classified_tx, classified_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let recovery_db = db.clone();
+    let recovery_profile_root = profile_root.clone();
+    let recovery = tokio::spawn(async move {
+        let mut classified_tx = Some(classified_tx);
+        let mut outcome = CollectionOutcome::default();
+        reconcile_registered_quarantine_inventory_with_classified_hook(
+            &recovery_db,
+            &recovery_profile_root,
+            unbounded_collection_control(),
+            &mut outcome,
+            move |intent, state| {
+                assert_eq!(intent.store_id, "store_registered_serialized_restore");
+                assert_eq!(state, RegisteredQuarantineRegistryStateV1::Exact);
+                classified_tx.take().unwrap().send(()).unwrap();
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test must release classified recovery");
+            },
+        )
+        .await
+        .unwrap();
+        outcome
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), classified_rx)
+        .await
+        .expect("recovery must reach exact classification")
+        .unwrap();
+    assert!(!data_root.exists());
+    assert!(quarantine_path.is_dir());
+    assert!(journal_path.is_file());
+
+    let competitor_db = db.clone();
+    let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+    let mut competitor = tokio::spawn(async move {
+        attempted_tx.send(()).unwrap();
+        let transaction = competitor_db.begin_write_transaction().await.unwrap();
+        let deleted = transaction
+            .execute(
+                "DELETE FROM store_instances WHERE store_id = ?1",
+                tracedecay_runtime_core::db::engine::params!["store_registered_serialized_restore"],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        deleted
+    });
+    attempted_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut competitor)
+            .await
+            .is_err(),
+        "competing registry deletion committed between classification and restore"
+    );
+    assert!(!data_root.exists());
+    assert!(quarantine_path.is_dir());
+    assert!(journal_path.is_file());
+
+    release_tx.send(()).unwrap();
+    let outcome = recovery.await.unwrap();
+    assert_eq!(competitor.await.unwrap(), 1);
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert_eq!(
+        outcome.recovery_receipts,
+        vec![CollectionRecoveryReceipt {
+            store_id: "store_registered_serialized_restore".to_owned(),
+            original_path: data_root.clone(),
+            quarantine_path: quarantine_path.clone(),
+            actual_path: data_root.clone(),
+            action: CollectionRecoveryAction::Restored,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert!(!quarantine_path.exists());
+    assert!(!journal_path.exists());
+    assert!(
+        db.try_list_store_instances_for_project("proj_registered_serialized_restore")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn empty_plan_clears_registered_pre_rename_journal_when_exact_row_remains() {
     let tmp = tempfile::TempDir::new().unwrap();
