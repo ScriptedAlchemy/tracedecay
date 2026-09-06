@@ -316,25 +316,30 @@ async fn census_unregistered_project_dirs_page(
             ) {
                 Ok(Some(QuarantineRecoveryOutcome::Restored {
                     restored_path,
-                    journal_pending,
+                    failure,
                 })) => {
                     recovered_project_ids.insert(project_id.clone());
                     Some((
                         projects_dir.join(&quarantine_name),
                         restored_path,
-                        if journal_pending {
+                        if failure.is_some() {
                             CollectionRecoveryAction::RetainedForRecovery
                         } else {
                             CollectionRecoveryAction::Restored
                         },
+                        failure,
                     ))
                 }
-                Ok(Some(QuarantineRecoveryOutcome::Retained { quarantine_path })) => {
+                Ok(Some(QuarantineRecoveryOutcome::Retained {
+                    quarantine_path,
+                    failure,
+                })) => {
                     recovered_project_ids.insert(project_id.clone());
                     Some((
                         quarantine_path.clone(),
                         quarantine_path,
                         CollectionRecoveryAction::RetainedForRecovery,
+                        failure,
                     ))
                 }
                 Ok(None) => None,
@@ -346,7 +351,7 @@ async fn census_unregistered_project_dirs_page(
                     None
                 }
             };
-            if let Some((quarantine_path, actual_path, action)) = record_recovery {
+            if let Some((quarantine_path, actual_path, action, failure)) = record_recovery {
                 recovery_outcome
                     .recovery_receipts
                     .push(CollectionRecoveryReceipt {
@@ -356,6 +361,12 @@ async fn census_unregistered_project_dirs_page(
                         quarantine_path,
                         action,
                     });
+                if let Some(failure) = failure {
+                    recovery_outcome.errors.push(CollectionFailure {
+                        store_id: project_id.clone(),
+                        kind: CollectionFailureKind::RemoveFailed(failure),
+                    });
+                }
                 recovery_outcome.errors.push(CollectionFailure {
                     store_id: project_id,
                     kind: CollectionFailureKind::PayloadChanged,

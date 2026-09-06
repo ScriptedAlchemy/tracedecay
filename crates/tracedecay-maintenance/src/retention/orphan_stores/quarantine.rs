@@ -77,7 +77,7 @@ pub(super) enum QuarantineStoreOutcome {
     },
     Restored {
         restored_path: PathBuf,
-        journal_failure: Option<CollectionMutationFailure>,
+        failure: Option<CollectionMutationFailure>,
     },
     Retained {
         quarantine_path: PathBuf,
@@ -86,13 +86,15 @@ pub(super) enum QuarantineStoreOutcome {
 }
 
 /// A durable quarantine found on a later maintenance admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum QuarantineRecoveryOutcome {
     Restored {
         restored_path: PathBuf,
-        journal_pending: bool,
+        failure: Option<CollectionMutationFailure>,
     },
     Retained {
         quarantine_path: PathBuf,
+        failure: Option<CollectionMutationFailure>,
     },
 }
 
@@ -261,14 +263,13 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         .to_str()
         .ok_or(CollectionFailureKind::InspectFailed)?
         .to_owned();
-    let quarantine_name = reserve_quarantine_name(&capability.parent, &capability.leaf_name)
-        .ok_or_else(|| {
-            CollectionFailureKind::RemoveFailed(CollectionMutationFailure::without_native_error(
-                CollectionMutationOperation::ReserveQuarantineName,
-                data_root.to_path_buf(),
-                expected_root_identity.clone(),
-            ))
-        })?;
+    let quarantine_name = reserve_quarantine_name(
+        &capability.parent,
+        data_root,
+        &capability.leaf_name,
+        expected_root_identity.clone(),
+    )
+    .map_err(CollectionFailureKind::RemoveFailed)?;
     let quarantine_path = data_root
         .parent()
         .ok_or(CollectionFailureKind::OutsideProfile)?
@@ -320,9 +321,20 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
             &journal_name,
             expected_root_identity,
         );
+        // The live-leaf rename is the primary failure. Best-effort journal
+        // cleanup is secondary and must never replace its operation or code.
         return Err(CollectionFailureKind::RemoveFailed(failure));
     }
-    if sync_directory(&capability.parent).is_err() {
+    if let Err(error) = sync_directory(&capability.parent) {
+        let parent_path = quarantine_path
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf);
+        let failure = CollectionMutationFailure::from_io_error(
+            CollectionMutationOperation::ParentSync,
+            parent_path,
+            expected_root_identity.clone(),
+            &error,
+        );
         return Ok(recover_original_name(
             capability.parent,
             capability.leaf_name,
@@ -330,6 +342,7 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
             quarantine_path,
             Some(journal_name),
             expected_root_identity,
+            Some(failure),
         ));
     }
     let renamed_marker = renamed_marker_name(&journal_name);
@@ -357,6 +370,7 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
                 quarantine_path,
                 Some(journal_name),
                 expected_root_identity,
+                None,
             ));
         }
     };
@@ -388,6 +402,7 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
                 quarantine_path,
                 Some(journal_name),
                 expected_root_identity,
+                None,
             ))
         }
     }
@@ -422,6 +437,7 @@ fn recover_original_name(
     quarantine_path: PathBuf,
     journal_name: Option<String>,
     expected_root_identity: Option<StoreRootIdentity>,
+    primary_failure: Option<CollectionMutationFailure>,
 ) -> QuarantineStoreOutcome {
     match rename_noreplace(
         &parent,
@@ -435,7 +451,7 @@ fn recover_original_name(
             let parent_path = quarantine_path
                 .parent()
                 .map_or_else(PathBuf::new, Path::to_path_buf);
-            let journal_failure = match sync_directory(&parent) {
+            let secondary_failure = match sync_directory(&parent) {
                 Ok(()) => journal_name.and_then(|name| {
                     clear_journal(&parent, &parent_path, &name, expected_root_identity.clone())
                         .err()
@@ -447,31 +463,48 @@ fn recover_original_name(
                     &error,
                 )),
             };
+            // One flat failure preserves the initiating error; restore sync
+            // and cleanup errors fill the slot only when no primary exists.
+            let failure = primary_failure.or(secondary_failure);
             let restored_path = quarantine_path
                 .parent()
                 .map_or_else(PathBuf::new, |parent| parent.join(&original_name));
             QuarantineStoreOutcome::Restored {
                 restored_path,
-                journal_failure,
+                failure,
             }
         }
         Err(error) => {
-            let failure = CollectionMutationFailure::from_io_error(
+            let restore_failure = CollectionMutationFailure::from_io_error(
                 CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
-                quarantine_path.clone(),
+                quarantine_path
+                    .parent()
+                    .map_or_else(PathBuf::new, |parent| parent.join(&original_name)),
                 expected_root_identity,
                 &error,
             );
             QuarantineStoreOutcome::Retained {
                 quarantine_path,
-                failure,
+                failure: primary_failure.unwrap_or(restore_failure),
             }
         }
     }
 }
 
-fn reserve_quarantine_name(parent: &Dir, original: &OsStr) -> Option<String> {
-    let original = original.to_str()?;
+fn reserve_quarantine_name(
+    parent: &Dir,
+    data_root: &Path,
+    original: &OsStr,
+    expected_root_identity: Option<StoreRootIdentity>,
+) -> Result<String, CollectionMutationFailure> {
+    let Some(original) = original.to_str() else {
+        return Err(CollectionMutationFailure::without_native_error(
+            CollectionMutationOperation::ReserveQuarantineName,
+            data_root.to_path_buf(),
+            expected_root_identity,
+        ));
+    };
+    let mut last_probe_error = None;
     for _ in 0..QUARANTINE_ATTEMPTS {
         let sequence = QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = format!(
@@ -479,12 +512,30 @@ fn reserve_quarantine_name(parent: &Dir, original: &OsStr) -> Option<String> {
             std::process::id()
         );
         match parent.symlink_metadata(&candidate) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(candidate),
-            // The candidate name is taken or unreadable; try the next sequence.
-            Ok(_) | Err(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => last_probe_error = Some((candidate, error)),
         }
     }
-    None
+    Err(last_probe_error.map_or_else(
+        || {
+            CollectionMutationFailure::without_native_error(
+                CollectionMutationOperation::ReserveQuarantineName,
+                data_root.to_path_buf(),
+                expected_root_identity.clone(),
+            )
+        },
+        |(candidate, error)| {
+            CollectionMutationFailure::from_io_error(
+                CollectionMutationOperation::ReserveQuarantineName,
+                data_root
+                    .parent()
+                    .map_or_else(PathBuf::new, |parent| parent.join(candidate)),
+                expected_root_identity.clone(),
+                &error,
+            )
+        },
+    ))
 }
 
 fn journal_name(quarantine_name: &str) -> String {
@@ -531,11 +582,13 @@ fn write_journal(
         .open_with(&temporary, &options)
         .map_err(|error| publish_failure(&error))?;
     if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        // Preserve the publish error; temporary cleanup is best-effort only.
         let _ = parent.remove_file(&temporary);
         return Err(publish_failure(&error));
     }
     drop(file);
     if let Err(error) = rename_noreplace(parent, OsStr::new(&temporary), parent, OsStr::new(name)) {
+        // Preserve the publish error; temporary cleanup is best-effort only.
         let _ = parent.remove_file(&temporary);
         return Err(publish_failure(&error));
     }
@@ -650,6 +703,7 @@ pub(super) fn recover_existing_store_quarantine(
         if capability.parent.symlink_metadata(&journal).is_ok() {
             outcomes.push(QuarantineRecoveryOutcome::Retained {
                 quarantine_path: parent_path.join(&file_name),
+                failure: None,
             });
             continue;
         }
@@ -692,6 +746,7 @@ pub(super) fn recover_named_store_quarantine(
         Err(_) => {
             return Ok(Some(QuarantineRecoveryOutcome::Retained {
                 quarantine_path,
+                failure: None,
             }));
         }
     }
@@ -702,26 +757,38 @@ pub(super) fn recover_named_store_quarantine(
     if capability.parent.symlink_metadata(&journal).is_ok() {
         return Ok(Some(QuarantineRecoveryOutcome::Retained {
             quarantine_path,
+            failure: None,
         }));
     }
-    if rename_noreplace(
+    match rename_noreplace(
         &capability.parent,
         quarantine_name,
         &capability.parent,
         &capability.leaf_name,
-    )
-    .is_ok()
-    {
-        Ok(Some(QuarantineRecoveryOutcome::Restored {
-            restored_path: data_root.to_path_buf(),
-            // Legacy quarantines have no journal, but an unsynced rename is
-            // still a recovery state that must not be reported as complete.
-            journal_pending: sync_directory(&capability.parent).is_err(),
-        }))
-    } else {
-        Ok(Some(QuarantineRecoveryOutcome::Retained {
+    ) {
+        Ok(()) => {
+            let failure = sync_directory(&capability.parent).err().map(|error| {
+                CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::ParentSync,
+                    parent_path.to_path_buf(),
+                    None,
+                    &error,
+                )
+            });
+            Ok(Some(QuarantineRecoveryOutcome::Restored {
+                restored_path: data_root.to_path_buf(),
+                failure,
+            }))
+        }
+        Err(error) => Ok(Some(QuarantineRecoveryOutcome::Retained {
             quarantine_path,
-        }))
+            failure: Some(CollectionMutationFailure::from_io_error(
+                CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+                data_root.to_path_buf(),
+                None,
+                &error,
+            )),
+        })),
     }
 }
 

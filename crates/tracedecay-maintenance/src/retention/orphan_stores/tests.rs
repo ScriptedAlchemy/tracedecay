@@ -12,6 +12,10 @@ use tracedecay_runtime_core::storage::{
 };
 
 const DAY: i64 = 24 * 60 * 60;
+#[cfg(unix)]
+const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 17;
+#[cfg(windows)]
+const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 183;
 
 async fn open_registered_db(
     profile_root: &Path,
@@ -2026,11 +2030,13 @@ fn interrupted_quarantine_is_restored_on_the_next_collection_admission() {
 
     let outcomes = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
 
-    assert_eq!(outcomes.len(), 1);
-    assert!(matches!(
-        outcomes.as_slice(),
-        [QuarantineRecoveryOutcome::Restored { .. }]
-    ));
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Restored {
+            restored_path: data_root.clone(),
+            failure: None,
+        }]
+    );
     assert_eq!(
         std::fs::read(data_root.join("payload.bin")).unwrap(),
         b"recover me"
@@ -2056,10 +2062,20 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
 
     let outcomes = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
 
-    assert!(matches!(
-        outcomes.as_slice(),
-        [QuarantineRecoveryOutcome::Retained { .. }]
-    ));
+    let expected_failure = CollectionMutationFailure {
+        operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+        raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
+        target_path: data_root.clone(),
+        expected_root_identity: None,
+        classification: CollectionMutationFailureClassification::NonRetryable,
+    };
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine.clone(),
+            failure: Some(expected_failure.clone()),
+        }]
+    );
     assert_eq!(
         std::fs::read(data_root.join("payload.bin")).unwrap(),
         b"new live bytes"
@@ -2067,6 +2083,37 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
     assert_eq!(
         std::fs::read(quarantine.join("payload.bin")).unwrap(),
         b"quarantined bytes"
+    );
+
+    let mut collection = CollectionOutcome::default();
+    assert!(!reconcile_existing_quarantine(
+        &profile_root,
+        &data_root,
+        "proj_retained_quarantine",
+        &mut collection,
+    ));
+    assert_eq!(
+        collection,
+        CollectionOutcome {
+            errors: vec![
+                CollectionFailure {
+                    store_id: "proj_retained_quarantine".to_owned(),
+                    kind: CollectionFailureKind::RemoveFailed(expected_failure),
+                },
+                CollectionFailure {
+                    store_id: "proj_retained_quarantine".to_owned(),
+                    kind: CollectionFailureKind::PayloadChanged,
+                },
+            ],
+            recovery_receipts: vec![CollectionRecoveryReceipt {
+                store_id: "proj_retained_quarantine".to_owned(),
+                original_path: data_root,
+                quarantine_path: quarantine.clone(),
+                actual_path: quarantine,
+                action: CollectionRecoveryAction::RetainedForRecovery,
+            }],
+            ..CollectionOutcome::default()
+        }
     );
 }
 
@@ -2354,6 +2401,76 @@ async fn unregistered_store_sweep_reconciles_interrupted_quarantine() {
         b"recover through pager"
     );
     assert!(!quarantine.exists());
+}
+
+#[tokio::test]
+async fn unregistered_store_sweep_reports_failed_legacy_restore() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let projects = profile_root.join("projects");
+    let data_root = projects.join("proj_paged_retained");
+    let quarantine = projects.join(".tracedecay-orphan-quarantine-proj_paged_retained-42-7");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"new live bytes").unwrap();
+    std::fs::create_dir_all(&quarantine).unwrap();
+    std::fs::write(quarantine.join("payload.bin"), b"legacy quarantine bytes").unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let cancellation = CancellationToken::new();
+
+    let report = sweep_unregistered_store_page(
+        &db,
+        &profile_root,
+        UnregisteredStoreSweepRequestV1 {
+            cursor: None,
+            limit: 2,
+            retention_secs: 0,
+            now: 1_700_000_000,
+            apply: true,
+            cancellation: &cancellation,
+            deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+        },
+    )
+    .await
+    .unwrap();
+
+    let failure = CollectionMutationFailure {
+        operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+        raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
+        target_path: data_root.clone(),
+        expected_root_identity: None,
+        classification: CollectionMutationFailureClassification::NonRetryable,
+    };
+    assert_eq!(
+        report.outcome.errors,
+        vec![
+            CollectionFailure {
+                store_id: "proj_paged_retained".to_owned(),
+                kind: CollectionFailureKind::RemoveFailed(failure),
+            },
+            CollectionFailure {
+                store_id: "proj_paged_retained".to_owned(),
+                kind: CollectionFailureKind::PayloadChanged,
+            },
+        ]
+    );
+    assert_eq!(
+        report.outcome.recovery_receipts,
+        vec![CollectionRecoveryReceipt {
+            store_id: "proj_paged_retained".to_owned(),
+            original_path: data_root.clone(),
+            quarantine_path: quarantine.clone(),
+            actual_path: quarantine.clone(),
+            action: CollectionRecoveryAction::RetainedForRecovery,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"new live bytes"
+    );
+    assert_eq!(
+        std::fs::read(quarantine.join("payload.bin")).unwrap(),
+        b"legacy quarantine bytes"
+    );
 }
 
 /// A durable-memory guard applies to unregistered directories exactly as it
