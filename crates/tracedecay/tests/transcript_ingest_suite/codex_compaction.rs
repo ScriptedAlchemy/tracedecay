@@ -106,18 +106,9 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
         EnvVarGuard::set("USERPROFILE", &home),
     ];
     let project_id = mark_test_project(&project);
-    // The hook resolves the project root through the initialized-store gate,
-    // exactly like production installs: `init` creates the project store
-    // first, then daemon enrollment mounts the already-initialized layout
-    // (the canonical enrollment composition itself creates the project graph
-    // database, so init must come first — as it does in a real install).
-    crate::common::initialize_tracedecay_cli_project(&home, &project);
-    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
-        .await
-        .unwrap();
-    drop(enrollment);
-    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
-
+    // The app-server summarizer resolves its binary from the daemon's own
+    // environment, and the `init` below is what first starts that daemon, so
+    // the fake `codex` has to be installed before anything spawns it.
     let codex_bin = tmp.path().join("codex");
     std::fs::write(
         &codex_bin,
@@ -141,6 +132,18 @@ done
         EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &codex_bin),
         EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
     ];
+    // The hook resolves the project root through the initialized-store gate,
+    // exactly like production installs: `init` creates the project store
+    // first, then daemon enrollment mounts the already-initialized layout
+    // (the canonical enrollment composition itself creates the project graph
+    // database, so init must come first — as it does in a real install).
+    crate::common::initialize_tracedecay_cli_project(&home, &project);
+    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+        .await
+        .unwrap();
+    drop(enrollment);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
+
     let daemon = spawn_tracedecay_daemon(&home);
     let event = serde_json::json!({
         "hook_event_name": "PostCompact",
