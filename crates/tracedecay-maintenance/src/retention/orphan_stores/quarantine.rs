@@ -242,7 +242,7 @@ impl QuarantinedStore {
                 failure,
             };
         }
-        let journal_failure = clear_journal(
+        let journal_failure = clear_committed_journal(
             &parent,
             quarantine_path
                 .parent()
@@ -685,18 +685,70 @@ fn clear_journal(
     journal_name: &str,
     expected_root_identity: Option<StoreRootIdentity>,
 ) -> Result<(), CollectionMutationFailure> {
+    clear_journal_in_order(
+        parent,
+        parent_path,
+        journal_name,
+        expected_root_identity,
+        JournalCleanupState::Recoverable,
+    )
+}
+
+fn clear_committed_journal(
+    parent: &Dir,
+    parent_path: &Path,
+    journal_name: &str,
+    expected_root_identity: Option<StoreRootIdentity>,
+) -> Result<(), CollectionMutationFailure> {
+    clear_journal_in_order(
+        parent,
+        parent_path,
+        journal_name,
+        expected_root_identity,
+        JournalCleanupState::DeletionConfirmed,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum JournalCleanupState {
+    Recoverable,
+    DeletionConfirmed,
+}
+
+fn journal_cleanup_names(journal_name: &str, state: JournalCleanupState) -> [String; 3] {
     let renamed = renamed_marker_name(journal_name);
-    let marker = retired_marker_name(journal_name);
-    // The journal is the recovery authority, so remove it last. A marker
-    // cleanup failure must leave the exact intent discoverable on retry.
-    for name in [renamed.as_str(), marker.as_str(), journal_name] {
-        match parent.remove_file(name) {
+    let retired = retired_marker_name(journal_name);
+    match state {
+        // Restore and pre-delete cleanup must keep the journal as the final
+        // recovery authority if either marker cleanup is interrupted.
+        JournalCleanupState::Recoverable => [renamed, retired, journal_name.to_owned()],
+        // Once exact deletion is confirmed, the retired marker must remain
+        // authoritative until the journal is removed. It becomes ignorable
+        // orphan debris as soon as journal-driven inventory cannot see it.
+        JournalCleanupState::DeletionConfirmed => [renamed, journal_name.to_owned(), retired],
+    }
+}
+
+#[cfg(test)]
+pub(super) fn committed_journal_cleanup_names(journal_name: &str) -> [String; 3] {
+    journal_cleanup_names(journal_name, JournalCleanupState::DeletionConfirmed)
+}
+
+fn clear_journal_in_order(
+    parent: &Dir,
+    parent_path: &Path,
+    journal_name: &str,
+    expected_root_identity: Option<StoreRootIdentity>,
+    state: JournalCleanupState,
+) -> Result<(), CollectionMutationFailure> {
+    for name in journal_cleanup_names(journal_name, state) {
+        match parent.remove_file(&name) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(CollectionMutationFailure::from_io_error(
                     CollectionMutationOperation::ClearRecoveryJournal,
-                    parent_path.join(name),
+                    parent_path.join(&name),
                     expected_root_identity,
                     &error,
                 ));
@@ -1035,7 +1087,7 @@ fn recover_named_store_quarantine_inner(
             };
             let Some(original_identity) = original_identity else {
                 if decision == RegisteredQuarantineDecisionV1::Remove {
-                    let journal_failure = clear_journal(
+                    let journal_failure = clear_committed_journal(
                         &capability.parent,
                         parent_path,
                         &journal_name,

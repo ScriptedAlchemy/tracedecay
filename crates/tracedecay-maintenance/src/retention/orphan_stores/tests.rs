@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use super::quarantine::classify_recovery_journal_probe;
 use super::quarantine::{
     PendingQuarantineReceiptV1, QuarantineRecoveryOutcome, RegisteredQuarantineDecisionV1,
-    RegisteredQuarantineInventoryV1, read_registered_quarantine_intents_controlled,
-    recover_existing_store_quarantine, recover_named_store_quarantine_controlled,
-    recover_registered_quarantine_intent_controlled,
+    RegisteredQuarantineInventoryV1, committed_journal_cleanup_names,
+    read_registered_quarantine_intents_controlled, recover_existing_store_quarantine,
+    recover_named_store_quarantine_controlled, recover_registered_quarantine_intent_controlled,
 };
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -1854,6 +1854,23 @@ fn committed_journal_recovery_removes_the_exact_quarantine() {
 }
 
 #[test]
+fn committed_journal_cleanup_keeps_retired_authority_until_journal_removal() {
+    let journal = "quarantine.receipt-v1.json";
+    let order = committed_journal_cleanup_names(journal);
+
+    assert_eq!(order[0], format!("{journal}.renamed"));
+    assert_eq!(
+        order[1], journal,
+        "the recovery journal must remain while retired authority is required"
+    );
+    assert_eq!(
+        order[2],
+        format!("{journal}.retired"),
+        "retired authority becomes orphan debris only after the journal is gone"
+    );
+}
+
+#[test]
 fn registered_remove_clears_journal_after_exact_quarantine_is_already_absent() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -1944,6 +1961,17 @@ fn unregistered_committed_recovery_clears_journal_after_quarantine_is_already_ab
     quarantine.mark_retirement_committed().unwrap();
     drop(quarantine);
     std::fs::remove_dir_all(&quarantine_path).unwrap();
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    let renamed_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.renamed"));
+    let retired_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.retired"));
+    std::fs::remove_file(&renamed_marker).unwrap();
+    assert!(
+        journal_path.is_file() && retired_marker.is_file(),
+        "a crash before journal removal retains both recovery authorities"
+    );
 
     let recovery = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
 
@@ -1956,6 +1984,8 @@ fn unregistered_committed_recovery_clears_journal_after_quarantine_is_already_ab
     );
     assert!(!data_root.exists());
     assert!(!quarantine_path.exists());
+    assert!(!journal_path.exists());
+    assert!(!retired_marker.exists());
     assert!(
         read_pending_quarantine_receipts(&profile_root)
             .unwrap()
