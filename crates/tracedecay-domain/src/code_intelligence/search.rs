@@ -33,6 +33,7 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
+const CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN: &str = "tracedecay.code-source-full-replay.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 const EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN: &str = "tracedecay.embedding-projection-key.v1";
 const SEMANTIC_SEARCH_INDEX_KEY_DIGEST_DOMAIN: &str = "tracedecay.semantic-search-index-key.v1";
@@ -730,6 +731,73 @@ struct ChangedCodeChunkSetDigestInput<'a> {
     added_or_changed: &'a [ChangedCodeChunkV1],
     deleted: &'a [ChangedCodeChunkV1],
     reused: &'a [ChangedCodeChunkV1],
+}
+
+/// The two source identities sealed by one code generation.
+///
+/// The incremental digest authenticates the physical generation transition
+/// and all three change partitions. The full-replay digest authenticates only
+/// the complete ordered chunk corpus, so byte-identical source remains the
+/// same across generation-id churn.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGenerationSourceCommitmentsV1 {
+    pub incremental_manifest_digest: ManifestDigest,
+    pub full_replay_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct CodeSourceFullReplayDigestInput<'a> {
+    domain: &'static str,
+    chunks: &'a [(CodeSearchChunkId, ContentDigest)],
+}
+
+/// Digest a complete source corpus in canonical chunk-identity order.
+pub fn code_source_full_replay_digest(
+    chunks: &[(CodeSearchChunkId, ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
+    for (chunk, digest) in chunks {
+        chunk.validate()?;
+        digest.validate()?;
+    }
+    if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(DomainError::NonCanonical {
+            field: "full replay source chunk order",
+        });
+    }
+    canonical_sha256(&CodeSourceFullReplayDigestInput {
+        domain: CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN,
+        chunks,
+    })
+}
+
+impl CodeGenerationSourceCommitmentsV1 {
+    pub fn from_changed_chunks(
+        changes: &ChangedCodeChunkSetV1,
+        full_source: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<Self, DomainError> {
+        changes.validate()?;
+        Ok(Self {
+            incremental_manifest_digest: changes.manifest_digest.clone(),
+            full_replay_digest: code_source_full_replay_digest(full_source)?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.incremental_manifest_digest.validate()?;
+        self.full_replay_digest.validate()
+    }
+
+    pub fn validate_for_source(
+        &self,
+        full_source: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        if self.full_replay_digest != code_source_full_replay_digest(full_source)? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl ChangedCodeChunkSetV1 {
@@ -2042,6 +2110,48 @@ mod tests {
             tampered.validate(),
             Err(DomainError::DigestMismatch)
         ));
+    }
+
+    #[test]
+    fn source_commitments_preserve_incremental_and_full_replay_identities() {
+        let incremental = changed_set();
+        let full_source = vec![
+            (id("chunk.added"), id(&digest('a'))),
+            (id("chunk.reused"), id(&digest('c'))),
+        ];
+        let first =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&incremental, &full_source)
+                .expect("source commitments");
+
+        assert_eq!(
+            first.incremental_manifest_digest,
+            incremental.compute_digest().expect("incremental digest")
+        );
+        assert_ne!(
+            first.incremental_manifest_digest, first.full_replay_digest,
+            "the generation-bound changed-set digest is not a full replay identity"
+        );
+
+        let mut republished = incremental;
+        republished.from_generation = Some(id("generation.8"));
+        republished.to_generation = id("generation.9");
+        republished.manifest_digest = republished.compute_digest().expect("republished digest");
+        let second =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&republished, &full_source)
+                .expect("republished source commitments");
+
+        assert_ne!(
+            first.incremental_manifest_digest, second.incremental_manifest_digest,
+            "incremental identity must retain its generation watermarks"
+        );
+        assert_eq!(
+            first.full_replay_digest, second.full_replay_digest,
+            "full replay identity must survive generation-id churn over identical source"
+        );
+
+        let mut tampered = first;
+        tampered.full_replay_digest = id(&digest('f'));
+        assert!(tampered.validate_for_source(&full_source).is_err());
     }
 
     #[test]
