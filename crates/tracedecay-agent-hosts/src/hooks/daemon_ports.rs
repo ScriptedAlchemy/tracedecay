@@ -22,11 +22,13 @@ use tracedecay_hooks::{
 };
 
 use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
+use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::HookTimingSpan;
 use super::dispatch::NativeContextScoutLifecycleV1;
 
 pub(crate) struct DaemonAdmissionPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
     session_id: Option<&'a str>,
     lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
@@ -40,12 +42,14 @@ pub(crate) struct DaemonAdmissionPort<'a> {
 
 impl<'a> DaemonAdmissionPort<'a> {
     pub(crate) fn new(
+        runtime: &'a HookRuntimeV1,
         project_root: &'a Path,
         session_id: Option<&'a str>,
         lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
         telemetry: Option<&'a HookTimingSpan>,
     ) -> Self {
         Self {
+            runtime,
             project_root,
             session_id,
             lifecycle,
@@ -179,6 +183,7 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
             let response = tokio::time::timeout(
                 Duration::from_micros(deadline.remaining_micros()),
                 super::daemon_hook_action(
+                    self.runtime,
                     Some(self.project_root),
                     serde_json::json!({
                         "action": "hook_v2_admit",
@@ -221,6 +226,7 @@ fn delivery_outcome_from_status(status: Option<&str>) -> HookFeedbackDeliveryOut
 
 #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.timed_daemon_action")]
 async fn timed_daemon_hook_action(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     action: serde_json::Value,
     deadline: HookSynchronousDeadlineV1,
@@ -228,7 +234,7 @@ async fn timed_daemon_hook_action(
 ) -> HookFeedbackDeliveryOutcomeV1 {
     let response = tokio::time::timeout(
         Duration::from_micros(deadline.remaining_micros()),
-        super::daemon_hook_action(Some(project_root), action, telemetry),
+        super::daemon_hook_action(runtime, Some(project_root), action, telemetry),
     )
     .await;
     let Ok(Ok(response)) = response else {
@@ -240,12 +246,16 @@ async fn timed_daemon_hook_action(
 /// Daemon-backed Hook feedback-notice delivery. Acknowledgement crosses the
 /// local daemon boundary; finding content stays in the feedback publication store.
 pub(crate) struct DaemonFeedbackNoticeDeliveryPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
 }
 
 impl<'a> DaemonFeedbackNoticeDeliveryPort<'a> {
-    pub(crate) fn new(project_root: &'a Path) -> Self {
-        Self { project_root }
+    pub(crate) fn new(runtime: &'a HookRuntimeV1, project_root: &'a Path) -> Self {
+        Self {
+            runtime,
+            project_root,
+        }
     }
 }
 
@@ -260,6 +270,7 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
             timed_daemon_hook_action(
+                self.runtime,
                 self.project_root,
                 serde_json::json!({
                     "action": "hook_v2_feedback_notice_delivery",
@@ -285,12 +296,16 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
 
 /// Daemon-backed Context Scout delivery-receipt commit.
 pub(crate) struct DaemonDeliveryReceiptPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
 }
 
 impl<'a> DaemonDeliveryReceiptPort<'a> {
-    pub(crate) fn new(project_root: &'a Path) -> Self {
-        Self { project_root }
+    pub(crate) fn new(runtime: &'a HookRuntimeV1, project_root: &'a Path) -> Self {
+        Self {
+            runtime,
+            project_root,
+        }
     }
 
     #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.post_receipt")]
@@ -300,6 +315,7 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
         deadline: HookSynchronousDeadlineV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
         timed_daemon_hook_action(
+            self.runtime,
             self.project_root,
             serde_json::json!({
                 "action": "hook_v2_delivery_receipt",
@@ -345,13 +361,17 @@ pub(crate) struct ContextScoutFeedbackCommitV1 {
 /// Daemon-backed Context Scout explicit-feedback commit.
 #[cfg(test)]
 pub(crate) struct DaemonContextScoutFeedbackPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
 }
 
 #[cfg(test)]
 impl<'a> DaemonContextScoutFeedbackPort<'a> {
-    pub(crate) fn new(project_root: &'a Path) -> Self {
-        Self { project_root }
+    pub(crate) fn new(runtime: &'a HookRuntimeV1, project_root: &'a Path) -> Self {
+        Self {
+            runtime,
+            project_root,
+        }
     }
 
     pub(crate) async fn post_feedback(
@@ -361,6 +381,7 @@ impl<'a> DaemonContextScoutFeedbackPort<'a> {
         deadline: HookSynchronousDeadlineV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
         timed_daemon_hook_action(
+            self.runtime,
             self.project_root,
             serde_json::json!({
                 "action": "hook_v2_feedback",
@@ -402,13 +423,19 @@ impl AsyncHookFeedbackDeliveryPortV1<ContextScoutFeedbackCommitV1>
 
 /// Daemon-backed `OpenCode` LSP update submission.
 pub(crate) struct DaemonOpenCodeLspUpdatePort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
     telemetry: Option<&'a HookTimingSpan>,
 }
 
 impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
-    pub(crate) fn new(project_root: &'a Path, telemetry: Option<&'a HookTimingSpan>) -> Self {
+    pub(crate) fn new(
+        runtime: &'a HookRuntimeV1,
+        project_root: &'a Path,
+        telemetry: Option<&'a HookTimingSpan>,
+    ) -> Self {
         Self {
+            runtime,
             project_root,
             telemetry,
         }
@@ -417,6 +444,7 @@ impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
     #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.opencode_lsp_submit")]
     pub(crate) async fn submit_updated_event(&self, event: &serde_json::Value) -> bool {
         let response = super::daemon_hook_action(
+            self.runtime,
             Some(self.project_root),
             serde_json::json!({
                 "action": "opencode_lsp_updated",

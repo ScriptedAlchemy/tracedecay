@@ -149,7 +149,10 @@ fn byte_offsets_to_utf16_range(
 const LSP_TEST_RUN_EXPANSION_TTL_MICROS: i64 = 15 * 60 * 1_000_000;
 
 mod projection_identity;
-pub use projection_identity::{LspCodeIndexProjectionIdentity, LspCodeIndexProjectionIdentityPort};
+pub use projection_identity::{
+    LspCodeIndexProjectionIdentity, LspCodeIndexProjectionIdentityPort,
+    LspCodeIndexWorktreeGraphScope,
+};
 mod overlay_admission;
 use overlay_admission::admit_overlay;
 mod diagnostic_records;
@@ -497,7 +500,7 @@ impl RegisteredProjectLspAuthority {
             .code_index
             .current_identity(self.project_root.clone(), document_relative_path.clone())
             .await?;
-        let mut projection = identity.admit_for_scope(scope)?;
+        let mut projection = identity.admit_commit_scope(scope)?;
         projection.document_relative_path = document_relative_path;
         Ok(projection)
     }

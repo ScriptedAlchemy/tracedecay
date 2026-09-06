@@ -18,7 +18,9 @@ use tracedecay::daemon::{
     DaemonHandshake, DaemonHookEvent, HookAgent, HookEventNotifyOutcomeV1, call_tool,
     notify_hook_event,
 };
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_code_index::production::{
+    CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
+};
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
@@ -343,6 +345,43 @@ fn result_paths(search: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// Typed symbol search through the application surface. Unlike
+/// `tracedecay_search`, this lane binds its page to the sealed generation via
+/// the symbol-graph cursor authority, so it observes scope admission directly.
+async fn symbol_search(socket: &Path, handshake: &DaemonHandshake, query: &str) -> Value {
+    let envelope = tool(
+        socket,
+        handshake,
+        "tracedecay_code_symbol_search",
+        json!({
+            "query": query,
+            "scope": { "path_prefix": null },
+            "lazy_index_ignored_dependencies": false,
+            "meta": { "projection": "summary", "order": "relevance" },
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(
+        envelope["outcome"]["outcome"], "evidence",
+        "typed symbol search must publish evidence for {query}: {envelope}"
+    );
+    assert_eq!(
+        envelope["outcome"]["value"]["execution"]["termination"], "completed",
+        "typed symbol search must complete for {query}: {envelope}"
+    );
+    envelope["outcome"]["value"]["payload"].clone()
+}
+
+fn symbol_search_files(payload: &Value) -> Vec<&str> {
+    payload["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["file"].as_str())
+        .collect()
+}
+
 fn assert_exact_identity(
     status: &Value,
     project: &Path,
@@ -594,15 +633,46 @@ fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGene
             .expect("active code generation pointer"),
     )
     .expect("valid active code generation pointer");
-    CodeIndexPublishedGenerationV1::decode_sealed(
-        &fs::read(
-            scope
-                .join("code-generations-v1")
-                .join(pointer.generation_file),
-        )
-        .expect("sealed active code generation"),
+    let sealed = fs::read(
+        scope
+            .join("code-generations-v1")
+            .join(pointer.generation_file),
     )
+    .expect("sealed active code generation");
+    // The daemon publishes partitioned manifests whose file segments live
+    // beside the generations directory; decode those the way the store does.
+    let segments_root = scope.join("code-generation-segments-v1");
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&sealed, |request, buffer| {
+        let (digest, size_bytes, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest, size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest, size_bytes, offset, length),
+        };
+        let digest_hex = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .expect("sealed segment digest is sha256");
+        let segment = fs::read(segments_root.join(format!("segment-{digest_hex}.json")))
+            .expect("sealed generation segment");
+        assert_eq!(
+            segment.len() as u64,
+            size_bytes,
+            "segment size matches manifest"
+        );
+        let start = usize::try_from(offset).expect("segment offset");
+        let end = start + usize::try_from(length).expect("segment length");
+        buffer.clear();
+        buffer.extend_from_slice(&segment[start..end]);
+        Ok(())
+    })
     .expect("active generation must be sealed and compatible")
+    .expect("active generation must be a partitioned manifest")
 }
 
 fn assert_sealed_generation_identity(
@@ -831,12 +901,23 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     )
     .await;
 
+    // Dirty the worktree with both an uncommitted edit to a tracked file and a
+    // new untracked file.
+    let committed_main_source =
+        fs::read_to_string(project.join("src/lib.rs")).expect("committed main source");
+    fs::write(
+        project.join("src/lib.rs"),
+        format!(
+            "{committed_main_source}pub fn lifecycle_dirty_tracked_symbol() -> &'static str {{ \"dirty\" }}\n"
+        ),
+    )
+    .expect("edit tracked source file");
     fs::write(
         project.join("src/saved.rs"),
         "pub fn lifecycle_saved_symbol() -> &'static str { \"saved\" }\n",
     )
     .expect("save source file");
-    deliver_save(&project, &["src/saved.rs"]).await;
+    deliver_save(&project, &["src/lib.rs", "src/saved.rs"]).await;
     // Dirty worktree generations keep ref/worktree identity but must not claim
     // HEAD as source_revision — that field is exact-commit evidence only.
     let saved = wait_for_terminal_generation(
@@ -851,6 +932,27 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         Some("src/saved.rs"),
     )
     .await;
+    // Read-only graph queries bind to the sealed dirty generation: exact lookup
+    // and the typed symbol-graph lane must both serve it even though no commit
+    // is sealed.
+    let dirty_exact =
+        exact_symbol(&socket, &handshake, "lifecycle_dirty_tracked_symbol", false).await;
+    assert_eq!(
+        dirty_exact["count"], 1,
+        "exact lookup must serve the dirty tracked edit: {dirty_exact}"
+    );
+    let dirty_tracked = symbol_search(&socket, &handshake, "lifecycle_dirty_tracked_symbol").await;
+    assert_eq!(
+        symbol_search_files(&dirty_tracked),
+        ["src/lib.rs"],
+        "typed symbol search must serve the dirty tracked edit: {dirty_tracked}"
+    );
+    let dirty_untracked = symbol_search(&socket, &handshake, "lifecycle_saved_symbol").await;
+    assert_eq!(
+        symbol_search_files(&dirty_untracked),
+        ["src/saved.rs"],
+        "typed symbol search must serve the untracked file: {dirty_untracked}"
+    );
 
     fs::rename(project.join("src/saved.rs"), project.join("src/renamed.rs"))
         .expect("rename source file");
@@ -872,9 +974,19 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         "rename retained the deleted logical path: {}",
         renamed.search
     );
+    // A further edit invalidates the previous dirty generation for the typed
+    // lane too: the symbol now binds to its new path only.
+    let renamed_typed = symbol_search(&socket, &handshake, "lifecycle_saved_symbol").await;
+    assert_eq!(
+        symbol_search_files(&renamed_typed),
+        ["src/renamed.rs"],
+        "typed symbol search must follow the dirty edit: {renamed_typed}"
+    );
 
+    fs::write(project.join("src/lib.rs"), committed_main_source)
+        .expect("restore committed main source");
     fs::remove_file(project.join("src/renamed.rs")).expect("delete renamed source file");
-    deliver_save(&project, &["src/renamed.rs"]).await;
+    deliver_save(&project, &["src/lib.rs", "src/renamed.rs"]).await;
     let deleted = wait_for_terminal_generation(
         &socket,
         &handshake,
@@ -887,6 +999,13 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         None,
     )
     .await;
+    // Back on the clean commit, the typed lane binds to the sealed HEAD
+    // generation and no longer serves the reverted dirty edit.
+    let clean_typed = symbol_search(&socket, &handshake, "lifecycle_dirty_tracked_symbol").await;
+    assert!(
+        symbol_search_files(&clean_typed).is_empty(),
+        "reverted dirty edit must leave the clean generation: {clean_typed}"
+    );
 
     git(&project, &["checkout", "--quiet", "feature/lifecycle"]);
     // External checkout is not a hooked file-edit, and shell hooks are a typed
@@ -987,7 +1106,12 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     let exit = daemon
         .wait_for_exit(RECEIPT_TIMEOUT)
         .expect("wait for cancelled daemon")
-        .expect("daemon must exit after SIGTERM");
+        .unwrap_or_else(|| {
+            panic!(
+                "daemon must exit after SIGTERM; daemon_log={}",
+                daemon_log_for_failure()
+            )
+        });
     assert!(
         exit.success(),
         "daemon cancellation was not graceful: {exit}"
