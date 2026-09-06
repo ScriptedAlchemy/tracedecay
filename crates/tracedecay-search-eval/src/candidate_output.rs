@@ -2563,13 +2563,13 @@ fn peak_rss_bytes_from_status(status: &str) -> Option<u64> {
 mod fallback_baseline_tests;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::semantic_native::SemanticNativePendingReasonV1;
 
-    struct TestRepositoryFixture {
+    pub(crate) struct TestRepositoryFixture {
         _temp: tempfile::TempDir,
-        root: PathBuf,
+        pub(crate) root: PathBuf,
     }
 
     impl TestRepositoryFixture {
@@ -2599,7 +2599,7 @@ mod tests {
         }
     }
 
-    fn authenticated_repo_fixture() -> Arc<TestRepositoryFixture> {
+    pub(crate) fn authenticated_repo_fixture() -> Arc<TestRepositoryFixture> {
         static FIXTURE: std::sync::OnceLock<Mutex<std::sync::Weak<TestRepositoryFixture>>> =
             std::sync::OnceLock::new();
         let mut fixture = FIXTURE
