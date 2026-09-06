@@ -48,6 +48,13 @@ impl KiroSnapshotObservationRecord {
         scope: ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
     ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        snapshot_cursor_after(PROVIDER, &self.session_id, self.order, scope, generation)
+        snapshot_cursor_after(
+            PROVIDER,
+            &self.session_id,
+            None,
+            self.order,
+            scope,
+            generation,
+        )
     }
 }

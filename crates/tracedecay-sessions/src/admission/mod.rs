@@ -714,23 +714,45 @@ pub(crate) mod test_support {
             state: &mut MemoryObservationState,
             write: AnchoredObservationWrite,
         ) -> ObservationStoreResult<ObservationPersistOutcome> {
-            if let Some(stored) = state.observations.iter().find(|stored| {
-                stored.observation().observation_id() == write.observation().observation_id()
-            }) {
-                return Ok(ObservationPersistOutcome::ExactDuplicate(
-                    stored.commit_receipt().clone(),
-                ));
+            let retained = state
+                .observations
+                .iter()
+                .find(|stored| {
+                    stored.observation().observation_id() == write.observation().observation_id()
+                })
+                .map(|stored| stored.commit_receipt().clone());
+            if let Some(retained) = &retained
+                && retained.observation().identity() == write.observation().identity()
+            {
+                // Byte-identical identity is an exact replay: it writes nothing
+                // and moves no cursor.
+                return Ok(ObservationPersistOutcome::ExactDuplicate(retained.clone()));
             }
             let actual = Self::current_cursor(
                 state,
                 write.next_cursor().source(),
                 write.next_cursor().scope(),
             );
+            if let Some(retained) = &retained
+                && actual.as_ref() == Some(write.next_cursor())
+            {
+                return Ok(ObservationPersistOutcome::CoveredDuplicate(
+                    retained.clone(),
+                ));
+            }
             if actual.as_ref() != write.expected_cursor() {
                 return Err(ObservationStoreError::CursorConflict {
                     expected: Box::new(write.expected_cursor().cloned()),
                     actual: Box::new(actual),
                 });
+            }
+            if let Some(retained) = retained {
+                // The same native record re-offered under a new source
+                // generation: the committed row stays immutable, but its
+                // coverage still advances the source cursor, exactly as the
+                // durable store does for a covered duplicate.
+                Self::replace_cursor(state, write.next_cursor().clone());
+                return Ok(ObservationPersistOutcome::CoveredDuplicate(retained));
             }
             let sequence = u64::try_from(state.observations.len())
                 .unwrap_or(u64::MAX)
