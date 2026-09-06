@@ -34,8 +34,9 @@ use tracedecay_store::{
 
 use super::{post_commit_publication_settlement_error, semantic_stage_source_identity};
 use crate::semantic_runtime::{
-    SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
-    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
+    RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
+    SemanticVectorGraphScopeV1, SemanticVectorRetentionAuthorizationV1,
+    VerifiedSemanticVectorGraphRuntimeV1,
 };
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
 use crate::store::vector_generations::graph_adapter::{
@@ -290,6 +291,7 @@ async fn verify_pass_outlasting_the_interactive_deadline_still_publishes() {
         // Twice the interactive deadline: enough that a shared 30s authority
         // is already spent before the install phase starts.
         simulated_verify_elapsed: Some(2 * GRAPH_OPERATION_DEADLINE),
+        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
@@ -315,6 +317,7 @@ async fn publication_cancelled_during_verify_reports_typed_cancellation() {
         staged_publication("cancelled-verify", 'b', &cancellation).await;
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancel_during_verify: Some(cancellation_flag),
+        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
@@ -348,6 +351,7 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         require_background_begin: true,
+        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(probe);
@@ -393,6 +397,7 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancellation_to_trip: Some(cancellation_flag),
+        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(probe);
@@ -406,6 +411,63 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
 /// Stands in for `EXACT_SQL_TRANSACTION_IDLE_LIMIT`, shrunk so the test fails
 /// in seconds instead of parking for the real abandoned-transaction lease.
 const WRITER_GATE_LEASE: Duration = Duration::from_secs(2);
+
+/// #915: snapshot recovery must isolate its synchronous graph operation from
+/// the sole runtime worker so the task holding the writer can release it.
+#[tokio::test(flavor = "current_thread")]
+async fn read_only_snapshot_recovery_leaves_the_only_runtime_worker_free() {
+    let source = CodeGenerationId::new("code-generation.read-only-contention").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let (release, gate) = std::sync::mpsc::channel();
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        recover_snapshot_gate: Mutex::new(Some(gate)),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(retained.runtime()))
+    });
+    let retained = RetainedSemanticVectorGraphV1::new(probe, Arc::clone(retained.cancellation()));
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let heartbeat_ticks = Arc::clone(&ticks);
+    let heartbeat = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let holder = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release.send(()).is_ok()
+    });
+
+    let started = Instant::now();
+    let store = GraphVectorGenerationStoreV1::read_only(&retained);
+    let elapsed = started.elapsed();
+    heartbeat.abort();
+
+    assert!(
+        store.is_ok(),
+        "read-only recovery must be released by the holder, never by the lease expiry"
+    );
+    assert!(
+        holder.await.unwrap(),
+        "the transaction holder must still run and release snapshot recovery"
+    );
+    assert!(
+        ticks.load(Ordering::SeqCst) > 0,
+        "the single runtime worker must keep ticking while snapshot recovery waits"
+    );
+    assert!(
+        elapsed < WRITER_GATE_LEASE,
+        "read-only recovery must not wait out the lease: {elapsed:?}"
+    );
+}
 
 /// The store's durable operations acquire the project's one exclusive writer
 /// synchronously. Running that on the runtime is what starved the tasks that
@@ -436,6 +498,7 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     let (release, gate) = std::sync::mpsc::channel();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         begin_gate: Mutex::new(Some(gate)),
+        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(probe);
@@ -487,6 +550,8 @@ struct PublicationAuthorityProbeRuntime {
     /// Stands in for the project's exclusive exact-SQL writer: `begin_stage`
     /// blocks here until the transaction holder releases it.
     begin_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Stands in for that writer while verified snapshot recovery blocks.
+    recover_snapshot_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// How long the whole-generation digest pass would run at corpus scale.
     /// Simulated rather than slept: what the fix has to survive is the
     /// *elapsed budget*, and a real 168k-chunk pass is not a unit test.
@@ -506,6 +571,7 @@ impl PublicationAuthorityProbeRuntime {
             prepare_deadline: Mutex::new(None),
             cancellation_to_trip: None,
             begin_gate: Mutex::new(None),
+            recover_snapshot_gate: Mutex::new(None),
             simulated_verify_elapsed: None,
             verify_completed_at: Mutex::new(None),
             cancel_during_verify: None,
@@ -523,6 +589,10 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         &self,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        if let Some(gate) = self.recover_snapshot_gate.lock().unwrap().take() {
+            gate.recv_timeout(WRITER_GATE_LEASE)
+                .map_err(|_| GraphDbError::Cancelled)?;
+        }
         if let Some(cancellation) = &self.cancellation_to_trip {
             cancellation.store(true, Ordering::SeqCst);
             authority.checkpoint()?;
