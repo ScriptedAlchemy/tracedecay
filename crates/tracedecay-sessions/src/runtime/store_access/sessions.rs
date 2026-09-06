@@ -13,7 +13,7 @@ use tracedecay_lcm::retrieval_content::{
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
-use super::super::shared::path_identity_lookup_candidates;
+use super::super::shared::path_identity_key;
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -38,24 +38,24 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
        AND messages.provider = ?1
        AND messages.message_id = requested.value";
 
-/// Appends a project-scope predicate that treats path identity, not raw
-/// display text, as the lookup authority.
+/// Appends the project-scope predicate.
+///
+/// `project_key` is an opaque authority and stays byte-exact. `project_path`
+/// is written through `path_identity_key`, so the same selector can use its
+/// exact spelling for the key and its canonical path spelling for the path.
 fn push_project_identity_predicate(
     sql: &mut String,
     query_params: &mut Vec<Value>,
-    project_key: &str,
+    project_selector: &str,
 ) {
-    let candidates = path_identity_lookup_candidates(project_key);
-    let start = query_params.len() + 1;
-    let placeholders = (0..candidates.len())
-        .map(|index| format!("?{}", start + index))
-        .collect::<Vec<_>>()
-        .join(", ");
+    query_params.push(Value::Text(project_selector.to_owned()));
+    let key_parameter = query_params.len();
+    query_params.push(Value::Text(path_identity_key(project_selector)));
+    let path_parameter = query_params.len();
     let _ = write!(
         sql,
-        " AND (s.project_key IN ({placeholders}) OR s.project_path IN ({placeholders}))"
+        " AND (s.project_key = ?{key_parameter} OR s.project_path = ?{path_parameter})"
     );
-    query_params.extend(candidates.into_iter().map(Value::Text));
 }
 
 fn session_db_operation_error(
@@ -393,15 +393,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         &self,
         project_key: &str,
     ) -> Result<i64, String> {
-        let mut rows = self
-            .read_connection()
-            .query(
-                "SELECT COUNT(*)
+        let mut sql = "SELECT COUNT(*)
                  FROM session_messages m
                  JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-                 WHERE s.project_key = ?1",
-                tracedecay_runtime_core::db::engine::params![project_key],
-            )
+                 WHERE 1 = 1"
+            .to_owned();
+        let mut query_params = Vec::with_capacity(2);
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
+        let mut rows = self
+            .read_connection()
+            .query(sql.as_str(), query_params)
             .await
             .map_err(|error| format!("failed to count project session messages: {error}"))?;
         let row = rows

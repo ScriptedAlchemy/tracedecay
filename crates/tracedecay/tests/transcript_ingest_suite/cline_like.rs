@@ -35,14 +35,9 @@ async fn parse_offset_for_path(
     db: &ProjectSessionTestRuntime,
     path: &std::path::Path,
 ) -> Option<ParseOffset> {
-    for candidate in tracedecay_sessions::runtime::shared::path_identity_lookup_candidates(
-        path.to_string_lossy().as_ref(),
-    ) {
-        if let Some(offset) = db.get_parse_offset(&candidate).await {
-            return Some(offset);
-        }
-    }
-    None
+    // `get_parse_offset` normalises to the canonical stored form itself, so
+    // the display path is the lookup.
+    db.get_parse_offset(path.to_string_lossy().as_ref()).await
 }
 
 pub(super) async fn parse_offset_for_task_history(

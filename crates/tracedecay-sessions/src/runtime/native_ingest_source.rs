@@ -55,9 +55,6 @@ pub fn cline_like_ui_source_key(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::shared::{
-        path_identity_eq, path_identity_key, path_identity_lookup_candidates,
-    };
     use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
 
     #[test]
@@ -101,27 +98,5 @@ mod tests {
         assert_eq!(written, looked_up);
         assert_ne!(written, legacy);
         assert!(written.explicit_source_key().is_some());
-    }
-
-    #[test]
-    fn path_identity_collapses_only_windows_display_forms() {
-        assert!(path_identity_eq(
-            r"C:\Users\agent\task\api_conversation_history.json",
-            r"c:/Users/agent/task/api_conversation_history.json",
-        ));
-        assert!(path_identity_eq(
-            r"\\?\C:\Users\agent\task\api_conversation_history.json",
-            r"C:\Users\agent\task\api_conversation_history.json",
-        ));
-        assert_eq!(
-            path_identity_key(r"\\?\C:\Users\agent\task\ui_messages.json"),
-            path_identity_key(r"c:/Users/agent/task/ui_messages.json"),
-        );
-        assert!(!path_identity_eq("task-1", "task-1:ui_messages"));
-        assert!(
-            path_identity_lookup_candidates(r"C:\Users\agent\task\api_conversation_history.json")
-                .iter()
-                .any(|candidate| candidate.contains('/'))
-        );
     }
 }

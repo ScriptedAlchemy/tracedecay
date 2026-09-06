@@ -6,9 +6,9 @@
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
+use tracedecay_sessions::runtime::cline_like::{ClineLikeSource, ui_messages_source_key};
 use tracedecay_sessions::runtime::cursor::ingest_cursor_transcript_event;
-use tracedecay_sessions::runtime::{cline_like_ui_source_key, native_ingest_source_identity};
+use tracedecay_sessions::runtime::native_ingest_source_identity;
 
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
@@ -40,17 +40,22 @@ async fn cline_parse_offset_lookup_uses_path_identity_not_display_text() {
         .await
         .expect("Cline API parse offset must be admitted");
 
-    let slash_flipped = api.to_string_lossy().replace('/', "\\");
     assert_eq!(
-        db.get_parse_offset(&slash_flipped).await,
-        Some(committed.clone()),
-        "Cline cursor lookup must treat slash direction as path identity"
-    );
-    let prefixed = format!(r"\\?\{}", api.to_string_lossy());
-    assert_eq!(
-        db.get_parse_offset(&prefixed).await,
+        db.get_parse_offset(api.to_string_lossy().as_ref()).await,
         Some(committed),
-        "Cline cursor lookup must treat the Windows extended prefix as path identity"
+        "Cline cursor lookup must use the admitted path identity"
+    );
+    #[cfg(windows)]
+    {
+        let slash_flipped = api.to_string_lossy().replace('\\', "/");
+        assert_eq!(db.get_parse_offset(&slash_flipped).await, Some(committed));
+    }
+    #[cfg(not(windows))]
+    assert!(
+        db.get_parse_offset(&format!(r"{}\literal-backslash", api.to_string_lossy()))
+            .await
+            .is_none(),
+        "a Unix literal backslash must not alias a path separator"
     );
 }
 
@@ -78,7 +83,7 @@ async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources()
     let api_cursor = observation_source_cursor(&db, "cline", session_id, &project)
         .await
         .expect("API stream cursor");
-    let ui_key = cline_like_ui_source_key(session_id);
+    let ui_key = ui_messages_source_key(session_id);
     let ui_cursor = observation_source_cursor_for_key(&db, "cline", session_id, &ui_key)
         .await
         .expect("UI stream cursor");
@@ -144,11 +149,10 @@ async fn cursor_search_uses_path_identity_for_the_selected_project() {
         .expect("Cursor admission must write a cursor under the session source");
     assert_eq!(cursor.source(), &source);
 
-    let flipped = project.to_string_lossy().replace('/', "\\");
     let results = runtime
         .search_project_session_messages_for_test(
             "cursor",
-            Some(flipped.as_str()),
+            Some(project.to_string_lossy().as_ref()),
             "billing ingestion",
             10,
         )
