@@ -4,8 +4,8 @@ use std::path::Path;
 
 use crate::{
     DirectEvaluationReportV1, GenerateCandidateOutputsOptions, QUERY_BASELINE_PROFILE,
-    checked_in_fixture_root, compute_profile_material_digest, evaluate_generated_outputs,
-    generate_candidate_outputs, load_candidate_workload,
+    compute_profile_material_digest, evaluate_generated_outputs, generate_candidate_outputs,
+    load_candidate_workload,
 };
 
 const BASELINE_REPORT_RESOURCE_CHILD_ENV: &str = "TRACEDECAY_BASELINE_REPORT_RESOURCE_CHILD";
