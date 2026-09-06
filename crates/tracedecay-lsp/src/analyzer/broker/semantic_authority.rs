@@ -361,9 +361,19 @@ fn begin_analyzer_start(inner: &StdioLspSemanticAuthorityInner, root: &AdmittedR
     if supervisor.state() == AnalyzerState::Ready {
         let _ = supervisor.apply(root, AnalyzerEvent::Crashed);
     }
+    // `Starting` belongs here too. Only one caller can be starting at a time —
+    // the client mutex this runs under is what enforces that — so reaching
+    // here in `Starting` means the caller that owned the previous start was
+    // dropped mid-flight (its request cancelled, or its spawned operation
+    // evicted) and released the lock without concluding the transition. The
+    // analyzer is not starting any more, and no event will ever arrive to say
+    // so, so refusing left the supervisor stranded and every later semantic
+    // request answering `Unavailable` for the rest of the session. This caller
+    // takes the start over; it consumes no restart budget, and a failure from
+    // `Starting` still charges one.
     if matches!(
         supervisor.state(),
-        AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff
+        AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff | AnalyzerState::Starting
     ) {
         return supervisor
             .apply(root, AnalyzerEvent::StartRequested)
@@ -540,5 +550,52 @@ mod tests {
         let readiness = authority.analyzer_readiness();
         assert_eq!(readiness.state(), AnalyzerState::RestartBackoff);
         assert_eq!(readiness.last_failure(), Some(AnalyzerEvent::StartupFailed));
+    }
+
+    /// A semantic request that owns an in-flight start can be dropped inside
+    /// it — its LSP request is cancelled, or its spawned operation is evicted
+    /// — releasing the analyzer client lock with the supervisor left in
+    /// `Starting` and no event coming to conclude it. The next request holds
+    /// that same lock, so nothing is racing it: it must take the start over
+    /// rather than read a stranded `Starting` as a refusal and answer
+    /// `Unavailable` for the rest of the session.
+    #[tokio::test]
+    async fn an_abandoned_start_is_taken_over_rather_than_stranding_the_analyzer() {
+        let authority = StdioLspSemanticAuthority::new(
+            "tracedecay-analyzer-that-cannot-spawn",
+            Vec::new(),
+            "rust",
+            std::env::temp_dir(),
+            "file:///project",
+            LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
+        );
+        let owner_root = AdmittedRoot::new("file:///project");
+        assert!(begin_analyzer_start(&authority.inner, &owner_root));
+        assert_eq!(
+            authority.analyzer_readiness().state(),
+            AnalyzerState::Starting,
+            "the abandoned caller's transition"
+        );
+
+        let outcome = authority
+            .start(
+                AdmittedRoot::new("file:///project"),
+                LspRequestId::Number(2),
+                crate::LspSemanticRequest::from_standard(
+                    "textDocument/documentSymbol",
+                    serde_json::json!({ "textDocument": { "uri": "file:///project/src/lib.rs" } }),
+                ),
+            )
+            .await;
+
+        assert_ne!(
+            outcome,
+            LspSemanticOperationOutcome::Unavailable,
+            "a start nobody owns any more must be taken over, not refused"
+        );
+        assert_eq!(
+            authority.analyzer_readiness().last_failure(),
+            Some(AnalyzerEvent::StartupFailed)
+        );
     }
 }
