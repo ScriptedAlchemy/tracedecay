@@ -171,6 +171,31 @@ class PortableProcessTests(unittest.TestCase):
         self.assertEqual(resolved.returncode, 0)
         self.assertEqual(Path(resolved.stdout.strip()), HELPER.resolve())
 
+    def test_resident_memory_sample_is_portable_and_never_fails_the_probe(self) -> None:
+        sampled = helper("resident-memory", "--pid", str(os.getpid()))
+        self.assertEqual(sampled.returncode, 0, sampled.stderr)
+        fields = dict(
+            field.split("=", 1) for field in sampled.stdout.split() if "=" in field
+        )
+        self.assertEqual(set(fields), {"rss_kib", "peak_rss_kib"})
+        # This interpreter is alive and resident on every supported kernel;
+        # the peak is Linux-only and reads `unavailable` elsewhere.
+        self.assertTrue(fields["rss_kib"].isdigit(), sampled.stdout)
+        self.assertGreater(int(fields["rss_kib"]), 0)
+        self.assertTrue(
+            fields["peak_rss_kib"].isdigit() or fields["peak_rss_kib"] == "unavailable",
+            sampled.stdout,
+        )
+
+        with subprocess.Popen([sys.executable, "-c", "pass"]) as exited:
+            exited.wait(timeout=10)
+            gone = helper("resident-memory", "--pid", str(exited.pid))
+        # A process that is already gone is a missing measurement, not an
+        # error: the sample is evidence for the attempts log, never a probe
+        # that may fail the readiness loop.
+        self.assertEqual(gone.returncode, 0, gone.stderr)
+        self.assertIn("rss_kib=unavailable", gone.stdout)
+
     def test_group_probes_ignore_an_unreaped_zombie_leader(self) -> None:
         holder_source = textwrap.dedent(
             """
@@ -557,6 +582,17 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
                 "TraceDecay PR dogfood pr_context output is valid", completed.stdout
             )
             self.assertIn("tracedecay_ci_readiness attempts=3", completed.stdout)
+            # A PASS carries its phase attribution, not only the verdict: the
+            # readiness journey names when text completed and the graph seated,
+            # and reports the daemon memory it observed (unavailable here, the
+            # fake binary runs without the daemon harness).
+            self.assertRegex(
+                completed.stdout,
+                r"tracedecay_ci_readiness_phases outcome=ready attempts=3 "
+                r"first_progress_ms=\S+ first_generation_ms=\d+ text_complete_ms=\d+ "
+                r"graph_ready_ms=\d+ status_current_ms=\d+ peak_daemon_rss_mb=unavailable "
+                r"last_phase=\S+ last_files=\S+ last_graph=ready last_coverage=complete",
+            )
             self.assertEqual(status_counter.read_text(encoding="utf-8").strip(), "4")
             self.assertIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
 
@@ -626,6 +662,23 @@ class DogfoodJourneyOutputTests(unittest.TestCase):
             self.assertIn("exact_scope_generation_not_ready", completed.stderr)
             self.assertNotIn("Traceback", completed.stderr)
             self.assertNotIn("tracedecay_ci_dogfood outcome=complete", completed.stdout)
+            # The timeout attributes the journey: text was complete and
+            # current the whole time, the graph never reported ready, and
+            # every probe row carries the graph column separately from the
+            # text phase so a waiting graph is never read as a text stall.
+            self.assertRegex(
+                completed.stdout,
+                r"tracedecay_ci_readiness_phases outcome=timeout attempts=\d+ "
+                r"first_progress_ms=None first_generation_ms=\d+ text_complete_ms=\d+ "
+                r"graph_ready_ms=None status_current_ms=\d+ peak_daemon_rss_mb=unavailable "
+                r"last_phase=None last_files=None/None last_graph=None last_coverage=complete",
+            )
+            self.assertRegex(
+                completed.stderr,
+                r"attempt=1 elapsed_ms=\d+ probe_ms=\d+ status_rc=0 validation_rc=1 "
+                r"status=current coverage=complete staleness=fresh rebuild=None "
+                r"gen=on\.text-only digest=None graph=None gstats=unavailable phase=None",
+            )
 
     def test_run_mode_retains_valid_status_when_next_probe_is_malformed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dogfood-malformed-status-") as tmp:
