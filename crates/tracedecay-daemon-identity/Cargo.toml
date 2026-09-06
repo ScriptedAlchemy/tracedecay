@@ -18,6 +18,7 @@ hotpath = [
     "tracedecay-application/hotpath",
     "tracedecay-daemon-protocol/hotpath",
     "tracedecay-domain/hotpath",
+    "tracedecay-private-fs/hotpath",
     "tracedecay-runtime-core/hotpath",
 ]
 hotpath-alloc = [
@@ -26,6 +27,7 @@ hotpath-alloc = [
     "tracedecay-application/hotpath-alloc",
     "tracedecay-daemon-protocol/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
 ]
 hotpath-cpu = [
@@ -34,6 +36,7 @@ hotpath-cpu = [
     "tracedecay-application/hotpath-cpu",
     "tracedecay-daemon-protocol/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
 ]
 
@@ -47,6 +50,7 @@ serde_json = "1"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [dev-dependencies]

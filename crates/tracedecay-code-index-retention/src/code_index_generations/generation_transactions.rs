@@ -281,6 +281,9 @@ impl GraphReplayPoolLockV1 {
             // Honor an already-expired caller deadline before the syscall so a
             // free pool is not taken after the budget, and so a Windows lock
             // conflict cannot replace the typed busy result with Storage.
+            // Production callers always pass `now + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET`
+            // (execute, cleanup, and the convenience wrapper). None use
+            // `deadline == now` as a try-once probe on a free pool.
             if Instant::now() >= deadline {
                 crate::hotpath_observe::retention_replay_pool_busy();
                 return Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy);
