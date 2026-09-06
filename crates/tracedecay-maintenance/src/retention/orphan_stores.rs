@@ -504,7 +504,7 @@ impl<'a> CollectionControl<'a> {
     }
 }
 
-fn unbounded_collection_control() -> CollectionControl<'static> {
+pub(super) fn unbounded_collection_control() -> CollectionControl<'static> {
     static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
     CollectionControl::new(
         CANCELLATION.get_or_init(CancellationToken::new),
@@ -774,9 +774,10 @@ fn finalize_verified_quarantine(
 }
 
 /// Reconcile a durable interrupted quarantine before applying a fresh plan for
-/// this exact live-name. Recovery never resumes the old deletion decision: a
-/// restored or retained quarantine is an owner-visible receipt and forces a
-/// later census/confirmation pass.
+/// this exact live-name. Only a durable retirement marker resumes the old
+/// deletion decision. A restored or retained quarantine forces a later
+/// census/confirmation pass; a journal-authorized removal completes the prior
+/// decision but never fabricates the old plan's byte count.
 fn reconcile_existing_quarantine(
     profile_root: &Path,
     data_root: &Path,
@@ -786,28 +787,48 @@ fn reconcile_existing_quarantine(
     match recover_existing_store_quarantine(profile_root, data_root) {
         Ok(recoveries) if recoveries.is_empty() => true,
         Ok(recoveries) => {
+            let mut retained_or_restored = false;
             for recovery in recoveries {
-                let (quarantine_path, actual_path, action, failure) = match recovery {
+                let recovery_receipt = match recovery {
+                    QuarantineRecoveryOutcome::Removed {
+                        journal_failure, ..
+                    } => {
+                        if let Some(failure) = journal_failure {
+                            outcome.errors.push(CollectionFailure {
+                                store_id: store_id.to_owned(),
+                                kind: CollectionFailureKind::RemoveFailed(failure),
+                            });
+                        }
+                        None
+                    }
                     QuarantineRecoveryOutcome::Restored {
                         restored_path,
                         failure,
                     } => {
+                        retained_or_restored = true;
                         let action = if failure.is_some() {
                             CollectionRecoveryAction::RetainedForRecovery
                         } else {
                             CollectionRecoveryAction::Restored
                         };
-                        (data_root.to_path_buf(), restored_path, action, failure)
+                        Some((data_root.to_path_buf(), restored_path, action, failure))
                     }
                     QuarantineRecoveryOutcome::Retained {
                         quarantine_path,
+                        actual_path,
                         failure,
-                    } => (
-                        quarantine_path.clone(),
-                        quarantine_path,
-                        CollectionRecoveryAction::RetainedForRecovery,
-                        failure,
-                    ),
+                    } => {
+                        retained_or_restored = true;
+                        Some((
+                            quarantine_path.clone(),
+                            actual_path,
+                            CollectionRecoveryAction::RetainedForRecovery,
+                            failure,
+                        ))
+                    }
+                };
+                let Some((quarantine_path, actual_path, action, failure)) = recovery_receipt else {
+                    continue;
                 };
                 outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                     store_id: store_id.to_owned(),
@@ -823,10 +844,12 @@ fn reconcile_existing_quarantine(
                     });
                 }
             }
-            outcome.errors.push(CollectionFailure {
-                store_id: store_id.to_owned(),
-                kind: CollectionFailureKind::PayloadChanged,
-            });
+            if retained_or_restored {
+                outcome.errors.push(CollectionFailure {
+                    store_id: store_id.to_owned(),
+                    kind: CollectionFailureKind::PayloadChanged,
+                });
+            }
             false
         }
         Err(kind) => {
