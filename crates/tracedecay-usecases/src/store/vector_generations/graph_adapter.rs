@@ -64,6 +64,28 @@ const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 /// cancellation as the earlier reclamation path.
 pub const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_secs(15 * 60);
 
+/// One corpus-scaled phase of publishing a generation.
+///
+/// Each is an independent whole-generation pass with its own fresh background
+/// authority, so progress and cancellation are named per phase: a publication
+/// that stalls has to say *which* pass is still running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorPublicationPhaseV1 {
+    /// Re-derives the staged generation's digest over every stored row.
+    Verify,
+    /// Installs the verified generation as the published head.
+    Publish,
+}
+
+impl VectorPublicationPhaseV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verify => "verify",
+            Self::Publish => "publish",
+        }
+    }
+}
+
 /// Every durable operation this store performs is synchronous SQL: it acquires
 /// the project's single exclusive writer, runs its statements, and commits or
 /// rolls back before returning. That work is owned here, behind one `Arc`, so
@@ -645,12 +667,19 @@ impl GraphVectorGenerationStoreStateV1 {
         }
         let generation_id = catalog[0].generation_id.clone();
         drop(snapshot);
-        self.read_cataloged_hydrating_published_bases(&generation_id, Arc::clone(&cancellation))?
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Corrupt(
-                    "verified semantic vector generation records are missing".to_owned(),
-                )
-            })?;
+        // Opening a store re-proves the published generation over every stored
+        // row, so this is daemon-owned whole-generation verification, not an
+        // interactive read.
+        self.read_cataloged_hydrating_published_bases(
+            &generation_id,
+            Arc::clone(&cancellation),
+            GRAPH_BACKGROUND_OPERATION_BUDGET,
+        )?
+        .ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Corrupt(
+                "verified semantic vector generation records are missing".to_owned(),
+            )
+        })?;
         check_cancelled(cancellation.as_ref())?;
         Ok(())
     }
@@ -659,27 +688,45 @@ impl GraphVectorGenerationStoreStateV1 {
     /// published base identity. Recover that published snapshot only after
     /// dropping the current verified read: isolated evaluation's SQLite writer
     /// cannot open another generation while a reader snapshot is still live.
+    ///
+    /// `recovery_budget` is the authority policy of the phase that asked, not
+    /// a property of this walk: an interactive read keeps
+    /// [`GRAPH_OPERATION_DEADLINE`], while a daemon-owned lifecycle phase
+    /// passes [`GRAPH_BACKGROUND_OPERATION_BUDGET`]. Each generation in the
+    /// lineage still mints its own authority from it, because each is an
+    /// independent whole-generation pass.
     fn read_cataloged_hydrating_published_bases(
         &self,
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
+        recovery_budget: Duration,
     ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
         let Some(snapshot) = self.optional_snapshot()? else {
-            let cache =
-                self.preload_published_lineage(Some(generation_id), Arc::clone(&cancellation))?;
+            let cache = self.preload_published_lineage(
+                Some(generation_id),
+                Arc::clone(&cancellation),
+                recovery_budget,
+            )?;
             return Ok(cache.get(generation_id).cloned());
         };
         let catalog =
             read_generation_catalog_entry(&snapshot, generation_id, Arc::clone(&cancellation))?;
         let Some(catalog) = catalog else {
             drop(snapshot);
-            let cache =
-                self.preload_published_lineage(Some(generation_id), Arc::clone(&cancellation))?;
+            let cache = self.preload_published_lineage(
+                Some(generation_id),
+                Arc::clone(&cancellation),
+                recovery_budget,
+            )?;
             return Ok(cache.get(generation_id).cloned());
         };
         let base = catalog.base_generation.clone();
         drop(snapshot);
-        let cache = self.preload_published_lineage(base.as_ref(), Arc::clone(&cancellation))?;
+        let cache = self.preload_published_lineage(
+            base.as_ref(),
+            Arc::clone(&cancellation),
+            recovery_budget,
+        )?;
         let snapshot = self.snapshot()?;
         let recover: &PublishedBaseRecover<'_> =
             &|generation, _, _| Ok(cache.get(generation).cloned());
@@ -691,6 +738,7 @@ impl GraphVectorGenerationStoreStateV1 {
         &self,
         start: Option<&VectorGenerationIdV1>,
         cancellation: Arc<dyn GraphCancellation>,
+        recovery_budget: Duration,
     ) -> Result<
         BTreeMap<VectorGenerationIdV1, ScopedGenerationRecordsV1>,
         VectorGenerationStoreErrorV1,
@@ -706,7 +754,11 @@ impl GraphVectorGenerationStoreStateV1 {
             }
             chain.push(generation_id.clone());
             let snapshot = self
-                .load_published_generation_snapshot(&generation_id, Arc::clone(&cancellation))?
+                .load_published_generation_snapshot(
+                    &generation_id,
+                    Arc::clone(&cancellation),
+                    recovery_budget,
+                )?
                 .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                     BaseGenerationIncompatibilityV1::MissingPublished,
                 ))?;
@@ -716,7 +768,11 @@ impl GraphVectorGenerationStoreStateV1 {
         let mut cache = BTreeMap::new();
         for generation_id in chain.into_iter().rev() {
             let snapshot = self
-                .load_published_generation_snapshot(&generation_id, Arc::clone(&cancellation))?
+                .load_published_generation_snapshot(
+                    &generation_id,
+                    Arc::clone(&cancellation),
+                    recovery_budget,
+                )?
                 .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                     BaseGenerationIncompatibilityV1::MissingPublished,
                 ))?;
@@ -741,11 +797,14 @@ impl GraphVectorGenerationStoreStateV1 {
         &self,
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
+        recovery_budget: Duration,
     ) -> Result<Option<SemanticVectorVerifiedReadV1>, VectorGenerationStoreErrorV1> {
-        let authority = SemanticGraphExecutionAuthorityV1::new(
-            cancellation,
-            Instant::now() + GRAPH_OPERATION_DEADLINE,
-        );
+        // Recovering a published generation can re-derive its digest over every
+        // stored row, so the budget belongs to the phase that asked and each
+        // recovery starts fresh: a lineage walk is a sequence of independent
+        // whole-generation passes, and one must not spend the next one's.
+        let authority =
+            SemanticGraphExecutionAuthorityV1::new(cancellation, Instant::now() + recovery_budget);
         let (_, binding) = self.runtime.staging_binding();
         let scope = self.runtime.scope();
         let key = SemanticVectorPublishedGenerationKey {
@@ -803,8 +862,11 @@ impl GraphVectorGenerationStoreStateV1 {
         let snapshot = self.snapshot()?;
         let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
         drop(snapshot);
-        let Some(records) =
-            self.read_cataloged_hydrating_published_bases(generation_id, cancellation)?
+        let Some(records) = self.read_cataloged_hydrating_published_bases(
+            generation_id,
+            cancellation,
+            GRAPH_OPERATION_DEADLINE,
+        )?
         else {
             return Ok(None);
         };
@@ -841,8 +903,12 @@ impl GraphVectorGenerationStoreStateV1 {
         if self.optional_snapshot()?.is_none() {
             return Ok(None);
         }
-        self.read_cataloged_hydrating_published_bases(generation_id, cancellation)
-            .map(|records| records.map(|records| records.generation))
+        self.read_cataloged_hydrating_published_bases(
+            generation_id,
+            cancellation,
+            GRAPH_OPERATION_DEADLINE,
+        )
+        .map(|records| records.map(|records| records.generation))
     }
 
     /// Catalog/owner visibility only — does not hydrate resident vectors.

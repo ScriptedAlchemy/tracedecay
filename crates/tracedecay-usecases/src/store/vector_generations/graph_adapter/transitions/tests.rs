@@ -37,11 +37,14 @@ use crate::semantic_runtime::{
     SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
-use crate::store::vector_generations::graph_adapter::GRAPH_BACKGROUND_OPERATION_BUDGET;
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
+use crate::store::vector_generations::graph_adapter::{
+    GRAPH_BACKGROUND_OPERATION_BUDGET, GRAPH_OPERATION_DEADLINE,
+};
 use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, PreparedVectorGenerationV1, SemanticVectorStageDescriptorV1,
-    VectorGenerationBeginOutcomeV1, VectorGenerationPlanV1, VectorGenerationStoreErrorV1,
+    VectorGenerationBeginOutcomeV1, VectorGenerationBuildIdV1, VectorGenerationPlanV1,
+    VectorGenerationStoreErrorV1,
 };
 
 #[test]
@@ -214,43 +217,55 @@ async fn same_binding_store_preserves_an_active_pending_stage() {
     ));
 }
 
-#[tokio::test]
-async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
-    let source = CodeGenerationId::new("code-generation.background-publication").unwrap();
-    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+/// One committed generation, ready to publish.
+async fn staged_publication(
+    label: &str,
+    byte: char,
+    cancellation: &Arc<dyn GraphCancellation>,
+) -> (
+    Arc<IsolatedSemanticEvaluationGraphV1>,
+    GraphVectorGenerationStoreV1,
+    VectorGenerationBuildIdV1,
+    CodeGenerationId,
+) {
+    let source = CodeGenerationId::new(format!("code-generation.{label}")).unwrap();
     let graph = Arc::new(
         IsolatedSemanticEvaluationGraphV1::open_source_generations(
             std::slice::from_ref(&source),
-            Arc::clone(&cancellation),
+            Arc::clone(cancellation),
         )
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
     let (plan, prepared, descriptor) = prepared_generation(
         &source,
-        "chunk.background-publication",
-        'c',
+        &format!("chunk.{label}"),
+        byte,
         &admitted_embedding(),
     );
     store.configure_stage(descriptor).unwrap();
     let build = store
-        .begin_generation(plan, Arc::clone(&cancellation))
+        .begin_generation(plan, Arc::clone(cancellation))
         .await
         .unwrap()
         .build_id()
         .clone();
     store
-        .commit_batch(&build, None, prepared, Arc::clone(&cancellation))
+        .commit_batch(&build, None, prepared, Arc::clone(cancellation))
         .await
         .unwrap();
-    let probe = Arc::new(PublicationAuthorityProbeRuntime {
-        inner: Arc::clone(&store.runtime),
-        require_background_begin: false,
-        prepare_deadline: Mutex::new(None),
-        cancellation_to_trip: None,
-        begin_gate: Mutex::new(None),
-    });
+    (graph, store, build, source)
+}
+
+#[tokio::test]
+async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let (_graph, mut store, build, source) =
+        staged_publication("background-publication", 'c', &cancellation).await;
+    let probe = Arc::new(PublicationAuthorityProbeRuntime::wrapping(Arc::clone(
+        &store.runtime,
+    )));
     store.replace_runtime(probe);
 
     let publication = store
@@ -259,6 +274,56 @@ async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
         .unwrap();
 
     assert_eq!(publication.checkpoint.source_generation, source);
+}
+
+/// #837: the whole-generation digest over 168k chunks alone outran the 30s
+/// interactive deadline, and the install phase inherited what was left of the
+/// same authority — nothing. Each phase now mints its own background
+/// authority, so a verify pass that is itself longer than the interactive
+/// deadline still leaves the install a full budget.
+#[tokio::test]
+async fn verify_pass_outlasting_the_interactive_deadline_still_publishes() {
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let (_graph, mut store, build, source) =
+        staged_publication("long-verify", 'f', &cancellation).await;
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        // Twice the interactive deadline: enough that a shared 30s authority
+        // is already spent before the install phase starts.
+        simulated_verify_elapsed: Some(2 * GRAPH_OPERATION_DEADLINE),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+    });
+    store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
+
+    let publication = store
+        .publish_generation(&build, cancellation)
+        .await
+        .unwrap();
+
+    assert_eq!(publication.checkpoint.source_generation, source);
+    assert_eq!(probe.publish_calls.load(Ordering::SeqCst), 1);
+}
+
+/// Lifecycle cancellation during the verify pass ends the publication with a
+/// typed `Cancelled`, and the install phase never starts. The background
+/// budget replaces the wall clock, not cancellation.
+#[tokio::test]
+async fn publication_cancelled_during_verify_reports_typed_cancellation() {
+    let cancellation_flag = Arc::new(AtomicBool::new(false));
+    let cancellation: Arc<dyn GraphCancellation> =
+        Arc::new(SwitchCancellation(Arc::clone(&cancellation_flag)));
+    let (_graph, mut store, build, _source) =
+        staged_publication("cancelled-verify", 'b', &cancellation).await;
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        cancel_during_verify: Some(cancellation_flag),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+    });
+    store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
+
+    assert!(matches!(
+        store.publish_generation(&build, cancellation).await,
+        Err(VectorGenerationStoreErrorV1::Cancelled)
+    ));
+    assert_eq!(probe.publish_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -282,11 +347,8 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
     );
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
-        inner: Arc::clone(&store.runtime),
         require_background_begin: true,
-        prepare_deadline: Mutex::new(None),
-        cancellation_to_trip: None,
-        begin_gate: Mutex::new(None),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(probe);
 
@@ -330,11 +392,8 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
         prepared_generation(&source, "chunk.begin-cancelled", 'e', &admitted_embedding());
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
-        inner: Arc::clone(&store.runtime),
-        require_background_begin: false,
-        prepare_deadline: Mutex::new(None),
         cancellation_to_trip: Some(cancellation_flag),
-        begin_gate: Mutex::new(None),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(probe);
 
@@ -376,11 +435,8 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     store.configure_stage(descriptor).unwrap();
     let (release, gate) = std::sync::mpsc::channel();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
-        inner: Arc::clone(&store.runtime),
-        require_background_begin: false,
-        prepare_deadline: Mutex::new(None),
-        cancellation_to_trip: None,
         begin_gate: Mutex::new(Some(gate)),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
     });
     store.replace_runtime(probe);
 
@@ -431,6 +487,31 @@ struct PublicationAuthorityProbeRuntime {
     /// Stands in for the project's exclusive exact-SQL writer: `begin_stage`
     /// blocks here until the transaction holder releases it.
     begin_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// How long the whole-generation digest pass would run at corpus scale.
+    /// Simulated rather than slept: what the fix has to survive is the
+    /// *elapsed budget*, and a real 168k-chunk pass is not a unit test.
+    simulated_verify_elapsed: Option<Duration>,
+    /// When that simulated verify pass would have finished.
+    verify_completed_at: Mutex<Option<Instant>>,
+    /// Trips lifecycle cancellation from inside the verify pass.
+    cancel_during_verify: Option<Arc<AtomicBool>>,
+    publish_calls: AtomicUsize,
+}
+
+impl PublicationAuthorityProbeRuntime {
+    fn wrapping(inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>) -> Self {
+        Self {
+            inner,
+            require_background_begin: false,
+            prepare_deadline: Mutex::new(None),
+            cancellation_to_trip: None,
+            begin_gate: Mutex::new(None),
+            simulated_verify_elapsed: None,
+            verify_completed_at: Mutex::new(None),
+            cancel_during_verify: None,
+            publish_calls: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
@@ -542,6 +623,20 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
             return Err(GraphDbError::DeadlineExceeded);
         }
         *self.prepare_deadline.lock().unwrap() = Some(authority.deadline());
+        if let Some(cancellation) = &self.cancel_during_verify {
+            cancellation.store(true, Ordering::SeqCst);
+            authority.checkpoint()?;
+        }
+        if let Some(elapsed) = self.simulated_verify_elapsed {
+            // The whole-generation digest pass, charged against this phase's
+            // own authority. Outliving the interactive deadline here is the
+            // corpus-scale case; not outliving the phase budget is the fix.
+            let completed_at = Instant::now() + elapsed;
+            if authority.deadline() <= completed_at {
+                return Err(GraphDbError::DeadlineExceeded);
+            }
+            *self.verify_completed_at.lock().unwrap() = Some(completed_at);
+        }
         let outcome = self
             .inner
             .prepare_publication_from_staged_native(stage, authority)?;
@@ -553,12 +648,20 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         stage: &SemanticVectorStageKey,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.publish_calls.fetch_add(1, Ordering::SeqCst);
         let prepare_deadline = self
             .prepare_deadline
             .lock()
             .unwrap()
             .ok_or_else(|| GraphDbError::conflict("test.publish_without_prepare"))?;
         if authority.deadline() <= prepare_deadline {
+            return Err(GraphDbError::DeadlineExceeded);
+        }
+        // The install has to start after the simulated verify pass finished and
+        // still hold budget. One authority shared across both phases cannot.
+        if let Some(completed_at) = *self.verify_completed_at.lock().unwrap()
+            && authority.deadline() <= completed_at
+        {
             return Err(GraphDbError::DeadlineExceeded);
         }
         self.inner.publish_ready_stage(stage, authority)
