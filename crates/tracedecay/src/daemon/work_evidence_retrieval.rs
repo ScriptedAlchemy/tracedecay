@@ -5,7 +5,6 @@
 //! anchors through the active evaluated federated profile, reauthorizes Work on
 //! both sides of selection, and hydrates only the globally selected anchors.
 
-use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -84,15 +83,6 @@ impl DaemonWorkEvidenceRetrievalV1 {
         self
     }
 
-    pub(crate) fn same_authority(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.retrieval, &other.retrieval)
-            && match (&self.federated_authority, &other.federated_authority) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
-            }
-    }
-
     fn temporal_query(
         &self,
         request: &WorkTaskSessionRequestV1,
@@ -142,17 +132,6 @@ impl DaemonWorkEvidenceRetrievalV1 {
 }
 
 impl WorkEvidenceRetrievalPortV1 for DaemonWorkEvidenceRetrievalV1 {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn same_retrieval_authority(&self, other: &dyn WorkEvidenceRetrievalPortV1) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<Self>()
-            .is_some_and(|other| self.same_authority(other))
-    }
-
     fn clone_arc(&self) -> Arc<dyn WorkEvidenceRetrievalPortV1> {
         Arc::new(self.clone())
     }
