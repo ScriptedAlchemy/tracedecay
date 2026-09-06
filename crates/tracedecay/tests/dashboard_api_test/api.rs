@@ -74,6 +74,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
                 id: "dashboard-outcome-skill".to_string(),
                 title: "Dashboard outcome skill".to_string(),
                 summary: "Fixture skill for outcome endpoint coverage.".to_string(),
+                routing_description: "Fixture skill for outcome endpoint coverage.".to_string(),
                 category: "maintenance".to_string(),
                 targets: default_managed_skill_targets(),
                 body_markdown: "Use when validating the outcomes endpoint.".to_string(),
