@@ -344,6 +344,10 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     );
 
     // Bridge: `analytics sync` imports the JSONL rows into the durable table.
+    // Hook callbacks already advance the same per-file import cursor while the
+    // daemon settles hint outcomes after a project-scope transcript ingest, so
+    // the explicit sync only ever imports the tail written since the last one.
+    // The durable table below is the completeness authority.
     let sync = enable_profile_accounting(&mut tracedecay_command_with_home(&home_root))
         .args(["analytics", "sync"])
         .current_dir(&project_root)
@@ -361,10 +365,20 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             String::from_utf8_lossy(&sync.stdout)
         )
     });
-    assert_eq!(
-        sync_outcome.get("imported").and_then(Value::as_u64),
-        Some(store_rows.len() as u64),
-        "analytics sync must import every emitted hook analytics row: {sync_outcome:#}"
+    assert!(
+        sync_outcome
+            .get("imported")
+            .and_then(Value::as_u64)
+            .is_some_and(|imported| imported <= store_rows.len() as u64),
+        "analytics sync must report the imported tail: {sync_outcome:#}"
+    );
+    assert!(
+        sync_outcome["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|source| source["error"].is_null() && source["skipped"] == 0),
+        "analytics sync must map every remaining row: {sync_outcome:#}"
     );
     drop(daemon);
 
@@ -376,7 +390,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             provider: None,
             project_id: None,
             session_id: None,
-            event_kind: Some("hook_invoked".to_string()),
+            event_kind: None,
             since: None,
             until: None,
             before_id: None,
@@ -384,6 +398,19 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         })
         .await
         .expect("query analytics events");
+    let hook_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.provider.starts_with("hook_"))
+        .collect();
+    assert_eq!(
+        hook_events.len(),
+        store_rows.len(),
+        "every emitted hook analytics row must be durable exactly once"
+    );
+    let events: Vec<_> = hook_events
+        .into_iter()
+        .filter(|event| event.event_kind == "hook_invoked")
+        .collect();
     assert_eq!(
         events.len(),
         replays.len(),

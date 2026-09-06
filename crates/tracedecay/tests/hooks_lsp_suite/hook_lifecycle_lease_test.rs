@@ -84,9 +84,15 @@ fn fixture_request(document: &str, identity: &str) -> Vec<u8> {
     serde_json::to_vec(&event["request"]).unwrap()
 }
 
+/// Rebinds a recorded fixture's portable `cwd` placeholder to this test's
+/// enrollment. A payload that names no `cwd` is returned unchanged: its host
+/// resolves the project from the hook process's working directory, and adding
+/// a field the host never sends would stop being the production shape.
 fn payload_with_enrolled_cwd(payload: &[u8], project: &Path) -> Vec<u8> {
     let mut payload: serde_json::Value = serde_json::from_slice(payload).unwrap();
-    payload["cwd"] = serde_json::Value::String(project.to_string_lossy().into_owned());
+    if payload.get("cwd").is_some() {
+        payload["cwd"] = serde_json::Value::String(project.to_string_lossy().into_owned());
+    }
     serde_json::to_vec(&payload).unwrap()
 }
 
@@ -425,28 +431,38 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         })
         .unwrap();
 
-        // Claude's response-capable handlers resolve project identity from the
-        // payload CWD rather than the process CWD, and deliberately refuse to
+        // Every response-capable handler resolves project identity from the
+        // payload CWD rather than the process CWD, and deliberately refuses to
         // re-attribute a named-but-unknown directory to wherever the hook
         // happens to run. The recorded host fixtures intentionally use a
         // portable workspace path, so bind these production-shaped payloads to
         // this test's enrollment.
-        let payload = if matches!(hook, "hook-claude-post-tool-use" | "hook-stop") {
-            payload_with_enrolled_cwd(&payload, &project)
-        } else {
-            payload
-        };
+        let payload = payload_with_enrolled_cwd(&payload, &project);
         let output = run_hook_at(&home, &project, hook, Some(&payload));
 
         assert!(output.status.success(), "{hook}: {output:?}");
-        let expected_stdout: &[u8] = if hook == "hook-claude-post-tool-use" {
-            b""
-        } else {
-            b"{}\n"
+        let expected_stdout: &[u8] = match hook {
+            // These providers support immediate context for PostToolUse. With
+            // no bound daemon guidance the canonical response journey emits no
+            // JSON, exactly as `native_host_hooks_do_not_create_a_missing_profile`
+            // pins for the unbound case: a published binding changes where the
+            // event is spooled, not whether context is fabricated.
+            "hook-claude-post-tool-use"
+            | "hook-kimi-event"
+            | "hook-opencode-event"
+            | "hook-opencode-tool-after" => b"",
+            _ => b"{}\n",
         };
         assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
         assert!(output.stderr.is_empty(), "{hook}: {output:?}");
-        if hook == "hook-claude-post-tool-use" {
+        // A host redelivers a callback whose exit it could not observe, and
+        // sibling hooks fire concurrently for one edit. The redelivery names
+        // the same event and must settle as the capture already recorded, on
+        // the response lane and the native capture lane alike.
+        if matches!(
+            hook,
+            "hook-claude-post-tool-use" | "hook-cursor-after-file-edit"
+        ) {
             let replay = run_hook_at(&home, &project, hook, Some(&payload));
             assert!(replay.status.success(), "{hook} replay: {replay:?}");
             assert_eq!(replay.stdout, expected_stdout, "{hook} replay: {replay:?}");
