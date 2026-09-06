@@ -1,17 +1,5 @@
-//! Filesystem validation contract tests for the Claude Code plugin surface of
-//! the shared `plugin/` tree.
-//!
-//! These mirror the sibling bundle tests (`plugin_manifest_schema_test.rs`,
-//! `plugin_config_schema_test.rs`, `shared_skill_contract_test.rs`) but operate
-//! purely on the on-disk shared tree, asserting Claude's manifests, MCP config,
-//! lifecycle hooks, skills, commands, and agents are shaped correctly and stay
-//! in sync with the canonical agent catalog (`plugin/agents/`).
-//!
-//! The embedded-file-list coverage check (asserting a Rust `const` registry
-//! matches the on-disk tree) is intentionally omitted here; it is handled with
-//! the installer that owns that registry.
-
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Host-specific Claude hook syntax, agent permissions, and generated adapters.
+//! General source schemas and shared skill frontmatter have dedicated validators.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -29,66 +17,8 @@ fn bundle_root() -> PathBuf {
     crate::common::repository_path("plugin")
 }
 
-/// The 18 model-invocable skills the bundle ships (also the Codex skill set),
-/// kept in sync across every skill-bundling surface. The `tracedecay-*`
-/// workflow dispatcher skills were removed (their behavior lives in the native
-/// slash commands), the memory write/read skills were folded into
-/// `project-memory`, and `recalling-session-context`/`retrieving-cached-context`
-/// were folded into `managing-session-context`/`using-the-cli`.
-const EXPECTED_SKILLS: &[&str] = &[
-    "assessing-impact",
-    "code-health",
-    "diagnosing-analytics",
-    "discovering-tracedecay",
-    "editing-safely",
-    "exploring-code",
-    "fixing-build-and-type-errors",
-    "inspecting-managed-skills",
-    "investigating-unexpected-changes",
-    "managing-session-context",
-    "managing-work",
-    "managing-workflows",
-    "profiling-tracedecay-performance",
-    "project-memory",
-    "reviewing-changes",
-    "tracing-functions",
-    "using-the-cli",
-    "using-tracedecay",
-];
-
-/// The 13 slash commands the bundle ships.
-const EXPECTED_COMMANDS: &[&str] = &[
-    "audit-safety",
-    "check-health",
-    "clean-dead-code",
-    "compare-branches",
-    "curate-memory",
-    "draft-commit",
-    "find-impact",
-    "fix-build",
-    "map-architecture",
-    "port-code",
-    "recall-memory",
-    "review-diff",
-    "test-changes",
-];
-
-/// The canonical product-plugin subagent definitions.
-const EXPECTED_AGENTS: &[&str] = &[
-    "automation-auditor.md",
-    "change-risk-reviewer.md",
-    "code-explorer.md",
-    "code-health-auditor.md",
-    "cross-host-integration-auditor.md",
-    "runtime-storage-doctor.md",
-    "session-historian.md",
-    "usage-intelligence-analyst.md",
-];
-
 /// Reads a required scalar frontmatter field from a `---`-fenced markdown file,
-/// asserting it is present and non-empty. Mirrors the frontmatter approach in
-/// `shared_skill_contract_test.rs` (manual parse via `parse_skill_frontmatter`,
-/// no new YAML dependency).
+/// asserting it is present and non-empty through the production parser.
 fn required_scalar(raw: &str, field: &str, path: &Path) -> String {
     let frontmatter = parse_skill_frontmatter(raw)
         .unwrap_or_else(|err| panic!("{}: failed to parse frontmatter: {err}", path.display()));
@@ -108,118 +38,6 @@ fn required_scalar(raw: &str, field: &str, path: &Path) -> String {
         path.display()
     );
     value.to_string()
-}
-
-/// Sorted set of subdirectory names directly under `dir`.
-fn sorted_subdir_names(dir: &Path) -> Vec<String> {
-    let mut names = fs::read_dir(dir)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
-        .map(|entry| entry.expect("read dir entry").path())
-        .filter(|path| path.is_dir())
-        .map(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .expect("directory name should be utf-8")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names
-}
-
-/// Sorted set of file names directly under `dir` matching `extension`.
-fn sorted_file_names(dir: &Path, extension: &str) -> Vec<String> {
-    let mut names = fs::read_dir(dir)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()))
-        .map(|entry| entry.expect("read dir entry").path())
-        .filter(|path| path.is_file())
-        .filter(|path| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext == extension)
-        })
-        .map(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .expect("file name should be utf-8")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names
-}
-
-#[test]
-fn claude_bundle_manifest_declares_the_expected_plugin_metadata() {
-    let manifest_path = bundle_root().join(".claude-plugin/plugin.json");
-    let manifest = read_json_file(&manifest_path);
-
-    assert_eq!(
-        manifest["name"],
-        "tracedecay",
-        "{} name must be tracedecay",
-        manifest_path.display()
-    );
-    for field in ["version", "description", "license", "homepage"] {
-        let value = manifest.get(field).and_then(Value::as_str);
-        assert!(
-            value.is_some_and(|value| !value.trim().is_empty()),
-            "{} must declare a non-empty `{field}`",
-            manifest_path.display()
-        );
-    }
-    let author_name = manifest
-        .get("author")
-        .and_then(|author| author.get("name"))
-        .and_then(Value::as_str);
-    assert!(
-        author_name.is_some_and(|name| !name.trim().is_empty()),
-        "{} must declare a non-empty author.name",
-        manifest_path.display()
-    );
-}
-
-#[test]
-fn claude_bundle_marketplace_lists_the_tracedecay_plugin() {
-    let marketplace_path = bundle_root().join(".claude-plugin/marketplace.json");
-    let marketplace = read_json_file(&marketplace_path);
-
-    assert_eq!(
-        marketplace["name"],
-        "tracedecay",
-        "{} name must be tracedecay",
-        marketplace_path.display()
-    );
-    assert!(
-        marketplace.get("owner").is_some(),
-        "{} must declare an owner",
-        marketplace_path.display()
-    );
-
-    let plugins = marketplace
-        .get("plugins")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| {
-            panic!(
-                "{} must declare a plugins array",
-                marketplace_path.display()
-            )
-        });
-    let entry = plugins
-        .iter()
-        .find(|plugin| plugin.get("name").and_then(Value::as_str) == Some("tracedecay"))
-        .unwrap_or_else(|| {
-            panic!(
-                "{} plugins[] must contain a tracedecay entry",
-                marketplace_path.display()
-            )
-        });
-    assert_eq!(
-        entry["source"],
-        "./",
-        "{} tracedecay plugin source must be \"./\"",
-        marketplace_path.display()
-    );
 }
 
 #[test]
@@ -349,111 +167,19 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
 }
 
 #[test]
-fn claude_bundle_ships_exactly_the_expected_skills() {
-    let skills_root = bundle_root().join("skills");
-    let mut expected: Vec<String> = EXPECTED_SKILLS.iter().map(|s| s.to_string()).collect();
-    expected.sort();
-    assert_eq!(
-        sorted_subdir_names(&skills_root),
-        expected,
-        "claude-plugin/skills must contain exactly the expected skill directories"
-    );
-}
-
-#[test]
-fn claude_bundle_skills_have_valid_frontmatter_and_body() {
-    let skills_root = bundle_root().join("skills");
-    for skill in EXPECTED_SKILLS {
-        let path = skills_root.join(skill).join("SKILL.md");
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-
-        let name = required_scalar(&raw, "name", &path);
-        assert_eq!(
-            &name,
-            skill,
-            "{} frontmatter name must match its directory",
-            path.display()
-        );
-        required_scalar(&raw, "description", &path);
-
-        assert!(
-            !body_after_frontmatter(&raw).trim().is_empty(),
-            "{} must have a non-empty body",
-            path.display()
-        );
-    }
-}
-
-#[test]
-fn claude_bundle_ships_exactly_the_expected_commands() {
-    let commands_root = bundle_root().join("commands");
-    let mut expected: Vec<String> = EXPECTED_COMMANDS
-        .iter()
-        .map(|command| format!("{command}.md"))
-        .collect();
-    expected.sort();
-    assert_eq!(
-        sorted_file_names(&commands_root, "md"),
-        expected,
-        "claude-plugin/commands must contain exactly the expected command files"
-    );
-}
-
-#[test]
 fn claude_bundle_commands_have_valid_frontmatter_and_body() {
-    let commands_root = bundle_root().join("commands");
-    for command in EXPECTED_COMMANDS {
-        let path = commands_root.join(format!("{command}.md"));
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    for (relative, raw) in tracedecay::agents::plugin_bundle::claude_files()
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("commands/"))
+    {
+        let path = Path::new(relative);
 
-        required_scalar(&raw, "description", &path);
+        required_scalar(raw, "description", path);
         assert!(
-            !body_after_frontmatter(&raw).trim().is_empty(),
+            !body_after_frontmatter(raw).trim().is_empty(),
             "{} must have a non-empty body",
             path.display()
         );
-    }
-}
-
-#[test]
-fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
-    let bundle_agents = bundle_root().join("agents");
-    let manifest_root = crate::common::repository_root();
-    let source_agents = manifest_root.join("plugin/agents");
-    assert!(
-        !manifest_root.join("src/agents/claude_agents").exists(),
-        "plugin/agents must be the only Claude agent source of truth"
-    );
-
-    // The bundle ships exactly the expected agent set.
-    let mut expected: Vec<String> = EXPECTED_AGENTS.iter().map(|a| a.to_string()).collect();
-    expected.sort();
-    assert_eq!(
-        sorted_file_names(&bundle_agents, "md"),
-        expected,
-        "claude-plugin/agents must contain exactly the expected agent files"
-    );
-
-    for agent in EXPECTED_AGENTS {
-        let bundle_path = bundle_agents.join(agent);
-        let source_path = source_agents.join(agent);
-        let bundle_bytes = fs::read(&bundle_path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", bundle_path.display()));
-        let source_bytes = fs::read(&source_path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", source_path.display()));
-        assert!(
-            bundle_bytes == source_bytes,
-            "{} must be a byte-identical copy of the single source of truth {}",
-            bundle_path.display(),
-            source_path.display()
-        );
-
-        let raw = String::from_utf8(bundle_bytes)
-            .unwrap_or_else(|err| panic!("{} is not utf-8: {err}", bundle_path.display()));
-        required_scalar(&raw, "name", &bundle_path);
-        required_scalar(&raw, "description", &bundle_path);
     }
 }
 
@@ -464,7 +190,6 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
     const DIRECT_PREFIX: &str = "mcp__tracedecay__";
     const PLUGIN_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
 
-    let source_agents = crate::common::repository_path("plugin/agents");
     // `read_only_tool_names()` reads the catalog straight from the crate that
     // owns it, so no composition-root registration precedes this and an
     // unavailable catalog is an error rather than an empty allowlist.
@@ -477,12 +202,13 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
         "the advertised catalog must expose read-only tools; an empty set would \
          pass every allowlist vacuously"
     );
-    for agent in EXPECTED_AGENTS {
-        let path = source_agents.join(agent);
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    for (relative, raw) in tracedecay::agents::plugin_bundle::claude_files()
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("agents/"))
+    {
+        let path = Path::new(relative);
 
-        let tools = required_scalar(&raw, "tools", &path);
+        let tools = required_scalar(raw, "tools", path);
         let tool_entries: Vec<&str> = tools.split(',').map(str::trim).collect();
         for required in ["Read", "Grep", "Glob", "ToolSearch"] {
             assert!(
@@ -540,7 +266,9 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
             );
         }
         assert!(
-            !raw.contains("disallowedTools:"),
+            !parse_skill_frontmatter(raw)
+                .unwrap()
+                .contains_key("disallowedTools"),
             "{} must not rely on a finite mutator denylist",
             path.display()
         );
@@ -549,24 +277,6 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
 
 #[test]
 fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
-    let root = crate::common::repository_root();
-    assert!(
-        !root.join("plugin/overlays/cursor/agents").exists(),
-        "Cursor adapters must be generated, not hand-authored"
-    );
-    // The host installers moved to `tracedecay-agent-hosts` in the crate
-    // split; assert against the live tree so this stays a real check and not
-    // a path that can never exist.
-    let host_agents = root.join("crates/tracedecay-agent-hosts/src/agents");
-    assert!(
-        host_agents.is_dir(),
-        "host installer sources moved; update this guard to the new location"
-    );
-    assert!(
-        !host_agents.join("codex_agents").exists(),
-        "Codex adapters must be generated, not hand-authored"
-    );
-
     let cursor_files = tracedecay::agents::plugin_bundle::cursor_files();
     let temp = tempfile::tempdir().unwrap();
     tracedecay_agent_hosts::register_automation_host_io();
@@ -574,10 +284,13 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
         temp.path(),
     )
     .unwrap();
-    for agent in EXPECTED_AGENTS {
-        let stem = agent.trim_end_matches(".md");
-        let claude_path = root.join("plugin/agents").join(agent);
-        let claude = fs::read_to_string(&claude_path).unwrap();
+    for (relative, claude) in tracedecay::agents::plugin_bundle::claude_files()
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("agents/"))
+    {
+        let claude_path = Path::new(relative);
+        let agent = relative.strip_prefix("agents/").unwrap();
+        let stem = agent.strip_suffix(".md").unwrap();
         let cursor = cursor_files
             .iter()
             .find(|(path, _)| *path == format!("agents/{agent}"))
@@ -595,14 +308,17 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
         assert_eq!(required_scalar(cursor, "name", Path::new(agent)), stem);
         assert_eq!(
             required_scalar(cursor, "description", Path::new(agent)),
-            required_scalar(&claude, "description", &claude_path)
+            required_scalar(claude, "description", claude_path)
         );
-        let canonical_body = body_after_frontmatter(&claude).replace("\r\n", "\n");
+        let canonical_body = body_after_frontmatter(claude).replace("\r\n", "\n");
         assert_eq!(
             body_after_frontmatter(cursor).replace("\r\n", "\n"),
             canonical_body
         );
-        assert!(cursor.contains("readonly: true"));
+        assert_eq!(
+            required_scalar(cursor, "readonly", Path::new(agent)),
+            "true"
+        );
         let expected_codex_name = format!("tracedecay-{stem}");
         assert_eq!(
             codex_toml["name"].as_str(),
@@ -610,7 +326,7 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
         );
         assert_eq!(
             codex_toml["description"].as_str(),
-            Some(required_scalar(&claude, "description", &claude_path).as_str())
+            Some(required_scalar(claude, "description", claude_path).as_str())
         );
         assert_eq!(codex_toml["sandbox_mode"].as_str(), Some("read-only"));
         assert_eq!(

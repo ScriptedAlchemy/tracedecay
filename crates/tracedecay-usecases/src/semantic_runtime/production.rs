@@ -2420,6 +2420,25 @@ impl ProductionSemanticRuntimeV1 {
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+        if let Some(field) = complete.mismatch(request) {
+            // The service collapses this into `IndexIncompatible`, the same
+            // public abstention a failed request contract produces. Name the
+            // field and both sides, or a serving-side drift is invisible.
+            tracing::warn!(
+                event = "semantic_serving_generation_mismatch",
+                field,
+                request_projection_key = ?request.projection.projection_key(),
+                serving_projection_key = ?active.projection_key(),
+                request_vector_generation = ?request.vector_generation,
+                serving_vector_generation = ?active.generation_id(),
+                request_code_generation = %request.code_generation,
+                serving_code_generation = %generation_id,
+                request_capability_manifest_digest = %request.capability_manifest_digest,
+                serving_capability_manifest_digest =
+                    %code_generation.capability().manifest_digest,
+                "the published semantic generation does not match the pinned request identity"
+            );
+        }
         let ann = match semantic_ann_serving_index(
             &store,
             &active,
