@@ -218,10 +218,7 @@ impl ScopeQuarantineAuthority {
             };
             match (source, staged) {
                 (Some((_, actual)), None) if actual == expected => {}
-                (None, Some((staged, actual))) if actual == expected => {
-                    if directory_identity(&staged).map_err(storage)? != expected {
-                        return Err(identity_changed(&scope.scope_hash, "before rollback"));
-                    }
+                (None, Some((staged, actual))) => {
                     drop(staged);
                     let stage = self.stage.as_ref().ok_or_else(|| {
                         unsafe_state("scope rollback lost its quarantine capability")
@@ -235,7 +232,7 @@ impl ScopeQuarantineAuthority {
                     .map_err(storage)?;
                     let (_, restored) = open_child_directory(&self.store, &scope.scope_hash)?
                         .ok_or_else(|| unsafe_state("scope rollback did not restore its source"))?;
-                    if restored != expected {
+                    if restored != actual {
                         return Err(identity_changed(&scope.scope_hash, "after rollback"));
                     }
                     sync_directory(&self.store).map_err(storage)?;
@@ -253,7 +250,7 @@ impl ScopeQuarantineAuthority {
                         scope.scope_hash
                     )));
                 }
-                (Some(_), None) | (None, Some(_)) => {
+                (Some(_), None) => {
                     return Err(identity_changed(&scope.scope_hash, "during rollback"));
                 }
             }
@@ -477,8 +474,9 @@ fn unsafe_state(message: impl Into<String>) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::UnsafeState(message.into())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -501,6 +499,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn rename_uses_open_quarantine_parent_after_ambient_parent_becomes_symlink() {
         let (store, scope) = fixture();
@@ -530,6 +529,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn unlink_uses_open_stage_after_ambient_parent_becomes_symlink() {
         let (store, scope) = fixture();
@@ -563,6 +563,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn rename_refuses_a_replacement_scope_with_the_same_name() {
         let (store, scope) = fixture();
@@ -596,6 +597,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn unlink_refuses_a_replacement_at_the_quarantined_name() {
         let (store, scope) = fixture();
@@ -635,5 +637,44 @@ mod tests {
             std::fs::read(displaced.join("payload")).expect("fenced scope survives"),
             b"owned"
         );
+    }
+
+    #[test]
+    fn rollback_restores_mismatched_staged_identity_without_deletion() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        authority
+            .stage(std::slice::from_ref(&scope))
+            .expect("stage exact scope");
+        let staged = store
+            .path()
+            .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
+            .join(RECEIPT_DIGEST)
+            .join(SCOPE_HASH);
+        let displaced = store.path().join("staged-original");
+        std::fs::rename(&staged, &displaced).expect("displace staged original");
+        std::fs::create_dir(&staged).expect("create staged replacement");
+        std::fs::write(staged.join("payload"), b"replacement-exact-bytes")
+            .expect("write staged replacement");
+
+        authority
+            .rollback(std::slice::from_ref(&scope))
+            .expect("restore the exact object found at the staged name");
+
+        assert_eq!(
+            std::fs::read(store.path().join(SCOPE_HASH).join("payload"))
+                .expect("restored replacement survives"),
+            b"replacement-exact-bytes"
+        );
+        assert_eq!(
+            std::fs::read(displaced.join("payload")).expect("displaced original survives"),
+            b"owned"
+        );
+        assert!(!staged.exists());
     }
 }
