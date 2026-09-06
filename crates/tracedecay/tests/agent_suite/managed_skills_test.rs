@@ -16,6 +16,7 @@ fn draft() -> ManagedSkillDraft {
         id: "repo-hygiene".to_string(),
         title: "Repository hygiene".to_string(),
         summary: "Keep repository maintenance guidance current.".to_string(),
+        routing_description: "Keep repository maintenance guidance current.".to_string(),
         category: "maintenance".to_string(),
         targets: vec![SkillInstallTarget::Cursor, SkillInstallTarget::Codex],
         body_markdown: "Use focused checks before changing generated files.".to_string(),
@@ -91,6 +92,7 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
     for (field, value) in [
         ("title", ""),
         ("summary", ""),
+        ("routing_description", ""),
         ("category", ""),
         ("body_markdown", ""),
     ] {
@@ -98,6 +100,7 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
         match field {
             "title" => draft.title = value.to_string(),
             "summary" => draft.summary = value.to_string(),
+            "routing_description" => draft.routing_description = value.to_string(),
             "category" => draft.category = value.to_string(),
             "body_markdown" => draft.body_markdown = value.to_string(),
             _ => unreachable!(),
@@ -126,7 +129,7 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
     }
     for key in ["name:", "description:"] {
         assert!(
-            !markdown.contains(key),
+            !markdown.lines().any(|line| line.starts_with(key)),
             "managed markdown must not include native frontmatter key {key}"
         );
     }

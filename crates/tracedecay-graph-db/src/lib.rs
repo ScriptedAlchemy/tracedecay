@@ -75,8 +75,6 @@ pub use projection::{
     GraphVector, GraphWatermark, GraphWriteBatch, SourceGeneration,
 };
 pub use projection::{NeverCancelled, ProjectionReplacement};
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-pub use projection_read::GraphProjectionLabelPage;
 pub use projection_read::{
     GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest,
