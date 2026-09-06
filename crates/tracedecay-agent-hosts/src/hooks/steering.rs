@@ -5,7 +5,8 @@ use std::path::Path;
 #[cfg(test)]
 use serde_json::Value;
 
-use crate::tracedecay::current_timestamp;
+use crate::ports::hook_runtime::HookRuntimeV1;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Model-invocable skills that Cursor ships in its `skills/` directory.
 pub use crate::agents::cursor::CURSOR_PLUGIN_SKILLS;
@@ -244,9 +245,11 @@ pub fn cursor_staleness_hint(age_secs: i64) -> String {
 /// Result-preserving status lookup for latency-sensitive hooks that must
 /// distinguish an unavailable daemon from a healthy index with no signals.
 pub(super) async fn cursor_index_signals_for_root_result(
+    runtime: &HookRuntimeV1,
     root: &Path,
 ) -> crate::errors::Result<(Option<String>, Option<u64>)> {
     let status = super::daemon_tool_json(
+        runtime,
         Some(root),
         "tracedecay_status",
         serde_json::json!({ "format": "json" }),

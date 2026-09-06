@@ -13,6 +13,7 @@ fn draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
         id: id.to_string(),
         title: format!("{id} skill"),
         summary: "Managed skill usage test fixture.".to_string(),
+        routing_description: "Managed skill usage test fixture.".to_string(),
         category: "maintenance".to_string(),
         targets: default_managed_skill_targets(),
         body_markdown: "Use this skill when maintaining automation.".to_string(),
