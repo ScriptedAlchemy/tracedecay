@@ -52,6 +52,26 @@ pub(super) fn init_project(home: &Path, project: &Path, socket_path: &Path) -> P
         "pub fn broker_fixture() -> u32 { 42 }\n",
     )
     .expect("write fixture source");
+    // The code index mounts against a repository, so a fixture without one
+    // leaves `doctor` reporting `code-index.mount.unmounted`.
+    let git = common::git_program();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "test@tracedecay.dev"][..],
+        &["config", "user.name", "TraceDecay Test"][..],
+        &["add", "."][..],
+        &["commit", "-q", "-m", "fixture"][..],
+    ] {
+        assert!(
+            std::process::Command::new(&git)
+                .args(args)
+                .current_dir(project)
+                .status()
+                .expect("run fixture git")
+                .success(),
+            "fixture git {args:?} failed"
+        );
+    }
 
     let output = common::tracedecay_command_with_home(home)
         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
