@@ -4,6 +4,21 @@ use tracedecay_usecases::semantic_runtime::{
     project_committed_semantic_pins, project_semantic_retained_vector_generations,
 };
 
+/// The exact query profile these fixtures serve, which the query authority
+/// owns in production. The committed state names it only until a second
+/// activation displaces it out of both slots.
+fn serving_query_profile_id(
+    committed: &CommittedRetrievalProfileStateV1,
+) -> tracedecay_domain::FusionProfileId {
+    committed
+        .state
+        .rollback_profile()
+        .expect("fixture query rollback profile")
+        .profile()
+        .profile_id
+        .clone()
+}
+
 #[tokio::test]
 async fn committed_query_routes_install_and_rollback_as_one_revision() {
     // `install_committed_query_authorities` canonicalizes the root it keys the
@@ -94,6 +109,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let semantic_authority = Arc::new(
             tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
+                serving_query_profile_id(&semantic),
             )
             .expect("prepare semantic route"),
         );
@@ -442,6 +458,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let delayed_semantic_authority = Arc::new(
             tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
+                serving_query_profile_id(&semantic),
             )
             .expect("prepare delayed semantic route"),
         );
@@ -716,6 +733,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     let standalone_semantic = Arc::new(
         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
+            serving_query_profile_id(&semantic),
         )
         .expect("prepare standalone semantic route"),
     );
@@ -752,6 +770,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     let retry_semantic_authority = Arc::new(
         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
+            serving_query_profile_id(&semantic),
         )
         .expect("prepare committed semantic route"),
     );

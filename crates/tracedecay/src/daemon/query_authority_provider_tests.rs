@@ -327,6 +327,74 @@ fn semantic_committed_state(scope: ResolvedScope) -> CommittedRetrievalProfileSt
     }
 }
 
+/// A second semantic activation, which displaces the evaluated query profile
+/// out of both state slots: `activate` moves the prior active profile into the
+/// rollback slot, so the slots hold the two semantic profiles.
+fn second_semantic_activation_state(prior: &RetrievalProfileStateV1) -> RetrievalProfileStateV1 {
+    let first_semantic = prior.active().clone();
+    // The accepted profile pins the calibration its own semantic lane names.
+    let mut pins = semantic_pins();
+    pins.calibration.calibration_profile_id = id("calibration.semantic.semantic-second");
+    let second_semantic = accepted_profile_with_compatibility(
+        "semantic-second",
+        &[
+            RetrieverKind::ExactLiteral,
+            RetrieverKind::Lexical,
+            RetrieverKind::Graph,
+            RetrieverKind::Semantic,
+        ],
+        RetrievalCompatibilityPinsV1 {
+            semantic: Some(pins),
+            rerank: None,
+        },
+    );
+    let base_revision = prior.configuration_revision().clone();
+    let result_revision = id::<ConfigurationRevisionId>("configuration.query-activation-test.5");
+    let actor_id = id("actor.query-activation-test");
+    let operation = RetrievalProfileAuditOperationV1::Activate;
+    let freshness_vector_digest = digest('5');
+    let occurred_at = UtcMicros(50);
+    let audit = RetrievalProfileAuditEventV1 {
+        event_id: canonical_sha256(&(
+            "tracedecay.retrieval.profile-audit.v1",
+            &actor_id,
+            &operation,
+            &first_semantic.profile().profile_id,
+            &second_semantic.profile().profile_id,
+            first_semantic.profile_digest(),
+            second_semantic.profile_digest(),
+            &second_semantic.profile().evaluation_result_anchor,
+            &freshness_vector_digest,
+            &base_revision,
+            &result_revision,
+            occurred_at,
+        ))
+        .expect("second activation audit digest"),
+        actor_id,
+        operation,
+        prior_active_profile_id: first_semantic.profile().profile_id.clone(),
+        resulting_active_profile_id: second_semantic.profile().profile_id.clone(),
+        prior_active_digest: first_semantic.profile_digest().clone(),
+        resulting_active_digest: second_semantic.profile_digest().clone(),
+        evaluation_anchor: second_semantic.profile().evaluation_result_anchor.clone(),
+        freshness_vector_digest,
+        base_revision,
+        result_revision: result_revision.clone(),
+        occurred_at,
+    };
+    let mut audit_history = prior.audit().to_vec();
+    audit_history.push(audit);
+    serde_json::from_value::<RetrievalProfileStateSnapshotV1>(serde_json::json!({
+        "configuration_revision": result_revision,
+        "active": second_semantic,
+        "rollback": first_semantic,
+        "audit": audit_history,
+    }))
+    .expect("persisted second semantic activation state")
+    .into_state()
+    .expect("second semantic activation state")
+}
+
 fn query_rollback_committed_state(
     prior: &CommittedRetrievalProfileStateV1,
 ) -> CommittedRetrievalProfileStateV1 {
@@ -674,6 +742,118 @@ fn zero_or_multiple_exact_query_profiles_fail_closed() {
         exact_query_profile_from_slots(&first, Some(&second)),
         Err(QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile)
     ));
+}
+
+/// Regression: the evaluated query profile survives past the first activation.
+///
+/// `activate` moves the profile it displaced into the rollback slot, so from
+/// the second activation onward neither state slot names the evaluated query
+/// profile. Re-deriving it from the state slots refused every later activation
+/// with `ActivationNotCurrent`, which reached the observer as a typed
+/// `Rejected` and left the runtime degraded after the operator activated.
+#[tokio::test]
+async fn second_semantic_activation_keeps_serving_the_evaluated_query_profile() {
+    let provider = DaemonQueryAuthorityProviderV1::default();
+    let scope = ResolvedScope::new(
+        id("project.second-activation"),
+        id("repository.second-activation"),
+        id("worktree.second-activation"),
+        Some(id("refs/heads/main")),
+    )
+    .expect("scope");
+    let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
+    let initial = RetrievalProfileStateV1::new(
+        id::<ConfigurationRevisionId>("configuration.query-activation-test.1"),
+        query.clone(),
+        &RetrievalRuntimeCompatibilityV1 {
+            retrieval_ceiling: RetrievalBudget {
+                max_candidates_per_lane: 32,
+                max_fused_candidates: 32,
+                max_hydrated_results: 16,
+                max_hydration_bytes: 65_536,
+                deadline_micros: None,
+            },
+            semantic: None,
+            semantic_ceiling: None,
+            rerank: None,
+            rerank_ceiling: None,
+        },
+    )
+    .expect("initial state");
+    let first = semantic_committed_state(scope.clone()).state;
+    let second = second_semantic_activation_state(&first);
+
+    let directory = TempDir::new().expect("temporary cursor store");
+    let profile_root = directory.path().join("profile");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "query-second-activation",
+    )
+    .expect("database scope");
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session registry");
+    let database = session_registry
+        .profile_sessions()
+        .await
+        .expect("session database");
+    let profile_id = database.binding().shard_id.profile_id.clone();
+    let cursor_keys = Arc::new(
+        database
+            .load_session_cursor_key_provider_result()
+            .await
+            .expect("cursor keys"),
+    );
+    let privacy_domain = id("privacy.second-activation");
+    provider
+        .install_evaluated_initial_state(
+            profile_id.clone(),
+            scope.clone(),
+            initial,
+            Arc::clone(&cursor_keys),
+        )
+        .expect("evaluated initial state");
+    let prepared = provider
+        .prepare_after_successful_activation(
+            profile_id.clone(),
+            scope.clone(),
+            first,
+            Arc::clone(&cursor_keys),
+            &privacy_domain,
+        )
+        .expect("first semantic activation prepares");
+    provider
+        .commit_prepared_activation(&prepared)
+        .expect("first semantic activation commits");
+
+    let prepared = provider
+        .prepare_after_successful_activation(
+            profile_id,
+            scope.clone(),
+            second,
+            cursor_keys,
+            &privacy_domain,
+        )
+        .expect("second semantic activation prepares");
+    assert_eq!(
+        prepared.query_authority().profile().profile_id,
+        query.profile().profile_id,
+        "the pinned evaluated query profile keeps serving the fallback lanes"
+    );
+    provider
+        .commit_prepared_activation(&prepared)
+        .expect("second semantic activation commits");
+    assert!(
+        matches!(
+            provider.status(Some(&scope)),
+            QueryAuthorityProviderStatusV1::Available { profile_id, .. }
+                if profile_id == query.profile().profile_id
+        ),
+        "the query authority stays available after the second activation"
+    );
 }
 
 #[test]

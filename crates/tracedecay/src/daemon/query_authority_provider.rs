@@ -93,6 +93,14 @@ struct ActivatedQueryStateV1 {
     profile_id: UserProfileId,
     scope: ResolvedScope,
     state: RetrievalProfileStateV1,
+    /// The exact evaluated query profile serving this scope's fallback lanes.
+    ///
+    /// Activation moves the profile it displaced into the rollback slot, so
+    /// the evaluated fallback survives in the state only until the second
+    /// activation displaces it out of both slots. It is not superseded by
+    /// that: it is pinned here when the state still names it, and carried
+    /// forward otherwise.
+    query_profile: AcceptedRetrievalProfileV1,
     cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
 }
 
@@ -106,6 +114,7 @@ pub(crate) struct PreparedQueryActivationV1 {
     profile_id: UserProfileId,
     scope: ResolvedScope,
     activated: RetrievalProfileStateV1,
+    query_profile: AcceptedRetrievalProfileV1,
     cursor_keys: Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
     query_authority: Arc<QueryAuthorityV1>,
 }
@@ -280,9 +289,12 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     })?;
                 let semantic_authority = if semantic_enabled {
                     let committed = committed.clone();
+                    let query_profile_id =
+                        prepared.query_authority().profile().profile_id.clone();
                     let authority = task::spawn_blocking(move || {
                         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                             committed,
+                            query_profile_id,
                         )
                     })
                     .await
@@ -598,17 +610,21 @@ impl DaemonQueryAuthorityProviderV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = Self::profile_key(&profile_id, &scope);
-        if !current.get(&key).is_some_and(|installed| {
+        let installed = current.get(&key);
+        if !installed.is_some_and(|installed| {
             installed.profile_id == profile_id
                 && installed.scope == scope
                 && installed.state == activated
         }) {
             validate_successful_activation_update(&current, &key, &scope, &activated)?;
         }
+        let query_profile =
+            resolved_query_profile(installed, &activated).map_err(map_unavailable_update_error)?;
         let candidate = ActivatedQueryStateV1 {
             profile_id: profile_id.clone(),
             scope: scope.clone(),
             state: activated.clone(),
+            query_profile: query_profile.clone(),
             cursor_keys: Arc::clone(&cursor_keys),
         };
         let material = query_material_for_activated(&candidate, privacy_domain)
@@ -628,6 +644,7 @@ impl DaemonQueryAuthorityProviderV1 {
             profile_id,
             scope,
             activated,
+            query_profile,
             cursor_keys,
             query_authority,
         })
@@ -662,6 +679,7 @@ impl DaemonQueryAuthorityProviderV1 {
                 profile_id: prepared.profile_id.clone(),
                 scope: prepared.scope.clone(),
                 state: prepared.activated.clone(),
+                query_profile: prepared.query_profile.clone(),
                 cursor_keys: Arc::clone(&prepared.cursor_keys),
             },
         );
@@ -683,12 +701,12 @@ impl DaemonQueryAuthorityProviderV1 {
         scope
             .validate()
             .map_err(|_| QueryAuthorityUpdateErrorV1::InvalidScope)?;
-        if !initial.audit().is_empty()
-            || initial.rollback_profile().is_some()
-            || exact_query_profile(&initial).is_err()
-        {
+        if !initial.audit().is_empty() || initial.rollback_profile().is_some() {
             return Err(QueryAuthorityUpdateErrorV1::InvalidInitialState);
         }
+        let query_profile = exact_query_profile(&initial)
+            .map_err(|_| QueryAuthorityUpdateErrorV1::InvalidInitialState)?
+            .clone();
         let mut current = self
             .activated
             .write()
@@ -708,6 +726,7 @@ impl DaemonQueryAuthorityProviderV1 {
                 profile_id: profile_id.clone(),
                 scope: scope.clone(),
                 state: initial,
+                query_profile,
                 cursor_keys,
             },
         );
@@ -883,11 +902,30 @@ fn validate_successful_activation_update(
     Ok(())
 }
 
+/// Resolve the exact evaluated query profile a committed activation serves.
+///
+/// The state names it while it still occupies the active or rollback slot.
+/// Once a second activation displaces it out of both, the profile already
+/// pinned for this scope is still the one the fallback lanes execute, so it is
+/// carried forward rather than treated as a broken activation.
+fn resolved_query_profile(
+    installed: Option<&ActivatedQueryStateV1>,
+    state: &RetrievalProfileStateV1,
+) -> Result<AcceptedRetrievalProfileV1, QueryAuthorityUnavailableReasonV1> {
+    match exact_query_profile(state) {
+        Ok(profile) => Ok(profile.clone()),
+        Err(QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile) => installed
+            .map(|installed| installed.query_profile.clone())
+            .ok_or(QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile),
+        Err(reason) => Err(reason),
+    }
+}
+
 fn query_material_for_activated(
     activated: &ActivatedQueryStateV1,
     privacy_domain: &PrivacyDomainId,
 ) -> Result<QueryAuthorityMaterialV1, QueryAuthorityUnavailableReasonV1> {
-    let query = exact_query_profile(&activated.state)?;
+    let query = &activated.query_profile;
     let ranking_revision =
         ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
             .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
@@ -920,10 +958,7 @@ fn status_for_activated(
     if !has_current_query_authority(&activated.state) {
         return unavailable(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
     }
-    let profile = match exact_query_profile(&activated.state) {
-        Ok(profile) => profile,
-        Err(reason) => return unavailable(reason),
-    };
+    let profile = &activated.query_profile;
     QueryAuthorityProviderStatusV1::Available {
         scope_digest: activated.scope.scope_digest.clone(),
         profile_id: profile.profile().profile_id.clone(),
