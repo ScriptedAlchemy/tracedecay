@@ -700,14 +700,20 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
         1,
         "cache hits must not provide config reconciliation"
     );
-    assert!(
-        !engine
-            .store_administration
-            .automation_schedulers()
-            .lock()
-            .await
-            .contains_key(&key)
-    );
+    // An empty scheduler map is a state this open travels through, not one it
+    // settles in: the project's default automation already has schedulable
+    // work, so activation registers this exact owner. The wait above returns
+    // as soon as `automation_config_probe_attempts` moves, and that counter
+    // increments when the probe starts — before the configuration read and
+    // well before registration. Settle on the registered owner instead of
+    // sampling the window before it appears.
+    wait_for_automation_scheduler_state(
+        &engine,
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(20),
+        "initial automation scheduler activation",
+        |schedulers| schedulers.contains_key(&key),
+    )
+    .await;
 
     apply_project_automation_patch_via_surface(
         &engine,
