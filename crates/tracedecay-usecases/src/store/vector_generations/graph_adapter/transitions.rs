@@ -44,12 +44,12 @@ use super::native_records::{
 use super::persistence::{map_graph_error, storage_error};
 use super::stage_identity::next_stage_attempt;
 use super::{
-    GRAPH_BACKGROUND_OPERATION_BUDGET, GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreV1,
+    GRAPH_BACKGROUND_OPERATION_BUDGET, GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreStateV1,
     VectorGenerationBeginOutcomeV1,
 };
 use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
 
-impl GraphVectorGenerationStoreV1 {
+impl GraphVectorGenerationStoreStateV1 {
     pub(super) fn semantic_stage_plan(
         &self,
         plan: &VectorGenerationPlanV1,
@@ -1096,7 +1096,7 @@ pub(super) fn transition_state<'a>(
     Ok(state)
 }
 
-impl GraphVectorGenerationStoreV1 {
+impl GraphVectorGenerationStoreStateV1 {
     fn push_required_generation(
         &self,
         generations: &mut Vec<ScopedGenerationRecordsV1>,

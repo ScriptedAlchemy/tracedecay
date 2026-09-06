@@ -8,7 +8,7 @@ use tracedecay_store::{
 };
 
 use super::persistence::map_graph_error;
-use super::{GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreV1};
+use super::{GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreStateV1};
 use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
 use crate::store::vector_generations::VectorGenerationStoreErrorV1;
 
@@ -18,7 +18,7 @@ fn operation_authority(
     SemanticGraphExecutionAuthorityV1::new(cancellation, Instant::now() + GRAPH_OPERATION_DEADLINE)
 }
 
-impl GraphVectorGenerationStoreV1 {
+impl GraphVectorGenerationStoreStateV1 {
     #[hotpath::measure(label = "usecases.store.reserve_generation")]
     pub fn reserve_one_generation(
         &self,
