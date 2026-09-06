@@ -348,13 +348,15 @@ fn finalize_arrays_splits_csv() {
 
 #[test]
 fn explicit_project_lcm_dispatch_allows_first_touch_init() {
+    let fixture = tempfile::tempdir().expect("explicit LCM project fixture");
+    let project_path = fixture.path().to_path_buf();
     let dispatch = DaemonToolDispatch::project_scoped(
-        Some("/tmp/project".to_string()),
+        Some(project_path.to_string_lossy().into_owned()),
         "tracedecay_lcm_status",
     );
 
     assert!(dispatch.allow_init);
-    assert_eq!(dispatch.project_path, Some(PathBuf::from("/tmp/project")));
+    assert_eq!(dispatch.project_path, Some(project_path));
 }
 
 #[test]

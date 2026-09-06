@@ -525,6 +525,18 @@ pub fn graph_store_locator_path(
 mod tests {
     use super::*;
 
+    fn host_temp_root(name: &str) -> PathBuf {
+        let temp_root = std::env::temp_dir();
+        let absolute_temp_root = if temp_root.is_absolute() {
+            temp_root
+        } else {
+            std::env::current_dir()
+                .expect("fixture current directory")
+                .join(temp_root)
+        };
+        absolute_temp_root.join(name)
+    }
+
     fn id<T>(value: &str) -> T
     where
         T: TryFrom<String>,
@@ -579,10 +591,11 @@ mod tests {
 
     #[test]
     fn canonical_locator_digest_binds_the_exact_absolute_path() {
-        let first = canonical_store_locator_digest(Path::new("/stores/a/graph-store"))
-            .expect("absolute locator");
-        let second = canonical_store_locator_digest(Path::new("/stores/b/graph-store"))
-            .expect("absolute locator");
+        let fixture = host_temp_root("tracedecay-store-locator-fixture");
+        let first_path = fixture.join("stores/a/graph-store");
+        let second_path = fixture.join("stores/b/graph-store");
+        let first = canonical_store_locator_digest(&first_path).expect("absolute locator");
+        let second = canonical_store_locator_digest(&second_path).expect("absolute locator");
 
         assert_ne!(first, second);
         assert!(canonical_store_locator_digest(Path::new("relative/graph-store")).is_err());
@@ -590,13 +603,15 @@ mod tests {
 
     #[test]
     fn graph_locator_is_an_ordinary_database_file_and_shard_specific() {
-        let root = Path::new("/stores/project-a");
+        let fixture = host_temp_root("tracedecay-graph-locator-fixture");
+        let root = fixture.join("stores/project-a");
+        let other_root = fixture.join("stores/project-b");
         assert_eq!(
-            graph_store_locator_path(root, &root.join("sessions.db"))
+            graph_store_locator_path(&root, &root.join("sessions.db"))
                 .expect("canonical graph locator"),
             root.join("sessions.grafeo")
         );
-        assert!(graph_store_locator_path(root, Path::new("/stores/project-b/project.db")).is_err());
+        assert!(graph_store_locator_path(&root, &other_root.join("project.db")).is_err());
     }
 
     #[test]

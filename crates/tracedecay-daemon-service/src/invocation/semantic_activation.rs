@@ -361,28 +361,32 @@ pub(super) fn compose_activated_semantic_config(
 mod tests {
     use super::*;
 
+    fn model_path(root: &Path) -> PathBuf {
+        root.join("models").join("jina")
+    }
+
     fn digest(seed: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
             .expect("valid manifest digest")
     }
 
-    fn material() -> InstalledSemanticModelMaterialV1 {
+    fn material(root: &Path) -> InstalledSemanticModelMaterialV1 {
         InstalledSemanticModelMaterialV1 {
             artifact_digest: "a".repeat(64),
-            install_path: PathBuf::from("/models/jina"),
+            install_path: model_path(root),
         }
     }
 
-    fn selection(profile_id: &str, seed: char) -> SemanticProfileSelection {
+    fn selection(root: &Path, profile_id: &str, seed: char) -> SemanticProfileSelection {
         SemanticProfileSelection {
             profile_id: profile_id.to_owned(),
             accepted_profile_digest: digest(seed),
             artifact_digest: "a".repeat(64),
-            artifact_path: PathBuf::from("/models/jina"),
+            artifact_path: model_path(root),
         }
     }
 
-    fn installed_status() -> SemanticModelLifecycleStatusV1 {
+    fn installed_status(root: &Path) -> SemanticModelLifecycleStatusV1 {
         SemanticModelLifecycleStatusV1 {
             selected_model: Some("JinaEmbeddingsV2BaseCode".to_owned()),
             auto_download: false,
@@ -391,7 +395,7 @@ mod tests {
                 model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
                 revision: "rev".to_owned(),
                 artifact_digest: "a".repeat(64),
-                install_path: PathBuf::from("/models/jina"),
+                install_path: model_path(root),
             }),
             remediation: SemanticModelRemediationV1 {
                 retry: false,
@@ -404,16 +408,18 @@ mod tests {
 
     #[test]
     fn activation_material_comes_from_the_installed_lifecycle_state() {
-        let status = installed_status();
+        let root = tempfile::tempdir().expect("semantic model fixture root");
+        let status = installed_status(root.path());
         let material =
             semantic_activation_material(Some(&status)).expect("installed model material");
         assert_eq!(material.artifact_digest, "a".repeat(64));
-        assert_eq!(material.install_path, PathBuf::from("/models/jina"));
+        assert_eq!(material.install_path, model_path(root.path()));
     }
 
     #[test]
     fn activation_refuses_typed_when_the_model_is_still_downloading() {
-        let mut status = installed_status();
+        let root = tempfile::tempdir().expect("semantic model fixture root");
+        let mut status = installed_status(root.path());
         status.state = Some(SemanticModelLifecycleStateV1::Downloading {
             model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
             revision: "rev".to_owned(),
@@ -450,10 +456,11 @@ mod tests {
 
     #[test]
     fn composed_activation_preserves_configuration_and_records_prior_rollback() {
+        let root = tempfile::tempdir().expect("semantic model fixture root");
         let current = SemanticConfig {
             selected_model: Some("JinaEmbeddingsV2BaseCode".to_owned()),
             auto_download: false,
-            active_profile: Some(selection("hybrid-conservative", 'b')),
+            active_profile: Some(selection(root.path(), "hybrid-conservative", 'b')),
             rollback_profile: None,
             resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
             document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
@@ -462,7 +469,7 @@ mod tests {
             &current,
             "hybrid-conservative",
             &digest('c'),
-            &material(),
+            &material(root.path()),
             true,
         );
         assert_eq!(
@@ -474,7 +481,7 @@ mod tests {
         assert_eq!(active.accepted_profile_digest, digest('c'));
         assert_eq!(
             composed.config.rollback_profile,
-            Some(selection("hybrid-conservative", 'b')),
+            Some(selection(root.path(), "hybrid-conservative", 'b')),
             "the prior active selection becomes the rollback target"
         );
         assert_eq!(
@@ -489,10 +496,11 @@ mod tests {
 
     #[test]
     fn reactivating_the_same_profile_never_records_itself_as_rollback() {
+        let root = tempfile::tempdir().expect("semantic model fixture root");
         let current = SemanticConfig {
             selected_model: Some("JinaEmbeddingsV2BaseCode".to_owned()),
             auto_download: false,
-            active_profile: Some(selection("hybrid-conservative", 'c')),
+            active_profile: Some(selection(root.path(), "hybrid-conservative", 'c')),
             rollback_profile: None,
             resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
             document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
@@ -501,7 +509,7 @@ mod tests {
             &current,
             "hybrid-conservative",
             &digest('c'),
-            &material(),
+            &material(root.path()),
             true,
         );
         assert_eq!(composed.config.rollback_profile, None);
@@ -514,11 +522,12 @@ mod tests {
 
     #[test]
     fn first_activation_without_rollback_intent_keeps_a_differing_existing_rollback() {
+        let root = tempfile::tempdir().expect("semantic model fixture root");
         let current = SemanticConfig {
             selected_model: Some("JinaEmbeddingsV2BaseCode".to_owned()),
             auto_download: true,
             active_profile: None,
-            rollback_profile: Some(selection("hybrid-aggressive", 'd')),
+            rollback_profile: Some(selection(root.path(), "hybrid-aggressive", 'd')),
             resources: tracedecay_semantic_contracts::SemanticResourceCeilings::default(),
             document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
         };
@@ -526,12 +535,12 @@ mod tests {
             &current,
             "hybrid-conservative",
             &digest('c'),
-            &material(),
+            &material(root.path()),
             false,
         );
         assert_eq!(
             composed.config.rollback_profile,
-            Some(selection("hybrid-aggressive", 'd'))
+            Some(selection(root.path(), "hybrid-aggressive", 'd'))
         );
         composed
             .config

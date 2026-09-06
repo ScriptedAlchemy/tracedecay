@@ -2459,20 +2459,31 @@ mod tests {
             &identity,
         )
         .expect("task XML");
+        let native_profile_root =
+            profile_root_from_task_xml(&original).expect("native task profile root");
         let replacement =
             Path::new("C:/Users/alice/AppData/Local/TraceDecay/service/tracedecay/tracedecay.exe");
         let restored =
             replace_task_action_executable(&original, replacement).expect("rewritten action");
         let action = task_action_from_xml(&restored).expect("restored action");
         assert_eq!(action.executable, replacement);
-        assert_eq!(
-            profile_root_from_task_xml(&restored),
-            Some(PathBuf::from("C:/profiles/stable & exact"))
+        let restored_profile_root =
+            profile_root_from_task_xml(&restored).expect("restored task profile root");
+        #[cfg(windows)]
+        assert!(
+            windows_paths_equal(&restored_profile_root, &native_profile_root)
+                .expect("compare Windows profile paths")
         );
-        assert_eq!(
-            action.arguments,
-            r#"daemon run --profile-root "C:/profiles/stable & exact""#
+        #[cfg(not(windows))]
+        assert_eq!(restored_profile_root, native_profile_root);
+        let expected_arguments = format!(
+            "daemon run --profile-root {}",
+            quote_windows_argument(
+                windows_path_text(&native_profile_root, "daemon profile root")
+                    .expect("native profile root text")
+            )
         );
+        assert_eq!(action.arguments, expected_arguments);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

@@ -2044,7 +2044,7 @@ async fn retry_cycle_high_water_wraps_despite_continuous_higher_insertions() {
 #[tokio::test]
 async fn composer_key_scan_reports_corrupt_or_incompatible_schema() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let path = tmp.path().join("state #?%.vscdb");
+    let path = tmp.path().join("state #%.vscdb");
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(

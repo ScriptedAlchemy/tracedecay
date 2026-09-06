@@ -312,7 +312,7 @@ fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
                 run_id: id("run.task.topology.a"),
                 target: WorkPlacementTargetV1::new(
                     WorkPlacementKindV1::LinkedWorktree,
-                    Some("/workspace/topology-lane-a".to_owned()),
+                    Some(common::fixture_abs_root("/workspace/topology-lane-a")),
                     false,
                     true,
                 )

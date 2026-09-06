@@ -26,7 +26,7 @@ use tracedecay_store::ObservationReplayRequest;
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{vscode_storage_root, write_task};
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
-use crate::support::{init_git_repo, init_project, setup};
+use crate::support::{assert_path_text_eq, init_git_repo, init_project, setup};
 
 const TEST_PROJECT_ID: &str = "tracedecay-transcript-ingest-fixture";
 static NEXT_TEST_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
@@ -387,7 +387,12 @@ pub(super) async fn assert_secret_absent_from_observation_sinks(
 }
 
 fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> PathBuf {
-    let dir = home.join(".codex/sessions/2026/01/01");
+    let dir = home
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("01")
+        .join("01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("rollout-2026-01-01T00-00-00-{session}.jsonl"));
     let contents = format!(
@@ -1368,13 +1373,14 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     assert_eq!(db.session_message_count().await.unwrap(), 2);
     // `transcript_path` is the physical rollout path; `parse_offsets` is keyed
     // by the source's durable cursor key, which Codex hashes.
-    assert_eq!(
+    assert_path_text_eq(
         db.get_session("codex", "codex-restart")
             .await
             .expect("Codex session ingested")
             .transcript_path
-            .as_deref(),
-        Some(path.to_string_lossy().as_ref())
+            .as_deref()
+            .expect("Codex session transcript path"),
+        &path,
     );
     let path_key = source.cursor_key(&path).durable_text();
     let first_offset = db.get_parse_offset(&path_key).await.unwrap();
@@ -1763,13 +1769,14 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
     );
     // `transcript_path` is the physical rollout path; `parse_offsets` is keyed
     // by the source's durable cursor key, which Codex hashes.
-    assert_eq!(
+    assert_path_text_eq(
         db.get_session("codex", "codex-partial-append")
             .await
             .expect("Codex session ingested")
             .transcript_path
-            .as_deref(),
-        Some(path.to_string_lossy().as_ref())
+            .as_deref()
+            .expect("Codex session transcript path"),
+        &path,
     );
     let path_key = source.cursor_key(&path).durable_text();
     let committed = db.get_parse_offset(&path_key).await.unwrap();

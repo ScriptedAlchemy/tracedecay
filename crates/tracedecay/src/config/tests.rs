@@ -327,6 +327,7 @@ fn semantic_config_rejects_uncataloged_model_ids() {
 
 #[test]
 fn semantic_config_accepts_only_explicit_local_installed_profiles() {
+    let root = TempDir::new().expect("semantic profile fixture root");
     let local = SemanticProfileSelection {
         profile_id: "code-embedding.v1".to_owned(),
         accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
@@ -335,7 +336,7 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
         ))
         .unwrap(),
         artifact_digest: "a".repeat(64),
-        artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
+        artifact_path: root.path().join("models").join("code-embedding"),
     };
     let mut semantic = SemanticConfig {
         active_profile: Some(local.clone()),
@@ -347,9 +348,7 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
             ))
             .unwrap(),
             artifact_digest: "b".repeat(64),
-            artifact_path: std::path::PathBuf::from(
-                "/var/lib/tracedecay/models/code-embedding-previous",
-            ),
+            artifact_path: root.path().join("models").join("code-embedding-previous"),
         }),
         ..SemanticConfig::default()
     };

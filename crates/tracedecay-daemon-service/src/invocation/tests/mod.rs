@@ -1,5 +1,7 @@
 //! Shared test fixtures for the invocation-handler unit suite.
 
+use std::path::Path;
+
 use super::*;
 
 use tracedecay_lsp::{
@@ -8,6 +10,13 @@ use tracedecay_lsp::{
     ContextProjectionRequest, GenerationDiagnostics, LspAnalyzerCancellationAuthority,
     LspRequestId, UnavailableSemanticProvider,
 };
+use url::Url;
+
+fn fixture_directory_uri(path: &Path) -> String {
+    Url::from_directory_path(path)
+        .expect("fixture directory path must convert to a file URL")
+        .to_string()
+}
 
 #[derive(Default)]
 struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<FeedbackSourceEventV1>>);

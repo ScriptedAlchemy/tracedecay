@@ -852,11 +852,14 @@ fn remote_tls_config(
 
 #[test]
 fn systemd_service_round_trips_remote_tls_listener_paths() {
-    let remote_tls = remote_tls_config(
-        "192.0.2.10:7443",
-        "/etc/trace decay/server%$\"chain\\part.pem",
-        "/etc/trace decay/server%$key.pem",
-    );
+    let fixture = TempDir::new().expect("Remote Brain TLS fixture");
+    let tls_root = fixture.path().join("trace decay");
+    std::fs::create_dir_all(&tls_root).expect("Remote Brain TLS fixture directory");
+    let certificate_chain = tls_root.join("server%$ chain-part.pem");
+    let private_key = tls_root.join("server%$ key.pem");
+    std::fs::write(&certificate_chain, b"certificate chain").expect("certificate fixture");
+    std::fs::write(&private_key, b"private key").expect("private key fixture");
+    let remote_tls = remote_tls_config("192.0.2.10:7443", certificate_chain, private_key);
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
         socket_path: PathBuf::from("/tmp/tracedecay.sock"),
@@ -894,15 +897,25 @@ fn managed_service_rejects_relative_remote_tls_paths() {
 
 #[test]
 fn managed_service_rejects_remote_tls_path_control_characters() {
+    let fixture = TempDir::new().expect("Remote Brain TLS fixture");
+    let certificate_chain = fixture.path().join("server.pem");
+    let private_key = fixture.path().join("server-key.pem");
+    std::fs::write(&certificate_chain, b"certificate chain").expect("certificate fixture");
+    std::fs::write(&private_key, b"private key").expect("private key fixture");
+    let mut injected_certificate = certificate_chain.into_os_string();
+    injected_certificate.push("\nEnvironment=INJECTED");
     let remote_tls = remote_tls_config(
         "192.0.2.10:7443",
-        "/etc/tracedecay/server.pem\nEnvironment=INJECTED",
-        "/etc/tracedecay/server-key.pem",
+        PathBuf::from(injected_certificate),
+        private_key,
     );
 
-    let error =
-        super::service_spec_with_remote_tls("/usr/local/bin/tracedecay", None, Some(remote_tls))
-            .expect_err("control characters must not enter a service definition");
+    let error = super::service_spec_with_remote_tls(
+        fixture.path().join("tracedecay"),
+        None,
+        Some(remote_tls),
+    )
+    .expect_err("control characters must not enter a service definition");
 
     assert!(error.to_string().contains("control character"));
 }
