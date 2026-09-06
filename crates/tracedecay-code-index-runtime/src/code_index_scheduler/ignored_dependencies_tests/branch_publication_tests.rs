@@ -419,7 +419,7 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
     wait_for_reconciling(&registry, 1).await;
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
-        Some(incumbent),
+        Some(incumbent.clone()),
         "the scheduled follow-up cannot expose the stale admission candidate while blocked"
     );
     release_tx.send(()).expect("release follow-up scheduler");
@@ -427,7 +427,24 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
         .join()
         .expect("follow-up scheduler holder joins");
     wait_for_reconciling(&registry, 0).await;
-    let converged = latest(&registry, fixture.path()).await;
+    // The serving swap runs after the source pass releases
+    // `reconcile_in_progress`, and that release is itself pinned by
+    // `graph_decode_does_not_block_text_freshness`: the optional graph decode
+    // must never read as a rebuild in flight. A quiesced reconcile is
+    // therefore not yet a seated generation. Wait for the slot to leave the
+    // incumbent rather than sampling it once; the assertions below still pin
+    // exactly which generation it may leave for.
+    let converged = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let served = latest(&registry, fixture.path()).await;
+            if served.generation().manifest().generation_id != incumbent {
+                break served;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the real worker advances serving past the incumbent");
     assert_eq!(
         converged.generation().manifest().generation_id,
         competitor,
