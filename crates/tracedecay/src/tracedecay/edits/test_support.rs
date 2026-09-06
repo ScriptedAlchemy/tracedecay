@@ -483,6 +483,45 @@ pub(super) struct EffectUnknownFixture {
     pub(super) result: SourceEditApplicationResult,
 }
 
+fn assert_effect_unknown_boundary(result: &SourceEditApplicationResult) {
+    assert!(matches!(
+        &result.outcome,
+        SourceEditOutcome::EffectUnknown { .. }
+    ));
+    assert_eq!(
+        result.effect.as_ref().unwrap().receipt.outcome,
+        EffectTermination::EffectUnknown
+    );
+}
+
+#[test]
+fn effect_unknown_boundary_failure_exposes_outcome_phase_and_receipt() {
+    let result = SourceEditApplicationResult {
+        outcome: SourceEditOutcome::Failed {
+            message: "diagnostic sentinel".to_owned(),
+        },
+        dry_run: false,
+        expected_state: digest(SHA256_A),
+        predicted_state: None,
+        verification: None,
+        effect: None,
+        replayed: false,
+    };
+
+    let panic = std::panic::catch_unwind(|| assert_effect_unknown_boundary(&result))
+        .expect_err("a pre-effect failure must not satisfy the interrupted-effect boundary");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("assertion panic must retain a diagnostic message");
+
+    assert!(message.contains("diagnostic sentinel"), "{message}");
+    assert!(message.contains("actual outcome"), "{message}");
+    assert!(message.contains("execution phase"), "{message}");
+    assert!(message.contains("committed receipt"), "{message}");
+}
+
 const MOVE_SOURCE_PREIMAGE: &[u8] = b"pub fn keep() {}\n\npub fn moved() {}\n";
 const MOVE_SOURCE_POSTIMAGE: &[u8] = b"pub fn keep() {}\n";
 const MOVE_DESTINATION_PREIMAGE: &[u8] = b"pub fn existing() {}\n";
@@ -615,14 +654,7 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     fs::set_permissions(&locked_directory, original_permissions).unwrap();
     let result = execution.unwrap();
 
-    assert!(matches!(
-        result.outcome,
-        SourceEditOutcome::EffectUnknown { .. }
-    ));
-    assert_eq!(
-        result.effect.as_ref().unwrap().receipt.outcome,
-        EffectTermination::EffectUnknown
-    );
+    assert_effect_unknown_boundary(&result);
     let fixture = EffectUnknownFixture {
         project,
         graph,
