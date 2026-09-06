@@ -200,6 +200,75 @@ impl GraphCancellation for AtomicGraphCancellationV1 {
     }
 }
 
+/// Request cancellation for a corpus-sized sealed publication that also
+/// answers to the daemon's measured-RSS admission authority.
+///
+/// The publication is the largest single grower in the process and the only
+/// one that ran outside that authority: the maintenance sampler logged
+/// `daemon_resident_memory_over_budget` at the high watermark while the
+/// projection kept allocating until the kernel OOM-killed the daemon — taking
+/// the already-complete text serving down with the graph. Tripping the
+/// existing cancellation checkpoints at the watermark reuses the one abort
+/// path the publication already handles (staging discard, journal untouched);
+/// [`RetainedCodeGraphRuntimeV1::publish_verified_snapshot`] then reports the
+/// abort as a typed [`GraphBudgetKind::ResidentMemory`] refusal rather than a
+/// generic cancellation, so the scheduler seats text without graph instead of
+/// scheduling a retry into the same wall.
+struct ResidentMemoryGuardedGraphCancellationV1 {
+    request: Arc<AtomicBool>,
+    pressure: Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1>,
+    tripped: AtomicBool,
+}
+
+impl ResidentMemoryGuardedGraphCancellationV1 {
+    fn new(
+        request: Arc<AtomicBool>,
+        pressure: Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1>,
+    ) -> Self {
+        Self {
+            request,
+            pressure,
+            tripped: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the resident-memory watermark, not the request, ended the
+    /// publication. A request cancellation observed at any point keeps its
+    /// own identity even if the watermark also tripped.
+    fn refused_by_resident_memory(&self) -> bool {
+        self.tripped.load(Ordering::Acquire) && !self.request.load(Ordering::Acquire)
+    }
+}
+
+impl GraphCancellation for ResidentMemoryGuardedGraphCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        if self.request.load(Ordering::Acquire) {
+            return true;
+        }
+        if let tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
+            observed_bytes,
+            limit_bytes,
+            high_watermark_bytes,
+            ..
+        } = self.pressure.state()
+        {
+            if !self.tripped.swap(true, Ordering::AcqRel) {
+                tracing::warn!(
+                    event = "code_graph_publication_refused_resident_memory",
+                    observed_bytes,
+                    high_watermark_bytes,
+                    limit_bytes,
+                    "measured process RSS is over the admission watermark; the sealed graph \
+                     publication stops at its next checkpoint and the generation keeps serving \
+                     exact and lexical without a native graph"
+                );
+            }
+            return true;
+        }
+        false
+    }
+}
+
 struct MaintenanceGraphCancellationV1(tracedecay_session_memory::context::CancellationToken);
 
 impl GraphCancellation for MaintenanceGraphCancellationV1 {
@@ -534,6 +603,11 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     /// Registry-owned per-project-publication-shard locks; see
     /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
     publication_locks: Arc<CodeGraphShardPublicationLocksV1>,
+    /// The measured-RSS admission cell sealed publication answers to. Bound
+    /// from the manifest provider so the decoded offers and the corpus-sized
+    /// build obey one authority; tests substitute an isolated cell.
+    resident_memory_pressure:
+        Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1>,
 }
 
 /// Retirement releases the decoded-generation offer this runtime commissioned.
@@ -1068,6 +1142,17 @@ impl RetainedCodeGraphRuntimeV1 {
         Arc::clone(&self.authority)
     }
 
+    /// Bind sealed publication to an isolated measured-RSS cell so a fake RSS
+    /// series drives the refusal without touching `/proc` or other cases.
+    #[cfg(test)]
+    pub(super) fn with_resident_memory_pressure(
+        mut self,
+        pressure: &Arc<tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1>,
+    ) -> Self {
+        self.resident_memory_pressure = Arc::clone(pressure);
+        self
+    }
+
     /// Drops aborted catalog/manifest staging files for this sealed digest.
     /// A retry must not inherit another attempt's `.read-bundle-*.tmp` scratch.
     #[hotpath::measure(label = "daemon.session_registry.sweep_read_bundle_temporaries")]
@@ -1165,10 +1250,12 @@ impl RetainedCodeGraphRuntimeV1 {
             ))
             .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
+        let resident_memory_guard = Arc::new(ResidentMemoryGuardedGraphCancellationV1::new(
+            Arc::clone(&request_cancelled),
+            Arc::clone(&self.resident_memory_pressure),
+        ));
         let probe = GraphPublicationProbeV1 {
-            request_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &request_cancelled,
-            ))),
+            request_cancellation: Arc::clone(&resident_memory_guard) as Arc<dyn GraphCancellation>,
             lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
             deadline_at,
             cancellation: cancellation_identity.clone(),
@@ -1188,7 +1275,23 @@ impl RetainedCodeGraphRuntimeV1 {
             Some(RuntimeInterruptionV1::DeadlineExceeded) => Err(GraphDbError::DeadlineExceeded),
             None => Ok(()),
         };
-        let _build = self.publication_locks.claim_build(&interruption)?;
+        // A cancellation the watermark caused is reported as the typed budget
+        // it exhausted: the scheduler classifies that name as a graph refusal
+        // that leaves text serving seated, whereas a bare `Cancelled` would
+        // arm a retry into the same memory wall.
+        let refuse_if_resident_memory = |error: GraphDbError| match error {
+            GraphDbError::Cancelled if resident_memory_guard.refused_by_resident_memory() => {
+                GraphDbError::budget_exhausted(
+                    GraphBudgetKind::ResidentMemory,
+                    resident_memory_guard.pressure.limit_bytes(),
+                )
+            }
+            other => other,
+        };
+        let _build = self
+            .publication_locks
+            .claim_build(&interruption)
+            .map_err(refuse_if_resident_memory)?;
         let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
             self.authority.namespace().clone(),
         )
@@ -1216,7 +1319,9 @@ impl RetainedCodeGraphRuntimeV1 {
             );
         #[cfg(any(test, feature = "test-helpers"))]
         PUBLICATION_PROJECTION_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-        let manifest = manifest.map_err(map_code_graph_error)?;
+        let manifest = manifest
+            .map_err(map_code_graph_error)
+            .map_err(refuse_if_resident_memory)?;
         let relational_projection = GraphProjectionIdentityV1 {
             shard_id: self.authority.binding().shard_id.clone(),
             namespace: tracedecay_store::GraphNamespaceV1::new(self.authority.namespace().as_str())
@@ -1255,12 +1360,9 @@ impl RetainedCodeGraphRuntimeV1 {
             request_cancelled,
         };
         let mut staging_release = None;
-        let published = self.publish_prepared_sealed_generation(
-            &prepared,
-            &probe,
-            &context,
-            &mut staging_release,
-        );
+        let published = self
+            .publish_prepared_sealed_generation(&prepared, &probe, &context, &mut staging_release)
+            .map_err(refuse_if_resident_memory);
         // Everything corpus-sized this publication built — the projection
         // manifest, the staged relational rows, the sealed copy buffers — is
         // dead by here. Free it, release the duplicate staging rows the seal
@@ -2620,6 +2722,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         let publication_locks = self.retain_project_publication_locks(&project_shard);
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
+            resident_memory_pressure: Arc::clone(
+                self.graph_manifest_provider.resident_memory_pressure(),
+            ),
             graph_manifest_provider: Arc::clone(&self.graph_manifest_provider),
             _manifest_route: manifest_route,
             authority,

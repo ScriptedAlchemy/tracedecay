@@ -248,6 +248,22 @@ fn take_injected_activation_gate(
         .remove(worktree_id.as_str())
 }
 
+/// The typed reason a generation reports while its native graph is refused by
+/// the measured-RSS admission watermark. Shared by the persistent publication
+/// path and the injected test refusal so status and tests name one verdict.
+pub(crate) const RESIDENT_MEMORY_GRAPH_REFUSAL_REASON: &str =
+    "code graph activation was refused by the resident-memory policy";
+
+/// Whether a projection error is the resident-memory budget refusal that
+/// [`CodeIndexSchedulerErrorV1::is_graph_activation_refusal`] recognizes.
+pub(crate) fn is_resident_memory_refusal(error: &CodeGraphProjectionError) -> bool {
+    matches!(
+        error,
+        CodeGraphProjectionError::BudgetExhausted { budget, .. }
+            if budget == tracedecay_graph_db::GraphBudgetKind::ResidentMemory.as_str()
+    )
+}
+
 #[derive(Clone)]
 pub enum CodeGraphActivationAuthorityV1 {
     Persistent {
@@ -451,12 +467,12 @@ impl CodeGraphActivationAuthorityV1 {
                     ));
                 }
                 if has_injected_resident_memory_refusal(worktree_id) {
-                    latest.refuse_graph_activation(
-                        "code graph activation was refused by the resident-memory policy",
-                    );
+                    latest.refuse_graph_activation(RESIDENT_MEMORY_GRAPH_REFUSAL_REASON);
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         CodeGraphProjectionError::BudgetExhausted {
-                            budget: "resident_memory".to_owned(),
+                            budget: tracedecay_graph_db::GraphBudgetKind::ResidentMemory
+                                .as_str()
+                                .to_owned(),
                             limit:
                                 tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1()
                                     .get(),
@@ -671,6 +687,17 @@ impl LatestCompleteCodeIndexV1 {
             retained
                 .publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
                 .map_err(CodeGraphProjectionError::from)
+                .map_err(|error| {
+                    // The publication stopped at the measured-RSS watermark.
+                    // Record the typed refusal before the error reaches the
+                    // scheduler so status reports `refused` with its reason
+                    // instead of a `pending` graph that will never seat;
+                    // exact and lexical serving stay installed.
+                    if is_resident_memory_refusal(&error) {
+                        self.refuse_graph_activation(RESIDENT_MEMORY_GRAPH_REFUSAL_REASON);
+                    }
+                    error
+                })
         )?;
         let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,

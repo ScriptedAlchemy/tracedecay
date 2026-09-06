@@ -166,6 +166,10 @@ else
   ) >"$daemon_log" 2>&1 &
 fi
 daemon_pid=$!
+# `exec-session` execs into the daemon, so this is the daemon's own PID. The
+# smoke command samples its resident memory per readiness probe; a timeout or
+# an OOM-killed daemon is then attributable to a phase and a peak, not a guess.
+export TRACEDECAY_DAEMON_PID="$daemon_pid"
 
 if ! python3 -S "$PROCESS_HELPER" wait-unix-socket \
   --path "$TRACEDECAY_DAEMON_SOCKET" \
