@@ -166,88 +166,33 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Durable path-identity key for ingest cursor and project-scope lookups.
+/// The one canonical stored form of a path-shaped durable key.
 ///
-/// Only path-shaped fields are normalized: extended-length prefixes, slash
-/// direction, and Windows drive-letter case. Session and source keys stay
-/// verbatim so independently ordered streams are not re-merged.
+/// Applied on write and on read, so `parse_offsets.file_path` and the session
+/// project columns hold exactly one string per location and a single indexed
+/// equality lookup is the only lookup the ingest hot path needs.
+///
+/// Only path *display* forms are folded: the Windows extended-length prefix,
+/// slash direction, and drive-letter case. The rest of the string keeps its
+/// case, because the same columns also carry case-sensitive opaque keys — the
+/// Claude non-Unicode hex cursor key, the base64 host-discovery-queue key —
+/// that must survive the round trip byte for byte. The result never depends on
+/// the compiling platform: the same input must produce the same stored bytes
+/// on Windows and on Unix.
 #[must_use]
 pub fn path_identity_key(path: &str) -> String {
-    let stripped = strip_windows_extended_prefix(path);
-    let mut normalized = stripped.replace('\\', "/");
-    if cfg!(windows) {
-        normalized.make_ascii_lowercase();
-    } else if let Some((drive, rest)) = normalized.split_once(':') {
-        if drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() && rest.starts_with('/') {
-            normalized = format!("{}:{rest}", drive.to_ascii_lowercase());
-        }
+    let mut normalized = strip_windows_extended_prefix(path).replace('\\', "/");
+    let head = normalized.as_bytes();
+    if head.len() >= 3 && head[0].is_ascii_alphabetic() && head[1] == b':' && head[2] == b'/' {
+        normalized[..1].make_ascii_lowercase();
     }
     normalized
-}
-
-/// Whether two stored or queried path strings name the same ingest location.
-#[must_use]
-pub fn path_identity_eq(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    if path_identity_key(left) == path_identity_key(right) {
-        return true;
-    }
-    paths_equal(Path::new(left), Path::new(right))
-}
-
-/// Exact lookup forms that must be tried before declaring a path cursor missing.
-///
-/// Production writes keep the platform display form. Lookups therefore try the
-/// slash, prefix, and drive-letter variants that Windows CI and helper
-/// fixtures commonly reconstruct.
-#[must_use]
-pub fn path_identity_lookup_candidates(path: &str) -> Vec<String> {
-    let mut candidates = Vec::new();
-    let mut push = |value: String| {
-        if !value.is_empty() && !candidates.iter().any(|seen| seen == &value) {
-            candidates.push(value);
-        }
-    };
-    push(path.to_owned());
-    let stripped = strip_windows_extended_prefix(path);
-    push(stripped.to_owned());
-    push(stripped.replace('\\', "/"));
-    push(stripped.replace('/', "\\"));
-    if !stripped.starts_with(r"\\?\")
-        && (stripped.contains('\\') || looks_like_windows_drive(stripped))
-    {
-        push(format!(r"\\?\{stripped}"));
-    }
-    if let Some((drive, rest)) = split_windows_drive(stripped) {
-        let rest_slash = rest.replace('\\', "/");
-        let rest_backslash = rest.replace('/', "\\");
-        push(format!("{}:{rest_slash}", drive.to_ascii_lowercase()));
-        push(format!("{}:{rest_slash}", drive.to_ascii_uppercase()));
-        push(format!("{}:{rest_backslash}", drive.to_ascii_lowercase()));
-        push(format!("{}:{rest_backslash}", drive.to_ascii_uppercase()));
-    }
-    candidates
 }
 
 fn strip_windows_extended_prefix(path: &str) -> &str {
     path.strip_prefix(r"\\?\")
         .or_else(|| path.strip_prefix("//?/"))
         .unwrap_or(path)
-}
-
-fn looks_like_windows_drive(path: &str) -> bool {
-    split_windows_drive(path).is_some()
-}
-
-fn split_windows_drive(path: &str) -> Option<(char, &str)> {
-    let mut chars = path.chars();
-    let drive = chars.next()?;
-    if !drive.is_ascii_alphabetic() || chars.next() != Some(':') {
-        return None;
-    }
-    Some((drive, chars.as_str()))
 }
 
 pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {

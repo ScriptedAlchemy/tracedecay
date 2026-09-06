@@ -9,7 +9,7 @@ use super::super::git_correlation::{
     CommitSessionRecord, SpanObservation, enqueue_git_evidence_publication,
 };
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
-use super::super::shared::{path_identity_eq, path_identity_lookup_candidates};
+use super::super::shared::path_identity_key;
 use super::codex_goal_reconciliation::find_preceding_codex_goal_response;
 use super::types::{TranscriptBatch, TranscriptPersistenceError};
 
@@ -125,22 +125,17 @@ async fn reconcile_codex_goal_response(
     })
 }
 
+/// Reads one durable cursor by its canonical key.
+///
+/// `path_identity_key` is applied on every write to this table, so the stored
+/// form is unique and this stays a single primary-key lookup — no candidate
+/// expansion, no table scan, on the per-file-per-pass ingest hot path.
 pub async fn get_parse_offset(
     conn: &impl QueryExecutor,
     path: &str,
 ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
-    for candidate in path_identity_lookup_candidates(path) {
-        if let Some(offset) = get_parse_offset_exact(conn, &candidate).await? {
-            return Ok(Some(offset));
-        }
-    }
-    get_parse_offset_by_path_identity(conn, path).await
-}
-
-async fn get_parse_offset_exact(
-    conn: &impl QueryExecutor,
-    path: &str,
-) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
+    let path = path_identity_key(path);
+    let path = path.as_str();
     match conn
         .query(
             "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
@@ -188,36 +183,6 @@ async fn get_parse_offset_exact(
             error,
         )),
     }
-}
-
-async fn get_parse_offset_by_path_identity(
-    conn: &impl QueryExecutor,
-    path: &str,
-) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
-    let mut rows = conn
-        .query(
-            "SELECT file_path, byte_offset, mtime, file_id FROM parse_offsets",
-            params![],
-        )
-        .await
-        .map_err(|error| {
-            TranscriptPersistenceError::storage("scan transcript parse offsets", error)
-        })?;
-    while let Some(row) = rows.next().await.map_err(|error| {
-        TranscriptPersistenceError::storage("read transcript parse offset identity", error)
-    })? {
-        let stored = row.get::<String>(0).map_err(|error| {
-            TranscriptPersistenceError::storage("decode transcript parse offset path", error)
-        })?;
-        if path_identity_eq(&stored, path) {
-            return Ok(Some(ParseOffset {
-                byte_offset: decode_u64(&row, 1, "decode transcript byte offset")?,
-                mtime: decode_u64(&row, 2, "decode transcript mtime")?,
-                file_id: decode_file_id(&row, 3, "decode transcript file id")?,
-            }));
-        }
-    }
-    Ok(None)
 }
 
 fn sqlite_missing_column(error: &tracedecay_runtime_core::db::engine::Error, column: &str) -> bool {
@@ -276,11 +241,16 @@ pub async fn require_expected_offset(
     }
 }
 
+/// Writes one durable cursor under its canonical key.
+///
+/// Normalising here — the single write funnel for this table — is what keeps
+/// [`get_parse_offset`] a primary-key lookup.
 pub async fn set_parse_offset(
     conn: &impl Executor,
     path: &str,
     offset: ParseOffset,
 ) -> Result<(), TranscriptPersistenceError> {
+    let path = path_identity_key(path);
     conn.execute(
         "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
          VALUES (?1, ?2, ?3, ?4)
@@ -321,6 +291,10 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         transaction.commit().await.is_ok()
     }
 
+    /// Writes one session row, with the project columns in the canonical path
+    /// form the project-scoped search and goal queries filter on. Normalising
+    /// here keeps those filters plain indexed equality against one stored
+    /// string; `transcript_path` stays the real display path.
     #[hotpath::skip]
     async fn upsert_session_in_existing_tx(conn: &impl Executor, session: &SessionRecord) -> bool {
         conn.execute(
@@ -344,8 +318,8 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             params![
                 session.provider.clone(),
                 session.session_id.clone(),
-                session.project_key.clone(),
-                session.project_path.clone(),
+                path_identity_key(&session.project_key),
+                path_identity_key(&session.project_path),
                 session.title.clone(),
                 session.started_at,
                 session.ended_at,
@@ -886,6 +860,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         path: &str,
         offset: ParseOffset,
     ) -> Result<(), String> {
+        let path = path_identity_key(path);
         conn.execute(
             "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
                  VALUES (?1, ?2, ?3, ?4)

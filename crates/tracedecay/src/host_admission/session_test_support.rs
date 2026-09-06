@@ -539,25 +539,17 @@ impl HostAdmissionTestRuntimeV1 {
         suffix: &str,
     ) -> tracedecay_domain::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
         let snapshot = self.project_database_for_test()?.read_snapshot().await?;
-        let suffix_candidates = [
-            suffix.to_owned(),
-            suffix.replace('/', "\\"),
-            suffix.replace('\\', "/"),
-        ];
+        // `parse_offsets.file_path` holds the canonical path-identity form, so
+        // the suffix is normalised the same way and one LIKE is enough.
+        let suffix = tracedecay_sessions::runtime::shared::path_identity_key(suffix);
         let mut rows = snapshot
             .query(
                 "SELECT byte_offset, mtime, file_id
                  FROM parse_offsets
                  WHERE file_path LIKE '%' || ?1
-                    OR file_path LIKE '%' || ?2
-                    OR file_path LIKE '%' || ?3
                  ORDER BY file_path
                  LIMIT 1",
-                tracedecay_runtime_core::db::engine::params![
-                    suffix_candidates[0].as_str(),
-                    suffix_candidates[1].as_str(),
-                    suffix_candidates[2].as_str()
-                ],
+                tracedecay_runtime_core::db::engine::params![suffix.as_str()],
             )
             .await
             .map_err(

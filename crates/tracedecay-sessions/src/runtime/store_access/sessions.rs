@@ -13,7 +13,7 @@ use tracedecay_lcm::retrieval_content::{
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
-use super::super::shared::path_identity_lookup_candidates;
+use super::super::shared::path_identity_key;
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -38,24 +38,22 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
        AND messages.provider = ?1
        AND messages.message_id = requested.value";
 
-/// Appends a project-scope predicate that treats path identity, not raw
-/// display text, as the lookup authority.
+/// Appends the project-scope predicate.
+///
+/// `sessions.project_key` / `project_path` are written through
+/// `path_identity_key`, so the caller's selector is normalised the same way
+/// and the filter stays one indexed equality per column.
 fn push_project_identity_predicate(
     sql: &mut String,
     query_params: &mut Vec<Value>,
     project_key: &str,
 ) {
-    let candidates = path_identity_lookup_candidates(project_key);
-    let start = query_params.len() + 1;
-    let placeholders = (0..candidates.len())
-        .map(|index| format!("?{}", start + index))
-        .collect::<Vec<_>>()
-        .join(", ");
+    query_params.push(Value::Text(path_identity_key(project_key)));
     let _ = write!(
         sql,
-        " AND (s.project_key IN ({placeholders}) OR s.project_path IN ({placeholders}))"
+        " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
+        query_params.len()
     );
-    query_params.extend(candidates.into_iter().map(Value::Text));
 }
 
 fn session_db_operation_error(

@@ -235,12 +235,13 @@ async fn parse_offset_for_task_history(
     _project: &Path,
     path: &Path,
 ) -> Option<tracedecay_global_db::ParseOffset> {
-    for candidate in tracedecay_sessions::runtime::shared::path_identity_lookup_candidates(
-        path.to_string_lossy().as_ref(),
-    ) {
-        if let Some(offset) = runtime.get_parse_offset(&candidate).await {
-            return Some(offset);
-        }
+    // `get_parse_offset` normalises to the canonical stored form itself, so
+    // the display path is the lookup.
+    if let Some(offset) = runtime
+        .get_parse_offset(path.to_string_lossy().as_ref())
+        .await
+    {
+        return Some(offset);
     }
     let task_dir = path.parent()?.file_name()?.to_string_lossy();
     let file_name = path.file_name()?.to_string_lossy();
