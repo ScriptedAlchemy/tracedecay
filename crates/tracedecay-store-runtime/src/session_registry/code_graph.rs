@@ -3165,15 +3165,16 @@ mod sealed_projection_deadline_tests {
 
     #[test]
     fn sealed_projection_has_no_wall_clock_bail_out() {
-        // Background projection is bounded by cancellation, not wall clock,
-        // regardless of artifact size. The live incident shape (a ~1.6 GB
-        // sealed generation died at a 30-second wall, then at a size-scaled
-        // wall) must never be budgeted below hours again.
+        // Background projection shares the finite corpus-scaled authority
+        // (316e8e73f: 15 minutes, matching the isolated 10x-corpus ceiling)
+        // and is reclaimed by lifecycle cancellation before that. The live
+        // incident shape (a ~1.6 GB sealed generation died at a 30-second
+        // wall, then at a size-scaled wall) must never return.
         assert_eq!(
             sealed_projection_deadline(),
             GRAPH_BACKGROUND_OPERATION_BUDGET
         );
-        assert!(GRAPH_BACKGROUND_OPERATION_BUDGET >= std::time::Duration::from_hours(24));
+        assert!(GRAPH_BACKGROUND_OPERATION_BUDGET >= std::time::Duration::from_mins(10));
     }
 
     #[test]
