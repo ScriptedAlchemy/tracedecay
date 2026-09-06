@@ -1677,7 +1677,8 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
         .project_sessions(project_id.clone(), [project_root.clone()])
         .await
         .expect("initial project session database");
-    let graph_path = first_database.db_path().with_extension("grafeo");
+    let database_path = first_database.db_path().to_path_buf();
+    let graph_path = database_path.with_extension("grafeo");
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
@@ -1703,9 +1704,26 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     .await
     .expect("relational session open must not wait for relation graph recovery")
     .expect("relational session database remains available");
+    assert_eq!(
+        reopened.db_path(),
+        database_path.as_path(),
+        "the corrupt relation graph must not displace the relational session owner"
+    );
+    // The relational open never waits for the relation graph: the attachment
+    // is a retained background task, so a lease issued the instant the mount
+    // returns reads the warming window and reports the graph unavailable.
+    // Recovery then rebuilds the corrupt graph and binds it into the same
+    // registered owner every lease shares -- on Linux a tick after the mount
+    // returns, on macOS before this first read -- so asserting the warming
+    // window is asserting a race. Settle the task through the typed signal
+    // that exists for exactly this fixture, then assert the terminal outcome.
+    reopened_registry
+        .settle_project_session_graph(&project_id)
+        .await
+        .expect("session relation graph settles after corrupt-file recovery");
     assert!(
-        reopened.session_relation_graph_identity().is_err(),
-        "corrupt relation graph must remain unavailable rather than fabricating readiness"
+        reopened.session_relation_graph_identity().is_ok(),
+        "recovery must rebind a rebuilt relation graph to the intact relational owner"
     );
     drop(reopened);
     reopened_registry.cancel_terminal_tasks();
