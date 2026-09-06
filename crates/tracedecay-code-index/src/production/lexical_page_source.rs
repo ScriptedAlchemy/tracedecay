@@ -1886,25 +1886,24 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             )
         })?;
         let start_index = self.file_range_index(file_offset)?;
-        let mut prefetch_bytes = 0u64;
+        // A partitioned layout assigns every file a one-byte ordinal range, so
+        // the byte-prefetch bound used for durable reads never trips here.
+        // Bound this fill to the next worker-width span of files instead,
+        // exactly like the durable path, and skip files the window still
+        // holds: a staged page the batch bound dropped evicts only its own
+        // files, so the refill must re-admit those files, not every remaining
+        // file in the generation. Counting the span rather than the admitted
+        // files keeps the window within two spans across repeated refills.
+        let workers = crate::parallelism::indexing_workers().max(1);
         let mut inputs = Vec::new();
-        for (index, file) in files[start_index..].iter().enumerate() {
-            let &(start, end) = self.file_ranges.get(start_index + index).ok_or_else(|| {
+        for (index, file) in files[start_index..].iter().enumerate().take(workers) {
+            let &(start, _) = self.file_ranges.get(start_index + index).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
                     "published generation file is missing a sealed lexical range".to_owned(),
                 )
             })?;
-            let file_bytes = end.checked_sub(start).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file byte range is invalid".to_owned(),
-                )
-            })?;
-            if index > 0
-                && prefetch_bytes
-                    .checked_add(file_bytes)
-                    .is_some_and(|total| total > LEXICAL_FILE_PREFETCH_BYTES_V1)
-            {
-                break;
+            if self.admitted_window.contains_key(&start) {
+                continue;
             }
             checkpoint(control)?;
             let next_file_offset = self
@@ -1912,7 +1911,6 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
                 .get(start_index + index + 1)
                 .map(|(next_start, _)| *next_start)
                 .unwrap_or(self.files_end_offset);
-            prefetch_bytes = prefetch_bytes.saturating_add(file_bytes);
             inputs.push((start, Arc::clone(file), next_file_offset));
         }
         if inputs.is_empty() {
@@ -3264,6 +3262,85 @@ mod lexical_page_source_tests {
         assert_eq!(disk, memory);
     }
 
+    /// A partitioned source owns its files in memory and assigns them one-byte
+    /// ordinal ranges, so the byte-prefetch bound never limits a fill. Every
+    /// batch whose trailing staged page is refused evicts that page's files;
+    /// the refill must re-admit only those files, never every remaining file.
+    #[test]
+    fn partitioned_memory_refill_after_a_refused_page_stays_worker_bounded() {
+        // Size the generation from the worker width so an unbounded fill is
+        // observable on any machine: it would leave every remaining file in
+        // the window, far past the two-fill bound asserted below.
+        let workers = crate::parallelism::indexing_workers().max(1);
+        let window_bound = workers.saturating_mul(2);
+        let file_count = window_bound * 2 + 8;
+        let generation = multi_file_generation(file_count);
+        let state_digest =
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(b"partitioned-refill-fixture"))
+                .expect("fixture state digest is canonical");
+        let open = || {
+            VerifiedSealedLexicalPageSourceV1::open_partitioned(
+                Cursor::new(Vec::<u8>::new()),
+                &generation,
+                state_digest.clone(),
+                1,
+                1024 * 1024,
+            )
+            .expect("partitioned fixture source opens")
+        };
+        let mut reference = open();
+        let mut expected = Vec::new();
+        while let VerifiedSealedLexicalPageReadV1::Page(page) = reference
+            .next_page(&ActiveControl)
+            .expect("reference one-page read")
+        {
+            expected.push(expectation(&page));
+        }
+        assert!(
+            expected.len() > file_count,
+            "fixture must mint more than one page per file"
+        );
+
+        let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(3, usize::MAX)
+            .expect("fixture batch bounds are retainable");
+        let mut source = open();
+        let mut observed = Vec::new();
+        let mut batches = 0usize;
+        loop {
+            // Accept one page of every staged batch so each batch refuses its
+            // tail and the cursor reverts into files the staging pass evicted.
+            let read = source
+                .next_page_batch_if(&ActiveControl, bounds, |_pages| {
+                    Ok::<_, CodeIndexProductionErrorV1>(NonZeroUsize::MIN)
+                })
+                .expect("batch staging succeeds")
+                .expect("batch admission succeeds");
+            batches += 1;
+            assert!(
+                source.admitted_window.len() <= window_bound,
+                "batch {batches} left {} admitted files in the window; the refill must stay \
+                 bounded by the {workers}-worker fill, not the {file_count}-file generation",
+                source.admitted_window.len()
+            );
+            match read {
+                VerifiedSealedLexicalPageBatchReadV1::Pages(pages) => {
+                    observed.extend(pages.iter().map(expectation));
+                }
+                VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) => {
+                    receipt
+                        .verify_completion(Some(source.cursor()))
+                        .expect("batched receipt verifies");
+                    break;
+                }
+            }
+        }
+        assert!(
+            batches > file_count,
+            "every batch must have reverted a page"
+        );
+        assert_eq!(observed, expected);
+    }
+
     #[test]
     fn incompatible_cursor_restore_drops_the_stale_prefetch_window() {
         let fixture = fixture();
@@ -3542,6 +3619,98 @@ mod lexical_page_source_tests {
             state_digest,
             generation,
         }
+    }
+
+    fn multi_file_generation(count: usize) -> Arc<CodeIndexPublishedGenerationV1> {
+        let mut files = Vec::with_capacity(count);
+        let mut captured_files = Vec::with_capacity(count);
+        let mut identity = Sha256::new();
+        for ordinal in 0..count {
+            let source: Arc<[u8]> = format!(
+                "pub fn first_{ordinal}() -> usize {{ {ordinal} }}\n\
+                 pub fn second_{ordinal}() -> usize {{ {ordinal} + 1 }}\n\
+                 pub fn third_{ordinal}() -> &'static str {{ \"file-{ordinal}\" }}\n"
+            )
+            .into_bytes()
+            .into();
+            let digest = content_digest(&source);
+            identity.update(digest.as_str().as_bytes());
+            let file_occurrence_id =
+                FileOccurrenceId::new(format!("file.lexical-page-batch.{ordinal:03}"))
+                    .expect("fixture file occurrence ID");
+            files.push(SanitizedCodeFileV1 {
+                file_occurrence_id: file_occurrence_id.clone(),
+                logical_path: format!("src/multi_{ordinal:03}.rs"),
+                language: Some(LanguageId::new("rust").expect("fixture language ID")),
+                content_digest: digest,
+                disposition: SnapshotFileDispositionV1::Present,
+            });
+            captured_files.push(CodeIndexCapturedFileV1 {
+                file_occurrence_id,
+                sanitized_bytes: source,
+                sensitivity_level: SensitivityLevelV1::Public,
+            });
+        }
+        let request = CodeIndexBuildRequestV1 {
+            snapshot: SanitizedCodeSnapshotV1 {
+                repository: RepositoryId::new("repository.lexical-page-batch")
+                    .expect("fixture repository ID"),
+                worktree: None,
+                reference: None,
+                source_revision: None,
+                sanitizer_revision: SanitizerRevision::new("sanitizer.lexical-page-batch")
+                    .expect("fixture sanitizer revision"),
+                sanitization_receipts: vec![
+                    SanitizationReceiptId::new("receipt.lexical-page-batch")
+                        .expect("fixture sanitization receipt"),
+                ],
+                content_identity: content_digest(&identity.finalize()),
+                captured_at: UtcMicros(1_000_000),
+                files,
+            },
+            captured_files,
+            changed_files: BTreeSet::new(),
+            invalidations: BTreeSet::new(),
+            ignored_source_admissions: Vec::new(),
+            repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                tree: None,
+                dirty: RepositoryDirtyStateV1::Dirty,
+            },
+            sealed_at: UtcMicros(1_100_000),
+            target_projection_key: ProjectionKeyV1 {
+                kind: ProjectionKindV1::Lexical,
+                schema_revision: "lexical.v1".to_owned(),
+                profile_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+                    .expect("fixture projection profile digest"),
+            },
+        };
+        fixture_owner()
+            .build_and_publish(request, &ActiveControl)
+            .expect("multi-file fixture generation publishes")
+    }
+
+    fn fixture_owner() -> CodeIndexProductionOwnerV1<TestPublicationStore, ApplyingProjectionSink> {
+        CodeIndexProductionOwnerV1::new(
+            CodeIndexProductionConfigV1 {
+                project_id: ProjectId::new("project.lexical-page-batch")
+                    .expect("fixture project ID"),
+                repository: RepositoryId::new("repository.lexical-page-batch")
+                    .expect("fixture repository ID"),
+                sanitizer_revision: SanitizerRevision::new("sanitizer.lexical-page-batch")
+                    .expect("fixture sanitizer revision"),
+                policy_revision: PolicyRevisionId::new("policy.lexical-page-batch")
+                    .expect("fixture policy revision"),
+                chunker_revision: ChunkerRevision::new("chunker.lexical-page-batch")
+                    .expect("fixture chunker revision"),
+                privacy_domain: PrivacyDomainId::new("privacy.lexical-page-batch")
+                    .expect("fixture privacy domain"),
+                privacy_key_epoch: 7,
+                max_snapshot_age_micros: None,
+            },
+            TestPublicationStore,
+            ApplyingProjectionSink,
+        )
+        .expect("fixture production owner opens")
     }
 
     fn one_page_expectations(fixture: &SealedSourceFixture) -> Vec<OnePageExpectation> {
