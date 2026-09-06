@@ -6884,6 +6884,7 @@ dependencies = [
  "clap",
  "hex",
  "hotpath",
+ "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
