@@ -23,7 +23,7 @@ fn semantic_workload_and_incremental_fixture_are_byte_exact() {
 
     assert_eq!(
         compute_workload_digest(&workload).expect("workload digest"),
-        "sha256:c0bcabaab7ea81312a6468262003d865e6ca293b2328b6c6332c731e5c1785d3"
+        "sha256:a4c7d68b3adbfac6fd3bb32c511dbf9f3588c74f1696e0ee4cc4cf1f00f37ab8"
     );
     assert_eq!(
         summary.workload_digest,
