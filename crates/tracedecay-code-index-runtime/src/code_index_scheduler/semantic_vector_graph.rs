@@ -592,14 +592,19 @@ impl DaemonSemanticVectorGraphProviderV1 {
         label = "daemon.code_index.semantic_vector.activation.retain",
         future = true
     )]
+    /// Retain by generation *identity*, not by a decoded generation: a clean
+    /// restart that recovered its retained revision-7 head serves without
+    /// seating a second copy of the sealed generation, and the vector graph
+    /// binds the same identity either way.
     async fn retain(
         &self,
         scope: &CodeIndexServingScopeV1,
-        generation: &CodeIndexPublishedGenerationV1,
+        generation_id: &CodeGenerationId,
+        reference: Option<&tracedecay_domain::RefId>,
     ) -> Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1> {
         let replay_binding = self
             .schedulers
-            .code_graph_replay_binding(&self.project_root, &generation.manifest().generation_id)
+            .code_graph_replay_binding(&self.project_root, generation_id)
             .await
             .ok_or_else(|| {
                 SemanticVectorGraphErrorV1::Unavailable(
@@ -613,8 +618,8 @@ impl DaemonSemanticVectorGraphProviderV1 {
                 self.project_id.clone(),
                 scope.repository_id.clone(),
                 scope.worktree_id.clone(),
-                generation.snapshot().reference.clone(),
-                generation.manifest().generation_id.clone(),
+                reference.cloned(),
+                generation_id.clone(),
                 Arc::clone(&self.project_database),
                 replay_binding,
                 // This path holds only a borrowed generation; cloning it just to
@@ -657,7 +662,12 @@ impl SemanticVectorGraphProviderV1 for DaemonSemanticVectorGraphProviderV1 {
     {
         Box::pin(async move {
             let scope = self.serving_scope().await?;
-            self.retain(&scope, generation).await
+            self.retain(
+                &scope,
+                &generation.manifest().generation_id,
+                generation.snapshot().reference.as_ref(),
+            )
+            .await
         })
     }
 
@@ -667,12 +677,37 @@ impl SemanticVectorGraphProviderV1 for DaemonSemanticVectorGraphProviderV1 {
     {
         Box::pin(async move {
             let scope = self.serving_scope().await?;
-            let generation = scope.serving_generation.clone().ok_or_else(|| {
-                SemanticVectorGraphErrorV1::Unavailable(
-                    "no code generation is currently serving for this project".to_owned(),
-                )
-            })?;
-            self.retain(&scope, generation.as_ref()).await
+            if let Some(generation) = scope.serving_generation.clone() {
+                return self
+                    .retain(
+                        &scope,
+                        &generation.manifest().generation_id,
+                        generation.snapshot().reference.as_ref(),
+                    )
+                    .await;
+            }
+            // A clean restart whose retained revision-7 head recovered leaves
+            // the sealed seat empty on purpose - replaying the partitions to
+            // seat a second copy of what already serves is exactly the cost
+            // recovery avoids. Reporting the project as serving nothing here
+            // fail-closed every vector retention pass for the life of a quiet
+            // checkout, so read the identity from the level that does serve.
+            let text = self
+                .schedulers
+                .latest_text_serving_for_root(&self.project_root)
+                .await
+                .ok_or_else(|| {
+                    SemanticVectorGraphErrorV1::Unavailable(
+                        "no code generation is currently serving for this project".to_owned(),
+                    )
+                })?;
+            let metadata = text.metadata();
+            self.retain(
+                &scope,
+                &metadata.manifest().generation_id,
+                metadata.snapshot().reference.as_ref(),
+            )
+            .await
         })
     }
 }

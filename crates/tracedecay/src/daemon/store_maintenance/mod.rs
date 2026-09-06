@@ -525,6 +525,14 @@ async fn serving_generation_pins(
     {
         pins.insert(serving.manifest().generation_id.clone());
     }
+    // A clean restart whose retained revision-7 head recovered serves through
+    // the text projection and never seats a second copy of its sealed
+    // generation, so the sealed slot alone under-reports what is live. Pin
+    // the level that actually serves or retention collects it out from under
+    // the route.
+    if let Some(text) = schedulers.latest_text_serving_for_root(project_root).await {
+        pins.insert(text.metadata().manifest().generation_id.clone());
+    }
     pins
 }
 

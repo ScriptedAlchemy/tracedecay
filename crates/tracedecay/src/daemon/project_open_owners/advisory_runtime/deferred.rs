@@ -110,30 +110,40 @@ async fn try_mount(
     // `latest_complete_ready_for_scope` is the authenticated demand boundary
     // every other first-generation consumer resolves through, so take it
     // before giving up and going back to sleep.
-    let generation = match invocation
+    let indexed = match invocation
         .code_index_schedulers
         .latest_complete_ready_decoded_for_root_scope(project_root, &state.scope)
         .await
     {
-        Some(generation) => generation,
+        Some(generation) => Some(generation.text_generation_handle()),
         None => match invocation
             .code_index_schedulers
             .latest_complete_ready_for_scope(&state.scope)
             .await
         {
-            Some(generation) => generation,
-            None => {
-                log_deferred_attempt(
-                    project_root,
-                    "generation_unavailable",
-                    "await_next_publication",
-                );
-                return Attempt::AwaitNextPublication;
-            }
+            Some(generation) => Some(generation.text_generation_handle()),
+            // A clean restart that recovered its retained revision-7 graph
+            // head serves through the text projection and never seats the
+            // sealed slot, so no publication edge follows for a quiet
+            // checkout. Feedback, session and LSP availability must not wait
+            // on full code-index publication: take that recovered level,
+            // which carries the same sealed snapshot this owner reads.
+            None => invocation
+                .code_index_schedulers
+                .latest_text_serving_for_scope(&state.scope)
+                .await,
         },
     };
-    let mut indexed_files = generation
-        .generation()
+    let Some(indexed) = indexed else {
+        log_deferred_attempt(
+            project_root,
+            "generation_unavailable",
+            "await_next_publication",
+        );
+        return Attempt::AwaitNextPublication;
+    };
+    let mut indexed_files = indexed
+        .metadata()
         .snapshot()
         .files
         .iter()
@@ -257,6 +267,11 @@ async fn classify_failure(
         .latest_complete_ready_for_scope(&state.scope)
         .await
         .is_none()
+        && invocation
+            .code_index_schedulers
+            .latest_text_serving_for_scope(&state.scope)
+            .await
+            .is_none()
     {
         Attempt::AwaitNextPublication
     } else {

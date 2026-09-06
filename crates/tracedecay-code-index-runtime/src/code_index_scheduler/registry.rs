@@ -339,17 +339,21 @@ fn cold_mount_final_commit_gate() -> &'static Mutex<Option<ColdMountFinalCommitG
 
 #[cfg(any(test, feature = "test-helpers"))]
 struct RetainedGraphRecoverySuccessorGateV1 {
-    project_root: PathBuf,
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
+/// Armed gates, keyed by the exact worktree they fence. The slot is process
+/// wide while the tests that arm it run concurrently in one binary, so a
+/// single slot made two unrelated restart fixtures collide by scheduling
+/// accident; the key is the isolation the fixtures already have.
 #[cfg(any(test, feature = "test-helpers"))]
 fn retained_graph_recovery_successor_gate()
--> &'static Mutex<Option<RetainedGraphRecoverySuccessorGateV1>> {
-    static GATE: std::sync::OnceLock<Mutex<Option<RetainedGraphRecoverySuccessorGateV1>>> =
-        std::sync::OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(None))
+-> &'static Mutex<BTreeMap<PathBuf, RetainedGraphRecoverySuccessorGateV1>> {
+    static GATE: std::sync::OnceLock<
+        Mutex<BTreeMap<PathBuf, RetainedGraphRecoverySuccessorGateV1>>,
+    > = std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 #[cfg(test)]
@@ -1339,32 +1343,28 @@ impl CodeIndexSchedulerRegistryV1 {
     ) {
         let (entered, entered_observed) = tokio::sync::oneshot::channel();
         let (released, release) = tokio::sync::oneshot::channel();
-        let mut gate = retained_graph_recovery_successor_gate()
+        let mut gates = retained_graph_recovery_successor_gate()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
-            gate.is_none(),
-            "only one retained graph recovery successor gate may be armed at a time"
+            gates
+                .insert(
+                    project_root.clone(),
+                    RetainedGraphRecoverySuccessorGateV1 { entered, release },
+                )
+                .is_none(),
+            "one retained graph recovery successor gate per worktree: {}",
+            project_root.display()
         );
-        *gate = Some(RetainedGraphRecoverySuccessorGateV1 {
-            project_root,
-            entered,
-            release,
-        });
         (entered_observed, released)
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     async fn wait_for_retained_graph_recovery_successor_gate(project_root: &Path) {
-        let gate = {
-            let mut armed = retained_graph_recovery_successor_gate()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let matches_root = armed
-                .as_ref()
-                .is_some_and(|gate| gate.project_root == project_root);
-            if matches_root { armed.take() } else { None }
-        };
+        let gate = retained_graph_recovery_successor_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(project_root);
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;

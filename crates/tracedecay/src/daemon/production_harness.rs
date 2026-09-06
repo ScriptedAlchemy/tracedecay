@@ -24,8 +24,6 @@ use super::project_composition::daemon_transcript_source_home;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 #[cfg(any(test, feature = "test-transport"))]
 use super::*;
-#[cfg(any(test, feature = "test-transport"))]
-use tracedecay_code_index_runtime::code_index_scheduler;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
 #[cfg(any(test, feature = "test-transport"))]
@@ -1024,19 +1022,42 @@ async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     scope: &tracedecay_application::ResolvedScope,
-) -> Result<Option<code_index_scheduler::LatestCompleteCodeIndexV1>> {
+) -> Result<()> {
     let wait_started = Instant::now();
     let publication = timeout(Duration::from_secs(20), async {
         loop {
             // Scope-aware readiness is the authenticated demand boundary that
             // starts the registered route-local activation owner. The root-only
             // probe cannot mount an idle on-demand scheduler.
-            if let Some(latest) = invocation
+            if invocation
                 .code_index_schedulers
                 .latest_complete_ready_for_scope(scope)
                 .await
+                .is_some()
             {
-                return Some(latest);
+                return;
+            }
+            // A clean restart whose retained revision-7 head recovered serves
+            // every read through the text projection and deliberately leaves
+            // the sealed seat empty, because replaying the partitions to seat
+            // a second copy of what already serves is the cost that recovery
+            // exists to avoid. No publication edge follows a quiet checkout,
+            // so waiting for that seat would always exhaust the timeout.
+            //
+            // The native graph is the discriminator, not text readiness
+            // alone: a *publishing* pass activates the graph only after the
+            // serving swap, so an already-serving graph over an empty seat is
+            // the recovered restart and nothing else. Accepting bare text
+            // readiness here would let the first open race ahead of its own
+            // seat, and every consumer that needs the decoded generation
+            // would then find nothing seated.
+            if invocation
+                .code_index_schedulers
+                .latest_text_serving_for_scope(scope)
+                .await
+                .is_some_and(|text| text.interactive_graph_store().is_ok())
+            {
+                return;
             }
             // A project whose verified source publishes no generation at all
             // (every file unsupported or unextractable) is a typed state, not
@@ -1048,14 +1069,14 @@ async fn wait_for_production_composition_code_index(
                 .reconciled_without_generation_for_scope(scope)
                 .await
             {
-                return None;
+                return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
     match publication {
-        Ok(latest) => Ok(latest),
+        Ok(()) => Ok(()),
         Err(_) => {
             let elapsed_wait = wait_started.elapsed();
             let admission = production_composition_admission_gate().snapshot();

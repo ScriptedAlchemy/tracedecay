@@ -353,9 +353,13 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
         .expect("dashboard replay of CLI user configuration effect"),
     )
     .expect("dashboard replay envelope");
+    // The durable effect is the replayed artefact; the envelope's `request_id`
+    // is minted per request per surface (see `configuration_batch_via_surface`)
+    // and can never match across two calls. Compare what replay actually
+    // promises, exactly as the cross-surface set journey above does.
     assert_eq!(
-        replay, first_effect,
-        "dashboard must replay the CLI operation's exact durable user configuration envelope"
+        replay["outcome"]["value"], first_effect["outcome"]["value"],
+        "dashboard must replay the CLI operation's exact durable user configuration effect"
     );
     assert_eq!(
         current_revision(&harness, &project).await,
