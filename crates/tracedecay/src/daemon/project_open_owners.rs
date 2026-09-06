@@ -75,6 +75,32 @@ use source_edit_owner::{
     source_edit_contract_error, source_edit_request_context, source_edit_surface_result,
 };
 
+/// Whether this route's code index is disabled by contract, so no generation
+/// will ever be published for it.
+///
+/// `f347a0a46` gates project-open code-index activation for a linked worktree
+/// behind `sync.watch_linked_worktrees`, which defaults off. Such a route
+/// serves, but never indexes: a deferred owner that waits for its first
+/// generation waits for the daemon's whole life. That wait is not idle. Both
+/// deferred owners also wake on the *global* serving-seat signal, so every
+/// publication another route makes re-enters their mount attempt, and each
+/// attempt takes the project store writer lane this route shares with the
+/// admitted one — the lane a concurrently opening sibling and Context Scout
+/// durable startup are both waiting on. Answer that wait with the typed
+/// disabled state at spawn time instead of parking a task that can only ever
+/// contend.
+fn code_index_disabled_for_scope(
+    invocation: &DaemonInvocationState,
+    scope: &ResolvedScope,
+) -> bool {
+    invocation
+        .code_index_schedulers
+        .automatic_admission_for_scope(scope)
+        == Some(
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+        )
+}
+
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
 const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
 const GRANT_HORIZON: Duration = Duration::from_hours(24);
