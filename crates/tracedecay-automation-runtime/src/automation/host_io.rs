@@ -5,7 +5,6 @@
 //! bundle files, and managed-skill export sweeps stay in agent-hosts and are
 //! registered at process start so this crate does not depend on it.
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -40,7 +39,6 @@ type ExportToAgentHosts = fn(&Path, &Path, &Path) -> Vec<ManagedSkillExportRepor
 type WriteText = fn(&Path, &str, Option<&Path>) -> Result<()>;
 type WriteJson = fn(&Path, &Value, Option<&Path>) -> Result<()>;
 type RemoveHostFile = fn(&Path) -> std::io::Result<()>;
-type ResolveOnPath = fn(&str, Option<&OsStr>) -> Result<Option<PathBuf>>;
 type CodexAgentFiles = fn() -> &'static [PluginFile];
 type WithWriteIntents = fn(PathBuf, &mut dyn FnMut());
 
@@ -58,7 +56,6 @@ pub struct HostIoRegistration {
     pub write_text: WriteText,
     pub write_json: WriteJson,
     pub remove_host_file: RemoveHostFile,
-    pub resolve_on_path: ResolveOnPath,
     pub codex_agent_files: CodexAgentFiles,
     pub with_write_intents: WithWriteIntents,
 }
@@ -135,13 +132,6 @@ pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
     }
 }
 
-pub fn resolve_on_path(program: &str, path_var: Option<&OsStr>) -> Result<Option<PathBuf>> {
-    match registered().map(|io| io.resolve_on_path) {
-        Some(resolve) => resolve(program, path_var),
-        None => Err(unregistered("resolve_on_path")),
-    }
-}
-
 pub fn codex_agent_files() -> Result<&'static [PluginFile]> {
     match registered().map(|io| io.codex_agent_files) {
         Some(files) => Ok(files()),
@@ -198,10 +188,6 @@ mod tests {
         Ok(())
     }
 
-    fn resolve(_: &str, _: Option<&OsStr>) -> Result<Option<PathBuf>> {
-        Ok(None)
-    }
-
     fn files() -> &'static [PluginFile] {
         &[]
     }
@@ -217,7 +203,6 @@ mod tests {
             write_text,
             write_json,
             remove_host_file: remove_file,
-            resolve_on_path: resolve,
             codex_agent_files: files,
             with_write_intents: intents,
         }
