@@ -1102,6 +1102,22 @@ mod tests {
     };
     use tracedecay_domain::{LocatorDigest, ProjectId, RepositoryId, WorktreeId};
 
+    /// A workspace root the host accepts as absolute, and its `file:` URI.
+    ///
+    /// `production_lsp_input` builds the root URI with
+    /// `Url::from_directory_path`, which requires an absolute path. Windows
+    /// does not consider a rootless `/workspace` absolute — it has no drive
+    /// prefix — so the bare Unix spelling made every fixture here fail with
+    /// `Inconsistent { field: "project-open feedback root URI" }`.
+    #[cfg(windows)]
+    const WORKSPACE_ROOT: &str = r"C:\workspace";
+    #[cfg(windows)]
+    const WORKSPACE_URI: &str = "file:///C:/workspace";
+    #[cfg(not(windows))]
+    const WORKSPACE_ROOT: &str = "/workspace";
+    #[cfg(not(windows))]
+    const WORKSPACE_URI: &str = "file:///workspace";
+
     #[derive(Clone)]
     struct Identity(ProductionFeedbackDocumentIdentityV1);
 
@@ -1318,15 +1334,15 @@ mod tests {
             threshold_pin: threshold_pin(&configuration_revision, &configuration),
             policy_digest: policy,
             providers: vec![provider],
-            project_root: PathBuf::from("/workspace"),
+            project_root: PathBuf::from(WORKSPACE_ROOT),
             document_identity: Arc::new(Identity(document)),
         })
         .expect("input");
 
         let invocation = input(FeedbackCycleRequest {
-            root_uri: "file:///workspace".to_owned(),
+            root_uri: WORKSPACE_URI.to_owned(),
             trigger: DiagnosticTrigger::DocumentSave,
-            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+            document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
         })
         .await;
 
@@ -1356,9 +1372,9 @@ mod tests {
         )
         .expect("provider");
         let request = || FeedbackCycleRequest {
-            root_uri: "file:///workspace/".to_owned(),
+            root_uri: format!("{WORKSPACE_URI}/"),
             trigger: DiagnosticTrigger::DocumentSave,
-            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+            document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
         };
         let (current, calls) = authorization(&scope, &configuration_revision, &configuration, 1);
         let input = production_lsp_input(ProductionLspInputContext {
@@ -1369,7 +1385,7 @@ mod tests {
             threshold_pin: threshold_pin(&configuration_revision, &configuration),
             policy_digest: policy.clone(),
             providers: vec![provider.clone()],
-            project_root: PathBuf::from("/workspace"),
+            project_root: PathBuf::from(WORKSPACE_ROOT),
             document_identity: Arc::new(Identity(document.clone())),
         })
         .expect("input");
@@ -1388,7 +1404,7 @@ mod tests {
             threshold_pin: threshold_pin(&configuration_revision, &configuration),
             policy_digest: policy,
             providers: vec![provider],
-            project_root: PathBuf::from("/workspace"),
+            project_root: PathBuf::from(WORKSPACE_ROOT),
             document_identity: Arc::new(Identity(document)),
         })
         .expect("input");
@@ -1431,16 +1447,16 @@ mod tests {
             threshold_pin: threshold_pin(&configuration_revision, &authorized_configuration),
             policy_digest: policy,
             providers: vec![provider],
-            project_root: PathBuf::from("/workspace"),
+            project_root: PathBuf::from(WORKSPACE_ROOT),
             document_identity: Arc::new(Identity(document)),
         })
         .expect("input");
 
         assert!(
             input(FeedbackCycleRequest {
-                root_uri: "file:///workspace/".to_owned(),
+                root_uri: format!("{WORKSPACE_URI}/"),
                 trigger: DiagnosticTrigger::DocumentSave,
-                document_uri: "file:///workspace/src/lib.rs".to_owned(),
+                document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
             })
             .await
             .is_err(),
@@ -1531,14 +1547,14 @@ mod tests {
             threshold_pin: threshold_pin(&configuration_revision, &configuration),
             policy_digest: policy,
             providers: vec![provider],
-            project_root: PathBuf::from("/workspace"),
+            project_root: PathBuf::from(WORKSPACE_ROOT),
             document_identity: Arc::new(Identity(document.clone())),
         })
         .expect("input");
         let invocation = input(FeedbackCycleRequest {
-            root_uri: "file:///workspace/".to_owned(),
+            root_uri: format!("{WORKSPACE_URI}/"),
             trigger: DiagnosticTrigger::DocumentSave,
-            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+            document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
         })
         .await
         .expect("invocation");
@@ -1580,14 +1596,14 @@ mod tests {
             threshold_pin: threshold_pin(&configuration_revision, &configuration),
             policy_digest: policy,
             providers: vec![provider],
-            project_root: PathBuf::from("/workspace"),
+            project_root: PathBuf::from(WORKSPACE_ROOT),
             document_identity: Arc::new(Identity(document.clone())),
         })
         .expect("input");
         let mut invocation = input(FeedbackCycleRequest {
-            root_uri: "file:///workspace/".to_owned(),
+            root_uri: format!("{WORKSPACE_URI}/"),
             trigger: DiagnosticTrigger::DocumentSave,
-            document_uri: "file:///workspace/src/lib.rs".to_owned(),
+            document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
         })
         .await
         .expect("invocation");
