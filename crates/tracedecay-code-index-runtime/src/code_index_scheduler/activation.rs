@@ -670,6 +670,82 @@ mod tests {
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 0);
     }
 
+    /// `3b0d7c458` answers both project-open deferred owners with
+    /// `automatic_admission_for_scope` at spawn time, so a route the daemon may
+    /// never index automatically parks no background task. That admission is
+    /// frozen into the activation when the route is composed from
+    /// `sync.watch_linked_worktrees`; nothing re-reads the configuration
+    /// afterwards. Disabling automatic indexing must therefore not be a
+    /// permanent loss of the dependent owners: this pins the requirement the
+    /// code actually carries — the enabling transition takes effect on the next
+    /// route mount, which replaces the registered activation for the scope.
+    #[tokio::test]
+    async fn a_disabled_route_regains_its_deferred_owners_only_on_a_remount() {
+        let repository = repository();
+        let identity = IndexingIdentityV1::resolve(repository.path()).expect("indexing identity");
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.disabled-route-remount").expect("project id"),
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            identity.head_ref().cloned(),
+        )
+        .expect("resolved scope");
+        let registry = super::super::CodeIndexSchedulerRegistryV1::new(1);
+
+        let disabled = Arc::new(CodeIndexActivationV1::new_with_admission(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+            Arc::new(|| Box::pin(async { Ok(()) })),
+            Arc::new(|_| Box::pin(async { true })),
+        ));
+        assert!(registry.register_activation(&scope, &disabled));
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled),
+            "the deferred owners must read the route's disabled admission"
+        );
+
+        // The configuration flips to enabled. The retained activation is the
+        // only thing the deferred owners consult, and it does not re-read
+        // configuration, so on its own the flip changes nothing.
+        assert_eq!(
+            disabled.automatic_admission(),
+            CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+            "a live activation must not silently change the admission it was composed with"
+        );
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
+        );
+
+        // The route remount composes a new activation from the new
+        // configuration and re-registers it for the same scope. From here the
+        // deferred owners are admitted again: the disablement was never
+        // terminal for the capability, only for that mount.
+        let enabled = Arc::new(CodeIndexActivationV1::new_with_admission(
+            repository.path(),
+            Arc::new(AtomicBool::new(true)),
+            CancellationToken::new(),
+            CodeIndexAutomaticAdmissionV1::Admitted,
+            Arc::new(|| Box::pin(async { Ok(()) })),
+            Arc::new(|_| Box::pin(async { true })),
+        ));
+        assert!(registry.register_activation(&scope, &enabled));
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::Admitted),
+            "a route remount under the enabled configuration must readmit the deferred owners"
+        );
+        drop(disabled);
+        assert_eq!(
+            registry.automatic_admission_for_scope(&scope),
+            Some(CodeIndexAutomaticAdmissionV1::Admitted),
+            "retiring the superseded activation must not revoke the remounted admission"
+        );
+    }
+
     #[tokio::test]
     async fn search_and_callable_lookups_activate_registered_route_once() {
         let repository = repository();

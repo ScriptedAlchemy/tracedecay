@@ -196,6 +196,12 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         return Ok(QuarantineStoreOutcome::Missing);
     }
     let capability = open_store_directory_nofollow(profile_root, data_root)?;
+    // The leaf handle only proved the store is present and readable. The
+    // content proof re-opens the leaf under its quarantine name, so release
+    // the probe before the rename: cap-std opens directories without
+    // `FILE_SHARE_DELETE`, and Windows refuses to rename a directory while
+    // such a handle is live.
+    drop(capability.root);
     let original_name = capability
         .leaf_name
         .to_str()
@@ -236,7 +242,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     if sync_directory(&capability.parent).is_err() {
         return Ok(recover_original_name(
             capability.parent,
-            capability.root,
             capability.leaf_name,
             quarantine_name,
             quarantine_path,
@@ -244,7 +249,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         ));
     }
     if write_empty_marker(&capability.parent, &renamed_marker_name(&journal_name)).is_err() {
-        drop(capability.root);
         return Ok(QuarantineStoreOutcome::Interrupted { quarantine_path });
     }
     let moved_root = match capability.parent.open_dir_nofollow(&quarantine_name) {
@@ -252,7 +256,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         Err(_) => {
             return Ok(recover_original_name(
                 capability.parent,
-                capability.root,
                 capability.leaf_name,
                 quarantine_name,
                 quarantine_path,
@@ -279,7 +282,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
             drop(moved_root);
             Ok(recover_original_name(
                 capability.parent,
-                capability.root,
                 capability.leaf_name,
                 quarantine_name,
                 quarantine_path,
@@ -311,15 +313,16 @@ pub(super) fn quarantine_store_for_verified_collection(
     )
 }
 
+/// Renames the quarantined leaf back to its original name. Every handle on
+/// the leaf must already be closed (see the probe release before the
+/// forward rename); the callers drop `moved_root` before arriving here.
 fn recover_original_name(
     parent: Dir,
-    root: Dir,
     original_name: OsString,
     quarantine_name: String,
     quarantine_path: PathBuf,
     journal_name: Option<String>,
 ) -> QuarantineStoreOutcome {
-    drop(root);
     if rename_noreplace(
         &parent,
         OsStr::new(&quarantine_name),
