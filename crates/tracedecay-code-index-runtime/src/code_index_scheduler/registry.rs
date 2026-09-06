@@ -1449,6 +1449,24 @@ impl CodeIndexSchedulerRegistryV1 {
             .is_some_and(|reconcile_in_progress| reconcile_in_progress.load(Ordering::Acquire) != 0)
     }
 
+    /// Test-only: hold an exact mounted worktree's owner-pass authority, as
+    /// the worker does from claiming a wake through text projection and graph
+    /// seating, without holding the scheduler mutex.
+    #[cfg(test)]
+    pub async fn hold_reconcile_pass_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<super::ReconcilePassGuard> {
+        let project_root = project_root.canonicalize().ok()?;
+        let reconcile_in_progress = self
+            .mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress))?;
+        Some(super::ReconcilePassGuard::enter(&reconcile_in_progress))
+    }
+
     /// Serving slot only — no Git open, no freshness ladder, no wake.
     #[cfg(test)]
     pub async fn latest_complete_serving_for_test(
@@ -6141,11 +6159,26 @@ impl CodeIndexSchedulerRegistryV1 {
                 .filter(|latest| {
                     latest.text_serving_is_ready() && text_matches_scope_identity(latest, &scope)
                 })?;
-            if pending_wake.has_pending_arrival()
-                || reconcile_in_progress.load(Ordering::Acquire) != 0
-            {
-                // The existing worker owns the freshness remedy. Re-requesting
-                // here would enqueue a redundant pass behind it.
+            if pending_wake.has_pending_arrival() {
+                // A pass is already queued behind the current owner work; it
+                // re-observes the source when it starts, so it also supplies
+                // this query's remedy.
+                return Some((latest, false));
+            }
+            if reconcile_in_progress.load(Ordering::Acquire) != 0 {
+                // In-flight owner work observed the source when *it* started,
+                // which may predate the change this query is asking about:
+                // after publication the same pass still owns the text
+                // projection and optional graph seating of the previous
+                // source state. Returning stale without a wake stranded that
+                // remedy until an unrelated hint arrived (issue #917). Post the
+                // coalesced follow-up the busy-lock arm below posts, so the
+                // worker re-runs the freshness ladder once this pass ends.
+                Self::note_wake(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::BusyFollowUp,
+                );
                 return Some((latest, false));
             }
             let mut scheduler = match scheduler.try_lock() {
