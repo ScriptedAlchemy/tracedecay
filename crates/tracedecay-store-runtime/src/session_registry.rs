@@ -17,6 +17,7 @@ use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
 };
+use tracedecay_usecases::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
 
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -3004,6 +3005,7 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     graph_manifest_provider: Arc<code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
+    semantic_vector_operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
     profile_pin: Mutex<Option<ProfileAuthorityPin>>,
     profile_database_mount: Mutex<()>,
     profile_database: StdMutex<Option<RegisteredGlobalDbOwnerV1>>,
@@ -3049,6 +3051,10 @@ pub struct DaemonSessionRuntimeRegistryV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    pub fn semantic_vector_operation_task_owner(&self) -> Arc<SemanticVectorOperationTaskOwnerV1> {
+        Arc::clone(&self.semantic_vector_operation_task_owner)
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn lookup_store_runtime(
         &self,

@@ -66,7 +66,7 @@ pub use fair_scheduler::{
 };
 pub use graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphErrorV1,
-    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1,
+    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1, SemanticVectorOperationTaskOwnerV1,
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 pub use owner::SemanticRuntimeOwnerV1;

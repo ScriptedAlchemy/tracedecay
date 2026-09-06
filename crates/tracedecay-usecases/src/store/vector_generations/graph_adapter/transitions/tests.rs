@@ -4,6 +4,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
 use tracedecay_domain::{
     BrainId, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
@@ -35,7 +36,8 @@ use tracedecay_store::{
 use super::{post_commit_publication_settlement_error, semantic_stage_source_identity};
 use crate::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
-    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
+    SemanticVectorOperationTaskOwnerV1, SemanticVectorRetentionAuthorizationV1,
+    VerifiedSemanticVectorGraphRuntimeV1,
 };
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
 use crate::store::vector_generations::graph_adapter::{
@@ -465,6 +467,64 @@ async fn read_only_snapshot_recovery_leaves_the_only_runtime_worker_free() {
     );
 }
 
+/// A caller abort only detaches its typed result receiver. The daemon-owned
+/// settlement task must still join the unabortable blocking child before graph
+/// lifecycle shutdown may proceed.
+#[tokio::test(flavor = "current_thread")]
+async fn aborted_read_only_cannot_outlive_operation_owner_shutdown() {
+    let source = CodeGenerationId::new("code-generation.read-only-abort").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let operation_owner = Arc::new(SemanticVectorOperationTaskOwnerV1::new());
+    let recovery_started = Arc::new(Notify::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        recover_snapshot_gate: Mutex::new(Some(gate)),
+        recover_snapshot_started: Some(Arc::clone(&recovery_started)),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(retained.runtime()))
+    });
+    let retained = RetainedSemanticVectorGraphV1::new_with_operation_task_owner(
+        probe,
+        Arc::clone(retained.cancellation()),
+        Arc::clone(&operation_owner),
+    );
+    let caller =
+        tokio::spawn(async move { GraphVectorGenerationStoreV1::read_only(&retained).await });
+    recovery_started.notified().await;
+
+    caller.abort();
+    assert!(
+        caller
+            .await
+            .expect_err("read-only caller must abort")
+            .is_cancelled(),
+        "caller abort must drop only the live result receiver"
+    );
+    operation_owner.begin_shutdown();
+    let shutdown = tokio::spawn({
+        let operation_owner = Arc::clone(&operation_owner);
+        async move { operation_owner.shutdown().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "operation-owner shutdown must wait for blocked recovery"
+    );
+
+    release.send(()).expect("release blocked snapshot recovery");
+    shutdown
+        .await
+        .expect("operation-owner shutdown remains joinable")
+        .expect("operation-owner shutdown joins blocking recovery");
+}
+
 /// The store's durable operations acquire the project's one exclusive writer
 /// synchronously. Running that on the runtime is what starved the tasks that
 /// would commit the transaction it waits for, so the writer stayed occupied
@@ -597,6 +657,8 @@ struct PublicationAuthorityProbeRuntime {
     begin_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// Stands in for that writer while verified snapshot recovery blocks.
     recover_snapshot_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Signals when verified snapshot recovery has entered the blocking child.
+    recover_snapshot_started: Option<Arc<Notify>>,
     /// How long the whole-generation digest pass would run at corpus scale.
     /// Simulated rather than slept: what the fix has to survive is the
     /// *elapsed budget*, and a real 168k-chunk pass is not a unit test.
@@ -618,6 +680,7 @@ impl PublicationAuthorityProbeRuntime {
             cancellation_to_trip: None,
             begin_gate: Mutex::new(None),
             recover_snapshot_gate: Mutex::new(None),
+            recover_snapshot_started: None,
             simulated_verify_elapsed: None,
             verify_completed_at: Mutex::new(None),
             cancel_during_verify: None,
@@ -635,6 +698,9 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         &self,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        if let Some(started) = &self.recover_snapshot_started {
+            started.notify_one();
+        }
         if let Some(gate) = self.recover_snapshot_gate.lock().unwrap().take() {
             gate.recv_timeout(WRITER_GATE_LEASE)
                 .map_err(|_| GraphDbError::Cancelled)?;

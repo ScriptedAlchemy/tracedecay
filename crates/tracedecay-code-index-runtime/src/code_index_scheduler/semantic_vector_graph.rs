@@ -22,7 +22,7 @@ use tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1
 use crate::code_graph_seat::CodeGraphSeatRuntimePortV1;
 use tracedecay_usecases::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticRuntimeFuture, SemanticVectorGraphErrorV1,
-    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1,
+    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1, SemanticVectorOperationTaskOwnerV1,
     SemanticVectorRetentionAuthorizationV1,
 };
 
@@ -576,6 +576,7 @@ pub struct DaemonSemanticVectorGraphProviderV1 {
     schedulers: CodeIndexSchedulerRegistryV1,
     runtime: Arc<dyn CodeGraphSeatRuntimePortV1>,
     project_database: Arc<tracedecay_runtime_core::db::Database>,
+    operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
 }
 
 impl DaemonSemanticVectorGraphProviderV1 {
@@ -585,6 +586,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
         schedulers: CodeIndexSchedulerRegistryV1,
         runtime: Arc<dyn CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
+        operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
     ) -> Self {
         Self {
             project_id,
@@ -592,6 +594,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
             schedulers,
             runtime,
             project_database,
+            operation_task_owner,
         }
     }
 
@@ -672,7 +675,13 @@ impl DaemonSemanticVectorGraphProviderV1 {
         .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
         let _ = lease.semantic_vector_staging_binding();
         let runtime = lease.into_semantic_vector_runtime(semantic_scope);
-        Ok(RetainedSemanticVectorGraphV1::new(runtime, cancellation))
+        Ok(
+            RetainedSemanticVectorGraphV1::new_with_operation_task_owner(
+                runtime,
+                cancellation,
+                Arc::clone(&self.operation_task_owner),
+            ),
+        )
     }
 }
 

@@ -16,6 +16,7 @@ use tracedecay_rusqlite_runtime::remote::{
 };
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{ProjectId, StoreShardIdV1, StoreShardScopeV1};
+use tracedecay_usecases::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
 
 use super::remote_recovery::{
     DaemonRemoteRecoveryPhysicalEffectsV1, RemoteRecoveryPublicationContextV1,
@@ -202,6 +203,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             graph_registry,
             graph_manifest_provider,
             graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
+            semantic_vector_operation_task_owner: Arc::new(
+                SemanticVectorOperationTaskOwnerV1::new(),
+            ),
             profile_pin: Mutex::new(Some(profile_pin)),
             profile_database_mount: Mutex::new(()),
             profile_database: std::sync::Mutex::new(None),
@@ -1011,8 +1015,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         databases
     }
 
-    /// Releases exclusive Grafeo writers at daemon shutdown, after the
-    /// reconciliation workers have joined.
+    /// Releases exclusive Grafeo writers at daemon shutdown, after semantic
+    /// vector operation settlement and reconciliation workers have joined.
     ///
     /// The shutdown close requires every graph owner to be unleased, so this
     /// first drains the retained owners out of the registry maps: dropping a

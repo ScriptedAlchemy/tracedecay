@@ -1,7 +1,9 @@
 //! Typed port giving semantic vector storage the daemon's canonical verified
 //! graph registry and relational replay/CAS authority.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
@@ -355,10 +357,150 @@ pub trait VerifiedSemanticVectorGraphRuntimeV1: Send + Sync {
     ) -> Result<bool, GraphDbError>;
 }
 
+struct SemanticVectorOperationTaskStateV1 {
+    accepting: bool,
+    next_task_id: u64,
+    tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
+}
+
+struct SemanticVectorOperationTaskFinalizerV1 {
+    state: Weak<Mutex<SemanticVectorOperationTaskStateV1>>,
+    task_id: u64,
+    completed: bool,
+}
+
+impl Drop for SemanticVectorOperationTaskFinalizerV1 {
+    fn drop(&mut self) {
+        if !self.completed {
+            return;
+        }
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tasks
+            .remove(&self.task_id);
+    }
+}
+
+/// Lifecycle owner for semantic-vector operation settlement tasks.
+///
+/// Admission and task publication share one synchronous mutex boundary, so
+/// `begin_shutdown` fences every later operation before shutdown atomically
+/// takes and joins all previously retained settlement tasks.
+pub struct SemanticVectorOperationTaskOwnerV1 {
+    state: Arc<Mutex<SemanticVectorOperationTaskStateV1>>,
+}
+
+impl SemanticVectorOperationTaskOwnerV1 {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SemanticVectorOperationTaskStateV1 {
+                accepting: true,
+                next_task_id: 0,
+                tasks: BTreeMap::new(),
+            })),
+        }
+    }
+
+    /// Synchronously admits and spawns one settlement future.
+    ///
+    /// `false` means admission was fenced, no Tokio runtime was available, or
+    /// the monotonic task identity space was exhausted. In every case the
+    /// supplied future is dropped without being polled.
+    pub fn retain<Fut>(&self, settlement: Fut) -> bool
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return false;
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return false;
+        }
+        let Some(task_id) = state.next_task_id.checked_add(1) else {
+            return false;
+        };
+        state.next_task_id = task_id;
+        let finalizer_state = Arc::downgrade(&self.state);
+        let task = runtime.spawn(async move {
+            let mut finalizer = SemanticVectorOperationTaskFinalizerV1 {
+                state: finalizer_state,
+                task_id,
+                completed: false,
+            };
+            settlement.await;
+            finalizer.completed = true;
+        });
+        state.tasks.insert(task_id, task);
+        true
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accepting = false;
+    }
+
+    /// Fences admission and joins every settlement task retained before the
+    /// fence. Operation results are delivered separately to live callers, so
+    /// only an actual settlement-task join failure is reported here.
+    pub async fn shutdown(&self) -> Result<(), String> {
+        let tasks = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.accepting = false;
+            std::mem::take(&mut state.tasks)
+        };
+        let mut failures = Vec::new();
+        for (task_id, task) in tasks {
+            if let Err(error) = task.await {
+                failures.push(format!(
+                    "semantic vector operation settlement task {task_id} join failed: {error}"
+                ));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+}
+
+impl Default for SemanticVectorOperationTaskOwnerV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SemanticVectorOperationTaskOwnerV1 {
+    fn drop(&mut self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accepting = false;
+        for (_, task) in std::mem::take(&mut state.tasks) {
+            task.abort();
+        }
+    }
+}
+
 /// A code-graph authority retained for semantic-vector reads and writes.
 pub struct RetainedSemanticVectorGraphV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
     cancellation: Arc<dyn GraphCancellation>,
+    operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
 }
 
 impl RetainedSemanticVectorGraphV1 {
@@ -366,9 +508,22 @@ impl RetainedSemanticVectorGraphV1 {
         runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Self {
+        Self::new_with_operation_task_owner(
+            runtime,
+            cancellation,
+            Arc::new(SemanticVectorOperationTaskOwnerV1::new()),
+        )
+    }
+
+    pub fn new_with_operation_task_owner(
+        runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+        operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
+    ) -> Self {
         Self {
             runtime,
             cancellation,
+            operation_task_owner,
         }
     }
 
@@ -378,6 +533,10 @@ impl RetainedSemanticVectorGraphV1 {
 
     pub fn cancellation(&self) -> &Arc<dyn GraphCancellation> {
         &self.cancellation
+    }
+
+    pub(crate) fn operation_task_owner(&self) -> &Arc<SemanticVectorOperationTaskOwnerV1> {
+        &self.operation_task_owner
     }
 }
 
@@ -392,4 +551,48 @@ pub trait SemanticVectorGraphProviderV1: Send + Sync {
     fn graph_for_current(
         &self,
     ) -> SemanticRuntimeFuture<'_, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn operation_owner_shutdown_fences_admission_and_joins_retained_work() {
+        let owner = Arc::new(SemanticVectorOperationTaskOwnerV1::new());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        assert!(owner.retain({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+            }
+        }));
+        started.notified().await;
+
+        owner.begin_shutdown();
+        assert!(
+            !owner.retain(async {}),
+            "shutdown must fence later settlement admission"
+        );
+        let shutdown = tokio::spawn({
+            let owner = Arc::clone(&owner);
+            async move { owner.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must join retained settlement work"
+        );
+
+        release.notify_one();
+        shutdown
+            .await
+            .expect("operation-owner shutdown remains joinable")
+            .expect("operation-owner shutdown joins cleanly");
+    }
 }
