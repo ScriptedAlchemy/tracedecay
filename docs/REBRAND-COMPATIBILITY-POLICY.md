@@ -1,7 +1,7 @@
 # TraceDecay rebrand compatibility policy
 
 Date: 2026-06-14
-Source audits: `docs/archive/TRACEDECAY-COMPATIBILITY-AUDIT.md`, `docs/TREESITTERS-RENAME-CONSTRAINTS.md`
+Source audits: `TRACEDECAY-COMPATIBILITY-AUDIT.md` (git history, formerly `docs/archive/`), `docs/TREESITTERS-RENAME-CONSTRAINTS.md`
 
 This policy defines how the project treats names and artifacts from the pre-rebrand
 TraceDecay era. It is normative for new code, docs, tests, release automation, and
