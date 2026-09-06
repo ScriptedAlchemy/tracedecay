@@ -352,22 +352,6 @@ impl RegisteredProject {
         })
     }
 
-    /// Opens one tracked branch's graph in the same profile.
-    pub async fn open_branch(&self, branch_name: &str) -> TraceDecay {
-        Box::pin(TraceDecay::open_branch_with_options(
-            &self.root,
-            branch_name,
-            self.open_options.clone(),
-        ))
-        .await
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to open fixture branch '{branch_name}' of '{}': {err}",
-                self.root.display()
-            )
-        })
-    }
-
     /// Checkpoints and closes the retained graph while keeping profile
     /// isolation, enrollment, and the store layout for a later reopen.
     ///
@@ -463,22 +447,6 @@ impl ClosedRegisteredProject {
         .unwrap_or_else(|err| {
             panic!(
                 "failed to reopen fixture graph '{}': {err}",
-                self.root.display()
-            )
-        })
-    }
-
-    /// Opens one tracked branch's graph in the same profile.
-    pub async fn open_branch(&self, branch_name: &str) -> TraceDecay {
-        Box::pin(TraceDecay::open_branch_with_options(
-            &self.root,
-            branch_name,
-            self.open_options.clone(),
-        ))
-        .await
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to open fixture branch '{branch_name}' of '{}': {err}",
                 self.root.display()
             )
         })

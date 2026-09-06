@@ -462,12 +462,6 @@ impl ResidentMemoryPressureV1 {
         })
     }
 
-    /// Run every registered pressure reclaimer, outside the registry lock, and
-    /// report the bytes they released.
-    pub fn release_under_pressure(&self, observed_bytes: u64) -> u64 {
-        self.run_pressure_reclaimers(observed_bytes)
-    }
-
     fn run_pressure_reclaimers(&self, observed_bytes: u64) -> u64 {
         let reclaimers: Vec<Arc<ResidentMemoryPressureReclaimerV1>> = {
             let state = self.lock_state();
@@ -889,12 +883,6 @@ impl ProcessResidentMemoryV1 {
     #[must_use]
     pub fn pressure(&self) -> &Arc<ResidentMemoryPressureV1> {
         &self.pressure
-    }
-
-    /// What the last measured sample says. `Unobserved` until one is published.
-    #[must_use]
-    pub fn pressure_state(&self) -> ResidentMemoryPressureStateV1 {
-        self.pressure.state()
     }
 
     #[hotpath::measure(label = "runtime_core.resident.reserve")]

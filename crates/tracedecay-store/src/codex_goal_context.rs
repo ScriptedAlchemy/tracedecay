@@ -100,12 +100,6 @@ impl CodexGoalContext {
         }
         Value::Object(goal)
     }
-
-    /// Content-private identity shared by direct and canonical pairing.
-    pub fn correlation_identity(&self) -> Option<[u8; 32]> {
-        let encoded = serde_json::to_vec(&self.metadata()).ok()?;
-        Some(Sha256::digest(encoded).into())
-    }
 }
 
 /// Read the shared pairing identity from a projected Codex goal message.

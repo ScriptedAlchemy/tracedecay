@@ -33,9 +33,6 @@ use tracedecay_application::git::{
     GitBlameRequest, GitHistoryRequest, GitHunkPreviewEntryV1, GitHunkPreviewInputV1,
     GitIntelligenceError, GitReadRequestV1,
 };
-use tracedecay_application::historical_query::{
-    HistoricalGitQueryAdapter, HistoricalQueryRequestV1, HistoricalSourceAuthorizationV1,
-};
 pub use tracedecay_application::historical_query::{
     HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
 };
@@ -423,58 +420,6 @@ impl GitReadAuthorityV1 {
         );
         GitQueryEngine::with_topology(&adapter, &topology).join_generation(bounds, query)
     }
-
-    /// Mount the historical code-index join on this exact admitted checkout.
-    pub fn read_historical(
-        &self,
-        selected_scope: &ResolvedScope,
-        authorization: Option<&HistoricalSourceAuthorizationV1>,
-        request: &HistoricalQueryRequestV1,
-    ) -> HistoricalGitReadOutcomeV1 {
-        if selected_scope != &self.scope {
-            return HistoricalGitReadOutcomeV1::Unavailable {
-                reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
-            };
-        }
-        let identity_matches = tracedecay_runtime_core::storage::read_repository_identity_marker(&self.project_root)
-            .ok()
-            .flatten()
-            .and_then(|marker| {
-                tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
-                    &self.project_root,
-                    &self.scope.project_id,
-                    &marker,
-                )
-            })
-            .is_some_and(|identity| {
-                identity.matches_admitted_identity(
-                    &self.scope.project_id,
-                    &self.scope.repository_id,
-                    &self.scope.worktree_id,
-                )
-            });
-        if !identity_matches {
-            return HistoricalGitReadOutcomeV1::Unavailable {
-                reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
-            };
-        }
-        let adapter = NativeGitIntelligence::new(
-            self.project_root.clone(),
-            self.scope.repository_id.clone(),
-            self.scope.worktree_id.clone(),
-        );
-        match HistoricalGitQueryAdapter::new(&adapter, self.scope.clone())
-            .query(authorization, request)
-        {
-            Ok(result) => HistoricalGitReadOutcomeV1::Complete {
-                scope: self.scope.clone(),
-                result,
-            },
-            Err(error) => HistoricalGitReadOutcomeV1::Unavailable {
-                reason: HistoricalGitReadUnavailableReasonV1::from_query_error(&error),
-            },
-        }
-    }
 }
 
 struct ReadGraphCancellation {
@@ -518,21 +463,6 @@ pub fn execute_git_read(
         Some(authority) => authority.read(selected_scope, request, bounds),
         None => GitReadOutcomeV1::Unavailable {
             reason: GitReadUnavailableReasonV1::AuthorityAbsent,
-        },
-    }
-}
-
-#[hotpath::measure(label = "usecases.git.execute_historical_read")]
-pub fn execute_historical_git_read(
-    authority: Option<&GitReadAuthorityV1>,
-    selected_scope: &ResolvedScope,
-    source_authorization: Option<&HistoricalSourceAuthorizationV1>,
-    request: &HistoricalQueryRequestV1,
-) -> HistoricalGitReadOutcomeV1 {
-    match authority {
-        Some(authority) => authority.read_historical(selected_scope, source_authorization, request),
-        None => HistoricalGitReadOutcomeV1::Unavailable {
-            reason: HistoricalGitReadUnavailableReasonV1::AuthorityAbsent,
         },
     }
 }

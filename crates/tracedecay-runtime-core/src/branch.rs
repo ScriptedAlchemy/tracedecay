@@ -47,13 +47,6 @@ fn record_live_branch_resolution(project_root: &Path) {
     }
 }
 
-/// Live [`current_branch`] probes observed since the last reset.
-#[cfg(any(test, feature = "test-helpers"))]
-#[must_use]
-pub fn live_branch_resolution_count_for_test() -> u64 {
-    LIVE_BRANCH_RESOLUTIONS.load(Ordering::Relaxed)
-}
-
 /// Live [`current_branch`] probes for one project root (and its canonical path).
 ///
 /// Parallel tests share the process, so the global counter is not an isolation
@@ -69,13 +62,6 @@ pub fn live_branch_resolution_count_for_root_for_test(root: &Path) -> u64 {
         .ok()
         .and_then(|canonical| counts.get(&canonical).copied())
         .unwrap_or(0)
-}
-
-/// Clears the live-resolution probe counter.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn reset_live_branch_resolution_count_for_test() {
-    LIVE_BRANCH_RESOLUTIONS.store(0, Ordering::Relaxed);
-    live_branch_resolution_counts().clear();
 }
 
 /// Clears live-resolution probes recorded for one project root.

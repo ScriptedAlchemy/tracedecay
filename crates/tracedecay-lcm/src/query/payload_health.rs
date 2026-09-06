@@ -318,28 +318,6 @@ pub async fn payload_health_detail(
     })
 }
 
-pub fn payload_health_state(
-    payload: &LcmPayloadStatus,
-    payload_gc: &LcmPayloadGcStatus,
-) -> &'static str {
-    if payload.missing_count > 0
-        || payload.missing_placeholder_file_count > 0
-        || payload.integrity_mismatch_count.unwrap_or(0) > 0
-        || payload_gc.last_gc_status.as_deref() == Some("failed")
-        || !payload.root_contained
-    {
-        "error"
-    } else if payload.coverage.state == LcmPayloadCoverageState::Partial
-        || payload.orphan_file_count > 0
-        || payload.unreferenced_count > 0
-        || payload_gc.last_gc_at.is_none()
-    {
-        "warning"
-    } else {
-        "healthy"
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct PayloadHealthDetail {
     pub payload: LcmPayloadStatus,

@@ -1,7 +1,5 @@
 //! Trust score helpers for bounded confidence and feedback.
 
-pub const HELPFUL_DELTA: f64 = 0.05;
-pub const UNHELPFUL_DELTA: f64 = -0.10;
 pub const TRUST_MIN: f64 = 0.0;
 pub const TRUST_MAX: f64 = 1.0;
 pub const DEFAULT_TRUST: f64 = 0.5;
@@ -28,16 +26,6 @@ pub fn trust_bucket(score: f64) -> &'static str {
     } else {
         "high"
     }
-}
-
-pub fn trust_distribution(scores: &[f64]) -> (usize, usize, usize) {
-    scores.iter().fold((0, 0, 0), |(low, medium, high), score| {
-        match trust_bucket(*score) {
-            "low" => (low + 1, medium, high),
-            "medium" => (low, medium + 1, high),
-            _ => (low, medium, high + 1),
-        }
-    })
 }
 
 #[cfg(test)]

@@ -99,13 +99,6 @@ pub(crate) fn vector_candidates(candidates: usize) {
 }
 
 #[inline]
-pub(crate) fn vector_resident_reservation(retained_bytes: u64, hydration_peak_bytes: u64) {
-    hotpath::gauge!("usecases.vector.resident_retained_bytes").set(retained_bytes as f64);
-    hotpath::gauge!("usecases.vector.resident_hydration_peak_bytes")
-        .set(hydration_peak_bytes as f64);
-}
-
-#[inline]
 pub(crate) fn vector_cancelled() {
     hotpath::gauge!("usecases.vector.cancellation_checkpoints").inc(1.0);
 }
@@ -116,6 +109,39 @@ pub(crate) fn vector_cancelled() {
 pub(crate) fn vector_batch_committed(batch_chunks: usize, completed_batches: u64) {
     hotpath::gauge!("usecases.vector.batch_chunks").set(batch_chunks as f64);
     hotpath::gauge!("usecases.vector.completed_batches").set(completed_batches as f64);
+}
+
+/// One completed corpus-scaled publication phase: the chunks it carried and
+/// how long it ran. A 168k-chunk verify pass is minutes of otherwise silent
+/// work, and the phase that never reports is the phase a publication is stuck
+/// in.
+#[inline]
+pub(crate) fn vector_publication_phase(
+    phase: crate::store::vector_generations::VectorPublicationPhaseV1,
+    chunks: u64,
+    elapsed: std::time::Duration,
+) {
+    use crate::store::vector_generations::VectorPublicationPhaseV1;
+
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(
+        target: "tracedecay::semantic::publication",
+        phase = phase.as_str(),
+        chunks,
+        elapsed_ms,
+        "semantic vector publication phase completed"
+    );
+    match phase {
+        VectorPublicationPhaseV1::Verify => {
+            hotpath::gauge!("usecases.vector.publication.verified_chunks").set(chunks as f64);
+            hotpath::gauge!("usecases.vector.publication.verify_elapsed_ms").set(elapsed_ms as f64);
+        }
+        VectorPublicationPhaseV1::Publish => {
+            hotpath::gauge!("usecases.vector.publication.published_chunks").set(chunks as f64);
+            hotpath::gauge!("usecases.vector.publication.publish_elapsed_ms")
+                .set(elapsed_ms as f64);
+        }
+    }
 }
 
 /// A begin/rebuild request resolved to an already-published generation, so
