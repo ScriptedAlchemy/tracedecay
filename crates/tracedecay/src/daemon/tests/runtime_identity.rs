@@ -61,7 +61,7 @@ async fn wait_for_exact_interactive_graph_ready(
                 .latest_complete_ready_for_scope(scope)
                 .await
             {
-                if latest.generation().interactive_graph_store().is_ok() {
+                if latest.interactive_graph_store().is_ok() {
                     break;
                 }
             }
