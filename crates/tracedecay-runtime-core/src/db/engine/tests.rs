@@ -384,3 +384,5 @@ async fn transaction_statement_batch_reports_the_exact_failed_statement() {
         0
     );
 }
+
+mod async_writer;

@@ -26,10 +26,12 @@ Bundled `plugin/skills/` changes remain a separate release path.
    must not appear as active managed state.
 5. For bundled reusable guidance, edit `plugin/skills/<slug>/SKILL.md` and run
    the agent-suite validation. Do not copy profile-owned state into the bundle.
-6. Validate discovery text: the description names concrete triggers, the body
-   is host-portable, and support files remain bounded and relevant.
-7. Check post-activation adoption through analytics diagnostics and skill usage
-   events before declaring the skill effective.
+6. Validate discovery text: the description names concrete triggers without a
+   required opening phrase. Keep the body host-portable and support files relevant;
+   judge routing with task cases rather than prose-shape checks.
+7. Evaluate positive, neighboring-task, and no-skill cases through the existing
+   neutral routing evaluator. Keep expected routing separate from task outcomes
+   and unnecessary calls; invocation telemetry alone does not prove usefulness.
 
 ## Quality Bar
 
@@ -39,7 +41,7 @@ Bundled `plugin/skills/` changes remain a separate release path.
 | Body | Short imperative workflow, no session narrative, no stale environment facts. |
 | Evidence | Run artifact or transcript shows the failure this skill prevents. |
 | Validation | The terminal record and advertised validation evidence agree, or the bundled skill passes plugin tests. |
-| Adoption | Usage telemetry or follow-up session proves it was invoked. |
+| Effectiveness | Task evidence shows useful routing without false triggers or unnecessary calls. |
 
 ## Guardrails
 

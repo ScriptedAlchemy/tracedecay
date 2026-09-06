@@ -1,126 +1,29 @@
 ---
 name: using-the-cli
-description: 'Use when MCP transport is intentionally absent or unavailable while an existing TraceDecay daemon is available, or when preflighting tool arguments without dispatch.'
+description: 'Use TraceDecay through its generic CLI when MCP is unavailable or intentionally absent, or preserve exact arguments and scope across transports.'
 ---
 
-# Using the tracedecay CLI
+# Using the CLI
 
-MCP is optional. The `tracedecay` binary exposes every MCP tool as a first-class
-shell command with the same project store, arguments, and payloads. Use the CLI
-when only MCP transport is unavailable and keep following the active
-`tracedecay:*` skill. The CLI is a client of the same daemon, not an
-availability fallback: it never starts a missing or stopped service. If the
-daemon is unavailable or intentionally held, report the typed state and use
-scoped native tools. Do not retry or change daemon lifecycle unless the
-operator explicitly asks for that action.
+`tracedecay tool <name>` adapts the same operation and argument schema as MCP.
+Read live `--help` for the installed version. CLI fallback helps a broken MCP
+transport only while the daemon is available; it is not a reason to start,
+restart, or bypass an unavailable or intentionally held daemon.
 
-## The one rule for arguments
+Pass complex arguments as one object through `--args -` with a quoted heredoc,
+or a payload file, to preserve quotes, newlines, arrays, and exact identifiers.
+Do not interpolate untrusted text into shell syntax. Scalar flags are convenient
+only when their interpretation matches the live schema.
 
-**The arguments of `tracedecay tool <name>` are the tool's MCP `arguments` object** — the same JSON you would send over MCP. Pass it whole with `--args`:
+Preserve project/profile selectors and generation-bound handles across transport
+changes. A truncated response's handle belongs to its issuing scope; retrieve
+only the needed continuation. A stale or mismatched handle requires resolving
+that original scope, not silently rerunning against the active project.
 
-- **`--args -` + a quoted heredoc** — the canonical form. No shell escaping, no argv-length limit, byte-exact MCP parity. Use it whenever the payload has quotes, newlines, or any non-scalar value.
-- **`--args '<json>'`** — inline JSON, only when the object is short and contains no single quotes.
-- **`--args payload.json`** (or `--args @payload.json`) — read from a file; use for payloads near or over the ~128 KiB per-argument shell limit.
+Argument validation is not mutation authorization. Distinguish CLI parsing
+controls from an operation's own preview/dry-run fields using current help.
+Apply and rollback consume returned identities and expected state unchanged.
 
-```bash
-tracedecay tool multi_str_replace --args - <<'JSON'
-{"path":"src/lib.rs","replacements":[["old, with 'quotes'","new $body"]]}
-JSON
-```
-
-Nothing new to learn: you already know every tool's MCP schema, and `--args` carries that object verbatim. For quick scalar-only calls you may also spell top-level fields as `--key value` flags (`--key=value` works too); values are interpreted by the tool's schema, and anything that isn't a scalar must be JSON. See [references/tool-arg-catalog.md](references/tool-arg-catalog.md) for ready-to-copy examples of the hard-shape tools.
-
-## Discovery
-
-1. **List every tool → `tracedecay tool`** (no name): all tools grouped by category with one-line summaries.
-2. **One tool's parameters → `tracedecay tool <name> --help`**: the tool's full description, a ready-to-copy usage line, each parameter with its type/required flag (enum values and array shapes included), and a generated `--args -` example for any tool whose payload is non-scalar.
-3. **Everything else → `tracedecay --help`**: the non-tool subcommands (`init`, `sync`, `status`, `doctor`, `daemon`, `sessions`, `dashboard`, …) plus a quick-start trailer that restates this discovery flow. Every subcommand's own `--help` carries an `Examples:` section with real flag combinations and `Related:` cross-references — read it before improvising flags.
-
-## Pre-flighting edits with `--dry-run`
-
-Add `--dry-run` to parse, validate, and print the final arguments object as JSON **without dispatching the tool** — no daemon, no handler, no side effects. Use it to self-check a destructive edit-tool payload (`str_replace`, `multi_str_replace`, `replace_symbol`, `ast_grep_rewrite`, `insert_at`) before applying it, or to confirm you constructed the right object when a shape is tricky. Exits non-zero with the same corrective error as a real call if the arguments are wrong.
-
-```bash
-tracedecay tool multi_str_replace --args - --dry-run <<'JSON'
-{"path":"src/lib.rs","replacements":[["old","new"]]}
-JSON
-```
-
-## Reserved flags
-
-- `--args <json|-|@file|file>` — whole MCP arguments object (see above). Mutually exclusive with `--key value` flags and positionals.
-- `--dry-run` — validate + print the resolved arguments object, do not invoke the tool.
-- `--json` — print the raw JSON result payload instead of the human-readable text rendering.
-- `--project <path>` — pick the project root explicitly; otherwise the nearest initialised project walking up from cwd is used. (We use `--project`, not `-p`, because several tools have a `path` argument that filters files within the project.)
-- `-h` / `--help` — print the tool's parameters and exit.
-- Per-key values starting with `@` are read from that file (`--new-body @/tmp/body.txt`); `@-` reads stdin — handy for multi-line replacement bodies.
-
-## Retrieving truncated responses
-
-TraceDecay truncates large tool responses and emits a **handle** envelope
-instead of the full body. The original text is cached in the active-project
-store; dereference it rather than re-running the source tool — this works
-identically over MCP (`tracedecay_retrieve`) and the CLI
-(`tracedecay tool retrieve`).
-
-- A prior response ended with a `handle` (e.g. `rh_…`) and the missing detail
-  is actually needed → **dereference the handle → `tracedecay_retrieve`**
-  (`handle` copied exactly). It returns the exact cached original text; it does
-  not re-run the tool or re-read a file/session/node. Do not re-run the broad
-  query, guess, or read a file again.
-- You do NOT need the truncated tail → leave it; retrieval costs tokens.
-- Handles are local, project-scoped, and expire; if `retrieve` reports an
-  expired/unknown handle, re-run the original tool with a **narrower** query
-  (see `tracedecay:using-tracedecay`) rather than retrying the stale handle. If
-  the truncated response used a `project-id`/`project-path` selector, pass the
-  same selector to `retrieve`.
-- To open one session/summary node instead of a cached tool body → expand it
-  with `tracedecay_lcm_expand`; `tracedecay:managing-session-context` drives the
-  LCM store and past-session retrieval.
-
-## CLI fallback conditions
-
-- MCP is intentionally unavailable or omitted from the host integration.
-- An MCP call returns a client or transport error, times out, or the server drops mid-session.
-- The tracedecay MCP server is not configured in this host but `tracedecay` is on `PATH`.
-- A subagent or hook context has shell access but no MCP access.
-
-For a transport-only failure, `tracedecay doctor` and `tracedecay tool runtime`
-can diagnose the MCP side without changing service lifecycle. When CLI-only
-operation is intentional, do not treat the missing MCP transport as an error.
-When Doctor or the CLI reports a missing, stopped, or unavailable daemon, stop
-there: the service may be intentionally held.
-
-## Corrective errors are the feedback loop
-
-If a call is rejected, the error message tells you exactly how to fix it — read it as the CLI's tab-completion:
-
-- Unknown parameter → names the nearest valid parameter (`did you mean --limit?`) and lists all valid keys.
-- Invalid enum → lists the allowed values verbatim (`not one of: complexity | lines | …`).
-- Wrong type for a field → names the expected JSON type and shows the `--args -` heredoc form for non-scalars.
-- Missing required → names the parameter and gives a one-line usage example.
-
-Fix a deterministic argument error per the message and retry that corrected
-call once. An availability, transport, or lifecycle error is not an argument
-correction: report it instead of retrying or starting the daemon. Never use raw
-database access as a fallback.
-
-## Guardrails
-
-- Never query `.tracedecay/*.db` with sqlite3 or scripts — schemas are internal and change without notice. The CLI is the supported fallback, not raw DB access.
-- After an MCP transport-only failure, use the CLI while the daemon remains available. If the daemon is unavailable or intentionally held, use only the scoped native reads needed for the task and state why TraceDecay evidence is unavailable.
-- CLI editing tools (`str_replace`, `replace_symbol`, …) mutate the working tree exactly like their MCP twins — apply the same care as `tracedecay:editing-safely`. Pre-flight with `--dry-run` when the payload is non-trivial.
-- If the CLI also fails, classify the result. A missing binary or uninitialised project may justify suggesting setup; a stopped, missing, or unavailable daemon may be an intentional hold and must not trigger setup, retry, start, restart, or install advice without an explicit operator request.
-
-## If tools are deferred or MCP fails
-
-- This skill is the MCP-*transport* failure path: run `tracedecay tool <name>` only while an existing daemon is available. A daemon availability failure ends this fallback; report it and preserve lifecycle state.
-- Deferred (names listed without schemas) but MCP otherwise healthy: load once
-  with ToolSearch — `select:tracedecay_retrieve,tracedecay_runtime` (add the
-  tools the parent skill needs) — then call normally instead of shelling out.
-
-## Deliverable
-
-Return either the same result the MCP tool would have returned, or the typed
-daemon-unavailable result plus the scoped native evidence used instead. Note
-why the CLI fallback was attempted and report any `tracedecay_metrics:` line.
+Correct deterministic argument errors once. Preserve typed availability failures
+and use bounded native evidence when appropriate; private database queries are
+not an alternate public transport.

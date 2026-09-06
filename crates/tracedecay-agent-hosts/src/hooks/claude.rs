@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::ports::hook_runtime::HookRuntimeV1;
+
 use super::post_tool_use::is_post_tool_use_failure_event;
 use super::steering::index_status_line;
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
@@ -20,13 +22,14 @@ use super::{
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
 #[hotpath::measure(label = "hosts.hooks.claude.pre_tool_use")]
-pub fn hook_pre_tool_use() {
+pub fn hook_pre_tool_use(runtime: &HookRuntimeV1) {
     let tool_input = std::env::var("TOOL_INPUT").unwrap_or_default();
     let parsed: Value = serde_json::from_str(&tool_input).unwrap_or(Value::Null);
     // TOOL_INPUT has no `cwd`; Claude Code runs hooks with the project as the
     // process working directory, so fall back to it for attribution.
     let root = event_project_root(&parsed).or_else(process_cwd_project_root);
     let _hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Claude,
         "preToolUse",
@@ -131,10 +134,11 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 
 /// Claude Code `SessionStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.session_start")]
-pub async fn hook_claude_session_start() -> i32 {
+pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
-    let (root, output) = claude_session_start_response(&event).await;
+    let (root, output) = claude_session_start_response(runtime, &event).await;
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
@@ -150,12 +154,16 @@ pub async fn hook_claude_session_start() -> i32 {
 
 /// Returns the identity-resolved root alongside the response so the handler
 /// does not repeat the registry-probing resolution for output delivery.
-async fn claude_session_start_response(event: &str) -> (Option<PathBuf>, String) {
+async fn claude_session_start_response(
+    runtime: &HookRuntimeV1,
+    event: &str,
+) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     // Resolve the project root the same identity-aware way the printed context
     // does, including global-only stores and fresh harness-created worktrees.
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Claude,
         "SessionStart",
@@ -163,6 +171,7 @@ async fn claude_session_start_response(event: &str) -> (Option<PathBuf>, String)
         &parsed,
     );
     let output = super::dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -209,7 +218,7 @@ enum ClaudeSubagentStartContextOutcome {
 /// skipped when the project root cannot be resolved (a non-project workspace has
 /// nothing to steer toward). Analytics are fire-and-forget like `SessionStart`.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.subagent_start")]
-pub async fn hook_claude_subagent_start() -> i32 {
+pub async fn hook_claude_subagent_start(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let started = Instant::now();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -218,6 +227,7 @@ pub async fn hook_claude_subagent_start() -> i32 {
     // request map a registered global-only alias when one exists.
     let root = claude_subagent_project_root(&parsed);
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Claude,
         "SubagentStart",
@@ -229,7 +239,7 @@ pub async fn hook_claude_subagent_start() -> i32 {
         Some(_) if remaining.is_zero() => ClaudeSubagentStartContextOutcome::TimedOut,
         Some(root) => {
             bounded_claude_subagent_start_context(
-                super::steering::cursor_index_signals_for_root_result(root),
+                super::steering::cursor_index_signals_for_root_result(runtime, root),
                 remaining,
             )
             .await
@@ -261,6 +271,7 @@ pub async fn hook_claude_subagent_start() -> i32 {
     let delivered = tokio::time::timeout(
         CLAUDE_SUBAGENT_OUTPUT_BUDGET,
         super::write_hook_output(
+            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
@@ -286,11 +297,12 @@ pub async fn hook_claude_subagent_start() -> i32 {
 /// read-only capability probe and returns typed unavailable without publishing
 /// transcript or summary state.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.post_compact")]
-pub async fn hook_claude_post_compact() -> i32 {
+pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Claude,
         "PostCompact",
@@ -299,11 +311,12 @@ pub async fn hook_claude_post_compact() -> i32 {
     );
     let args = compact_daemon_args("claude_compact", "claude", root.is_none(), &event, None);
     if let Err(error) =
-        super::daemon_hook_action(root.as_deref(), args, Some(&hook_telemetry)).await
+        super::daemon_hook_action(runtime, root.as_deref(), args, Some(&hook_telemetry)).await
     {
         tracing::warn!(%error, "Claude PostCompact daemon call failed");
     }
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
@@ -351,11 +364,12 @@ where
 
 /// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.post_tool_use")]
-pub async fn hook_claude_post_tool_use() -> i32 {
+pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
-    let (root, response) = claude_post_tool_use_response(&event).await;
+    let (root, response) = claude_post_tool_use_response(runtime, &event).await;
     if let Some(response) = response
         && !super::write_hook_output(
+            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
@@ -371,15 +385,19 @@ pub async fn hook_claude_post_tool_use() -> i32 {
 
 /// Returns the identity-resolved root alongside the response so the handler
 /// does not repeat the registry-probing resolution for output delivery.
-async fn claude_post_tool_use_response(event: &str) -> (Option<PathBuf>, Option<String>) {
+async fn claude_post_tool_use_response(
+    runtime: &HookRuntimeV1,
+    event: &str,
+) -> (Option<PathBuf>, Option<String>) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let hook_event_name = if is_post_tool_use_failure_event(&parsed) {
         "PostToolUseFailure"
     } else {
         "PostToolUse"
     };
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Claude,
         hook_event_name,
@@ -387,6 +405,7 @@ async fn claude_post_tool_use_response(event: &str) -> (Option<PathBuf>, Option<
         &parsed,
     );
     let response = super::dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -402,7 +421,7 @@ async fn claude_post_tool_use_response(event: &str) -> (Option<PathBuf>, Option<
 /// `UserPromptSubmit` hook handler: resets the project counter; a projectless
 /// session is ingested into the profile store.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.prompt_submit")]
-pub async fn hook_prompt_submit() -> i32 {
+pub async fn hook_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
         Ok(super::HookStdinRead::Oversized) => {
@@ -418,8 +437,9 @@ pub async fn hook_prompt_submit() -> i32 {
         }
     };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Claude,
         "UserPromptSubmit",
@@ -428,15 +448,20 @@ pub async fn hook_prompt_submit() -> i32 {
     );
     let session_id = event_session_id(&parsed);
     if root.is_none()
-        && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
-            .await
+        && ingest_user_claude_session_with_telemetry(
+            runtime,
+            session_id.clone(),
+            Some(&hook_telemetry),
+        )
+        .await
     {
-        super::schedule_user_session_review("claude", session_id.as_deref()).await;
+        super::schedule_user_session_review(runtime, "claude", session_id.as_deref()).await;
     }
     if let Some(root) = root.as_deref() {
-        reset_counter_for_project(root, Some(&hook_telemetry)).await;
+        reset_counter_for_project(runtime, root, Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
@@ -452,7 +477,7 @@ pub async fn hook_prompt_submit() -> i32 {
 
 /// `Stop` hook handler: submits the native turn boundary to the daemon.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.stop")]
-pub async fn hook_stop() -> i32 {
+pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
         Ok(super::HookStdinRead::Oversized) => {
@@ -464,8 +489,9 @@ pub async fn hook_stop() -> i32 {
         }
         Err(_) => String::new(),
     };
-    let (root, output) = claude_stop_response_for_event(&event).await;
+    let (root, output) = claude_stop_response_for_event(runtime, &event).await;
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
@@ -481,12 +507,22 @@ pub async fn hook_stop() -> i32 {
 
 /// Returns the identity-resolved root alongside the response so the handler
 /// does not repeat the registry-probing resolution for output delivery.
-async fn claude_stop_response_for_event(event: &str) -> (Option<PathBuf>, String) {
+async fn claude_stop_response_for_event(
+    runtime: &HookRuntimeV1,
+    event: &str,
+) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
-    let hook_telemetry =
-        record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", event, &parsed);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
+        root.as_deref(),
+        HintAgent::Claude,
+        "Stop",
+        event,
+        &parsed,
+    );
     let output = super::dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::ClaudeCode,
         event,
         root.as_deref(),
@@ -505,15 +541,19 @@ async fn claude_stop_response_for_event(event: &str) -> (Option<PathBuf>, String
 /// Incrementally ingests one live projectless Claude session into the profile
 /// session store. `false` means no new transcript evidence was written.
 #[cfg(test)]
-pub async fn ingest_user_claude_session(session_id: Option<String>) -> bool {
-    ingest_user_claude_session_with_telemetry(session_id, None).await
+pub async fn ingest_user_claude_session(
+    runtime: &HookRuntimeV1,
+    session_id: Option<String>,
+) -> bool {
+    ingest_user_claude_session_with_telemetry(runtime, session_id, None).await
 }
 
 async fn ingest_user_claude_session_with_telemetry(
+    runtime: &HookRuntimeV1,
     session_id: Option<String>,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> bool {
-    super::ingest_user_session("Claude", session_id, telemetry).await
+    super::ingest_user_session(runtime, "Claude", session_id, telemetry).await
 }
 
 #[cfg(test)]
@@ -592,7 +632,8 @@ mod tests {
             serde_json::json!({ "messages_upserted": 1 }),
         ]);
 
-        assert!(ingest_user_claude_session(Some("claude-stop".to_owned())).await);
+        let runtime = crate::ports::hook_runtime::crate_test_runtime();
+        assert!(ingest_user_claude_session(&runtime, Some("claude-stop".to_owned())).await);
 
         let calls = daemon.calls();
         assert_eq!(calls.len(), 1);
