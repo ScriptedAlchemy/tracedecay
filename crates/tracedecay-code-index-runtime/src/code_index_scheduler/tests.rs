@@ -140,6 +140,13 @@ impl GitFixture {
         // setting is inherited by every copy taken from this template.
         git(root.path(), &["config", "maintenance.auto", "false"]);
         git(root.path(), &["config", "gc.auto", "0"]);
+        // These fixtures are byte-exact corpora: a clean scan captures HEAD's
+        // blobs while an incremental reconcile reads the files Git wrote into
+        // the worktree, and the two must agree byte for byte. The Windows
+        // runner's global `core.autocrlf=true` would make `rebase`/`switch`
+        // rewrite the LF sources as CRLF, so newline conversion is pinned off
+        // in the repository itself; every copy of the template inherits it.
+        git(root.path(), &["config", "core.autocrlf", "false"]);
         for (path, source) in files {
             write(root.path(), path, source);
         }
