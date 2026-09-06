@@ -276,8 +276,9 @@ hooks + skills + MCP together, so cleanly removing *one* channel requires a
 hermetic, componentized plugin. For every condition `run.sh`:
 
 * copies `plugin/` into `$work/plugins/<condition>` and strips the ablated part
-  (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` for
-  `no-skills`/`bare`, and MCP manifests for `cli-only`),
+  (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` plus
+  `commands/` for `no-skills`/`bare` — Claude exposes plugin commands as
+  `tracedecay:*` skills too — and MCP manifests for `cli-only`),
   substituting the hook binary path;
 * launches `claude` with a throwaway `HOME`, `--setting-sources project,local`
   (drops the ambient user config, global plugin, and user `CLAUDE.md`),
