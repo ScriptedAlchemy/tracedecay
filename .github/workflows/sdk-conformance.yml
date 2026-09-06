@@ -16,6 +16,11 @@ on:
       - "scripts/test-check-sdk-publish-workflow.py"
       - "scripts/check-github-hosted-runners.py"
       - "scripts/test-check-github-hosted-runners.py"
+      - ".config/nextest.toml"
+      - "scripts/check-windows-evaluator-distribution.py"
+      - "scripts/test-check-windows-evaluator-distribution.py"
+      - "scripts/package-windows-evaluator-bins.py"
+      - "scripts/test-package-windows-evaluator-bins.py"
       - "scripts/package-release-archive.py"
       - "scripts/test-package-release-archive.py"
       - "scripts/plan-release-recovery.py"
@@ -49,6 +54,11 @@ jobs:
         run: |
           python3 scripts/test-check-github-hosted-runners.py
           python3 scripts/check-github-hosted-runners.py
+      - name: Check Windows evaluator distribution
+        run: |
+          python3 scripts/test-package-windows-evaluator-bins.py
+          python3 scripts/test-check-windows-evaluator-distribution.py
+          python3 scripts/check-windows-evaluator-distribution.py
       - name: Install pinned actionlint
         run: |
           set -euo pipefail

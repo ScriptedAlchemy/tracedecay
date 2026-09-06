@@ -179,6 +179,13 @@ jobs:
       - name: Test dashboard bundle check
         run: bash tests/dashboard_bundle_check_test.sh
 
+      - name: Test Windows evaluator packaging
+        run: |
+          python3 -m pip install --disable-pip-version-check pyyaml==6.0.2
+          python3 scripts/test-package-windows-evaluator-bins.py
+          python3 scripts/test-check-windows-evaluator-distribution.py
+          python3 scripts/check-windows-evaluator-distribution.py
+
       - name: Check release version drift
         run: scripts/check-release-drift.sh
         env:
@@ -434,6 +441,38 @@ jobs:
       # second, feature-on resolution of the search-eval dependency graph
       # inside this job's bound (18 of its 62 minutes before it was cancelled),
       # and the parity property does not depend on the platform.
+      #
+      # Search-eval ships two binaries and has no test target. `cargo nextest
+      # archive` therefore never linked them, and shards failed closed looking
+      # for `tracedecay-search-eval.exe`. A `-p tracedecay-search-eval` build
+      # is not equivalent: that package depends on `tracedecay-code-index`
+      # with `default-features = false`, so it drops bundled Rust grammars.
+      # Use the same locked workspace/feature resolution as the archive.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build workspace binaries for the Windows test archive
+        shell: pwsh
+        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+
+      - name: Package Windows evaluator binaries
+        shell: pwsh
+        run: >-
+          python scripts/package-windows-evaluator-bins.py package
+          --profile-dir target/debug
+          --output-dir "$env:RUNNER_TEMP/windows-evaluator-bins"
+          --git-sha "${{ github.sha }}"
+
+      - name: Upload Windows evaluator binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-evaluator-bins
+          path: ${{ runner.temp }}/windows-evaluator-bins/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
       - name: Build nextest archive
         shell: pwsh
         run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
@@ -510,9 +549,35 @@ jobs:
           name: windows-nextest-archive
           path: ${{ runner.temp }}
 
+      # Building the evaluators only on the archive host is not enough: each
+      # shard is a fresh runner. Restore the support artifact, bind the tests
+      # through their declared executable overrides, and fail here if a helper
+      # is missing or will not execute.
+      - name: Download Windows evaluator binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-evaluator-bins
+          path: ${{ runner.temp }}/windows-evaluator-bins
+
+      - name: Restore Windows evaluator binaries
+        shell: pwsh
+        run: >-
+          python scripts/package-windows-evaluator-bins.py restore
+          --artifact-dir "$env:RUNNER_TEMP/windows-evaluator-bins"
+          --output-dir "$env:RUNNER_TEMP/windows-evaluator-runtime"
+          --github-env $env:GITHUB_ENV
+
+      - name: Preflight Windows evaluator binaries
+        shell: pwsh
+        run: >-
+          python scripts/package-windows-evaluator-bins.py preflight
+          --dir "$env:RUNNER_TEMP/windows-evaluator-runtime"
+
       - name: Run Windows tests
         env:
           TRACEDECAY_SQLITE_UNSAFE_FAST: "1"
+          TRACEDECAY_SEARCH_EVAL_TEST_BIN: ${{ runner.temp }}/windows-evaluator-runtime/tracedecay-search-eval.exe
+          TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN: ${{ runner.temp }}/windows-evaluator-runtime/tracedecay-search-eval-direct.exe
         shell: pwsh
         # --extract-to must be the workspace so target/ lands at the same
         # absolute path as on the build job: integration tests bake

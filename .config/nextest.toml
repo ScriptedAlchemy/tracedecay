@@ -11,6 +11,13 @@ slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 archive.include = [
     { path = "controlled-workload-hotpath", relative-to = "target", depth = 1, on-missing = "warn" },
+    # Windows shards extract this archive onto a clean runner. Search-eval
+    # has no test target, so nextest would otherwise omit these executables
+    # even after the archive host built them. Fail closed: a missing helper
+    # is an archive defect, not five product-test panics. Linux/macOS do not
+    # archive, so the `.exe` names are Windows-archive-only.
+    { path = "debug/tracedecay-search-eval.exe", relative-to = "target" },
+    { path = "debug/tracedecay-search-eval-direct.exe", relative-to = "target" },
 ]
 
 [profile.ci.junit]
