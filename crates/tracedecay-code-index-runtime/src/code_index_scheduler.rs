@@ -5260,6 +5260,23 @@ impl CodeIndexSchedulerErrorV1 {
         }
     }
 
+    /// The typed interruption a reconcile pass stopped on, when it did.
+    ///
+    /// An interrupted pass is not a failed pass: the epoch that cancelled it
+    /// was advanced by an observed source change (or shutdown) whose caller
+    /// also posted the wake that re-runs the pass, so the worker attributes
+    /// it as superseded instead of reporting the served generation stale.
+    pub fn reconcile_interruption(
+        &self,
+    ) -> Option<crate::code_index::production::CodeIndexInterruptionV1> {
+        match self {
+            Self::Production(CodeIndexProductionErrorV1::Interrupted(interruption)) => {
+                Some(*interruption)
+            }
+            _ => None,
+        }
+    }
+
     pub fn is_graph_activation_refusal(&self) -> bool {
         matches!(self, Self::GraphActivationRefused(_))
             || matches!(
