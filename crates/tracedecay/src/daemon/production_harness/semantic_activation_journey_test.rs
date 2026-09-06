@@ -99,9 +99,17 @@ pub(super) async fn wait_for_semantic_generation(
     Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
     PublishedVectorGenerationV1,
 ) {
+    // Every wait below is a distinct precondition. Naming the one that is
+    // still unmet turns the timeout from "did not publish" into an actionable
+    // report of which authority never settled.
+    let gate = std::cell::Cell::new("serving_code_scope");
+    let evidence = std::cell::RefCell::new(Value::Null);
+    let observed = &gate;
+    let last = &evidence;
     tokio::time::timeout(Duration::from_mins(3), async {
         loop {
             let resources = harness.resources.as_ref().expect("live harness");
+            observed.set("serving_code_scope");
             let Some(scope) = resources
                 .invocation
                 .code_index_schedulers
@@ -111,10 +119,12 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            observed.set("serving_generation");
             let Some(code) = scope.serving_generation else {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            observed.set("serving_generation_matches_expected_source");
             if code.manifest().generation_id != *expected_source {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
@@ -124,6 +134,7 @@ pub(super) async fn wait_for_semantic_generation(
             // snapshot authority accepts only the exact complete-and-fresh
             // generation. Wait for the public status of that authority rather
             // than racing an evaluation against publication settlement.
+            observed.set("code_index_freshness_current");
             let freshness = tool_payload(
                 &harness
                     .call_tool(
@@ -140,6 +151,7 @@ pub(super) async fn wait_for_semantic_generation(
                     .await
                     .expect("public code-index readiness status"),
             );
+            *last.borrow_mut() = freshness["code_index_freshness"].clone();
             if freshness["code_index_freshness"]["status"] != json!("current")
                 || freshness["code_index_freshness"]["worktree"]["latest_generation_id"]
                     != json!(expected_source)
@@ -152,6 +164,7 @@ pub(super) async fn wait_for_semantic_generation(
             // evaluator may consume it. This ordinary public query is the
             // authority preflight; an unavailable outcome keeps waiting and
             // is never treated as a successful evaluation precondition.
+            observed.set("code_index_query_authority");
             let query_readiness = tool_payload(
                 &harness
                     .call_tool(
@@ -162,12 +175,14 @@ pub(super) async fn wait_for_semantic_generation(
                     .await
                     .expect("public code-index query-authority readiness"),
             );
+            *last.borrow_mut() = query_readiness.clone();
             if query_readiness["status"] == json!("unavailable")
                 || query_readiness["code_generation"] != json!(expected_source)
             {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             }
+            observed.set("semantic_runtime_active_generation");
             let vector_id =
                 match tracedecay_usecases::semantic_runtime::project_semantic_application_status(
                     project, None,
@@ -186,6 +201,7 @@ pub(super) async fn wait_for_semantic_generation(
                         continue;
                     }
                 };
+            observed.set("semantic_vector_graph_provider");
             let Some(provider) = resources
                 .invocation
                 .code_index_schedulers
@@ -212,7 +228,13 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            observed.set("published_vector_matches_expected_source");
+            *last.borrow_mut() = json!({
+                "observed_vector_generation": vector.generation_id(),
+                "observed_vector_source_generation": vector.source_generation(),
+            });
             if vector.source_generation() == expected_source {
+                observed.set("model_lifecycle_ready");
                 let lifecycle =
                     tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(
                         project,
@@ -229,7 +251,21 @@ pub(super) async fn wait_for_semantic_generation(
         }
     })
     .await
-    .expect("production semantic generation did not publish")
+    .unwrap_or_else(|_| {
+        panic!(
+            "production semantic generation did not publish: unmet precondition {} \
+             awaiting source {expected_source:?}; semantic runtime {:?}; \
+             last observation {}; model lifecycle {:?}",
+            gate.get(),
+            tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+                project, None
+            )
+            .map(|status| status.state),
+            evidence.borrow(),
+            tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(project)
+                .and_then(|status| status.state),
+        )
+    })
 }
 
 async fn wait_for_settled_semantic_generation(

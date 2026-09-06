@@ -1825,6 +1825,25 @@ impl ProductionSemanticRuntimeV1 {
         self.schedule_saved_generation_inner(generation, Some(lease))
     }
 
+    /// Report one refused projection schedule and answer `false`.
+    ///
+    /// A silent refusal is indistinguishable from an unbounded "loading":
+    /// nothing else names the generation that will never be projected.
+    fn refused(
+        target_generation: &CodeGenerationId,
+        outcome: &'static str,
+        error: &dyn std::fmt::Debug,
+    ) -> bool {
+        tracing::warn!(
+            event = "semantic_projection_schedule",
+            outcome,
+            target_generation = ?target_generation,
+            error = ?error,
+            "semantic projection could not be scheduled for this code generation"
+        );
+        false
+    }
+
     #[hotpath::measure(label = "usecases.semantic.schedule_inner")]
     fn schedule_saved_generation_inner(
         &self,
@@ -1843,7 +1862,12 @@ impl ProductionSemanticRuntimeV1 {
                 );
                 projection
             }
-            Err(_) => {
+            Err(error) => {
+                Self::refused(
+                    &generation.manifest().generation_id,
+                    "artifact_unavailable",
+                    &error,
+                );
                 return schedule_saved_code_generation(
                     &self.handle,
                     &generation,
@@ -1890,7 +1914,13 @@ impl ProductionSemanticRuntimeV1 {
         // full rebuild; `handle.current()` is never a delta/base authority.
         let request = match semantic_projection_request(&generation, &projection, None) {
             Ok(request) => request,
-            Err(_) => return false,
+            Err(error) => {
+                return Self::refused(
+                    &generation.manifest().generation_id,
+                    "projection_request_failed",
+                    &error,
+                );
+            }
         };
         let changed_ids = request
             .changes
@@ -1906,6 +1936,7 @@ impl ProductionSemanticRuntimeV1 {
             .cloned()
             .collect::<Vec<_>>();
         let target_generation = generation.manifest().generation_id.clone();
+        let refusal_target = target_generation.clone();
         let expected_chunk_ids = generation
             .chunks()
             .chunks()
@@ -1952,7 +1983,13 @@ impl ProductionSemanticRuntimeV1 {
             .and_then(|profile| profile.index_key())
         {
             Ok(search_index_key) => search_index_key,
-            Err(_) => return false,
+            Err(error) => {
+                return Self::refused(
+                    &generation.manifest().generation_id,
+                    "search_index_key_failed",
+                    &error,
+                );
+            }
         };
         // Every stage of one scheduled projection — load, resume, per-batch
         // commit, stage, publish — reaches the same five handles. Bundling them
@@ -1976,8 +2013,6 @@ impl ProductionSemanticRuntimeV1 {
         let commit_handles = Arc::clone(&handles);
         let stage_handles = handles;
         let commit_lease = fair_lease.clone();
-        let _ = self.lifecycle.mark_loading();
-        let _ = self.lifecycle.mark_indexing(0, total_units);
         let request = match FastEmbedSemanticGenerationRequestV1::new(
             target_generation,
             request,
@@ -2150,12 +2185,30 @@ impl ProductionSemanticRuntimeV1 {
             },
         ) {
             Ok(request) => request,
-            Err(_) => return false,
+            Err(error) => {
+                return Self::refused(&refusal_target, "generation_request_failed", &error);
+            }
         };
         let scheduled = self.handle.schedule_generation(request);
-        if scheduled {
+        if !scheduled {
+            // The lifecycle is deliberately untouched above: a refused
+            // schedule has no worker to drive `Loading`/`Indexing` back to a
+            // terminal state, so marking progress here would strand the model
+            // in an unbounded "loading" for the life of the daemon.
+            return Self::refused(
+                &refusal_target,
+                "refused",
+                &"the semantic runtime declined the work",
+            );
+        }
+        {
             let handle = self.handle.clone();
             let lifecycle = Arc::clone(&self.lifecycle);
+            // Accepted work owns the lifecycle: the poller below is the only
+            // thing that can leave `Indexing`, so it is armed in the same
+            // step that advances into it.
+            let _ = lifecycle.mark_loading();
+            let _ = lifecycle.mark_indexing(0, total_units);
             tokio::spawn(async move {
                 loop {
                     match handle.status() {
@@ -2187,10 +2240,33 @@ impl ProductionSemanticRuntimeV1 {
                                     &detail,
                                 );
                             }
+                            tracing::warn!(
+                                event = "semantic_projection_schedule",
+                                outcome = "failed",
+                                target_generation = ?refusal_target,
+                                detail = %detail,
+                                "semantic projection failed for this code generation"
+                            );
                             let _ = lifecycle.mark_runtime_failed(detail, true);
                             break;
                         }
-                        SemanticRuntimeScheduleStatusV1::Unavailable => break,
+                        // The pointer this projection was driving was retired
+                        // under it. Nothing else will move the lifecycle, so
+                        // name the retirement instead of leaving `Indexing`
+                        // pinned for the life of the daemon.
+                        SemanticRuntimeScheduleStatusV1::Unavailable => {
+                            tracing::warn!(
+                                event = "semantic_projection_schedule",
+                                outcome = "retired",
+                                target_generation = ?refusal_target,
+                                "semantic projection was retired before it published"
+                            );
+                            let _ = lifecycle.mark_runtime_failed(
+                                "the semantic projection was retired before it published",
+                                true,
+                            );
+                            break;
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 }
@@ -2741,6 +2817,21 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
 
 fn semantic_source_manifest_digest(request: &ProjectionBatchRequestV1) -> &ManifestDigest {
     &request.changes.manifest_digest
+}
+
+/// Whether published vectors are still usable for the generation being served.
+///
+/// Semantic readiness is source compatibility, not generation identity: a
+/// vector generation serves exactly the corpus its projection digested, so the
+/// canonical comparison is the projected source manifest digest against the
+/// serving generation's. Comparing generation ids instead accepts (or rejects)
+/// on an implementation identity that says nothing about the corpus.
+pub fn vectors_serve_source(
+    vectors: &PublishedVectorGenerationV1,
+    serving: &CodeIndexPublishedGenerationV1,
+) -> bool {
+    vectors.source_manifest_digest()
+        == semantic_source_manifest_digest(serving.projection().request())
 }
 
 #[derive(Clone, Copy)]
@@ -4403,6 +4494,14 @@ pub fn production_saved_generation_schedule_hook(
                     });
                 }),
             )
+            .inspect_err(|error| {
+                tracing::warn!(
+                    event = "semantic_projection_schedule",
+                    outcome = "enqueue_failed",
+                    error = ?error,
+                    "semantic projection could not be queued for this code generation"
+                );
+            })
             .is_ok()
     })
 }

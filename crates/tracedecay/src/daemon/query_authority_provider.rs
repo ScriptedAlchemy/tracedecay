@@ -304,6 +304,31 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         .active_vector_generation(pins)
                         .await
                         .ok_or(("active_vector_generation", ObserverError::Unavailable))?;
+                    // Readiness is source compatibility, not generation
+                    // identity. Reinstalling a committed activation whose
+                    // vectors digested a superseded corpus un-seats the
+                    // projection that does serve the live generation, and
+                    // then reports Ready for vectors no query can use. Refuse
+                    // instead: the activation stays committed and the runtime
+                    // keeps the newer pointer until the operator activates it.
+                    if !tracedecay_usecases::semantic_runtime::vectors_serve_source(
+                        &vectors, &generation,
+                    ) {
+                        tracing::warn!(
+                            event = "semantic_query_activation",
+                            step = "superseded_committed_activation",
+                            project_root = %project_root.display(),
+                            serving_generation = %generation.manifest().generation_id,
+                            vector_source_generation = %vectors.source_generation(),
+                            vector_generation = ?pins.vector_generation_id,
+                            "the committed activation projected a superseded source; it is not \
+                             reinstalled over the generation now being served"
+                        );
+                        return Err((
+                            "superseded_committed_activation",
+                            ObserverError::Rejected,
+                        ));
+                    }
                     let source_generation = vectors.source_generation().clone();
                     // Queries pin the serving publication, so the semantic
                     // cache binds to it whenever the activated vectors carry
