@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, oneshot};
 
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
@@ -25,7 +25,7 @@ use tracedecay_store::{
 
 use crate::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
-    VerifiedSemanticVectorGraphRuntimeV1,
+    SemanticVectorOperationTaskOwnerV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 
 use super::{
@@ -95,6 +95,7 @@ impl VectorPublicationPhaseV1 {
 /// running it on a runtime worker.
 struct GraphVectorGenerationStoreStateV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
     snapshot: Mutex<Option<SemanticVectorVerifiedReadV1>>,
     descriptor: Mutex<Option<SemanticVectorStageDescriptorV1>>,
     pending: Mutex<BTreeMap<VectorGenerationBuildIdV1, PendingSemanticVectorBuildV1>>,
@@ -495,6 +496,7 @@ impl GraphVectorGenerationStoreV1 {
     fn from_retained(retained: &RetainedSemanticVectorGraphV1) -> Self {
         Self::from_state(GraphVectorGenerationStoreStateV1 {
             runtime: Arc::clone(retained.runtime()),
+            operation_task_owner: Arc::clone(retained.operation_task_owner()),
             snapshot: Mutex::new(None),
             descriptor: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
@@ -535,7 +537,9 @@ impl GraphVectorGenerationStoreV1 {
                 )
             })?;
         let state = Arc::clone(&self.state);
-        let settlement_owner = tokio::spawn(async move {
+        let operation_task_owner = Arc::clone(&state.operation_task_owner);
+        let (result_tx, result_rx) = oneshot::channel();
+        if !operation_task_owner.retain(async move {
             let blocking_child = tokio::task::spawn_blocking(move || {
                 // State pins the graph/database lifetime, while the permit
                 // prevents a successor until this child has settled.
@@ -544,21 +548,39 @@ impl GraphVectorGenerationStoreV1 {
                 drop(permit);
                 outcome
             });
-            settle_blocking(blocking_child).await?
-        });
-        // Caller cancellation only detaches this await; the independent owner
-        // continues joining the started blocking child.
-        settle_blocking(settlement_owner).await?
+            let joined = blocking_child.await;
+            if let Err(detached) = result_tx.send(joined)
+                && let Err(error) = detached
+            {
+                tracing::error!(
+                    event = "semantic_vector_operation_detached_join_failed",
+                    error = %error,
+                    panic = error.is_panic(),
+                    "detached semantic vector operation failed while lifecycle ownership settled it"
+                );
+            }
+        }) {
+            return Err(VectorGenerationStoreErrorV1::Unavailable(
+                "semantic vector operation settlement admission is closed".to_owned(),
+            ));
+        }
+        // Caller cancellation only drops this receiver. The lifecycle owner
+        // continues joining the started blocking child and retains its state
+        // and admission permit until the child has settled.
+        let joined = result_rx
+            .await
+            .map_err(|_| VectorGenerationStoreErrorV1::Cancelled)?;
+        settle_blocking_join(joined)?
     }
 }
 
-/// Await one operation-settlement task. A panic inside it stays a panic on the
-/// caller, exactly as the synchronous call it replaced; only a runtime
-/// shutdown that drops the task answers as cancellation.
-async fn settle_blocking<T>(
-    handle: tokio::task::JoinHandle<T>,
+/// Settle one blocking child for a still-live caller. A panic inside it stays
+/// a panic, exactly as the synchronous call it replaced; only runtime shutdown
+/// cancellation answers as typed cancellation.
+fn settle_blocking_join<T>(
+    joined: Result<T, tokio::task::JoinError>,
 ) -> Result<T, VectorGenerationStoreErrorV1> {
-    match handle.await {
+    match joined {
         Ok(outcome) => Ok(outcome),
         Err(error) => match error.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),

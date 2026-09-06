@@ -3169,6 +3169,7 @@ fn map_code_graph_error(
 
 impl Drop for DaemonSessionRuntimeRegistryV1 {
     fn drop(&mut self) {
+        self.semantic_vector_operation_task_owner.begin_shutdown();
         self.graph_lifecycle_cancelled
             .store(true, Ordering::Release);
         self.cancel_memory_graph_reconciliation_tasks();
