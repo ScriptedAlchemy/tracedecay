@@ -262,6 +262,7 @@ pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_skill_id(&skill.metadata.id)?;
     validate_frontmatter_scalar("title", &skill.metadata.title)?;
     validate_frontmatter_scalar("summary", &skill.metadata.summary)?;
+    validate_native_skill_description(&skill.metadata.routing_description)?;
     validate_skill_category(&skill.metadata.category)?;
     validate_skill_targets(&skill.metadata.targets)?;
     validate_body_markdown(&skill.body_markdown)?;
@@ -278,6 +279,9 @@ pub fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> 
     }
     if let Some(summary) = &update.summary {
         validate_frontmatter_scalar("summary", summary)?;
+    }
+    if let Some(routing_description) = &update.routing_description {
+        validate_native_skill_description(routing_description)?;
     }
     if let Some(category) = &update.category {
         validate_skill_category(category)?;
@@ -311,6 +315,7 @@ mod tests {
             id: "managed-validation-eval".to_string(),
             title: "Managed Validation Eval".to_string(),
             summary: "validate generated managed skill packages".to_string(),
+            routing_description: "Validate generated managed skill packages.".to_string(),
             category: "validation".to_string(),
             targets: vec![SkillInstallTarget::Codex, SkillInstallTarget::Claude],
             body_markdown: "# Managed Validation Eval\n\nUse this when validating skills."
@@ -328,6 +333,45 @@ mod tests {
     fn managed_skill_validation_accepts_valid_draft() {
         let skill = valid_draft().materialize().unwrap();
         validate_managed_skill(&skill).unwrap();
+    }
+
+    #[test]
+    fn routing_description_requires_valid_authored_host_text() {
+        for description in ["", " ", " leading", "trailing ", "two\nlines", "two\rlines"] {
+            let mut draft = valid_draft();
+            draft.routing_description = description.to_string();
+            assert!(draft.materialize().is_err(), "accepted {description:?}");
+            let update = ManagedSkillUpdate {
+                routing_description: Some(description.to_string()),
+                ..Default::default()
+            };
+            assert!(validate_managed_skill_update(&update).is_err());
+        }
+        let mut draft = valid_draft();
+        draft.routing_description = "é".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS);
+        let skill = draft.clone().materialize().unwrap();
+        skill.render_native_skill_markdown().unwrap();
+        draft.routing_description.push('é');
+        assert!(draft.materialize().is_err());
+        let update = ManagedSkillUpdate {
+            routing_description: Some("a".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS + 1)),
+            ..Default::default()
+        };
+        assert!(validate_managed_skill_update(&update).is_err());
+    }
+
+    #[test]
+    fn new_drafts_and_metadata_require_authored_routing_description() {
+        let mut draft = serde_json::to_value(valid_draft()).unwrap();
+        draft.as_object_mut().unwrap().remove("routing_description");
+        assert!(serde_json::from_value::<ManagedSkillDraft>(draft).is_err());
+
+        let mut skill = serde_json::to_value(valid_draft().materialize().unwrap()).unwrap();
+        skill["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("routing_description");
+        assert!(serde_json::from_value::<ManagedSkill>(skill).is_err());
     }
 
     #[test]

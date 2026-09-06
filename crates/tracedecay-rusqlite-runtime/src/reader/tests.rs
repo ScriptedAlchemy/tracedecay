@@ -33,7 +33,7 @@ use crate::connection::OpenedDatabaseFile;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[derive(Clone)]
-struct CountExecutor;
+pub(super) struct CountExecutor;
 
 impl ReaderQueryExecutor for CountExecutor {
     fn execute_read(
@@ -127,14 +127,14 @@ impl ReaderQueryExecutor for GateExecutor {
     }
 }
 
-struct TestStore {
+pub(super) struct TestStore {
     _directory: tempfile::TempDir,
     path: PathBuf,
-    binding: StoreRuntimeBindingV1,
+    pub(super) binding: StoreRuntimeBindingV1,
 }
 
 impl TestStore {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reader.db");
         let connection = Connection::open(&path).unwrap();
@@ -161,7 +161,7 @@ impl TestStore {
         }
     }
 
-    fn locator(&self) -> ExistingReaderLocator {
+    pub(super) fn locator(&self) -> ExistingReaderLocator {
         self.locator_at(self.path.clone())
     }
 
@@ -211,14 +211,14 @@ fn telemetry_scope() -> ResolvedScope {
     .unwrap()
 }
 
-struct Probe {
+pub(super) struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     interruption: Arc<AtomicU8>,
 }
 
 impl Probe {
-    fn for_request(request: &RuntimeReadRequestV1) -> Self {
+    pub(super) fn for_request(request: &RuntimeReadRequestV1) -> Self {
         Self {
             cancellation: request.control().cancellation.clone(),
             deadline: request.control().deadline.clone(),
@@ -305,7 +305,10 @@ impl RuntimeRequestProbeV1 for SecondPollProbe {
     }
 }
 
-fn request(binding: &StoreRuntimeBindingV1, priority: OperationPriorityV1) -> RuntimeReadRequestV1 {
+pub(super) fn request(
+    binding: &StoreRuntimeBindingV1,
+    priority: OperationPriorityV1,
+) -> RuntimeReadRequestV1 {
     let priority = match priority {
         OperationPriorityV1::Health => "health",
         OperationPriorityV1::Foreground => "foreground",
@@ -333,7 +336,7 @@ fn healthy(outcome: &RuntimeReadOutcomeV1) -> bool {
     )
 }
 
-fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
+pub(super) fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
     let mut budget = AdmissionConfigV1::default().readers;
     budget.min_per_hot_shard = 2;
     budget.max_per_hot_shard = 2;
