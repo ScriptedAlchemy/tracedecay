@@ -2,9 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_domain::{
-    TaskId, WorkAuthority, WorkTopologyPolicyV1, configuration::TopologyConcurrencyPolicyV1,
-};
+use tracedecay_domain::{TaskId, WorkTopologyPolicyV1, configuration::TopologyConcurrencyPolicyV1};
 
 use crate::work::work_authority;
 use crate::{ApplicationProblem, RequestContext};
@@ -135,23 +133,6 @@ where
         let authority = work_authority(context)?;
         self.attempts
             .admission_capacities(&authority, task_ids, &registered_topology.concurrency)
-            .map_err(storage_problem)
-    }
-
-    /// Whether this exact Work authority retains any non-terminal provider
-    /// attempt. An unreadable attempt authority is never reported as clean.
-    pub fn has_open_attempts(&self, context: &RequestContext) -> Result<bool, ApplicationProblem> {
-        let authority = work_authority(context)?;
-        self.has_open_attempts_for_authority(&authority)
-    }
-
-    pub fn has_open_attempts_for_authority(
-        &self,
-        authority: &WorkAuthority,
-    ) -> Result<bool, ApplicationProblem> {
-        self.attempts
-            .open_attempts(authority)
-            .map(|attempts| !attempts.is_empty())
             .map_err(storage_problem)
     }
 

@@ -17,8 +17,8 @@ use tracedecay_store::{
     ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
     ProjectMemoryFactMergeTargetV1, ProjectMemoryFactNormalizeTagsV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactStore,
-    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryFactUpdatePatchV1, derive_project_memory_fact_curation_child_operation_id,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
+    derive_project_memory_fact_curation_child_operation_id,
 };
 
 use super::MemoryApplication;
@@ -489,22 +489,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         )
     }
 
-    #[hotpath::skip]
-    pub async fn update_canonical_fact(
-        &self,
-        target: ProjectMemoryFactMutationTarget,
-        patch: ProjectMemoryFactUpdatePatchV1,
-        context: MemoryOperationContext,
-        write_control: &FactWriteControl,
-    ) -> Result<
-        ProjectMemoryFactUpdateOutcomeV1,
-        MemoryMutationError<ProjectMemoryFactUpdateOutcomeV1>,
-    > {
-        let command = self.canonical_fact_update_command(target, patch, &context)?;
-        self.update_project_memory_fact(command, write_control)
-            .await
-    }
-
     /// Constructs an owner-bound compare-and-set remove command.
     pub fn canonical_fact_remove_command(
         &self,
@@ -540,21 +524,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    #[hotpath::skip]
-    pub async fn remove_canonical_fact_at(
-        &self,
-        target: ProjectMemoryFactMutationTarget,
-        context: MemoryOperationContext,
-        write_control: &FactWriteControl,
-    ) -> Result<
-        ProjectMemoryFactRemoveOutcomeV1,
-        MemoryMutationError<ProjectMemoryFactRemoveOutcomeV1>,
-    > {
-        let command = self.canonical_fact_remove_command(target, &context)?;
-        self.remove_project_memory_fact(command, write_control)
-            .await
-    }
-
     /// Constructs an owner-bound, compare-and-set merge command.
     pub fn canonical_fact_merge_command(
         &self,
@@ -571,21 +540,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             context.operation_id().clone(),
             context.actor().cloned(),
         )
-    }
-
-    #[hotpath::skip]
-    pub async fn merge_canonical_facts(
-        &self,
-        winner: ProjectMemoryFactMutationTarget,
-        losers: Vec<ProjectMemoryFactMutationTarget>,
-        merged_content: Option<String>,
-        context: MemoryOperationContext,
-        write_control: &FactWriteControl,
-    ) -> Result<ProjectMemoryFactMergeOutcomeV1, MemoryMutationError<ProjectMemoryFactMergeOutcomeV1>>
-    {
-        let command =
-            self.canonical_fact_merge_command(winner, losers, merged_content, &context)?;
-        self.dashboard_merge_facts(command, write_control).await
     }
 
     #[hotpath::measure(label = "usecases.memory.merge", future = true)]

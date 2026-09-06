@@ -101,10 +101,6 @@ impl EvidenceSpanIdV1 {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
-
-    pub fn as_derived(&self) -> &DerivedEvidenceIdV1 {
-        &self.0
-    }
 }
 
 /// One ordered member of a derived span or burst.

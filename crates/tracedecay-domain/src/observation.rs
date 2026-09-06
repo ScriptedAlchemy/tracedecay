@@ -2211,21 +2211,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         })
     }
 
-    pub fn for_non_durable(
-        identity: &ClaudeObservationIdentityMaterialV1,
-        sanitizer_version: ComponentVersion,
-        disposition: SanitizerDispositionV1,
-        raw_digest: &[u8; 32],
-    ) -> Result<Self, ObservationContractError> {
-        Self::for_non_durable_with_sensitivity(
-            identity,
-            sanitizer_version,
-            disposition,
-            SensitivityV1::Sensitive,
-            raw_digest,
-        )
-    }
-
     pub fn for_non_durable_with_sensitivity(
         identity: &ClaudeObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,

@@ -581,23 +581,6 @@ impl ContextScoutSurfaceRequestV1 {
             Self::Feedback(request) => request.address,
         }
     }
-
-    pub fn matches_operation(&self, operation: &str) -> bool {
-        matches!(
-            (self, operation),
-            (Self::Status(_), "context_scout_status")
-                | (Self::Recent(_), "context_scout_recent")
-                | (Self::Explain(_), "context_scout_explain")
-                | (Self::Capability(_), "context_scout_capability")
-                | (Self::Budget(_), "context_scout_budget")
-                | (Self::Pause(_), "context_scout_pause")
-                | (Self::Resume(_), "context_scout_resume")
-                | (Self::Cancel(_), "context_scout_cancel")
-                | (Self::Claim(_), "context_scout_claim")
-                | (Self::Delivery(_), "context_scout_delivery")
-                | (Self::Feedback(_), "context_scout_feedback")
-        )
-    }
 }
 
 const fn read_spec(operation: &'static str, summary: &'static str) -> ContextScoutOperationSpec {

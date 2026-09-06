@@ -7,8 +7,6 @@
 //! ingest accepted, and adds the formatting and relative-filter parsing that
 //! only the executable needs.
 
-use std::time::SystemTime;
-
 use chrono::{DateTime, Utc};
 
 pub use tracedecay_capture::{
@@ -118,13 +116,6 @@ pub fn humanize_unix_secs(secs: i64) -> String {
         },
         |timestamp| timestamp.format("%Y-%m-%d %H:%M:%SZ").to_string(),
     )
-}
-
-/// The current UTC time as an ISO 8601 `yyyy-mm-ddThh:mm:ssZ` string.
-pub fn now_iso_utc() -> String {
-    DateTime::<Utc>::from(SystemTime::now())
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
 }
 
 fn format_calendar_day(days: i64) -> String {

@@ -214,38 +214,6 @@ impl SourceScheduledRefetchV1 {
         self.not_before
     }
 
-    pub fn with_retry(
-        &self,
-        attempt: u32,
-        not_before: UtcMicros,
-    ) -> SourceAcquisitionQueueResultV1<Self> {
-        Self::new(
-            self.definition.clone(),
-            self.binding.clone(),
-            self.request.clone(),
-            self.event_receipt.clone(),
-            self.whole_root_stage.clone(),
-            attempt,
-            not_before,
-        )
-    }
-
-    pub fn with_whole_root_stage(
-        &self,
-        stage: Option<SourceWholeRootStageV1>,
-        not_before: UtcMicros,
-    ) -> SourceAcquisitionQueueResultV1<Self> {
-        Self::new(
-            self.definition.clone(),
-            self.binding.clone(),
-            self.request.clone(),
-            self.event_receipt.clone(),
-            stage,
-            0,
-            not_before,
-        )
-    }
-
     pub fn validate(&self) -> SourceAcquisitionQueueResultV1<()> {
         self.definition.validate()?;
         self.binding.validate_against(&self.definition)?;
@@ -344,20 +312,6 @@ impl SourceAcquisitionQueueStateV1 {
         self.active
             .as_ref()
             .is_some_and(|task| task.not_before().0 <= now.0)
-    }
-
-    pub fn with_schedule(
-        &self,
-        active: Option<SourceScheduledRefetchV1>,
-        successor: Option<SourceScheduledRefetchV1>,
-    ) -> SourceAcquisitionQueueResultV1<Self> {
-        Self::new(
-            self.definition.clone(),
-            self.binding.clone(),
-            active,
-            successor,
-            self.receipts.clone(),
-        )
     }
 
     pub fn validate(&self) -> SourceAcquisitionQueueResultV1<()> {
