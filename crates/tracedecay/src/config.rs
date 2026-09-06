@@ -1329,37 +1329,6 @@ pub(crate) async fn load_runtime_configuration_for_registered_database_read_only
     )
 }
 
-#[cfg(not(test))]
-pub async fn ensure_runtime_configuration_for_layout(
-    _project_root: &Path,
-    _layout: &tracedecay_runtime_core::storage::StoreLayout,
-) -> Result<PinnedRuntimeConfiguration> {
-    Err(registered_configuration_database_required())
-}
-
-#[cfg(not(test))]
-pub async fn resolve_runtime_configuration_for_layout(
-    _project_root: &Path,
-    _layout: &tracedecay_runtime_core::storage::StoreLayout,
-) -> Result<PinnedRuntimeConfiguration> {
-    Err(registered_configuration_database_required())
-}
-
-#[cfg(not(test))]
-pub async fn load_runtime_configuration_for_layout_read_only(
-    _project_root: &Path,
-    _layout: &tracedecay_runtime_core::storage::StoreLayout,
-) -> Result<PinnedRuntimeConfiguration> {
-    Err(registered_configuration_database_required())
-}
-
-#[cfg(not(test))]
-fn registered_configuration_database_required() -> TraceDecayError {
-    config_error(
-        "configuration authority unavailable: a registered project session runtime is required",
-    )
-}
-
 fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) -> TraceDecayError {
     match error {
         tracedecay_configuration::ConfigurationError::ResetRequired { reason } => {
@@ -1394,43 +1363,6 @@ pub fn cached_sync_config(project_root: &Path) -> Result<SyncConfig> {
 
 pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
     Ok(cached_runtime_configuration(project_root)?.config.telemetry)
-}
-
-/// Creates the only permitted pre-store runtime snapshot: registry defaults
-/// with a synthetic bootstrap revision. It does not read or write
-/// `config.json`, and a daemon must replace it with its durable canonical
-/// snapshot before a subsequent process can serve the project.
-#[hotpath::measure(label = "daemon.config.bootstrap")]
-pub fn bootstrap_runtime_configuration(
-    project_root: &Path,
-    layout: &tracedecay_runtime_core::storage::StoreLayout,
-) -> Result<PinnedRuntimeConfiguration> {
-    let target = runtime_configuration_target_for_layout(project_root, layout)?;
-    if let Ok(existing) = runtime_configuration_cache().for_project(&target.project_id) {
-        // One authoritative project can be opened through more than one
-        // non-authoritative root spelling (for example, a linked worktree).
-        // Publish the retargeted view too so its hook paths remain cache-only.
-        let configuration = existing.retarget(target)?;
-        runtime_configuration_cache().insert(configuration.clone())?;
-        return Ok(configuration);
-    }
-
-    let registry = registry::ConfigurationRegistry::core()
-        .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
-    let snapshot = resolver::resolve_configuration(&registry, &[])
-        .map_err(|error| {
-            config_error(format!(
-                "configuration bootstrap resolution failed: {error}"
-            ))
-        })?
-        .snapshot;
-    let revision_id =
-        ConfigurationRevisionId::new("configuration.bootstrap.default.v1").map_err(|error| {
-            config_error(format!("invalid bootstrap configuration revision: {error}"))
-        })?;
-    let configuration = PinnedRuntimeConfiguration::new(target, revision_id, snapshot)?;
-    runtime_configuration_cache().insert(configuration.clone())?;
-    Ok(configuration)
 }
 
 /// Converts a complete typed snapshot into the runtime materialization without
@@ -1903,13 +1835,6 @@ pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
 /// otherwise be skipped by the file walker.
 pub fn is_included(path: &str, config: &TraceDecayConfig) -> bool {
     any_pattern_matches(&config.include, &[path])
-}
-
-/// Returns `true` if a directory should be entered because it or one of its
-/// descendants matches an explicit include glob.
-pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
-    let descendant_probe = format!("{dir_path}/_");
-    any_pattern_matches(&config.include, &[dir_path, &descendant_probe])
 }
 
 /// Returns `true` if a directory should be pruned during scanning.

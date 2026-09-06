@@ -1144,34 +1144,6 @@ fn replay_remote_capture_attempt(
     })
 }
 
-pub fn mark_remote_capture_gc_eligible(
-    spool: &dyn RemoteReplaySpoolPortV1,
-    frame: &RemoteReplayFrameV1,
-    receipt: RemoteReplayCommitReceiptV1,
-    observed_at: UtcMicros,
-) -> Result<(), RemoteReplayApplicationErrorV1> {
-    let state = spool
-        .state(&frame.event_id)
-        .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
-    if state.state != RemoteReplayStateV1::Acknowledged || state.receipt.as_ref() != Some(&receipt)
-    {
-        return Err(RemoteReplayApplicationErrorV1::InvalidSpoolState);
-    }
-    with_replay_attempt(spool, &frame.event_id, observed_at, |replay_attempt| {
-        transition(
-            spool,
-            frame,
-            RemoteReplayStateV1::Acknowledged,
-            RemoteReplayStateV1::GarbageCollectionEligible,
-            replay_attempt,
-            observed_at,
-            None,
-            Some(receipt),
-        )
-        .map(|_| ())
-    })
-}
-
 fn validate_scope_and_fence(
     frame: &RemoteReplayFrameV1,
     current_writer: &RemoteWriterAuthorityV1,

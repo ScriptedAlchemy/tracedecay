@@ -521,19 +521,6 @@ pub async fn finalize_gc_report(
     Ok(())
 }
 
-pub async fn finalize_gc_report_value(
-    conn: &(impl Executor + ?Sized),
-    report_value: &mut Value,
-    drain: PayloadDeleteDrain,
-) -> Result<(), LcmError> {
-    let mut report: LcmGcReport = serde_json::from_value(report_value.clone())
-        .map_err(|err| LcmError::Db(format!("invalid GC report: {err}")))?;
-    finalize_gc_report(conn, &mut report, drain).await?;
-    *report_value = serde_json::to_value(report)
-        .map_err(|err| LcmError::Db(format!("serialize GC report: {err}")))?;
-    Ok(())
-}
-
 #[hotpath::measure(label = "sessions.lcm.gc.apply", future = true)]
 pub async fn run_payload_gc_in_transaction(
     conn: &(impl Executor + ?Sized),

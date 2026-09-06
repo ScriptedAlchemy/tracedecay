@@ -505,25 +505,6 @@ impl GraphDb {
         sealed.get(locator).cloned()
     }
 
-    /// Whether a sealed store is installed for `locator` (test observability).
-    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
-    #[must_use]
-    pub fn has_sealed_generation_store_for(
-        &self,
-        namespace: &str,
-        projection: &str,
-        generation: &str,
-    ) -> bool {
-        let Ok(sealed) = self.inner.sealed_generations.read() else {
-            return false;
-        };
-        sealed.keys().any(|locator| {
-            locator.projection.namespace.as_str() == namespace
-                && locator.projection.projection.as_str() == projection
-                && locator.generation.as_str() == generation
-        })
-    }
-
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn discard_sealed_generation_reader(
         &self,

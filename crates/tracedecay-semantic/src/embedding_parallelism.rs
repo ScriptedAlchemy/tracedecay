@@ -37,12 +37,6 @@ const BASELINE_INTRA_THREADS: usize = 4;
 /// narrowed by [`embedding_execution_plan_for`].
 pub const DEFAULT_INTRA_THREADS: u32 = 12;
 
-/// Host-derived default for the artifact's maximum intra-op width.
-#[must_use]
-pub fn default_max_intra_threads() -> u32 {
-    default_max_intra_threads_for(detected_cores())
-}
-
 #[must_use]
 pub fn default_max_intra_threads_for(total_cores: usize) -> u32 {
     u32::try_from(total_cores.max(1))
@@ -213,25 +207,6 @@ fn record_execution_plan(
             EmbeddingSessionLimitingReasonV1::ResidentSessionLimit => 4,
         },
     );
-}
-
-/// Concurrent embedding sessions on this host, honouring the operator
-/// override. Always at least 1.
-#[must_use]
-pub fn embedding_session_width(intra_threads: u32, configured_max_sessions: u32) -> usize {
-    let configured = (configured_max_sessions as usize).max(1);
-    let shared_cpu_budget = installed_cpu_budget();
-    let environment_override = env_width(EMBED_SESSIONS_ENV);
-    let requested = environment_override.unwrap_or(configured);
-    let plan = embedding_execution_plan_for(
-        shared_cpu_budget,
-        intra_threads,
-        configured_max_sessions,
-        configured,
-        environment_override,
-    );
-    record_execution_plan(plan, requested, shared_cpu_budget, configured);
-    plan.sessions
 }
 
 /// Session-pool sizing that lets the derived concurrency actually be used.

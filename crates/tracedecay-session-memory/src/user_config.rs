@@ -155,22 +155,6 @@ pub fn config_path() -> Option<PathBuf> {
     tracedecay_runtime_core::config::user_data_dir().map(|dir| dir.join("config.toml"))
 }
 
-/// Whether the user config explicitly contains an `[automation]` table.
-/// Missing automation configuration is distinct from an explicit disabled
-/// configuration for profile-level projectless self-improvement.
-pub fn automation_is_configured() -> bool {
-    let Some(path) = config_path() else {
-        return false;
-    };
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    toml::from_str::<toml::Value>(&contents)
-        .ok()
-        .and_then(|value| value.as_table().cloned())
-        .is_some_and(|table| table.contains_key("automation"))
-}
-
 /// Errors returned by strict loads and configuration saves.
 ///
 /// Distinguishes the ways a save can fail so callers can surface an actionable

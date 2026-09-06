@@ -45,9 +45,6 @@ pub struct LegacyToolCompatibilityOwner;
 
 impl LegacyToolCompatibilityOwner {
     pub const OWNER: &'static str = "root MCP tool-dispatch migration";
-    pub const REASON: &'static str =
-        "typed ApplicationSurfaceRequest contract has not yet landed for this tool family";
-
     pub fn admits(
         tool_name: &str,
     ) -> std::result::Result<bool, dispatch::McpDispatchMetadataError> {
