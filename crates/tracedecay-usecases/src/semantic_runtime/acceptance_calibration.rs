@@ -114,6 +114,7 @@ impl SemanticAcceptanceCalibrationV1 {
 /// Deterministic in the generation: the same immutable vector map always
 /// yields the same bound, so a proposing writer and a certifying reader agree
 /// without persisting the statistic.
+#[hotpath::measure(label = "usecases.semantic.acceptance_calibration")]
 pub fn measure_acceptance_calibration(
     vectors: &BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
 ) -> SemanticAcceptanceCalibrationV1 {
@@ -125,6 +126,7 @@ pub fn measure_acceptance_calibration(
 }
 
 /// Measure the acceptance bound from canonically ordered vector values.
+#[hotpath::measure(label = "usecases.semantic.acceptance_calibration_values")]
 pub fn measure_acceptance_calibration_from_values(
     values: &[&[f32]],
 ) -> SemanticAcceptanceCalibrationV1 {
