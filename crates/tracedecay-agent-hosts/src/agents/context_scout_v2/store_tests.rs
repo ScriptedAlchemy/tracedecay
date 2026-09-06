@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tokio::sync::Barrier;
 
 use super::*;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -425,6 +426,53 @@ async fn restart_generation_snapshot_includes_a_live_claim_without_requeueing_it
             entries: vec![pending],
             truncated: false,
         }
+    );
+}
+
+#[tokio::test]
+async fn concurrent_startups_discover_one_entry_but_only_one_claims_it() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let pending = entry(project_id, 5);
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+
+    let claim_boundary = Arc::new(Barrier::new(2));
+    let contender = |claim_lease| {
+        let store = Arc::clone(&store);
+        let pending = pending.clone();
+        let claim_boundary = Arc::clone(&claim_boundary);
+        async move {
+            assert_eq!(
+                store.startup(UtcMicros(10), 8).await,
+                ContextScoutDurableStartupOutcomeV1::Ready {
+                    entries: vec![pending.clone()],
+                    truncated: false,
+                }
+            );
+            claim_boundary.wait().await;
+            store
+                .claim(pending.work.address, UtcMicros(10), claim_lease)
+                .await
+        }
+    };
+    let (first, second) = tokio::join!(contender(lease(47, 50)), contender(lease(48, 50)));
+    assert!(
+        matches!(
+            (&first, &second),
+            (
+                ContextScoutDurableClaimOutcomeV1::Claimed(_),
+                ContextScoutDurableClaimOutcomeV1::Empty,
+            ) | (
+                ContextScoutDurableClaimOutcomeV1::Empty,
+                ContextScoutDurableClaimOutcomeV1::Claimed(_),
+            )
+        ),
+        "discovery must yield one durable claim and one typed empty outcome: {first:?}, {second:?}"
     );
 }
 
