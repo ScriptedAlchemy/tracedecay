@@ -769,15 +769,14 @@ async fn concurrent_read_first_startups_discover_one_entry_and_claim_it_once() {
     assert_eq!(winner.entry, pending);
 
     // The durable state agrees: a third startup finds nothing unclaimed.
-    let (_third, third_startup) =
-        ProjectContextScoutDurableStoreV1::startup_from_project_database(
-            database,
-            project_id,
-            UtcMicros(12),
-            8,
-        )
-        .await
-        .expect("third startup");
+    let (_third, third_startup) = ProjectContextScoutDurableStoreV1::startup_from_project_database(
+        database,
+        project_id,
+        UtcMicros(12),
+        8,
+    )
+    .await
+    .expect("third startup");
     assert_eq!(
         third_startup,
         ContextScoutDurableStartupOutcomeV1::Ready {

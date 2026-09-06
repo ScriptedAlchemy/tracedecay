@@ -246,7 +246,12 @@ fn scope_set_cas_selects_exact_registered_roots() {
 /// per-project authorization each root brings.
 #[test]
 fn federated_roots_refuse_a_foreign_profile_store_locator() {
-    let alpha = context_at("project.alpha", "repository.alpha", "worktree.alpha", "alpha");
+    let alpha = context_at(
+        "project.alpha",
+        "repository.alpha",
+        "worktree.alpha",
+        "alpha",
+    );
     let beta = context_at("project.beta", "repository.beta", "worktree.beta", "beta");
     let shared = |context: &RequestContext, profile: &str, root: &str| {
         AuthorizedRootAdmission::new(

@@ -73,7 +73,7 @@ fn grant(scope: &ResolvedScope, suffix: &str) -> CapabilityGrantSnapshot {
         UtcMicros(10_000),
         scope.clone(),
         BTreeSet::from([
-            CapabilityId::new(super::LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability"),
+            CapabilityId::new(super::LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability")
         ]),
         BTreeSet::from([UseCaseId::new(super::LSP_WORKSPACE_USE_CASE_ID_V1).expect("use case")]),
         DisclosureClass::Sensitive,

@@ -1080,7 +1080,11 @@ fn a_branch_bound_source_scope_refuses_the_checkout_scope_and_names_both_tuples(
         "the refusal must name the code scope both tuples share: {message}"
     );
     assert!(
-        message.contains(serde_json::to_string(&checkout.source_scope).unwrap().as_str()),
+        message.contains(
+            serde_json::to_string(&checkout.source_scope)
+                .unwrap()
+                .as_str()
+        ),
         "the refusal must name the requested checkout source scope: {message}"
     );
     assert!(
