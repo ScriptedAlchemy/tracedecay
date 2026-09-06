@@ -336,7 +336,8 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .to_string();
     let warmup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
-        let warmup = cursor_pre_compact_via_daemon(&warmup_event).await;
+        let warmup =
+            cursor_pre_compact_via_daemon(&tracedecay::hook_runtime(), &warmup_event).await;
         let retryable = match (warmup.status.as_str(), warmup.reason.as_str()) {
             ("error", reason) => {
                 assert_eq!(reason, "timed out", "warmup hit a non-budget error");
@@ -369,7 +370,8 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         "context_tokens": 124000,
         "context_window_size": 128000
     });
-    let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
+    let outcome =
+        cursor_pre_compact_via_daemon(&tracedecay::hook_runtime(), &event.to_string()).await;
     // Pressure-only preCompact never carries Cursor's own summary text. The
     // daemon still runs its owned compaction route against the (empty)
     // session store and reports no backlog instead of treating the missing
