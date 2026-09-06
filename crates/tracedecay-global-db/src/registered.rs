@@ -328,6 +328,7 @@ impl RegisteredGlobalDb {
         self.database.truncate_wal_for_offline_maintenance().await
     }
 
+    #[cfg(test)]
     fn from_database(database: Database) -> Self {
         Self::from_database_with_operation_task_owner(
             database,
