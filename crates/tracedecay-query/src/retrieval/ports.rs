@@ -1,7 +1,7 @@
 //! Generic retrieval port surface.
 //!
 //! Read-only ports are implemented by root store/projector adapters, while
-//! lanes compose the shared `Retriever<R, E>` domain port.
+//! each lane exposes its own typed retriever trait.
 //!
 //! No SQL, no transport, no policy imports. Ports are synchronous contracts;
 //! scheduling and cancellation are application-layer concerns.
@@ -216,21 +216,6 @@ pub trait GraphEvidenceReadPort {
         request: &GraphLaneRequest,
         control: std::sync::Arc<dyn super::graph::GraphExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
-}
-
-/// Compact-candidate lane adapter surface.
-///
-/// Each lane adapts its typed request and read port into shared compact
-/// candidates; it never defines a second candidate, contribution, fusion,
-/// cursor, or hydration hierarchy.
-pub trait CompactCandidateLane<R, E> {
-    /// Produce compact candidates for `request` against the pinned
-    /// generation, preserving `(source_occurrence_id,
-    /// retriever_evidence_anchor)` pairs exactly.
-    fn candidates(
-        &self,
-        request: &R,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalPortError>;
 }
 
 /// Typed reference used by lanes to bind candidates to exact code occurrences.
