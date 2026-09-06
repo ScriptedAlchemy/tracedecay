@@ -37,6 +37,8 @@ umask 077
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+EVAL_SCENARIOS_DIR="$(cd "${EVAL_SCENARIOS_DIR:-$here/scenarios}" && pwd)"
+export EVAL_SCENARIOS_DIR
 
 HOSTS="${HOSTS:-claude}"
 CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"
@@ -59,7 +61,7 @@ done
 # the user's ambient ~/.claude/CLAUDE.md (deliberately excluded in ablations via
 # --setting-sources) so steering is held constant across no-hints/no-skills
 # instead of varying with whatever global memory the operator happens to run.
-STEER_TEXT="This repository is indexed for semantic code intelligence; prefer the available code-graph tools over raw file search when answering code questions."
+STEER_TEXT="This repository has indexed code-relationship evidence available. Choose tools according to the evidence the task requires."
 
 live=0
 if [[ "${TRACEDECAY_AGENT_EVALS:-}" == "1" ]]; then live=1; fi
@@ -100,7 +102,7 @@ EVAL_PATH="$(dirname "$TD"):$PATH"
 # spending a single token — if any scenario prompt names tracedecay/MCP/a
 # tool/a skill. Keeps future scenarios honest at the point of use.
 echo "linting scenario prompts for neutrality..."
-if ! python3 "$here/grade.py" --lint-only --scenarios "$here/scenarios"; then
+if ! python3 "$here/grade.py" --lint-only --scenarios "$EVAL_SCENARIOS_DIR"; then
   echo "abort: scenario prompts failed the neutrality lint (see above)." >&2
   exit 3
 fi
@@ -123,23 +125,62 @@ fi
 # and socket. TRACEDECAY_BIN pins the child invocation to the same candidate
 # binary that owns the daemon.
 export TRACEDECAY_ENABLE_GLOBAL_DB=0
-if [[ "${TRACEDECAY_DAEMON_HARNESS_ACTIVE:-}" != "1" ]]; then
-  exec "$repo_root/scripts/with-isolated-tracedecay-daemon.sh" \
-    --bin "$TD" \
-    --ready-timeout 60 \
-    --stop-timeout 10 \
-    --lifecycle-label "agent-adoption eval daemon" \
-    -- env TRACEDECAY_BIN="$TD" "$0" "$@"
+if [[ "${TRACEDECAY_AGENT_EVAL_ISOLATED:-}" != "1" ]]; then
+  # Preserve only explicit read-only auth sources before changing HOME. The
+  # daemon must not discover the operator's host transcripts or configuration.
+  export AGENT_EVAL_CODEX_AUTH_SOURCE="${CODEX_HOME:-$HOME/.codex}"
+  export AGENT_EVAL_CLAUDE_AUTH_SOURCE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  eval_home="$(mktemp -d "${TMPDIR:-/tmp}/agent-eval-home.XXXXXX")"
+  trap 'rm -rf "$eval_home"' EXIT
+  mkdir -p "$eval_home/home" "$eval_home/workspace" "$eval_home/tmp"
+  export HOME="$eval_home/home"
+  export XDG_CONFIG_HOME="$HOME/.config"
+  export XDG_DATA_HOME="$HOME/.local/share"
+  export XDG_CACHE_HOME="$HOME/.cache"
+  export XDG_STATE_HOME="$HOME/.local/state"
+  export CODEX_HOME="$HOME/.codex"
+  export CLAUDE_CONFIG_DIR="$HOME/.claude"
+  export TMPDIR="$eval_home/tmp"
+  # Keep report/fixture artifacts outside the disposable authority home.
+  export AGENT_EVAL_ARTIFACT_TMP="${AGENT_EVAL_ARTIFACT_TMP:-/tmp}"
+  (
+    cd "$eval_home/workspace"
+    "$repo_root/scripts/with-isolated-tracedecay-daemon.sh" \
+      --bin "$TD" \
+      --ready-timeout 60 \
+      --stop-timeout 10 \
+      --lifecycle-label "agent-adoption eval daemon" \
+      -- env TRACEDECAY_AGENT_EVAL_ISOLATED=1 AGENT_EVAL_ISOLATION_ROOT="$eval_home" \
+        TRACEDECAY_BIN="$TD" "$here/run.sh" "$@"
+  )
+  exit $?
+fi
+# Re-entry is valid only with the exact paths established by this runner. A
+# preconfigured flag alone must not suppress host/profile isolation.
+if [[ -z "${AGENT_EVAL_ISOLATION_ROOT:-}" ||
+      "$HOME" != "$AGENT_EVAL_ISOLATION_ROOT/home" ||
+      "$PWD" != "$AGENT_EVAL_ISOLATION_ROOT/workspace" ||
+      "$TMPDIR" != "$AGENT_EVAL_ISOLATION_ROOT/tmp" ||
+      "$XDG_CONFIG_HOME" != "$HOME/.config" ||
+      "$XDG_DATA_HOME" != "$HOME/.local/share" ||
+      "$XDG_CACHE_HOME" != "$HOME/.cache" ||
+      "$XDG_STATE_HOME" != "$HOME/.local/state" ||
+      "$CODEX_HOME" != "$HOME/.codex" ||
+      "$CLAUDE_CONFIG_DIR" != "$HOME/.claude" ||
+      "${TRACEDECAY_DATA_DIR:-}" != "$TMPDIR/"*/profile ||
+      "${TRACEDECAY_DAEMON_SOCKET:-}" != "$TMPDIR/"*/daemon.sock ]]; then
+  echo "error: evaluator isolation re-entry paths do not match" >&2
+  exit 2
 fi
 
 # ---- work dir + hermetic host state ---------------------------------------- #
-work="$(mktemp -d "${TMPDIR:-/tmp}/agent-evals.XXXXXX")"
+work="$(mktemp -d "${AGENT_EVAL_ARTIFACT_TMP:-${TMPDIR:-/tmp}}/agent-evals.XXXXXX")"
 run_dir="$work/run"
 mkdir -p "$run_dir"
 
 REAL_HOME="${HOME:?HOME must be set}"
-REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"
-REAL_CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$REAL_HOME/.claude}"
+REAL_CODEX_HOME="${AGENT_EVAL_CODEX_AUTH_SOURCE:-${CODEX_HOME:-$REAL_HOME/.codex}}"
+REAL_CLAUDE_CONFIG="${AGENT_EVAL_CLAUDE_AUTH_SOURCE:-${CLAUDE_CONFIG_DIR:-$REAL_HOME/.claude}}"
 CODEX_EVAL_HOME="$work/host-homes/codex"
 CODEX_EVAL_CONFIG="$CODEX_EVAL_HOME/.codex"
 CLAUDE_EVAL_HOME="$work/host-homes/claude"
@@ -339,7 +380,7 @@ claude_extra_for() {
 }
 
 # ---- select scenarios ------------------------------------------------------ #
-python3 - "$here/scenarios" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" > "$work/selected.tsv" <<'PY'
+python3 - "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" > "$work/selected.tsv" <<'PY'
 import json, os, sys
 sdir, filt, incl_def = sys.argv[1], sys.argv[2].split(), sys.argv[3] == "1"
 for fn in sorted(os.listdir(sdir)):
@@ -352,7 +393,7 @@ for fn in sorted(os.listdir(sdir)):
         continue
     for host in s.get("hosts", []):
         # emit: id \t host \t fixture \t prompt
-        print("\t".join([s["id"], host, s.get("fixture", "main"), s["prompt"].replace("\t", " ")]))
+        print("\t".join([s["id"], host, s.get("fixture", "main"), s["prompt"].replace("\t", " ").replace("\n", " ").replace("\r", " ")]))
 PY
 
 # ---- run each scenario x host x condition ---------------------------------- #
@@ -434,7 +475,7 @@ done
 # ---- grade ----------------------------------------------------------------- #
 if [[ "$live" == "1" ]]; then
   echo "grading..."
-  python3 "$here/grade.py" --run-dir "$run_dir" --scenarios "$here/scenarios" || true
+  python3 "$here/grade.py" --run-dir "$run_dir" --scenarios "$EVAL_SCENARIOS_DIR" || true
   if [[ -n "${EVAL_OUT:-}" ]]; then
     mkdir -p "$EVAL_OUT"
     cp "$run_dir/scoreboard.json" "$run_dir/report.md" "$EVAL_OUT/" 2>/dev/null || true
