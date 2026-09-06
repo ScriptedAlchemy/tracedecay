@@ -10,6 +10,8 @@ use serde_json::Value;
 #[cfg(test)]
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
+use crate::ports::hook_runtime::HookRuntimeV1;
+
 use super::claude::is_code_research_prompt;
 use super::steering::{HookWorkspaceStatus, index_status_line};
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
@@ -47,11 +49,12 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
 
 /// Codex `SessionStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.session_start")]
-pub async fn hook_codex_session_start() -> i32 {
+pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Codex,
         "SessionStart",
@@ -59,6 +62,7 @@ pub async fn hook_codex_session_start() -> i32 {
         &parsed,
     );
     let guidance = super::dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         root.as_deref(),
@@ -72,6 +76,7 @@ pub async fn hook_codex_session_start() -> i32 {
         |guidance| additional_context_json("SessionStart", &guidance),
     );
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
@@ -94,11 +99,12 @@ fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
 ///
 /// Resets the local counter and injects steering context for the new turn.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.user_prompt_submit")]
-pub async fn hook_codex_user_prompt_submit() -> i32 {
+pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Codex,
         "UserPromptSubmit",
@@ -106,14 +112,14 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         &parsed,
     );
     if let Some(root) = root.as_deref() {
-        super::reset_counter_for_project(root, Some(&hook_telemetry)).await;
+        super::reset_counter_for_project(runtime, root, Some(&hook_telemetry)).await;
     }
     let session_id = event_session_id(&parsed);
     if root.is_none() {
         // Keep recall current, but wait for the native Stop receipt before
         // reflection so one completed turn schedules one review rather than a
         // prompt-only review followed immediately by a final-turn review.
-        let _ = ingest_user_codex_session(session_id, Some(&hook_telemetry)).await;
+        let _ = ingest_user_codex_session(runtime, session_id, Some(&hook_telemetry)).await;
     }
     let context = Box::pin(codex_user_prompt_submit_context_with_root(
         &parsed,
@@ -130,6 +136,7 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         additional_context_json("UserPromptSubmit", &context)
     };
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
@@ -143,9 +150,12 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
     0
 }
 
-pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
+pub async fn codex_user_prompt_submit_context_for_event(
+    runtime: &HookRuntimeV1,
+    event: &str,
+) -> String {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     codex_user_prompt_submit_context_with_root(&parsed, root.as_deref()).await
 }
 
@@ -172,18 +182,19 @@ async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option
 
 /// Codex `SubagentStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.subagent_start")]
-pub async fn hook_codex_subagent_start() -> i32 {
+pub async fn hook_codex_subagent_start(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let _hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Codex,
         "SubagentStart",
         &event,
         &parsed,
     );
-    let count = record_codex_subagent_start(&event).await;
+    let count = record_codex_subagent_start(runtime, &event).await;
     let output = evaluate_codex_subagent_start(&event);
     eprintln!(
         "{}",
@@ -191,6 +202,7 @@ pub async fn hook_codex_subagent_start() -> i32 {
     );
     if let Some(output) = output
         && !super::write_hook_output(
+            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
@@ -210,12 +222,13 @@ pub async fn hook_codex_subagent_start() -> i32 {
 /// daemon-approved ready guidance is rendered in Codex's documented
 /// `additionalContext` shape; unavailable or guidance-free admission is silent.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.post_tool_use")]
-pub async fn hook_codex_post_tool_use() -> i32 {
+pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     // One parse supplies exact scope and analytics attribution.
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Codex,
         "PostToolUse",
@@ -223,6 +236,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
         &parsed,
     );
     let guidance = super::dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         root.as_deref(),
@@ -233,6 +247,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
     .flatten();
     if let Some(guidance) = guidance
         && !super::write_hook_output(
+            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
@@ -253,11 +268,12 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 /// ingest route and then runs the daemon-owned compression journey; the hook
 /// itself only forwards the boundary and fails open.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.post_compact")]
-pub async fn hook_codex_post_compact() -> i32 {
+pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
+    let root = event_project_root_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Codex,
         "PostCompact",
@@ -267,9 +283,10 @@ pub async fn hook_codex_post_compact() -> i32 {
     if std::env::var_os(tracedecay_sessions::runtime::codex_app_server::CODEX_SUMMARY_CHILD_ENV)
         .is_none()
     {
-        codex_post_compact(&event, Some(&hook_telemetry)).await;
+        codex_post_compact(runtime, &event, Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
@@ -294,15 +311,22 @@ const CODEX_STOP_RETENTION_BUDGET: Duration = Duration::from_secs(3);
 /// need this terminal receipt because the prompt hook runs before the final
 /// assistant message has been appended to the rollout.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.stop")]
-pub async fn hook_codex_stop() -> i32 {
+pub async fn hook_codex_stop(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(&parsed).await;
-    let hook_telemetry =
-        record_hook_invoked_parsed(root.as_deref(), HintAgent::Codex, "Stop", &event, &parsed);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
+        root.as_deref(),
+        HintAgent::Codex,
+        "Stop",
+        &event,
+        &parsed,
+    );
     let session_id = event_session_id(&parsed);
     if let Some(root) = root.as_deref()
         && let Some(guidance) = super::dispatch::dispatch(
+            runtime,
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             root,
@@ -314,13 +338,14 @@ pub async fn hook_codex_stop() -> i32 {
         // A daemon-admitted project Stop still hands the provider's historical
         // session to the daemon; the capture kernel correlates it back to
         // registered projects.
-        retain_codex_stop_in_daemon(session_id.as_deref(), Some(&hook_telemetry)).await;
+        retain_codex_stop_in_daemon(runtime, session_id.as_deref(), Some(&hook_telemetry)).await;
         let output = if let Some(guidance) = guidance {
             additional_context_json("Stop", &guidance)
         } else {
             serde_json::json!({}).to_string()
         };
         if !super::write_hook_output(
+            runtime,
             Some(root),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
@@ -334,9 +359,10 @@ pub async fn hook_codex_stop() -> i32 {
         return 0;
     }
     if root.is_none() {
-        retain_codex_stop_in_daemon(session_id.as_deref(), Some(&hook_telemetry)).await;
+        retain_codex_stop_in_daemon(runtime, session_id.as_deref(), Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
@@ -356,6 +382,7 @@ pub async fn hook_codex_stop() -> i32 {
 /// unavailable daemon fails open.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.retain_stop")]
 async fn retain_codex_stop_in_daemon(
+    runtime: &HookRuntimeV1,
     session_id: Option<&str>,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> bool {
@@ -364,6 +391,7 @@ async fn retain_codex_stop_in_daemon(
     };
     let retain = async {
         match super::daemon_hook_action(
+            runtime,
             None,
             serde_json::json!({
                 "action": "codex_stop",
@@ -432,12 +460,10 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
 
 /// Records a Codex `SubagentStart` and returns the session-local count.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.record_subagent_start")]
-pub async fn record_codex_subagent_start(event_json: &str) -> Option<u64> {
+pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let root = event_project_root_with_identity(&parsed).await?;
-    let layout = crate::ports::hook_runtime::resolve_store_layout(&root)
-        .await
-        .ok()?;
+    let root = event_project_root_with_identity(runtime, &parsed).await?;
+    let layout = runtime.resolve_store_layout(&root).await.ok()?;
     let path = layout.data_root.join("codex_subagent_starts.json");
     let analytics_session_id = event_session_id(&parsed);
     let session_id = analytics_session_id
@@ -631,11 +657,12 @@ pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Pat
 
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.compact_daemon")]
 async fn codex_post_compact(
+    runtime: &HookRuntimeV1,
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let Some(root) = event_project_root_with_identity(&parsed).await else {
+    let Some(root) = event_project_root_with_identity(runtime, &parsed).await else {
         return;
     };
     let session_id = event_session_id(&parsed);
@@ -646,16 +673,17 @@ async fn codex_post_compact(
         event_json,
         session_id.as_deref(),
     );
-    if let Err(error) = super::daemon_hook_action(Some(&root), args, telemetry).await {
+    if let Err(error) = super::daemon_hook_action(runtime, Some(&root), args, telemetry).await {
         tracing::warn!(%error, "Codex PostCompact daemon call failed");
     }
 }
 
 async fn ingest_user_codex_session(
+    runtime: &HookRuntimeV1,
     session_id: Option<String>,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> bool {
-    super::ingest_user_session("Codex", session_id, telemetry).await
+    super::ingest_user_session(runtime, "Codex", session_id, telemetry).await
 }
 
 fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
@@ -739,11 +767,12 @@ mod tests {
             "session_id": "final-turn",
         })]);
 
+        let runtime = crate::ports::hook_runtime::crate_test_runtime();
         assert!(
-            !retain_codex_stop_in_daemon(None, None).await,
+            !retain_codex_stop_in_daemon(&runtime, None, None).await,
             "a receipt without a session id has nothing to retain"
         );
-        assert!(retain_codex_stop_in_daemon(Some("final-turn"), None).await);
+        assert!(retain_codex_stop_in_daemon(&runtime, Some("final-turn"), None).await);
 
         let calls = daemon.calls();
         assert_eq!(

@@ -26,12 +26,13 @@ use tracedecay_graph_db::{
 use tracedecay_semantic::projector::PreparedVectorGenerationV1;
 use tracedecay_semantic::projector::{ProjectedChunkVectorV1, vector_output_digest};
 use tracedecay_store::{
-    GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
-    SemanticVectorPublishedGenerationLookup, SemanticVectorStageBatchReceipt,
-    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
-    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
-    SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1,
-    StoreShardIdV1,
+    CodeShardScopeV1, GraphPublicationKeyV1, GraphVerifiedHeadV1,
+    SemanticVectorPublishedGenerationDependencyLookup, SemanticVectorPublishedGenerationKey,
+    SemanticVectorPublishedGenerationLookup, SemanticVectorSourceScopeBindingLookup,
+    SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome, SemanticVectorStageKey,
+    SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
+    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
+    SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1, StoreShardIdV1,
 };
 use tracedecay_usecases::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
@@ -606,4 +607,373 @@ async fn prior_daemon_pending_stage_is_adopted_and_replacement_publishes() {
         restarted_scope,
         scheduler,
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linked_worktrees_keep_exact_semantic_bindings_and_publication_dependencies() {
+    let temporary = tempfile::tempdir().expect("semantic worktree fixture root");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let primary_root = root.join("primary");
+    let first_root = root.join("linked-first");
+    let second_root = root.join("linked-second");
+    std::fs::create_dir_all(primary_root.join("src")).expect("primary source directory");
+    git(&primary_root, &["init", "-q", "-b", "main"]);
+    git(&primary_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &primary_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        primary_root.join("src/lib.rs"),
+        "pub fn linked_semantic_value() -> usize { 0 }\n",
+    )
+    .expect("primary source");
+    git(&primary_root, &["add", "."]);
+    git(&primary_root, &["commit", "-qm", "linked semantic fixture"]);
+    git(
+        &primary_root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "semantic-first",
+            first_root.to_str().expect("UTF-8 first worktree"),
+        ],
+    );
+    git(
+        &primary_root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "semantic-second",
+            second_root.to_str().expect("UTF-8 second worktree"),
+        ],
+    );
+    for (worktree, value) in [(&first_root, 1), (&second_root, 2)] {
+        std::fs::write(
+            worktree.join("src/lib.rs"),
+            format!("pub fn linked_semantic_value() -> usize {{ {value} }}\n"),
+        )
+        .expect("linked source");
+        git(worktree, &["add", "src/lib.rs"]);
+        git(
+            worktree,
+            &["commit", "-qm", "distinct linked semantic source"],
+        );
+    }
+
+    let project_id = ProjectId::new("project.semantic-linked-worktrees").expect("project id");
+    for project_root in [&primary_root, &first_root, &second_root] {
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+    }
+    let first_root = first_root.canonicalize().expect("canonical first worktree");
+    let second_root = second_root
+        .canonicalize()
+        .expect("canonical second worktree");
+    let store_root = root.join("code-index-store");
+    let byte_pool = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let first_store_root = scoped_code_index_store_root(&store_root, &first_root);
+    let second_store_root = scoped_code_index_store_root(&store_root, &second_root);
+    let mut first_scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &first_root,
+        first_store_root.clone(),
+        Arc::clone(&byte_pool),
+    )
+    .expect("open first worktree scheduler");
+    let mut second_scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &second_root,
+        second_store_root.clone(),
+        byte_pool,
+    )
+    .expect("open second worktree scheduler");
+    first_scheduler
+        .reconcile_now()
+        .expect("seal first code generation");
+    second_scheduler
+        .reconcile_now()
+        .expect("seal second code generation");
+    let first_generation = first_scheduler
+        .latest_complete()
+        .expect("first complete generation")
+        .generation_handle();
+    let second_generation = second_scheduler
+        .latest_complete()
+        .expect("second complete generation")
+        .generation_handle();
+    let first_pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(first_store_root.join("active-code-generation-v1.json"))
+            .expect("first active generation pointer"),
+    )
+    .expect("decode first active generation pointer");
+    let second_pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(second_store_root.join("active-code-generation-v1.json"))
+            .expect("second active generation pointer"),
+    )
+    .expect("decode second active generation pointer");
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let expected_first_scope = StoreShardIdV1::code(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+        first_generation.snapshot().repository.clone(),
+        CodeShardScopeV1::Worktree {
+            worktree_id: first_scheduler.identity().worktree_id().clone(),
+        },
+    );
+    let expected_second_scope = StoreShardIdV1::code(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+        second_generation.snapshot().repository.clone(),
+        CodeShardScopeV1::Worktree {
+            worktree_id: second_scheduler.identity().worktree_id().clone(),
+        },
+    );
+    assert!(first_generation.snapshot().reference.is_some());
+    assert!(second_generation.snapshot().reference.is_some());
+
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        73,
+        "semantic linked worktree bindings",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(
+            project_id.clone(),
+            [first_root.clone(), second_root.clone()],
+        )
+        .await
+        .expect("shared project database");
+    let first_runtime = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            first_generation.snapshot().repository.clone(),
+            first_scheduler.identity().worktree_id().clone(),
+            first_generation.snapshot().reference.clone(),
+            first_generation.manifest().generation_id.clone(),
+            Arc::clone(&project_database),
+            CodeGraphReplayBindingV1 {
+                generations_root: first_store_root.join("code-generations-v1"),
+                sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+                    first_pointer.state_digest,
+                )
+                .expect("first sealed state digest"),
+            },
+            Some(Arc::clone(&first_generation)),
+        )
+        .await
+        .expect("retain first code graph runtime");
+    let second_runtime = registry
+        .retain_code_graph_runtime(
+            project_id,
+            second_generation.snapshot().repository.clone(),
+            second_scheduler.identity().worktree_id().clone(),
+            second_generation.snapshot().reference.clone(),
+            second_generation.manifest().generation_id.clone(),
+            Arc::clone(&project_database),
+            CodeGraphReplayBindingV1 {
+                generations_root: second_store_root.join("code-generations-v1"),
+                sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+                    second_pointer.state_digest,
+                )
+                .expect("second sealed state digest"),
+            },
+            Some(Arc::clone(&second_generation)),
+        )
+        .await
+        .expect("retain second code graph runtime");
+    let first_source_scope = first_runtime.semantic_vector_staging_binding().0.clone();
+    let second_source_scope = second_runtime.semantic_vector_staging_binding().0.clone();
+    let first_source_dependency = first_runtime
+        .semantic_vector_identity()
+        .expect("first semantic identity")
+        .4;
+    let second_source_dependency = second_runtime
+        .semantic_vector_identity()
+        .expect("second semantic identity")
+        .4;
+    assert_eq!(first_source_scope, expected_first_scope);
+    assert_eq!(second_source_scope, expected_second_scope);
+    assert_ne!(first_source_scope, second_source_scope);
+    assert_ne!(first_source_dependency, second_source_dependency);
+
+    first_runtime
+        .publish_verified_snapshot(&first_generation, Arc::new(AtomicBool::new(false)))
+        .expect("publish first code graph");
+    second_runtime
+        .publish_verified_snapshot(&second_generation, Arc::new(AtomicBool::new(false)))
+        .expect("publish second code graph");
+    let first_retained = retain_semantic_graph(first_runtime, &first_root);
+    let second_retained = retain_semantic_graph(second_runtime, &second_root);
+    let first_store = GraphVectorGenerationStoreV1::open(&first_retained)
+        .expect("open first semantic vector store");
+    let second_store = GraphVectorGenerationStoreV1::open(&second_retained)
+        .expect("open second semantic vector store");
+    let (first_plan, first_prepared, first_descriptor) = prepared_generation(
+        &first_generation.manifest().generation_id,
+        "chunk.linked-first",
+        'c',
+    );
+    let (second_plan, second_prepared, second_descriptor) = prepared_generation(
+        &second_generation.manifest().generation_id,
+        "chunk.linked-second",
+        'd',
+    );
+    first_store
+        .configure_stage(first_descriptor)
+        .expect("configure first semantic stage");
+    second_store
+        .configure_stage(second_descriptor)
+        .expect("configure second semantic stage");
+    let first_build = first_store
+        .begin_generation(first_plan, Arc::new(NeverCancelled))
+        .await
+        .expect("begin first semantic generation")
+        .build_id()
+        .clone();
+    first_store
+        .commit_batch(&first_build, None, first_prepared, Arc::new(NeverCancelled))
+        .await
+        .expect("commit first semantic generation");
+    let first_publication = first_store
+        .publish_generation(&first_build, Arc::new(NeverCancelled))
+        .await
+        .expect("publish first semantic generation");
+    let second_build = second_store
+        .begin_generation(second_plan, Arc::new(NeverCancelled))
+        .await
+        .expect("begin second semantic generation")
+        .build_id()
+        .clone();
+    second_store
+        .commit_batch(
+            &second_build,
+            None,
+            second_prepared,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("commit second semantic generation");
+    let second_publication = second_store
+        .publish_generation(&second_build, Arc::new(NeverCancelled))
+        .await
+        .expect("publish second semantic generation");
+
+    let retention = first_store
+        .reserve_one_generation(None, Arc::new(NeverCancelled))
+        .expect("read project vector census");
+    let revision = match retention {
+        tracedecay_graph_db::SemanticVectorRetentionStep::Census(census) => census.revision,
+        tracedecay_graph_db::SemanticVectorRetentionStep::Reserved {
+            census,
+            reservation,
+        } => {
+            first_store
+                .release_reserved_generation(*reservation)
+                .expect("release census reservation");
+            census.revision
+        }
+    };
+    let first_code_scope = tracedecay_store::SemanticVectorCodeScopeHash::new(
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(&first_root),
+    )
+    .expect("first code scope hash");
+    let second_code_scope = tracedecay_store::SemanticVectorCodeScopeHash::new(
+        tracedecay_code_index_retention::code_index_generations::code_index_scope_hash(
+            &second_root,
+        ),
+    )
+    .expect("second code scope hash");
+    assert_eq!(
+        first_store
+            .source_scope_binding(&first_code_scope, revision, Arc::new(NeverCancelled),)
+            .expect("first durable source binding"),
+        SemanticVectorSourceScopeBindingLookup::Exact(first_source_scope.clone())
+    );
+    assert_eq!(
+        first_store
+            .source_scope_binding(&second_code_scope, revision, Arc::new(NeverCancelled),)
+            .expect("second durable source binding"),
+        SemanticVectorSourceScopeBindingLookup::Exact(second_source_scope.clone())
+    );
+    let first_dependency = match first_store
+        .published_generation_dependency(
+            &first_publication.generation_id,
+            revision,
+            Arc::new(NeverCancelled),
+        )
+        .expect("first publication dependency")
+    {
+        SemanticVectorPublishedGenerationDependencyLookup::Published(dependency) => dependency,
+        SemanticVectorPublishedGenerationDependencyLookup::Missing => {
+            panic!("first publication dependency is missing")
+        }
+    };
+    let second_dependency = match first_store
+        .published_generation_dependency(
+            &second_publication.generation_id,
+            revision,
+            Arc::new(NeverCancelled),
+        )
+        .expect("second publication dependency")
+    {
+        SemanticVectorPublishedGenerationDependencyLookup::Published(dependency) => dependency,
+        SemanticVectorPublishedGenerationDependencyLookup::Missing => {
+            panic!("second publication dependency is missing")
+        }
+    };
+    assert_eq!(first_dependency.source_scope, first_source_scope);
+    assert_eq!(first_dependency.code_scope_hash, first_code_scope);
+    assert_eq!(
+        first_dependency.source_generation.as_str(),
+        first_generation.manifest().generation_id.as_str()
+    );
+    assert_eq!(
+        first_dependency
+            .source_dependency
+            .generation
+            .generation
+            .as_str(),
+        first_source_dependency.generation.as_str()
+    );
+    assert_eq!(
+        first_dependency.source_dependency.idempotency_key.as_str(),
+        first_source_dependency.idempotency_key.as_str()
+    );
+    assert_eq!(second_dependency.source_scope, second_source_scope);
+    assert_eq!(second_dependency.code_scope_hash, second_code_scope);
+    assert_eq!(
+        second_dependency.source_generation.as_str(),
+        second_generation.manifest().generation_id.as_str()
+    );
+    assert_eq!(
+        second_dependency
+            .source_dependency
+            .generation
+            .generation
+            .as_str(),
+        second_source_dependency.generation.as_str()
+    );
+    assert_eq!(
+        second_dependency.source_dependency.idempotency_key.as_str(),
+        second_source_dependency.idempotency_key.as_str()
+    );
 }
