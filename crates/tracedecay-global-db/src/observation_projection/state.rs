@@ -10,6 +10,7 @@ use tracedecay_store::{
 
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, plain_host_path};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
@@ -1141,7 +1142,10 @@ thread_local! {
 /// `/private/var`. Prefer the stable public `/var/...` spelling (same policy as
 /// [`tracedecay_sessions::runtime::git_correlation::normalize_worktree`]) so host-reported
 /// temp/project roots are not rewritten into a form that breaks search keys and
-/// authority verify against the original observation path.
+/// authority verify against the original observation path. On Windows,
+/// canonicalization returns the `\\?\D:\...` verbatim form; no host reports a
+/// project root that way, so the same policy spells it plainly
+/// ([`plain_host_path`]).
 fn canonical_project_path(path: &str) -> Option<String> {
     CANONICAL_PROJECT_PATH_CACHE.with(|cache| {
         if let Some(cached) = cache.borrow().get(path) {
@@ -1158,7 +1162,7 @@ fn compute_canonical_project_path(path: &str) -> Option<String> {
     if !path_ref.exists() {
         return None;
     }
-    let canonical = tracedecay_runtime_core::path_safety::canonicalize_existing_prefix(path_ref)?;
+    let canonical = plain_host_path(&canonicalize_existing_prefix(path_ref)?);
     let mut canonical = canonical.to_string_lossy().into_owned();
     if let Some(stripped) = canonical.strip_prefix("/private/var/") {
         canonical = format!("/var/{stripped}");
@@ -1414,7 +1418,6 @@ pub(super) async fn protected_message_rows_compatible(
 mod reconcile_tests {
     use tracedecay_store::SessionRecord;
 
-    #[cfg(unix)]
     use super::canonicalize_session_project_paths;
     use super::reconcile_session_rows;
 
@@ -1497,6 +1500,47 @@ mod reconcile_tests {
             "macOS /var firmlink expansion must not rewrite host-facing project paths"
         );
         assert_eq!(normalized.project_key, host);
+    }
+
+    /// The Windows analogue of the firmlink case: `canonicalize` yields
+    /// `\\?\D:\...`, which no host reports and no search key carries.
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_spelling_is_not_written_into_project_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let host = project.to_string_lossy().into_owned();
+        assert!(
+            !host.starts_with(r"\\?\"),
+            "expected a plain host spelling from the temp root, got {host}"
+        );
+        let normalized = canonicalize_session_project_paths(&record(&host));
+        assert!(
+            !normalized.project_path.starts_with(r"\\?\"),
+            "verbatim prefix leaked into the stored project path: {}",
+            normalized.project_path
+        );
+        assert_eq!(normalized.project_key, normalized.project_path);
+
+        let verbatim = format!(r"\\?\{host}");
+        let from_verbatim = canonicalize_session_project_paths(&record(&verbatim));
+        assert_eq!(
+            from_verbatim.project_path, normalized.project_path,
+            "both spellings of one directory must converge on the plain form"
+        );
+    }
+
+    /// Host-independent half of the same invariant: whatever `canonicalize`
+    /// returns, the stored spelling never carries the verbatim prefix.
+    #[test]
+    fn stored_project_paths_never_carry_the_verbatim_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let normalized = canonicalize_session_project_paths(&record(&project.to_string_lossy()));
+        assert!(!normalized.project_path.starts_with(r"\\?\"));
+        assert!(!normalized.project_key.starts_with(r"\\?\"));
     }
 
     #[test]

@@ -216,8 +216,15 @@ fn a_container_with_a_new_identity_is_re_proven_even_though_its_bytes_verify() {
     let container = support::graph_path(published.temp.path());
     let staged = container.with_extension("grafeo-copy");
 
-    // Same bytes, new inode -- and a new modification time.
+    // Same bytes, new file identity. Windows `copy` preserves LastWriteTime,
+    // so length plus mtime can match the stale marker; only a durable file
+    // identity (inode / volume+file-id) distinguishes the replacement.
+    let original_mtime = fs::metadata(&container).unwrap().modified().unwrap();
     fs::copy(&container, &staged).unwrap();
+    let staged_file = fs::OpenOptions::new().write(true).open(&staged).unwrap();
+    staged_file.set_modified(original_mtime).unwrap();
+    staged_file.sync_all().unwrap();
+    drop(staged_file);
     fs::rename(&staged, &container).unwrap();
 
     let _ = take_graph_db_verification_counters();
