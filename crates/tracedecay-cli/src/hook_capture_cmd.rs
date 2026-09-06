@@ -332,9 +332,9 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
             return 1;
         }
     }
-    // A non-zero capture exit is the host's only signal that the callback did
-    // not land, and the host shows it to the user. Name the outcome so the
-    // failure is diagnosable instead of a bare exit code.
+    // Hooks are silent on stderr by contract (the host shows every byte to
+    // the user), so the outcome goes to tracing, which the hook lane keeps
+    // off unless the operator opts in.
     match outcome {
         NativeHookCaptureOutcomeV1::Captured
         | NativeHookCaptureOutcomeV1::Unsupported
@@ -343,7 +343,7 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         | NativeHookCaptureOutcomeV1::Full
         | NativeHookCaptureOutcomeV1::ResetRequired
         | NativeHookCaptureOutcomeV1::Unavailable => {
-            eprintln!("tracedecay hook: native capture did not land: {outcome:?}");
+            tracing::warn!(?outcome, "native capture did not land");
             1
         }
     }
