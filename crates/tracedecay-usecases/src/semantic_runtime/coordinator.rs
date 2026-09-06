@@ -90,7 +90,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
             .configuration
             .current_committed_state()
             .await
-            .map_err(map_configuration_error)?
+            .map_err(configuration_error_at("current_committed_state"))?
         else {
             return Ok(None);
         };
@@ -135,7 +135,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
         self.configuration
             .install_initial_state(&pin, &state)
             .await
-            .map_err(map_configuration_error)
+            .map_err(configuration_error_at("bootstrap_query_profile.install"))
     }
 
     pub async fn current_profile_state(
@@ -147,7 +147,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
         self.configuration
             .current_profile_state()
             .await
-            .map_err(map_configuration_error)
+            .map_err(configuration_error_at("current_profile_state"))
     }
 
     pub async fn preview_central_mutation(
@@ -162,7 +162,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
         self.configuration
             .preview_central_mutation(authority, mutation, expected_revision)
             .await
-            .map_err(map_configuration_error)
+            .map_err(configuration_error_at("preview_central_mutation"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -197,7 +197,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
                 now,
             )
             .await
-            .map_err(map_configuration_error)?;
+            .map_err(configuration_error_at("stage_and_activate.stage_activation"))?;
         let target = transition
             .result_active_semantic
             .as_ref()
@@ -238,7 +238,11 @@ impl ProductionSemanticActivationCoordinatorV1 {
         now: UtcMicros,
     ) -> Result<SemanticRollbackReceiptV1, SemanticActivationCoordinationErrorV1> {
         let result_configuration = SemanticConfigurationPinV1::from_current(&result_configuration)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "stage_and_rollback: result configuration is not pinnable".to_owned(),
+                )
+            })?;
         let transition = self
             .configuration
             .stage_rollback(
@@ -253,11 +257,16 @@ impl ProductionSemanticActivationCoordinatorV1 {
                 now,
             )
             .await
-            .map_err(map_configuration_error)?;
+            .map_err(configuration_error_at("stage_and_rollback.stage_rollback"))?;
         let expected_active = transition
             .prior_active_semantic
             .as_ref()
-            .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?
+            .ok_or_else(|| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "stage_and_rollback: staged transition has no prior active semantic pin"
+                        .to_owned(),
+                )
+            })?
             .vector_generation_id
             .clone();
         let request = match transition.result_active_semantic.as_ref() {
@@ -267,13 +276,23 @@ impl ProductionSemanticActivationCoordinatorV1 {
                 transition
                     .prior_rollback_semantic
                     .as_ref()
-                    .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?
+                    .ok_or_else(|| {
+                        SemanticActivationCoordinationErrorV1::RejectedDetail(
+                            "stage_and_rollback: staged transition has no prior rollback \
+                             semantic pin"
+                                .to_owned(),
+                        )
+                    })?
                     .vector_generation_id
                     .clone(),
             ),
             None => SemanticRollbackRequestV1::disable(expected_active),
         }
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        .map_err(|_| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "stage_and_rollback: rollback request is invalid".to_owned(),
+            )
+        })?;
         self.owner
             .rollback(request)
             .await
@@ -448,22 +467,32 @@ impl SemanticRuntimeIntegrationPortV1 for ProductionSemanticActivationCoordinato
     }
 }
 
-fn map_configuration_error(
-    error: SemanticConfigurationBackendErrorV1,
-) -> SemanticActivationCoordinationErrorV1 {
-    let mapped = match error {
-        SemanticConfigurationBackendErrorV1::Unavailable => {
-            SemanticActivationCoordinationErrorV1::Unavailable
-        }
-        SemanticConfigurationBackendErrorV1::Rejected => {
-            SemanticActivationCoordinationErrorV1::Rejected
-        }
-        SemanticConfigurationBackendErrorV1::Conflict => {
-            SemanticActivationCoordinationErrorV1::Conflict
-        }
-    };
-    crate::hotpath_observe::semantic_coordination_error(&mapped);
-    mapped
+/// Every stage of a linked transition answers a configuration refusal with the
+/// same `Rejected` category, so the refusal has to carry the stage that
+/// produced it or an operator cannot reach it from the public problem.
+fn configuration_error_at(
+    stage: &'static str,
+) -> impl Fn(SemanticConfigurationBackendErrorV1) -> SemanticActivationCoordinationErrorV1 {
+    move |error| {
+        let mapped = match error {
+            SemanticConfigurationBackendErrorV1::Unavailable => {
+                SemanticActivationCoordinationErrorV1::Unavailable
+            }
+            SemanticConfigurationBackendErrorV1::Rejected => {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                    "{stage}: retrieval configuration transition was rejected"
+                ))
+            }
+            SemanticConfigurationBackendErrorV1::RejectedAt(inner) => {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(format!("{stage}: {inner}"))
+            }
+            SemanticConfigurationBackendErrorV1::Conflict => {
+                SemanticActivationCoordinationErrorV1::Conflict
+            }
+        };
+        crate::hotpath_observe::semantic_coordination_error(&mapped);
+        mapped
+    }
 }
 
 #[cfg(test)]
