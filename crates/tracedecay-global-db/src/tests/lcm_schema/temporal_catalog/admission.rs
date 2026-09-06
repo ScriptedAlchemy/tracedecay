@@ -82,6 +82,27 @@ async fn restore_schema_triggers(db_path: &Path, triggers: &[String]) {
     }
 }
 
+async fn table_trigger_sql(conn: &Connection, table: &str) -> Vec<String> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND tbl_name = ?1 AND sql IS NOT NULL ORDER BY name",
+            params![table],
+        )
+        .await
+        .unwrap();
+    let mut triggers = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        triggers.push(row.get::<String>(0).unwrap());
+    }
+    triggers
+}
+
+/// Rebuilds the two tables the v4 migration widened from their exact beta.37
+/// definitions. Recreating them costs two statement parses; the equivalent
+/// `DROP COLUMN` sequence reparses the whole 700-object schema several times
+/// per column, which under a full parallel test run exceeded the exact-SQL
+/// statement budget.
 async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
     let raw_db = TestConnection::open(db_path);
     let conn = (*raw_db).clone();
@@ -108,20 +129,27 @@ async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
                                 + receipt.assertion_count";
     assert_eq!(current_guard.matches(current_accounting).count(), 1);
     let released_guard = current_guard.replacen(current_accounting, released_accounting, 1);
+    // Dropping the table drops its triggers; their text is identical in v3.
+    let projection_receipt_triggers =
+        table_trigger_sql(&conn, "session_temporal_projection_receipts").await;
+    assert_eq!(projection_receipt_triggers.len(), 3);
 
     conn.execute_batch(
         "DROP TRIGGER session_refresh_progress_insert_guard_v1;
-         DROP INDEX idx_session_relation_receipts_recovery_due;
-         ALTER TABLE session_temporal_projection_receipts DROP COLUMN batch_item_count;
-         ALTER TABLE session_temporal_projection_receipts DROP COLUMN committed_item_count;
-         ALTER TABLE session_temporal_projection_receipts DROP COLUMN committed_copy_count;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_state;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_failure_code;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_failure_count;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_next_attempt_at;",
+         DROP TABLE session_temporal_projection_receipts;
+         DROP TABLE session_relation_receipts;",
     )
     .await
     .unwrap();
+    conn.execute_batch(SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3_DDL)
+        .await
+        .unwrap();
+    conn.execute_batch(SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DDL)
+        .await
+        .unwrap();
+    for trigger in &projection_receipt_triggers {
+        conn.execute_batch(trigger).await.unwrap();
+    }
     conn.execute_batch(&released_guard).await.unwrap();
     conn.execute(
         "UPDATE session_temporal_schema_migrations
@@ -132,6 +160,37 @@ async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
     .await
     .unwrap();
 }
+
+/// `session_temporal_projection_receipts` exactly as published in beta.37.
+const SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3_DDL: &str = "
+    CREATE TABLE session_temporal_projection_receipts (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        batch_ordinal INTEGER NOT NULL CHECK(batch_ordinal >= 0),
+        batch_digest TEXT NOT NULL,
+        frozen_watermarks_json TEXT NOT NULL CHECK(json_valid(frozen_watermarks_json)),
+        source_through INTEGER NOT NULL CHECK(source_through >= 0),
+        projection_through INTEGER NOT NULL CHECK(projection_through >= 0),
+        occurrence_count INTEGER NOT NULL CHECK(occurrence_count >= 0),
+        occurrence_digest TEXT NOT NULL,
+        dimension_count INTEGER NOT NULL CHECK(dimension_count >= 0),
+        dimension_digest TEXT NOT NULL,
+        copy_count INTEGER NOT NULL CHECK(copy_count >= 0),
+        copy_digest TEXT NOT NULL,
+        assertion_count INTEGER NOT NULL CHECK(assertion_count >= 0),
+        assertion_digest TEXT NOT NULL,
+        supersession_count INTEGER NOT NULL CHECK(supersession_count >= 0),
+        supersession_digest TEXT NOT NULL,
+        current_count INTEGER NOT NULL CHECK(current_count >= 0),
+        current_digest TEXT NOT NULL,
+        fts_count INTEGER NOT NULL CHECK(fts_count >= 0),
+        fts_digest TEXT NOT NULL,
+        committed_at INTEGER NOT NULL,
+        PRIMARY KEY(session_id, generation, batch_ordinal),
+        UNIQUE(session_id, generation, batch_digest),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
+    );";
 
 /// `session_relation_receipts` exactly as persisted by v4 stores before
 /// receipt recovery (byte-identical to the beta.37 published definition).
