@@ -611,6 +611,19 @@ impl Default for SemanticEvaluationWorkersV1 {
 pub struct DaemonSemanticEvaluationWorkerOwnerV1 {
     workers: Mutex<SemanticEvaluationWorkersV1>,
     scheduler_admission: Arc<tokio::sync::Semaphore>,
+    /// Completed projection batches, retained for the life of this project's
+    /// worker owner rather than for one request (#838).
+    ///
+    /// Every activation request re-runs the full native qualification, and
+    /// clean projection of the packaged corpus is the overwhelming majority of
+    /// its wall clock. The payload is immutable: canonical vectors for an
+    /// exact composed embedding input under an exact admitted projection
+    /// identity, which pins the model, tokenizer, runtime build, tensor shape,
+    /// chunker revision and privacy partition. Nothing request-scoped is
+    /// retained here -- cancellation, leases, query factories and publication
+    /// bindings are all rebuilt per request -- and the cache is byte-bounded
+    /// and released on shutdown.
+    projection_batch_store: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchStoreV1>,
 }
 
 impl Default for DaemonSemanticEvaluationWorkerOwnerV1 {
@@ -639,7 +652,19 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
         Self {
             workers: Mutex::new(SemanticEvaluationWorkersV1::default()),
             scheduler_admission,
+            projection_batch_store:
+                tracedecay_semantic::SemanticEvaluationProjectionBatchStoreV1::new(),
         }
+    }
+
+    /// One request's handle on the daemon-lifetime projection batch store
+    /// every qualification request for this project shares. The handle pins
+    /// the batches its request touches until the request drops it.
+    #[must_use]
+    pub fn projection_batch_cache(
+        &self,
+    ) -> Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1> {
+        Arc::new(self.projection_batch_store.request_cache())
     }
 
     #[hotpath::measure(label = "daemon.semantic.evaluation.execute", future = true)]
@@ -806,6 +831,10 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
                 .workers
                 .extend(pending);
         }
+        // Shutdown returns the retained projection bytes even when a worker
+        // outlived the deadline: the cache holds no request state, so nothing
+        // still running depends on an entry surviving.
+        self.projection_batch_store.release();
         SemanticEvaluationShutdownReceiptV1 {
             joined_workers,
             failed_workers,
@@ -876,12 +905,20 @@ pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
 }
 
 impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
+    /// Bind one request to the daemon-lifetime projection batch cache.
+    ///
+    /// Only the immutable projection payload is shared. The prepared native
+    /// generations, incremental projection measurements and projection-case
+    /// measurements below stay request-scoped: they carry this request's
+    /// cancellation authority and query factory, or they are this request's
+    /// measurement results.
     pub fn new(
         project_root: PathBuf,
         scope: ResolvedScope,
         scheduler: CodeIndexSchedulerRegistryV1,
         candidate: SemanticEvaluationProfileCandidateV1,
         control: Arc<DaemonSemanticEvaluationControlV1>,
+        projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
     ) -> Self {
         Self {
             project_root,
@@ -889,9 +926,7 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
             scheduler,
             candidate,
             control,
-            projection_batch_cache: Arc::new(
-                tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1::new(),
-            ),
+            projection_batch_cache,
             prepared_native: Arc::new(Mutex::new(BTreeMap::new())),
             projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
             incremental_projections: Arc::new(Mutex::new(BTreeMap::new())),
