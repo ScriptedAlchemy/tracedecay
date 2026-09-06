@@ -49,26 +49,27 @@ async fn files_for_session(
         .expect("files response")
 }
 
-async fn wait_for_exact_ready_graph_serving_generation(
+async fn wait_for_exact_interactive_graph_ready(
     engine: &DaemonEngine,
     scope: &tracedecay_application::ResolvedScope,
 ) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if engine
+            if let Some(latest) = engine
                 .invocation
                 .code_index_schedulers
                 .latest_complete_ready_for_scope(scope)
                 .await
-                .is_some()
             {
-                break;
+                if latest.generation().interactive_graph_store().is_ok() {
+                    break;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("exact ready graph serving generation timed out");
+    .expect("exact interactive graph readiness timed out");
 }
 
 #[cfg(unix)]
@@ -282,9 +283,9 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     let primary_session_id = "session.primary-route-follow-up";
     notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
     // `project_server` may publish `code_index=warming`; require the exact
-    // route's ready graph-serving generation so this assertion tests routing
-    // rather than activation timing.
-    wait_for_exact_ready_graph_serving_generation(&engine, &primary_scope).await;
+    // route's interactive graph to be ready so this assertion tests routing
+    // rather than catalog activation timing.
+    wait_for_exact_interactive_graph_ready(&engine, &primary_scope).await;
     let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
     assert!(
         primary_listing.error.is_none(),
