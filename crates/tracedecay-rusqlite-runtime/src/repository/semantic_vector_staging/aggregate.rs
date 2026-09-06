@@ -8,6 +8,10 @@ use super::SemanticVectorStagingExactSqlStorage;
 use super::published::*;
 use super::support::*;
 
+/// Reader-acquire slice for the published-generation lookup, matching the
+/// other snapshot reads in this repository.
+const PUBLISHED_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
+
 impl SemanticVectorPublicationAuthority for SemanticVectorStagingExactSqlStorage {
     fn binding(&self) -> &StoreRuntimeBindingV1 {
         self.handle.binding()
@@ -22,21 +26,24 @@ impl SemanticVectorPublicationAuthority for SemanticVectorStagingExactSqlStorage
         key.validate()?;
         ensure_live(context)?;
         ensure_projection_binding(&self.handle, &key.projection)?;
-        let tx = begin(&self.handle)?;
-        let Some(stage) = published_stage_for(&tx, key)? else {
-            rollback(tx)?;
+        // This lookup only reads: every path below used to end in `rollback`.
+        // Taking the exclusive writer lane for it made a read on the semantic
+        // (last) lifecycle layer block project open (the first) on the shared
+        // project store, so read it from a reader snapshot like every other
+        // read in this repository.
+        let snapshot = begin_read_snapshot(&self.handle, context, PUBLISHED_READ_WAIT)?;
+        let Some(stage) = published_stage_for(&snapshot, key)? else {
             return Ok(SemanticVectorPublishedGenerationLookup::Missing);
         };
         if stage.record.plan.semantic_generation_id != key.semantic_generation_id {
-            rollback(tx)?;
             return Err(corrupt(
                 "published semantic vector generation normalized identity mismatch",
             ));
         }
-        validate_stage_history(&tx, &stage, context)?;
-        let verified_head = published_stage_evidence(&tx, &stage)?;
+        validate_stage_history(&snapshot, &stage, context)?;
+        let verified_head = published_stage_evidence_in_snapshot(&snapshot, &stage)?;
         let record = stage.record;
-        rollback(tx)?;
+        drop(snapshot);
         ensure_live(context)?;
         Ok(SemanticVectorPublishedGenerationLookup::Published {
             record: Box::new(record),
