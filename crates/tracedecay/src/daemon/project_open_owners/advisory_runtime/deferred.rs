@@ -30,6 +30,13 @@ pub(super) fn spawn(
     project_root: PathBuf,
     mut state: ProjectOpenDependentOwnerState,
 ) -> bool {
+    // Nothing user-facing may wait on a layer this route disables by contract.
+    // With no code index there is no generation to defer to, so the wait below
+    // has no terminal state of its own: name it here instead.
+    if super::super::code_index_disabled_for_scope(&invocation, &state.scope) {
+        log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
+        return false;
+    }
     owner.spawn_background_task(hotpath::future!(
         async move {
             let mut publications = invocation
