@@ -48,6 +48,7 @@ use super::canonical_json::{
     CanonicalArrayOrderV1, CanonicalPolicyV1, canonicalize_json_into, visit_json_strings,
     write_json_string,
 };
+use super::lexical_page_source::{SealedLexicalFilesV1, checkpoint};
 use super::sealed_codec::{
     PersistedFileGenerationArtifactsRefV1, PersistedFileGenerationArtifactsV1,
     SEALED_GENERATION_FORMAT_REVISION_V1, StreamingPersistedPublishedGenerationV1,
@@ -2107,41 +2108,137 @@ fn snapshot_file_keys<'a>(
     Ok(keys)
 }
 
+type LexicalSegmentReaderV1 =
+    dyn FnMut(&ManifestDigest, u64, &mut Vec<u8>) -> Result<(), CodeIndexProductionErrorV1> + Send;
+
+pub(super) struct PartitionedLexicalFileSourceV1 {
+    generation_id: CodeGenerationId,
+    descriptors: Vec<PartitionedFileSegmentDescriptorV1>,
+    read_segment: Box<LexicalSegmentReaderV1>,
+}
+
+impl std::fmt::Debug for PartitionedLexicalFileSourceV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PartitionedLexicalFileSourceV1")
+            .field("generation_id", &self.generation_id)
+            .field("file_count", &self.descriptors.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartitionedLexicalFileSourceV1 {
+    pub(super) fn len(&self) -> usize {
+        self.descriptors.len()
+    }
+
+    pub(super) fn maximum_file_bytes(&self) -> u64 {
+        self.descriptors
+            .iter()
+            .map(|descriptor| descriptor.segment_size_bytes)
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn retained_layout_bytes(&self) -> usize {
+        self.descriptors.iter().fold(
+            self.descriptors
+                .capacity()
+                .saturating_mul(std::mem::size_of::<PartitionedFileSegmentDescriptorV1>())
+                .saturating_add(self.generation_id.as_str().len()),
+            |bytes, descriptor| {
+                bytes
+                    .saturating_add(descriptor.segment_digest.as_str().len())
+                    .saturating_add(descriptor.file_occurrence_id.as_str().len())
+                    .saturating_add(
+                        descriptor
+                            .symbol_occurrences
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<SymbolOccurrenceId>()),
+                    )
+                    .saturating_add(
+                        descriptor
+                            .symbol_occurrences
+                            .iter()
+                            .map(|id| id.as_str().len())
+                            .sum::<usize>(),
+                    )
+            },
+        )
+    }
+
+    pub(super) fn read_window(
+        &mut self,
+        start: usize,
+        maximum_files: usize,
+        maximum_bytes: u64,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<Vec<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
+        let mut files = Vec::new();
+        let mut bytes = 0u64;
+        let mut segment = Vec::new();
+        let mut restored = Vec::new();
+        for descriptor in self.descriptors.get(start..).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed lexical file ordinal is unavailable".to_owned(),
+            )
+        })? {
+            if !files.is_empty()
+                && (files.len() >= maximum_files
+                    || bytes.saturating_add(descriptor.segment_size_bytes) > maximum_bytes)
+            {
+                break;
+            }
+            checkpoint(control)?;
+            segment.clear();
+            (self.read_segment)(
+                &descriptor.segment_digest,
+                descriptor.segment_size_bytes,
+                &mut segment,
+            )?;
+            checkpoint(control)?;
+            files.push(decode_file_segment(
+                descriptor,
+                &self.generation_id,
+                &segment,
+                &mut restored,
+            )?);
+            bytes = bytes.saturating_add(descriptor.segment_size_bytes);
+        }
+        drop(segment);
+        drop(restored);
+        if files.is_empty() {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed lexical file window is empty".to_owned(),
+            ));
+        }
+        restore_file_pages(files)
+    }
+}
+
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
     pub fn open_partitioned_sealed(
         reader: R,
         manifest_bytes: &[u8],
         source_state_digest: ManifestDigest,
-        mut read_segment: impl FnMut(
+        read_segment: impl FnMut(
             &ManifestDigest,
             u64,
             &mut Vec<u8>,
-        ) -> Result<(), CodeIndexProductionErrorV1>,
+        ) -> Result<(), CodeIndexProductionErrorV1>
+        + Send
+        + 'static,
         maximum_page_chunks: usize,
         maximum_page_bytes: usize,
     ) -> Result<Option<Self>, CodeIndexProductionErrorV1> {
         let Some(generation) = parse_partitioned_manifest(manifest_bytes)? else {
             return Ok(None);
         };
-        let mut files = Vec::with_capacity(generation.file_segments.len());
-        let mut segment = Vec::new();
-        let mut restored = Vec::new();
-        for descriptor in &generation.file_segments {
-            segment.clear();
-            read_segment(
-                &descriptor.segment_digest,
-                descriptor.segment_size_bytes,
-                &mut segment,
-            )?;
-            files.push(decode_file_segment(
-                descriptor,
-                &generation.manifest.generation_id,
-                &segment,
-                &mut restored,
-            )?);
-        }
-        drop(restored);
-        let files = restore_file_pages(files)?;
+        let files = SealedLexicalFilesV1::Partitioned(PartitionedLexicalFileSourceV1 {
+            generation_id: generation.manifest.generation_id.clone(),
+            descriptors: generation.file_segments,
+            read_segment: Box::new(read_segment),
+        });
         Self::open_partitioned_parts(
             reader,
             generation.manifest,

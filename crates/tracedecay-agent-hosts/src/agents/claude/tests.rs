@@ -454,8 +454,142 @@ fn uninstall_preserves_user_tracedecay_heading_after_block() {
         "the user's own section body must survive uninstall"
     );
     assert!(
-        !after.contains(CLAUDE_MD_MARKER),
+        !after.contains(CLAUDE_MD_SENTINELS.start),
         "the managed block itself must be removed"
+    );
+}
+
+/// The heading shipped releases through v0.1.0-beta.37 wrote as the block's
+/// identity, with the sub-heading those blocks owned.
+const SHIPPED_HEADING: &str = "## MANDATORY: No Explore Agents When Tracedecay Is Available";
+const SHIPPED_DISPLAY_HEADING: &str =
+    "## MANDATORY: No Explore Agents When TraceDecay Is Available";
+const SHIPPED_SUBHEADING: &str =
+    "## When you spawn an Explore agent in a tracedecay-enabled project";
+
+fn shipped_block(heading: &str) -> String {
+    format!(
+        "{heading}\n\n**NEVER use Agent(subagent_type=Explore).** No exceptions. No rationalizing.\n\n\
+         {SHIPPED_SUBHEADING}\n\nUse `tracedecay_context` as your ONLY exploration tool."
+    )
+}
+
+#[test]
+fn every_historical_claude_md_shape_converges_on_update_and_preserves_peers() {
+    let block = claude_md_rules_text();
+    let historical_shapes = [
+        ("shipped heading", shipped_block(SHIPPED_HEADING)),
+        (
+            "display-case heading",
+            shipped_block(SHIPPED_DISPLAY_HEADING),
+        ),
+        (
+            "codegraph-era heading",
+            "## IMPORTANT: No Explore Agents When Codegraph Is Available\n\nNever explore."
+                .to_string(),
+        ),
+    ];
+    for (shape, stale) in historical_shapes {
+        let root = tempfile::tempdir().unwrap();
+        let claude_md = root.path().join("CLAUDE.md");
+        let original =
+            format!("# Project\n\nkeep me\n\n{stale}\n\n## Using tracedecay in CI\n\nand me\n");
+        std::fs::write(&claude_md, &original).unwrap();
+
+        install_claude_md_rules(&claude_md).unwrap();
+
+        let updated = std::fs::read_to_string(&claude_md).unwrap();
+        assert_eq!(
+            updated,
+            format!("# Project\n\nkeep me\n\n{block}\n\n## Using tracedecay in CI\n\nand me\n"),
+            "{shape}: update must replace the whole owned block (including its owned \
+             sub-heading) in place and keep both peers"
+        );
+        assert!(
+            !updated.contains("NEVER") && !updated.contains("rationaliz"),
+            "{shape}: no historical forcing may survive the migration"
+        );
+
+        install_claude_md_rules(&claude_md).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&claude_md).unwrap(),
+            updated,
+            "{shape}: a current reinstall is idempotent"
+        );
+    }
+}
+
+#[test]
+fn every_historical_claude_md_shape_is_removed_on_uninstall() {
+    for stale in [
+        shipped_block(SHIPPED_HEADING),
+        shipped_block(SHIPPED_DISPLAY_HEADING),
+        "## IMPORTANT: No Explore Agents When Codegraph Is Available\n\nNever explore.".to_string(),
+        claude_md_rules_text(),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let claude_md = root.path().join("CLAUDE.md");
+        std::fs::write(
+            &claude_md,
+            format!("keep me\n\n{stale}\n\n## Using tracedecay in CI\n\nand me\n"),
+        )
+        .unwrap();
+
+        uninstall_claude_md_rules(&claude_md).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&claude_md).unwrap(),
+            "keep me\n\n## Using tracedecay in CI\n\nand me\n",
+            "uninstall must remove the owned block and only that block"
+        );
+    }
+}
+
+#[test]
+fn duplicate_and_mixed_claude_md_blocks_converge_deterministically() {
+    let block = claude_md_rules_text();
+    // The display-case block directly precedes the current one: a heading-marked
+    // historical block must stop at the current start sentinel rather than
+    // swallow it.
+    let mixed = format!(
+        "keep me\n\n{}\n\n## Operator section\n\nand me\n\n{}\n\n{block}\n\ntail peer\n",
+        shipped_block(SHIPPED_HEADING),
+        shipped_block(SHIPPED_DISPLAY_HEADING),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let claude_md = root.path().join("CLAUDE.md");
+    std::fs::write(&claude_md, &mixed).unwrap();
+
+    install_claude_md_rules(&claude_md).unwrap();
+
+    let converged = std::fs::read_to_string(&claude_md).unwrap();
+    assert_eq!(
+        converged,
+        format!("keep me\n\n{block}\n\n## Operator section\n\nand me\n\ntail peer\n"),
+        "mixed markers must collapse onto one current block at the first owned position"
+    );
+    assert_eq!(owned_claude_md_ranges(&converged).len(), 1);
+
+    std::fs::write(&claude_md, &mixed).unwrap();
+    uninstall_claude_md_rules(&claude_md).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&claude_md).unwrap(),
+        "keep me\n\n## Operator section\n\nand me\n\ntail peer\n",
+        "uninstall must remove every owned block, historical and current"
+    );
+}
+
+#[test]
+fn claude_md_ownership_is_the_sentinel_not_prose() {
+    let prose = "Use tracedecay MCP tools and never spawn Explore agents.\n";
+    assert!(
+        owned_claude_md_ranges(prose).is_empty(),
+        "prose about tracedecay without a sentinel or shipped heading is operator text"
+    );
+    let dangling = format!("{}\n\nno end sentinel\n", CLAUDE_MD_SENTINELS.start);
+    assert!(
+        owned_claude_md_ranges(&dangling).is_empty(),
+        "a start sentinel without its end is not an owned block"
     );
 }
 
@@ -473,14 +607,18 @@ fn install_claude_md_rules_surfaces_lock_failures() {
 fn claude_prompt_mutation_cases() -> Vec<(&'static str, Option<Vec<u8>>)> {
     vec![
         (
-            "managed-block refresh",
+            "current-sentinel refresh",
             Some(
                 format!(
-                    "operator rules\n\n{CLAUDE_MD_MARKER}\n\nstale rules\n\n\
-                     {CLAUDE_MD_OWNED_SUBHEADING}\n\nstale explore rules\n"
+                    "operator rules\n\n{}\n",
+                    CLAUDE_MD_SENTINELS.render("## Older heading\n\nstale rules")
                 )
                 .into_bytes(),
             ),
+        ),
+        (
+            "shipped-heading refresh",
+            Some(format!("operator rules\n\n{}\n", shipped_block(SHIPPED_HEADING)).into_bytes()),
         ),
         ("existing append", Some(b"operator rules\n".to_vec())),
         ("missing create", None),
