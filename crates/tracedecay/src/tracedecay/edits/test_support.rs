@@ -11,9 +11,9 @@ use tempfile::{TempDir, tempdir};
 use tracedecay_application::{
     ApplicationOperation, AuthorityReceipt, CancellationContext, CancellationSignal,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectTermination, IdempotencyKey,
-    PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
-    SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
+    OperationTermination, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext,
+    RequestId, ResolvedScope, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
+    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
     source_edit_reconciliation_operation, source_edit_rollback_operation,
 };
 use tracedecay_code_index::graph_projection::{
@@ -483,6 +483,28 @@ pub(super) struct EffectUnknownFixture {
     pub(super) result: SourceEditApplicationResult,
 }
 
+fn assert_effect_unknown_boundary(result: &SourceEditApplicationResult) {
+    let effect = result.effect.as_ref();
+    let reached_boundary = matches!(&result.outcome, SourceEditOutcome::EffectUnknown { .. })
+        && effect.is_some_and(|effect| {
+            effect.execution.termination == OperationTermination::EffectUnknown
+                && effect.reconciliation == ReconciliationState::Pending
+                && effect.receipt.outcome == EffectTermination::EffectUnknown
+                && effect.receipt.committed_state.is_none()
+        });
+
+    assert!(
+        reached_boundary,
+        "source-edit fault injection must stop after durable intent and before settlement; \
+         actual outcome: {:#?}; execution phase: {:#?}; reconciliation phase: {:#?}; \
+         committed receipt: {:#?}",
+        result.outcome,
+        effect.map(|effect| effect.execution.termination),
+        effect.map(|effect| effect.reconciliation),
+        effect.map(|effect| &effect.receipt),
+    );
+}
+
 const MOVE_SOURCE_PREIMAGE: &[u8] = b"pub fn keep() {}\n\npub fn moved() {}\n";
 const MOVE_SOURCE_POSTIMAGE: &[u8] = b"pub fn keep() {}\n";
 const MOVE_DESTINATION_PREIMAGE: &[u8] = b"pub fn existing() {}\n";
@@ -600,10 +622,30 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     let authorization = fixture_authorization(&request);
     let operation = source_edit_operation(request.edit.kind()).unwrap();
 
+    // Inject the publication fault the platform actually honours. A read-only
+    // parent refuses the source-edit temporary file on Unix; Windows ignores
+    // the read-only attribute on directories, so hold the candidate open
+    // without `FILE_SHARE_DELETE` instead. The edit can still read it (the
+    // pre-effect state digest and the pre-rename comparison succeed), but the
+    // atomic rename over it is refused, which is the same crossed boundary.
+    #[cfg(not(windows))]
     let original_permissions = fs::metadata(&locked_directory).unwrap().permissions();
-    let mut read_only_permissions = original_permissions.clone();
-    read_only_permissions.set_readonly(true);
-    fs::set_permissions(&locked_directory, read_only_permissions).unwrap();
+    #[cfg(not(windows))]
+    {
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        fs::set_permissions(&locked_directory, read_only_permissions).unwrap();
+    }
+    #[cfg(windows)]
+    let held_candidate = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(locked_directory.join("a.rs"))
+            .unwrap()
+    };
     let execution = execute_source_edit(
         &graph,
         &code_graph,
@@ -612,17 +654,13 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         &authorization,
     )
     .await;
+    #[cfg(not(windows))]
     fs::set_permissions(&locked_directory, original_permissions).unwrap();
+    #[cfg(windows)]
+    drop(held_candidate);
     let result = execution.unwrap();
 
-    assert!(matches!(
-        result.outcome,
-        SourceEditOutcome::EffectUnknown { .. }
-    ));
-    assert_eq!(
-        result.effect.as_ref().unwrap().receipt.outcome,
-        EffectTermination::EffectUnknown
-    );
+    assert_effect_unknown_boundary(&result);
     let fixture = EffectUnknownFixture {
         project,
         graph,
