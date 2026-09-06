@@ -60,10 +60,9 @@ async fn wait_for_exact_interactive_graph_ready(
                 .code_index_schedulers
                 .latest_complete_ready_for_scope(scope)
                 .await
+                && latest.interactive_graph_store().is_ok()
             {
-                if latest.interactive_graph_store().is_ok() {
-                    break;
-                }
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
