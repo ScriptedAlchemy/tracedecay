@@ -391,6 +391,7 @@ impl DiagnosticBroker {
         Ok(Some(StdioLspSemanticAuthority::from_shared_client(
             command,
             adapter.args,
+            adapter.language,
             workspace_root,
             root_uri,
             timeouts,
