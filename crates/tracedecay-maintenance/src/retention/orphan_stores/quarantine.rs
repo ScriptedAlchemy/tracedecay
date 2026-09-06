@@ -294,6 +294,12 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         StoreContentFence::Missing | StoreContentFence::Unverifiable => None,
     };
     let capability = open_store_directory_nofollow(profile_root, data_root)?;
+    // The leaf handle only proved the store is present and readable. The
+    // content proof re-opens the leaf under its quarantine name, so release
+    // the probe before the rename: cap-std opens directories without
+    // `FILE_SHARE_DELETE`, and Windows refuses to rename a directory while
+    // such a handle is live.
+    drop(capability.root);
     let original_name = capability
         .leaf_name
         .to_str()
@@ -339,10 +345,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     )
     .map_err(CollectionFailureKind::RemoveFailed)?;
 
-    // cap_std does not open directories with FILE_SHARE_DELETE on Windows, so
-    // release our leaf handle before rename. The moved bytes are reopened and
-    // revalidated against the expected identity after the rename.
-    drop(capability.root);
     if let Err(error) = rename_noreplace(
         &capability.parent,
         &capability.leaf_name,
@@ -472,6 +474,9 @@ pub(super) fn quarantine_store_for_verified_collection(
     )
 }
 
+/// Renames the quarantined leaf back to its original name. Every handle on
+/// the leaf must already be closed (see the probe release before the
+/// forward rename); the callers drop `moved_root` before arriving here.
 fn recover_original_name(
     parent: Dir,
     original_name: OsString,

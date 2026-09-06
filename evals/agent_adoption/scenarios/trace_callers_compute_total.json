@@ -20,25 +20,16 @@
       "tracedecay_body",
       "tracedecay_grep",
       "Read"
-    ],
-    "forbidden_first": [
-      "Grep",
-      "Glob"
-    ],
-    "forbidden_bash": [
-      "grep",
-      "rg ",
-      "rg\t",
-      "find ",
-      "cat ",
-      "sed ",
-      "awk ",
-      "ack "
     ]
   },
   "ground_truth": [
     "place_order"
   ],
   "max_tool_calls": 5,
-  "notes": "Grep misses nothing here but call-graph is the intended tool; place_order is the only caller."
+  "notes": "Grep misses nothing here but call-graph is the intended tool; place_order is the only caller.",
+  "expected_skill": "tracing-functions",
+  "allowed_skills": [
+    "tracing-functions"
+  ],
+  "max_tracedecay_calls": 5
 }
