@@ -519,6 +519,23 @@ impl ProjectContextScoutDurableStoreV1 {
         Some(outcome)
     }
 
+    /// The ready page `startup_inner` answers from an already-decoded state.
+    fn startup_page(
+        state: &StoredContextScoutStateV1,
+        limit: usize,
+    ) -> ContextScoutDurableStartupOutcomeV1 {
+        let mut entries = state
+            .entries
+            .iter()
+            .filter(|stored| stored.lease.is_none())
+            .map(|stored| stored.entry.clone())
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| (entry.work.address, entry.work.generation));
+        let truncated = entries.len() > limit;
+        entries.truncate(limit);
+        ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated }
+    }
+
     async fn startup_inner(
         &self,
         now: UtcMicros,
@@ -527,21 +544,45 @@ impl ProjectContextScoutDurableStoreV1 {
         if now.0 <= 0 || limit == 0 || limit > MAX_SCOUT_ACTIVE_ADDRESSES {
             return ContextScoutDurableStartupOutcomeV1::Unavailable;
         }
+        // Startup is a read that *may* need to requeue expired claims. Asking
+        // for the exclusive writer lane before knowing that made project open
+        // depend on it unconditionally: a concurrently opening sibling route
+        // holds this project's single writer, so the lane arrives late or the
+        // idle lease expires under it, and the read-shaped startup reports
+        // `Unavailable` — a durable-state verdict — for lane contention.
+        // Project open then refuses a route whose durable state is intact.
+        // Decode through the read path first and answer from it whenever the
+        // state already reconciles; the atomic write below stays exactly as it
+        // was for the case that genuinely mutates.
+        if let Some(state) = self.load_state().await {
+            let mut reconciled = state.clone();
+            reconciled.refresh_delivery_provenance();
+            reconciled.recover_expired_claims(now);
+            if reconciled == state {
+                return Self::startup_page(&state, limit);
+            }
+        }
         self.update_state("start Context Scout durable store", |state| {
             state.recover_expired_claims(now);
-            let mut entries = state
-                .entries
-                .iter()
-                .filter(|stored| stored.lease.is_none())
-                .map(|stored| stored.entry.clone())
-                .collect::<Vec<_>>();
-            entries.sort_by_key(|entry| (entry.work.address, entry.work.generation));
-            let truncated = entries.len() > limit;
-            entries.truncate(limit);
-            ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated }
+            Self::startup_page(state, limit)
         })
         .await
         .unwrap_or(ContextScoutDurableStartupOutcomeV1::Unavailable)
+    }
+
+    /// Decodes the durable state without taking the writer lane. `None` means
+    /// "read it under the write path instead" — an unreadable, oversized, or
+    /// invalid record is not something this read may decide alone.
+    async fn load_state(&self) -> Option<StoredContextScoutStateV1> {
+        let encoded = self.database.get_metadata(STORE_KEY_V1).await.ok()?;
+        let state = match encoded {
+            Some(encoded) if encoded.len() <= MAX_STORED_STATE_BYTES_V1 => {
+                serde_json::from_str::<StoredContextScoutStateV1>(&encoded).ok()?
+            }
+            Some(_) => return None,
+            None => StoredContextScoutStateV1::new(self.project_id),
+        };
+        state.validate(self.project_id).then_some(state)
     }
 
     #[hotpath::measure(
