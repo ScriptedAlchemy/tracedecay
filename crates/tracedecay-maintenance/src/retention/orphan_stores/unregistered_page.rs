@@ -9,7 +9,7 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 
 use super::fence::{capture_store_content_fence_controlled, open_store_directory_nofollow};
 use super::quarantine::{
-    QuarantineRecoveryOutcome, quarantined_project_id, recover_named_store_quarantine,
+    QuarantineRecoveryOutcome, quarantine_recovery_entry, recover_named_store_quarantine,
 };
 use super::{
     CollectionCompletionV1, CollectionControl, CollectionFailure, CollectionFailureKind,
@@ -307,6 +307,9 @@ async fn census_unregistered_project_dirs_page(
             continue;
         };
         if recover_interrupted_quarantines {
+            if recovered_project_ids.contains(&project_id) {
+                continue;
+            }
             let data_root = projects_dir.join(&project_id);
             let record_recovery = match recover_named_store_quarantine(
                 profile_root,
@@ -314,6 +317,18 @@ async fn census_unregistered_project_dirs_page(
                 std::ffi::OsStr::new(&quarantine_name),
                 &projects_dir,
             ) {
+                Ok(Some(QuarantineRecoveryOutcome::Removed {
+                    journal_failure, ..
+                })) => {
+                    recovered_project_ids.insert(project_id.clone());
+                    if let Some(failure) = journal_failure {
+                        recovery_outcome.errors.push(CollectionFailure {
+                            store_id: project_id.clone(),
+                            kind: CollectionFailureKind::RemoveFailed(failure),
+                        });
+                    }
+                    None
+                }
                 Ok(Some(QuarantineRecoveryOutcome::Restored {
                     restored_path,
                     failure,
@@ -332,12 +347,13 @@ async fn census_unregistered_project_dirs_page(
                 }
                 Ok(Some(QuarantineRecoveryOutcome::Retained {
                     quarantine_path,
+                    actual_path,
                     failure,
                 })) => {
                     recovered_project_ids.insert(project_id.clone());
                     Some((
                         quarantine_path.clone(),
-                        quarantine_path,
+                        actual_path,
                         CollectionRecoveryAction::RetainedForRecovery,
                         failure,
                     ))
@@ -484,10 +500,10 @@ pub(in crate::retention) fn read_project_directory_page(
     };
     let entries = names
         .into_iter()
-        .map(|name| match quarantined_project_id(&name) {
-            Some(project_id) => ProjectDirectoryWorkV1::Quarantine {
+        .map(|name| match quarantine_recovery_entry(&name) {
+            Some((project_id, quarantine_name)) => ProjectDirectoryWorkV1::Quarantine {
                 project_id,
-                quarantine_name: name,
+                quarantine_name,
             },
             None => ProjectDirectoryWorkV1::Project(name),
         })
@@ -503,7 +519,7 @@ pub(in crate::retention) fn read_project_directory_page(
 /// filtered before selection, so garbage entries never consume a page slot and
 /// never stall the cursor.
 fn is_project_directory_candidate(name: &str) -> bool {
-    quarantined_project_id(name).is_some()
+    quarantine_recovery_entry(name).is_some()
         || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 
