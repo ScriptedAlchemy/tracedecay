@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
+use tracedecay_runtime_core::path_safety::{plain_host_path, same_canonical_path};
+
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tracedecay_usecases::feedback::FeedbackCycleRuntime;
 use tracedecay_usecases::primitives::PrimitiveProjectRuntime;
@@ -134,11 +136,30 @@ impl RecoveryCancelProbe {
     }
 }
 
+/// Publication stage of one project's registered runtime owners.
+///
+/// Request admission can succeed as soon as any registry entry exists. The
+/// stage distinguishes a still-mounting owner from a finished publication
+/// that will never grow the missing slot, so a permanent composition error
+/// is not reported as endless retryable pre-admission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectRuntimePublicationStateV1 {
+    /// Owner registration is still in progress, or no explicit terminal has
+    /// been recorded yet.
+    #[default]
+    Warming,
+    /// Mandatory owners published successfully.
+    Ready,
+    /// Project-open publication failed. Missing owners stay missing.
+    Failed,
+}
+
 /// Everything one canonical project's daemon runtime owns.
 ///
 /// A slot is `None` until that component is registered.
 #[derive(Default)]
 pub struct ProjectRuntime {
+    publication: ProjectRuntimePublicationStateV1,
     callable_code: Option<RegisteredCallableCodeRuntime>,
     feedback: Option<RegisteredFeedbackRuntime>,
     advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
@@ -240,6 +261,16 @@ impl ProjectRuntime {
                     false
                 }
             }
+    }
+
+    /// Keep a Failed publication visible after reservations drain.
+    ///
+    /// An empty Failed slot is the typed terminal for a composition error that
+    /// never installed owners. Dropping it would make the next request look
+    /// like a missing runtime again instead of a finished failure.
+    fn retain_after_reservation_release(&self) -> bool {
+        self.has_components()
+            || matches!(self.publication, ProjectRuntimePublicationStateV1::Failed)
     }
 }
 
@@ -715,11 +746,9 @@ impl Clone for ProjectRuntimeRequestLeaseV1 {
 impl ProjectRuntimeRequestLeaseV1 {
     pub fn covers(&self, registry: &ProjectRuntimeRegistryV1, project_root: &Path) -> bool {
         Arc::ptr_eq(&self.inner.registry.root_fences, &registry.root_fences)
-            && (self.inner.roots.contains(project_root)
-                || project_root
-                    .canonicalize()
-                    .ok()
-                    .is_some_and(|canonical| self.inner.roots.contains(&canonical)))
+            && self.inner.roots.iter().any(|root| {
+                request_root_matches(root, project_root, self.inner.canonical_root.as_deref())
+            })
     }
 
     /// Prefer the canonicalize result stored when this lease was admitted.
@@ -793,7 +822,8 @@ impl ProjectRuntimeReservationLease {
                 .type_ids()
                 .any(|reserved| reserved == *type_id)
         });
-        let remove_project = runtime.reservations.is_empty() && !runtime.has_components();
+        let remove_project =
+            runtime.reservations.is_empty() && !runtime.retain_after_reservation_release();
         if remove_project {
             runtimes.remove(&self.project_root);
         }
@@ -821,7 +851,8 @@ impl ProjectRuntimeReservationLease {
             runtime
                 .reservations
                 .retain(|type_id| !reservation.type_ids().any(|reserved| reserved == *type_id));
-            let remove_project = runtime.reservations.is_empty() && !runtime.has_components();
+            let remove_project =
+                runtime.reservations.is_empty() && !runtime.retain_after_reservation_release();
             if remove_project {
                 runtimes.remove(project_root);
             }
@@ -920,7 +951,8 @@ impl ProjectRuntimeBuildReservationLeaseV1 {
         {
             runtime.registration_builds.remove(&type_id);
             runtime.reservations.retain(|reserved| *reserved != type_id);
-            remove_project = runtime.reservations.is_empty() && !runtime.has_components();
+            remove_project =
+                runtime.reservations.is_empty() && !runtime.retain_after_reservation_release();
         }
         if remove_project {
             runtimes.remove(project_root);
@@ -1256,8 +1288,44 @@ impl ProjectRuntimeRegistryV1 {
         C: ProjectRuntimeComponent,
         F: FnOnce(&C) -> T,
     {
+        let canonical = project_root.canonicalize().ok();
         let runtimes = self.lock_runtimes();
-        runtimes.get(project_root).and_then(C::peek).map(read)
+        runtime_for_lookup(&runtimes, project_root, canonical.as_deref())
+            .and_then(C::peek)
+            .map(read)
+    }
+
+    /// Publication stage of the runtime admitted for this request spelling.
+    pub fn publication_state(
+        &self,
+        project_root: &Path,
+    ) -> Option<ProjectRuntimePublicationStateV1> {
+        let canonical = project_root.canonicalize().ok();
+        let runtimes = self.lock_runtimes();
+        runtime_for_lookup(&runtimes, project_root, canonical.as_deref())
+            .map(|runtime| runtime.publication)
+    }
+
+    /// Record that mandatory owner publication failed for this project.
+    ///
+    /// Creates the registry entry when project-open failed before any owner
+    /// registered, so a later admitted request can report a terminal failure
+    /// instead of "still mounting".
+    pub fn mark_publication_failed(&self, project_root: &Path) {
+        let canonical = project_root.canonicalize().ok();
+        let mut runtimes = self.lock_runtimes();
+        let key = resolved_runtime_key(&runtimes, project_root, canonical.as_deref())
+            .unwrap_or_else(|| project_root.to_path_buf());
+        runtimes.entry(key).or_default().publication = ProjectRuntimePublicationStateV1::Failed;
+    }
+
+    /// Record that mandatory owners published for this project.
+    pub fn mark_publication_ready(&self, project_root: &Path) {
+        let canonical = project_root.canonicalize().ok();
+        let mut runtimes = self.lock_runtimes();
+        if let Some(key) = resolved_runtime_key(&runtimes, project_root, canonical.as_deref()) {
+            runtimes.entry(key).or_default().publication = ProjectRuntimePublicationStateV1::Ready;
+        }
     }
 
     /// Project equivalent authorities from linked roots onto one result.
@@ -1377,7 +1445,70 @@ impl ProjectRuntimeRegistryV1 {
             }
         }
     }
+}
 
+/// Request-path spellings that name one registered project root.
+///
+/// Admission already treats the handshake path and its canonicalize result as
+/// one project. Windows `Path::canonicalize` yields the `\\?\` verbatim form,
+/// so the ordinary request spelling and the registered key must both appear
+/// here or `plain_host_path` must collapse them.
+///
+/// This set is lexical only. Callers that have a canonicalize result pass it
+/// as `canonical_root` so matching does not touch the filesystem while the
+/// registry lock is held.
+fn candidate_request_roots(
+    project_root: &Path,
+    canonical_root: Option<&Path>,
+) -> BTreeSet<PathBuf> {
+    let mut roots = BTreeSet::from([project_root.to_path_buf(), plain_host_path(project_root)]);
+    if let Some(canonical_root) = canonical_root {
+        roots.insert(canonical_root.to_path_buf());
+        roots.insert(plain_host_path(canonical_root));
+    }
+    roots
+}
+
+fn request_root_matches(
+    registered: &Path,
+    project_root: &Path,
+    canonical_root: Option<&Path>,
+) -> bool {
+    let candidates = candidate_request_roots(project_root, canonical_root);
+    if candidates.contains(registered) || candidates.contains(&plain_host_path(registered)) {
+        return true;
+    }
+    same_canonical_path(registered, project_root)
+        || canonical_root
+            .is_some_and(|canonical_root| same_canonical_path(registered, canonical_root))
+}
+
+fn resolved_runtime_key(
+    runtimes: &BTreeMap<PathBuf, ProjectRuntime>,
+    project_root: &Path,
+    canonical_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidates = candidate_request_roots(project_root, canonical_root);
+    for key in &candidates {
+        if runtimes.contains_key(key) {
+            return Some(key.clone());
+        }
+    }
+    runtimes
+        .keys()
+        .find(|key| candidates.contains(*key) || candidates.contains(&plain_host_path(key)))
+        .cloned()
+}
+
+fn runtime_for_lookup<'a>(
+    runtimes: &'a BTreeMap<PathBuf, ProjectRuntime>,
+    project_root: &Path,
+    canonical_root: Option<&Path>,
+) -> Option<&'a ProjectRuntime> {
+    resolved_runtime_key(runtimes, project_root, canonical_root).and_then(|key| runtimes.get(&key))
+}
+
+impl ProjectRuntimeRegistryV1 {
     fn component_with_canonical_fallback<C>(
         runtimes: &BTreeMap<PathBuf, ProjectRuntime>,
         project_root: &Path,
@@ -1386,14 +1517,8 @@ impl ProjectRuntimeRegistryV1 {
     where
         C: ProjectRuntimeComponent + Clone,
     {
-        runtimes
-            .get(project_root)
+        runtime_for_lookup(runtimes, project_root, canonical_root)
             .and_then(C::peek)
-            .or_else(|| {
-                canonical_root
-                    .and_then(|root| runtimes.get(root))
-                    .and_then(C::peek)
-            })
             .cloned()
     }
 

@@ -1068,6 +1068,48 @@ async fn canonical_fallback_finds_a_component_without_an_alias_runtime() {
     );
 }
 
+/// Project-open registers owners under `Path::canonicalize()` (`\\?\C:\...` on
+/// Windows). Later storage-status / primitive lookups arrive with the ordinary
+/// handshake spelling. Admission already treats those as one project; `get`
+/// and `read` must resolve the same registered owner instead of answering
+/// "still mounting" forever.
+#[tokio::test]
+async fn get_and_read_resolve_an_owner_registered_under_a_windows_verbatim_spelling() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let registered = PathBuf::from(r"\\?\C:\Users\test\project");
+    let request = PathBuf::from(r"C:\Users\test\project");
+    registry.publish(registered, TestFirst(7)).await.unwrap();
+
+    assert_eq!(
+        registry.get::<TestFirst>(&request).await,
+        Some(TestFirst(7)),
+        "an ordinary Windows request spelling must reach the verbatim registered owner"
+    );
+    assert_eq!(
+        registry
+            .read::<TestFirst, _, _>(&request, |owner| owner.0)
+            .await,
+        Some(7),
+        "primitive-style read must use the same admitted-root resolution as get"
+    );
+    assert_eq!(
+        registry.publication_state(&request),
+        Some(ProjectRuntimePublicationStateV1::Warming),
+        "publication stage must resolve through the same admitted root as get"
+    );
+}
+
+#[tokio::test]
+async fn get_does_not_treat_a_different_project_as_an_equivalent_root() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    registry.publish(root("alpha"), TestFirst(1)).await.unwrap();
+
+    assert!(
+        registry.get::<TestFirst>(&root("beta")).await.is_none(),
+        "linked or foreign roots must not collapse onto another project's owner"
+    );
+}
+
 #[tokio::test]
 async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
     let registry = Arc::new(ProjectRuntimeRegistryV1::default());
