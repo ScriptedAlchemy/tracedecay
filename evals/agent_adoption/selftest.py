@@ -519,7 +519,23 @@ def test_skill_routing():
     check("routing: prose is not invocation", grade.invoked_skills(prose) == [])
 
 
+def test_transcript_base_repetitions():
+    check("reps: matrix basename without rep",
+          grade.parse_transcript_base("trace_callers__claude__opus__bare")
+          == ("trace_callers", "claude", "bare", "opus"))
+    check("reps: rep suffix carries no identity",
+          grade.parse_transcript_base("trace_callers__claude__opus__bare__r12")
+          == ("trace_callers", "claude", "bare", "opus"))
+    check("reps: rep suffix on full condition",
+          grade.parse_transcript_base("trace_callers__claude__opus__r3")
+          == ("trace_callers", "claude", "full", "opus"))
+    check("reps: legacy id__host keeps a trailing r-like host untouched",
+          grade.parse_transcript_base("routing_r1__claude")
+          == ("routing_r1", "claude", "full", ""))
+
+
 def main() -> int:
+    test_transcript_base_repetitions()
     test_skill_routing()
     check("lint: generated scenario id cannot escape artifacts",
           bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))
