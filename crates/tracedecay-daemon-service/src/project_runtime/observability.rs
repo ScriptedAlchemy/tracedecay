@@ -411,6 +411,31 @@ impl StoreObservabilityRegistryV1 {
     }
 }
 
+/// The settlement frontends that stamp `producer`'s exact provenance onto the
+/// observations they raise, over the store owner's one recorder and authority.
+fn settlement_frontends(
+    core: &StoreObservabilityCoreV1,
+    producer: &BoundedObservabilityProducerV1,
+) -> Result<
+    (
+        Arc<DeliverySettlementAuthorityV1>,
+        Arc<BoundedDeliverySettlementRecorderV1>,
+    ),
+    &'static str,
+> {
+    let emission_identity = producer.identity().clone();
+    Ok((
+        Arc::new(
+            core.delivery_settlement_authority
+                .alias_with_policy_identity(emission_identity.clone())?,
+        ),
+        Arc::new(
+            core.delivery_settlements
+                .alias_with_policy_identity(emission_identity)?,
+        ),
+    ))
+}
+
 /// One project root's alias onto its store's observability owners.
 pub struct RegisteredObservabilityProducerV1 {
     registry: StoreObservabilityRegistryV1,
@@ -431,15 +456,8 @@ impl RegisteredObservabilityProducerV1 {
         core: Arc<StoreObservabilityCoreV1>,
         producer: Arc<BoundedObservabilityProducerV1>,
     ) -> Result<Self, &'static str> {
-        let emission_identity = producer.identity().clone();
-        let delivery_settlement_authority = Arc::new(
-            core.delivery_settlement_authority
-                .alias_with_policy_identity(emission_identity.clone())?,
-        );
-        let delivery_settlements = Arc::new(
-            core.delivery_settlements
-                .alias_with_policy_identity(emission_identity)?,
-        );
+        let (delivery_settlement_authority, delivery_settlements) =
+            settlement_frontends(&core, &producer)?;
         Ok(Self {
             registry,
             release: Some(Arc::clone(&core)),
@@ -482,6 +500,40 @@ impl RegisteredObservabilityProducerV1 {
         same_registered_store_authority(&self.core.database, database)
             && identity.authorized_scope_ref == authorized_scope_ref
             && identity.producer_revision == producer_revision
+    }
+
+    /// Re-stamps this root's own provenance onto the frontends it hands out.
+    ///
+    /// Configuration and policy provenance are the mounting root's at its own
+    /// open time, not owner identity, so a same-root remount resolves the
+    /// store's current revisions and must stamp them. Only the frontends are
+    /// replaced: the store owner keeps its one queue, sequence, worker and
+    /// settlement recorder, and observations already admitted under the
+    /// previous revisions keep the provenance stamped at their admission.
+    pub(crate) fn restamp_provenance(
+        &mut self,
+        configuration_revision: &str,
+        policy_revision: &str,
+    ) -> Result<(), &'static str> {
+        let incumbent = self.producer.identity();
+        if incumbent.configuration_revision == configuration_revision
+            && incumbent.policy_revision == policy_revision
+        {
+            return Ok(());
+        }
+        let producer = Arc::new(self.core.producer.alias_with_policy_identity(
+            ObservabilityProducerIdentityV1 {
+                configuration_revision: configuration_revision.to_owned(),
+                policy_revision: policy_revision.to_owned(),
+                ..incumbent.clone()
+            },
+        )?);
+        let (delivery_settlement_authority, delivery_settlements) =
+            settlement_frontends(&self.core, &producer)?;
+        self.producer = producer;
+        self.delivery_settlement_authority = delivery_settlement_authority;
+        self.delivery_settlements = delivery_settlements;
+        Ok(())
     }
 
     /// Releases this alias; the last release drains and closes the store
