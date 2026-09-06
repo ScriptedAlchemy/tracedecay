@@ -11,8 +11,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.registered_schema_convergence.begin_shutdown();
     }
 
-    /// Joins semantic-vector blocking settlement and the registry's other
-    /// terminal task owners before retained graph runtimes may be closed.
+    /// Joins all registered graph blocking settlement, including semantic
+    /// vectors and Git evidence, before retained graph runtimes may be closed.
     #[hotpath::measure(label = "daemon.session_registry.shutdown_terminal", future = true)]
     pub async fn shutdown_terminal_tasks(&self) -> Result<(), String> {
         self.cancel_terminal_tasks();
