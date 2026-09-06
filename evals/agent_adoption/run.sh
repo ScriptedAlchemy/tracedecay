@@ -348,10 +348,13 @@ provision_variant() {
   if [[ -f "$d/hooks/hooks-claude.json" ]]; then
     sed -i "s#__TRACEDECAY_BIN__#$TD#g" "$d/hooks/hooks-claude.json"
   fi
+  # Plugin `commands/` are exposed to Claude as `tracedecay:*` skills too (the
+  # Skill tool launches them and their bodies name tracedecay tools), so a
+  # skill-free condition must strip them alongside `skills/`.
   case "$cond" in
     no-hints) rm -f "$d"/hooks/*.json ;;   # skills + mcp, no hooks
-    no-skills) rm -rf "$d/skills" ;;       # hooks + mcp, no skills
-    bare) rm -f "$d"/hooks/*.json; rm -rf "$d/skills" ;;
+    no-skills) rm -rf "$d/skills" "$d/commands" ;;       # hooks + mcp, no skills
+    bare) rm -f "$d"/hooks/*.json; rm -rf "$d/skills" "$d/commands" ;;
     cli-only) rm -f "$d"/.mcp.json "$d"/mcp.json "$d"/hooks/*.json ;;
   esac
 }
