@@ -60,7 +60,12 @@ fn session_review_hint_routes_exact_identity_to_the_daemon() {
             "status": "accepted",
         })]);
 
-        schedule_user_session_review("claude", Some("session-native-17")).await;
+        schedule_user_session_review(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            "claude",
+            Some("session-native-17"),
+        )
+        .await;
 
         assert_eq!(
             daemon.calls(),

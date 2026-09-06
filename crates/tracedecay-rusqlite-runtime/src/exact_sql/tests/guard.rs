@@ -6,7 +6,7 @@ fn queued_write_rechecks_authority_on_actor_dequeue() {
     let holder = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let allowed = Arc::new(AtomicBool::new(true));
     let transaction = holder.begin_immediate().unwrap();
-    let (reply, receive) = std::sync::mpsc::sync_channel(1);
+    let (reply, receive) = async_channel::bounded(1);
     assert!(
         holder
             .writer
@@ -25,9 +25,17 @@ fn queued_write_rechecks_authority_on_actor_dequeue() {
 
     allowed.store(false, Ordering::Release);
     transaction.rollback().unwrap();
-    let error = receive
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let error = runtime
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), receive.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        })
         .unwrap_err();
 
     assert!(matches!(error, ExactSqlError::AuthorityDenied(_)));

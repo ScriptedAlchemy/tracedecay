@@ -25,6 +25,7 @@ fn draft(id: &str, title: &str) -> ManagedSkillDraft {
         id: id.to_string(),
         title: title.to_string(),
         summary: format!("{title} summary"),
+        routing_description: format!("Use when {title} summary"),
         category: "workflow".to_string(),
         targets: default_managed_skill_targets(),
         body_markdown: format!("Use {title} when the workflow repeats."),
@@ -281,6 +282,7 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
             vec![SkillInstallTarget::Cursor],
         );
         legacy.summary = "a".repeat(1020);
+        legacy.routing_description = format!("Use when {}", "a".repeat(1015));
         create_managed_skill(&profile_root, legacy).await.unwrap();
 
         let summary =

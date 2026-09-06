@@ -66,7 +66,6 @@ pub mod tool_name;
 pub use tracedecay_automation_runtime as automation_runtime;
 
 pub use product_version::PRODUCT_VERSION;
-pub(crate) use tracedecay_session_memory::user_config;
 
 // Kernel shims. `tracedecay-runtime-core` owns the substrate these two
 // subsystems were extracted alongside; aliasing the kernel modules into this
@@ -74,12 +73,7 @@ pub(crate) use tracedecay_session_memory::user_config;
 // code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
 // do on the other side of the split.
 pub(crate) use tracedecay_domain::errors;
-pub(crate) use tracedecay_runtime_core::{branch, config, db, storage, worktree};
-
-/// Kernel-owned slice of the former root `tracedecay` façade module.
-pub(crate) mod tracedecay {
-    pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
-}
+pub(crate) use tracedecay_runtime_core::{config, db, storage};
 
 /// Registers the host-install surface automation used to call on `agents`.
 ///

@@ -273,7 +273,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         category: HintCategory::ExploreSubagent,
         key: "explore_subagent",
         label: "explore subagent",
-        skill: "using-tracedecay",
+        skill: "discovering-tracedecay",
         message: "For code research subagents, consider adding tracedecay MCP context before broad exploration.",
         context: "tracedecay_context can gather focused code context, while tracedecay_search, tracedecay_callers, and tracedecay_impact can answer common research questions without a broad scan.",
         expected_tools: &[
@@ -288,7 +288,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         category: HintCategory::SubagentStartContext,
         key: "subagent_start_context",
         label: "subagent start context",
-        skill: "using-tracedecay",
+        skill: "discovering-tracedecay",
         message: "For subagent handoff, include focused TraceDecay context instead of broad repo instructions.",
         context: "Use tracedecay_context, tracedecay_search, and tracedecay_impact to provide only the code graph slices the subagent needs; keep workflow depth in bundled skills.",
         expected_tools: &[

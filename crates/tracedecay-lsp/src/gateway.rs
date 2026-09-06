@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tracedecay_domain::ManifestDigest;
+use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, same_canonical_path};
 use url::Url;
 
 use crate::capabilities::{
@@ -80,7 +81,8 @@ impl AdmittedRoot {
                 Some((candidate_url, candidate_segments)),
             ) => {
                 admitted_url.host_str() == candidate_url.host_str()
-                    && admitted_segments == candidate_segments
+                    && (admitted_segments == candidate_segments
+                        || same_local_directory(&admitted_url, &candidate_url))
             }
             _ => false,
         }
@@ -185,6 +187,22 @@ pub fn strict_file_uri_path(uri: &str) -> Option<(Url, PathBuf)> {
         return None;
     }
     Some((url, path))
+}
+
+/// Whether two already-validated `file:` URIs name one directory on this
+/// host, whatever spelling each carries.
+///
+/// Daemon admission canonicalizes a root before binding it, so a client that
+/// addresses the same directory through an OS alias (macOS `/var` ->
+/// `/private/var`) or a worktree symlink presents different segments for the
+/// admitted root. Two URIs this host cannot convert to local paths never
+/// compare here; their identity stays the platform-independent segment
+/// comparison.
+fn same_local_directory(left: &Url, right: &Url) -> bool {
+    match (left.to_file_path(), right.to_file_path()) {
+        (Ok(left), Ok(right)) => same_canonical_path(&left, &right),
+        _ => false,
+    }
 }
 
 /// Validates a raw (pre-percent-decoded) URI path: rejects an empty path,
@@ -1165,27 +1183,32 @@ impl DocumentConfinement {
         if self.root_host.as_deref() != document_url.host_str() {
             return false;
         }
-        if document_segments.len() <= self.root_segments.len()
-            || !document_segments.starts_with(&self.root_segments)
-        {
-            return false;
-        }
-        // The lexical decision above is complete on its own; the canonical
-        // guard only applies when the root actually exists on this host, and
-        // then only to reject a symlink that escapes it.
+        // A root this host cannot resolve to a directory (a foreign drive or
+        // UNC shape) is contained lexically: the decoded segments are the only
+        // identity available and they are the same on every platform.
         let Some(canonical_root) = self.canonical_root.as_ref() else {
-            return true;
+            return document_segments.len() > self.root_segments.len()
+                && document_segments.starts_with(&self.root_segments);
         };
+        // Admission resolves filesystem aliases before binding this root.
+        // Apply the same identity rule to client document URIs, including an
+        // unsaved buffer whose existing parent is reached through an alias, so
+        // a symlink that escapes the root is refused and an alias of the root
+        // is admitted for the same reason.
         let Some((_, document_path)) = strict_file_uri_path(document_uri) else {
             return false;
         };
-        let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
-        else {
+        let Some(canonical_document) = canonicalize_existing_prefix(&document_path) else {
             return false;
         };
-        existing_ancestor
-            .canonicalize()
-            .is_ok_and(|canonical_ancestor| canonical_ancestor.strip_prefix(canonical_root).is_ok())
+        canonical_document
+            .strip_prefix(canonical_root)
+            .is_ok_and(|relative| {
+                !relative.as_os_str().is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
+            })
     }
 }
 
