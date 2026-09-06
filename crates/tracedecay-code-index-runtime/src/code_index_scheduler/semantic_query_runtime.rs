@@ -56,8 +56,16 @@ struct ConfiguredRerankAuthorityV1 {
 }
 
 impl SemanticQueryAuthorityV1 {
+    /// Bind a committed semantic activation to the exact query profile the
+    /// scope's fallback lanes execute.
+    ///
+    /// The serving query profile is supplied by the query authority that owns
+    /// it. It cannot be re-derived from the committed state: activation moves
+    /// the profile it displaced into the rollback slot, so the evaluated query
+    /// profile occupies neither slot once a second activation commits.
     pub fn from_committed(
         committed: CommittedRetrievalProfileStateV1,
+        query_profile_id: tracedecay_domain::FusionProfileId,
     ) -> Result<Self, SemanticQueryAuthorityErrorV1> {
         let activation = committed
             .current_activation
@@ -79,33 +87,6 @@ impl SemanticQueryAuthorityV1 {
         let rerank_policy = accepted.rerank().cloned();
         let rerank_pins = accepted.compatibility().rerank.clone();
         let profile_digest = accepted.profile_digest().clone();
-        let query_lanes = BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES);
-        let mut query_profiles = [
-            Some(committed.state.active()),
-            committed.state.rollback_profile(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|profile| {
-            profile
-                .profile()
-                .calibrations
-                .keys()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                == query_lanes
-                && profile
-                    .profile()
-                    .weights_micros
-                    .keys()
-                    .copied()
-                    .collect::<BTreeSet<_>>()
-                    == query_lanes
-        });
-        let query_profile_id = query_profiles
-            .next()
-            .map(|profile| profile.profile().profile_id.clone())
-            .ok_or(SemanticQueryAuthorityErrorV1::IncompatibleActivation)?;
         if activation.receipt.activated_generation != pins.vector_generation_id
             || pins.calibration.projection_key != *pins.projection.projection_key()
             || pins.calibration.vector_generation != pins.vector_generation_id
@@ -125,7 +106,6 @@ impl SemanticQueryAuthorityV1 {
                 policy.evaluation_result_anchor != accepted.profile().evaluation_result_anchor
             })
             || accepted.compatibility().semantic.as_ref() != Some(pins)
-            || query_profiles.next().is_some()
         {
             return Err(SemanticQueryAuthorityErrorV1::IncompatibleActivation);
         }
@@ -290,10 +270,20 @@ impl CodeIndexSchedulerRegistryV1 {
         if committed.scope != *scope {
             return Err(SemanticQueryAuthorityErrorV1::ScopeMismatch);
         }
-        let authority =
-            task::spawn_blocking(move || SemanticQueryAuthorityV1::from_committed(committed))
-                .await
-                .map_err(|error| SemanticQueryAuthorityErrorV1::Mount(error.to_string()))??;
+        // The semantic authority binds to the query profile this scope is
+        // actually serving, which only the mounted query authority knows.
+        let query_profile_id = self
+            .query_authority_for_scope(scope)
+            .await
+            .ok_or(SemanticQueryAuthorityErrorV1::Unavailable)?
+            .profile()
+            .profile_id
+            .clone();
+        let authority = task::spawn_blocking(move || {
+            SemanticQueryAuthorityV1::from_committed(committed, query_profile_id)
+        })
+        .await
+        .map_err(|error| SemanticQueryAuthorityErrorV1::Mount(error.to_string()))??;
         let authority = Arc::new(authority);
         self.mount_semantic_query_authority(project_root, scope, authority)
             .await
