@@ -2830,8 +2830,14 @@ pub fn vectors_serve_source(
     vectors: &PublishedVectorGenerationV1,
     serving: &CodeIndexPublishedGenerationV1,
 ) -> bool {
-    vectors.source_manifest_digest()
-        == semantic_source_manifest_digest(serving.projection().request())
+    let recorded = vectors.source_manifest_digest();
+    // Either digest identifies the same corpus: the one the code index carried
+    // on its own projection request, or the one a full replay recomputes for
+    // it. `prepare_restore_current` accepts exactly this pair, so a readiness
+    // gate that accepted only one of them would refuse compatible vectors.
+    recorded == semantic_source_manifest_digest(serving.projection().request())
+        || semantic_projection_request(serving, vectors.embedding_key(), None)
+            .is_ok_and(|replay| recorded == &replay.changes.manifest_digest)
 }
 
 #[derive(Clone, Copy)]
