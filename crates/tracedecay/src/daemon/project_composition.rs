@@ -1301,6 +1301,10 @@ async fn production_project_server_inner(
                 if let Some(mutation) = &core_source_edit_mutation {
                     mutation.mark_failed();
                 }
+                invocation
+                    .service
+                    .project_runtimes
+                    .mark_publication_failed(canonical_project_path);
                 if core_retained {
                     if let Some(failed_full_server) = failed_full_server {
                         failed_full_server.revoke_project_server_responses();
