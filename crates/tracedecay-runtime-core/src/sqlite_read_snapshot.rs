@@ -102,33 +102,6 @@ impl SnapshotDatabase {
         }
     }
 
-    /// Writes this frozen logical snapshot to one standalone `SQLite` file.
-    ///
-    /// The backup reads only the already-captured immutable/copy connection;
-    /// it never opens the live source authority.
-    #[hotpath::measure(label = "runtime_core.db.snapshot.backup")]
-    pub async fn backup_to(&self, destination: &Path) -> io::Result<()> {
-        let source = Arc::clone(&self.connection.connection);
-        let destination = destination.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let source = source
-                .lock()
-                .map_err(|_| io::Error::other("snapshot connection lock poisoned"))?;
-            let mut destination_connection = Connection::open_with_flags(
-                &destination,
-                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-            )
-            .map_err(io::Error::other)?;
-            let backup = rusqlite::backup::Backup::new(&source, &mut destination_connection)
-                .map_err(io::Error::other)?;
-            backup
-                .run_to_completion(128, Duration::from_millis(1), None)
-                .map_err(io::Error::other)
-        })
-        .await
-        .map_err(|error| io::Error::other(format!("snapshot backup task failed: {error}")))?
-    }
-
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
@@ -293,20 +266,8 @@ impl SnapshotSet {
         })
     }
 
-    pub fn validate_sources_unchanged(&self) -> io::Result<()> {
-        for database in self.databases.values() {
-            database.validate_source()?;
-        }
-        Ok(())
-    }
-
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn database_count(&self) -> usize {
-        self.databases.len()
     }
 }
 
@@ -368,16 +329,6 @@ struct FileState {
 #[cfg(any(test, feature = "test-helpers"))]
 pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture(&[path.to_path_buf()]).await?;
-    snapshots.databases.remove(path).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no frozen SQLite snapshot for '{}'", path.display()),
-        )
-    })
-}
-
-pub async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
-    let mut snapshots = SnapshotSet::capture_in(&[path.to_path_buf()], root).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,

@@ -664,23 +664,6 @@ impl ProductionSemanticRuntimeV1 {
         self.schedule_saved_generation_inner(generation, None)
     }
 
-    /// Build an evaluator-only exact-flat lane from the checked-in sanitized
-    /// corpus. The verified production artifact/runtime are reused, while the
-    /// resulting vectors remain process-local and cannot alter the project's
-    /// committed semantic activation.
-    pub fn prepare_evaluation_generation(
-        &self,
-        generation: &CodeIndexPublishedGenerationV1,
-        cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
-    ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
-        self.prepare_evaluation_generation_with_cache(
-            generation,
-            None,
-            Arc::new(SemanticEvaluationProjectionBatchCacheV1::new()),
-            cancellation,
-        )
-    }
-
     /// Mint pre-evaluation resource identity from the installed artifact and
     /// the configured execution ceiling. Artifact member lengths are observed
     /// facts; the remaining fields are admission bounds that the genuine

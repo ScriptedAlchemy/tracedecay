@@ -38,20 +38,6 @@ impl Database {
         self.query_scalar(operation, sql, ()).await
     }
 
-    /// Runs a bounded scalar blob inspection on the retained runtime.
-    #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn query_scalar_blob(&self, operation: &str, sql: &str) -> Result<Vec<u8>> {
-        self.query_scalar(operation, sql, ()).await
-    }
-
-    /// Runs a bounded scalar text inspection on the retained runtime.
-    #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn query_scalar_text(&self, operation: &str, sql: &str) -> Result<String> {
-        self.query_scalar(operation, sql, ()).await
-    }
-
     /// Runs a bounded scalar integer inspection with one text identity bound.
     #[doc(hidden)]
     #[hotpath::skip]

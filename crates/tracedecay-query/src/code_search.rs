@@ -115,8 +115,6 @@ pub mod lane_reason {
     pub const GENERATION_REBUILDING: &str = "generation_rebuilding";
     /// No complete code-index generation exists at all for this scope.
     pub const GENERATION_UNAVAILABLE: &str = "generation_unavailable";
-    /// The lane exists but this request was denied, cancelled, or timed out.
-    pub const REQUEST_TERMINATED: &str = "request_terminated";
     /// The authenticated fallback payload reports that this retriever could
     /// not serve the request.
     pub const RETRIEVER_UNAVAILABLE: &str = "retriever_unavailable";

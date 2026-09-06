@@ -353,16 +353,6 @@ impl GraphDb {
         Ok(verified)
     }
 
-    /// Discards every marker admitted at open, so the next activation of each
-    /// generation re-derives its digest from the stored rows.
-    ///
-    /// The explicit full re-verify hook. File identity standing in for content
-    /// is an OS-integrity assumption, and this is how an operator or a
-    /// scheduled audit drops it.
-    pub(crate) fn forget_verified_markers(&self) {
-        self.inner.markers.forget_admitted();
-    }
-
     #[hotpath::measure(label = "graph_db.generation.verify_existing", impl_type = "GraphDb")]
     pub(crate) fn verify_existing_generation(
         &self,

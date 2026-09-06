@@ -47,16 +47,6 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Discovers a worktree root without invoking Git.
-///
-/// Bounded and cancellable callers use this authority so discovery cannot
-/// escape their subprocess deadline through [`git_worktree_root`]'s
-/// command-line fallback.
-pub fn discover_git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    let repo = gix::discover(dir).ok()?;
-    realpath(repo.workdir()?)
-}
-
 /// Absolute, symlink-resolved path to the repository's git common directory.
 ///
 /// For a linked worktree this is the main checkout's `.git` directory, which is

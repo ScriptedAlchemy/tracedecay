@@ -311,12 +311,6 @@ impl FeedbackCycleRuntime {
         Arc::clone(&self.source_observations)
     }
 
-    /// Input for `ConcreteFeedbackLspSource` to share this cycle with
-    /// managed diagnostics and context projections.
-    pub fn context_projection_input(self: &Arc<Self>) -> Arc<dyn FeedbackCycleRuntimePort> {
-        self.clone()
-    }
-
     /// Runs exactly one bounded feedback cycle and returns its terminal,
     /// canonical result. It never schedules retries or follow-up work.
     #[hotpath::measure(label = "usecases.feedback.run_once", future = true)]

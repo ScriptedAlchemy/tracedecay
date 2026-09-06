@@ -171,15 +171,6 @@ impl ProfileRegistryMaintenanceRuntime {
         Ok(Self { profile_database })
     }
 
-    #[hotpath::measure(label = "daemon.profile_registry.list_projects", future = true)]
-    pub async fn registered_project_paths(
-        &self,
-    ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
-        self.profile_database
-            .try_list_code_project_paths(usize::MAX)
-            .await
-    }
-
     #[hotpath::measure(label = "daemon.profile_registry.classify_storage", future = true)]
     pub async fn classify_project_storage(
         &self,

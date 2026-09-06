@@ -64,10 +64,6 @@
 //!   `GraphDbError::Corrupt` on a preexisting store. That is the layer a
 //!   marker was never covering: the SHA-256 replay proof only ever ran *after*
 //!   the CRC had already passed.
-//! * **A deliberate re-verify path.** `GraphDb::forget_verified_markers`
-//!   discards the marker set so the next open re-derives every proof from the
-//!   rows. That is what a periodic or operator-triggered full re-verification
-//!   is built on.
 //!
 //! What a marker genuinely gives up is the *cryptographic* half against an
 //! adversary who can write to the store directory while preserving file
@@ -390,19 +386,6 @@ impl GenerationMarkers {
     /// admitted proofs for this open.
     pub(crate) fn mark_container_mutated(&self) {
         self.pristine.store(false, Ordering::Release);
-    }
-
-    /// Discards every admitted proof, forcing the next verification of each
-    /// generation to re-derive it from the stored rows.
-    ///
-    /// This is the explicit full re-verify hook: the OS-integrity assumption
-    /// that file identity stands in for content is exactly the assumption an
-    /// operator wants to be able to drop.
-    pub(crate) fn forget_admitted(&self) {
-        self.mark_container_mutated();
-        if let Ok(mut proven) = self.proven.lock() {
-            proven.clear();
-        }
     }
 
     /// Looks up a completed proof of `expected` for `locator`.

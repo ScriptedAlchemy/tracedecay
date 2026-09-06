@@ -574,26 +574,6 @@ impl GenerationGitJoinV1 {
         )
     }
 
-    /// Bind a typed Git diff and independently sourced graph, diagnostic, and
-    /// test evidence to one immutable generation.
-    pub fn join_with_context(
-        generation: &CodeGenerationManifestV1,
-        snapshot: &ValidatedCodeSnapshotV1,
-        diff: &GitDiffV1,
-        git_watermark: &GenerationGitWatermarkV1,
-        file_contents: &[GitFileContentIdentityV1],
-        context: &GenerationGitContextProvidersV1,
-    ) -> Result<Self, GenerationGitJoinErrorV1> {
-        Self::join_internal(
-            generation,
-            snapshot,
-            diff,
-            git_watermark,
-            file_contents,
-            Some(context),
-        )
-    }
-
     #[hotpath::measure(label = "code_index.git.join_diff")]
     fn join_internal(
         generation: &CodeGenerationManifestV1,

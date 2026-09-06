@@ -17,7 +17,9 @@ use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
 };
 
-use super::journey_test_support::{git, tool_payload};
+use super::journey_test_support::{
+    StageLedgerReportV1, git, record_evaluation_report, record_stage, timed_stage, tool_payload,
+};
 use super::*;
 
 const EVALUATED_PROFILE_ID: &str = "hybrid-conservative";
@@ -438,6 +440,7 @@ pub(super) async fn evaluate_native_profile(
             tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
         )
         .expect("mint a production semantic-evaluation request id");
+        let dispatched = std::time::Instant::now();
         let response = resources
             .invocation
             .service
@@ -463,6 +466,12 @@ pub(super) async fn evaluate_native_profile(
                 ),
             )
             .await;
+        record_stage(
+            "evaluate.dispatch(queue wait + execution)",
+            dispatched.elapsed(),
+            attempt + 1,
+            "dispatch attempt",
+        );
         match response.outcome {
             tracedecay_daemon_protocol::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
                 profile_digest,
@@ -471,6 +480,7 @@ pub(super) async fn evaluate_native_profile(
             } => {
                 let report: tracedecay_query::search_quality::DirectEvaluationReportV1 =
                     serde_json::from_value(report).expect("direct evaluation report wire");
+                record_evaluation_report("evaluate", &report);
                 assert_eq!(
                     report.status,
                     tracedecay_query::search_quality::DirectEvaluationStatusV1::Pass,
@@ -583,6 +593,7 @@ async fn activate_native_profile(
             tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
         )
         .expect("mint a production semantic-activation request id");
+        let dispatched = std::time::Instant::now();
         let response = resources
             .invocation
             .service
@@ -609,6 +620,12 @@ async fn activate_native_profile(
                 ),
             )
             .await;
+        record_stage(
+            "activate.dispatch(queue wait + evaluation + activation)",
+            dispatched.elapsed(),
+            attempt + 1,
+            "dispatch attempt",
+        );
         match response.outcome {
             tracedecay_daemon_protocol::DaemonInvocationOutcome::SemanticProfileActivated {
                 profile_digest,
@@ -924,6 +941,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         );
         return;
     };
+    // #838 attribution. Armed before every other binding so it is dropped last
+    // and still prints the stages the journey did reach when a later assertion
+    // panics.
+    let _stage_report = StageLedgerReportV1::arm("semantic activation journey");
     let _profile = crate::config::PinnedUserDataDir::new();
     let lifecycle_root =
         tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
@@ -933,9 +954,16 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     lifecycle
         .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select production semantic model");
+    let model_install = std::time::Instant::now();
     lifecycle
         .acquire_blocking_for_tests()
         .expect("install verified distribution fixture");
+    record_stage(
+        "model.verify_and_install",
+        model_install.elapsed(),
+        1,
+        "artifact",
+    );
     let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
 
     let isolation = tempfile::TempDir::new().expect("journey isolation");
@@ -949,12 +977,18 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     .expect("G1 source");
     let first_commit = commit(&project, "test: seed semantic generation one");
 
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
-        .await
-        .expect("production composition");
+    let harness = timed_stage(
+        "harness.open(daemon composition)",
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()]),
+    )
+    .await
+    .expect("production composition");
     let resources = harness.resources.as_ref().expect("live harness");
-    let (first_code_id, first_code, first_vector) =
-        wait_for_settled_semantic_generation(&harness, &project, None).await;
+    let (first_code_id, first_code, first_vector) = timed_stage(
+        "G1.index+embed+publish(settle)",
+        wait_for_settled_semantic_generation(&harness, &project, None),
+    )
+    .await;
     let graph = harness.server(&project).expect("project server").cg().await;
     assert!(
         graph
@@ -983,8 +1017,16 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
          of reporting a cause-free invalid runtime status: {before_activation}"
     );
 
-    let first_profile = activate_native_profile(&harness, &project).await;
-    let first_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    let first_profile = timed_stage(
+        "G1.activate(evaluate+calibrate+publish+activate)",
+        activate_native_profile(&harness, &project),
+    )
+    .await;
+    let first_runtime = timed_stage(
+        "G1.await_runtime_ready",
+        wait_for_semantic_runtime_ready(&harness, &project),
+    )
+    .await;
     assert_eq!(first_runtime["state"]["state"], "ready");
     assert_eq!(
         graph_bytes(&first_generation).await,
@@ -992,7 +1034,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         "composed evaluation and activation must not publish into the project graph"
     );
     assert_code_generation_unchanged(&harness, &project, &first_code_id).await;
-    let first_query = search(&harness, &project, true).await;
+    let first_query = timed_stage("G1.strict_query", search(&harness, &project, true)).await;
     assert_eq!(first_query["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(
         &first_query,
@@ -1017,8 +1059,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
             .await
     );
-    let (second_code_id, second_code, second_vector) =
-        wait_for_settled_semantic_generation(&harness, &project, Some(&first_code_id)).await;
+    let (second_code_id, second_code, second_vector) = timed_stage(
+        "G2.index+embed+publish(settle)",
+        wait_for_settled_semantic_generation(&harness, &project, Some(&first_code_id)),
+    )
+    .await;
     assert_ne!(first_vector.generation_id(), second_vector.generation_id());
     let second_graph = retain_graph(&harness, &project, &second_code).await;
     let generations = [
@@ -1034,13 +1079,18 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         ),
     ];
     let graph_before_second_evaluation = graph_bytes(&generations).await;
-    let second_profile = evaluate_native_profile(&harness, &project).await;
+    let second_profile = timed_stage(
+        "G2.evaluate(full native qualification)",
+        evaluate_native_profile(&harness, &project),
+    )
+    .await;
     assert_eq!(
         graph_bytes(&generations).await,
         graph_before_second_evaluation,
         "native reevaluation must not publish into the project graph"
     );
     let graph_before_activation = graph_bytes(&generations).await;
+    let second_activation = std::time::Instant::now();
     set_semantic_profile(
         &harness,
         &project,
@@ -1053,6 +1103,12 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     )
     .await;
     let second_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    record_stage(
+        "G2.activate_via_config(set+converge ready)",
+        second_activation.elapsed(),
+        1,
+        "activation",
+    );
     assert_eq!(
         second_runtime["state"]["receipt"]["activated_generation"],
         json!(second_vector.generation_id())
@@ -1063,7 +1119,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         graph_before_activation,
         "activation must not publish or rewrite graph state"
     );
-    let second_query = search(&harness, &project, true).await;
+    let second_query = timed_stage("G2.strict_query", search(&harness, &project, true)).await;
     assert_eq!(second_query["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(
         &second_query,
@@ -1098,8 +1154,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     // byte-for-byte assertion below still measures exactly what it names - the
     // rollback - over every generation now in the projection, including this
     // one.
-    let (settled_rollback_id, rollback_code, rollback_vector) =
-        wait_for_settled_semantic_generation(&harness, &project, Some(&second_code_id)).await;
+    let (settled_rollback_id, rollback_code, rollback_vector) = timed_stage(
+        "rollback.reproject_G1_content(settle)",
+        wait_for_settled_semantic_generation(&harness, &project, Some(&second_code_id)),
+    )
+    .await;
     assert_eq!(
         settled_rollback_id, rollback_code_id,
         "the settled semantic generation must be the one serving the restored source"
@@ -1123,6 +1182,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         ),
     ];
     let graph_before_rollback = graph_bytes(&generations).await;
+    let rollback_activation = std::time::Instant::now();
     set_semantic_profile(
         &harness,
         &project,
@@ -1135,6 +1195,12 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     )
     .await;
     let rollback_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
+    record_stage(
+        "rollback.activate_via_config(set+converge ready)",
+        rollback_activation.elapsed(),
+        1,
+        "rollback",
+    );
     assert_eq!(
         rollback_runtime["state"]["receipt"]["activated_generation"],
         json!(first_vector.generation_id())
@@ -1145,7 +1211,8 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         graph_before_rollback,
         "rollback must preserve the graph catalog, control state, and verified heads byte-for-byte"
     );
-    let rolled_back_query = search(&harness, &project, true).await;
+    let rolled_back_query =
+        timed_stage("rollback.strict_query", search(&harness, &project, true)).await;
     assert_eq!(rolled_back_query["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(
         &rolled_back_query,
@@ -1175,8 +1242,11 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     // and the indexing lane publishes vectors for it. Settle and re-baseline so
     // the two assertions below measure the failed install and the exact retry
     // rather than that publication.
-    let (settled_retry_id, retry_code, retry_vector) =
-        wait_for_settled_semantic_generation(&harness, &project, Some(&rollback_code_id)).await;
+    let (settled_retry_id, retry_code, retry_vector) = timed_stage(
+        "retry.reproject_G2_content(settle)",
+        wait_for_settled_semantic_generation(&harness, &project, Some(&rollback_code_id)),
+    )
+    .await;
     assert_eq!(
         settled_retry_id, retry_code_id,
         "the settled semantic generation must be the one serving the restored source"
@@ -1272,6 +1342,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     lifecycle
         .retry()
         .expect("re-admit verified installed model");
+    let recovery = std::time::Instant::now();
     let (recovered, recovered_status) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let result = search(&harness, &project, true).await;
@@ -1284,6 +1355,12 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     })
     .await
     .expect("daemon semantic activation recovery did not converge");
+    record_stage(
+        "retry.recover_exact(converge)",
+        recovery.elapsed(),
+        1,
+        "retry",
+    );
     assert_eq!(recovered["semantic"]["status"], "complete");
     assert_semantic_probe_contribution(&recovered, "semantic_product_probe", "semantic retry");
     assert_eq!(recovered_status["state"]["state"], "ready");
@@ -1298,5 +1375,9 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         "exact retry must restore routing without graph publication"
     );
     assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
-    harness.shutdown().await;
+    timed_stage(
+        "harness.teardown(activation reconciler retry)",
+        harness.shutdown(),
+    )
+    .await;
 }

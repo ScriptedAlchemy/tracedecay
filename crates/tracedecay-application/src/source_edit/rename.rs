@@ -242,10 +242,4 @@ impl RenameResult {
     pub fn bind_preview_digest(&mut self, digest: ManifestDigest) {
         self.preview_digest = Some(digest);
     }
-
-    pub fn mark_verification_rollback(&mut self) {
-        self.success = false;
-        self.rolled_back = true;
-        self.message = "rename verification failed; exact preimages were restored".to_owned();
-    }
 }

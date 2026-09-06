@@ -712,24 +712,6 @@ pub fn transcript_git_evidence(
     (records.into_values().collect(), spans)
 }
 
-pub fn direct_commit_records(
-    messages: &[SessionMessageRecord],
-    project_root: &std::path::Path,
-) -> Vec<CommitSessionRecord> {
-    transcript_git_evidence(messages, project_root).0
-}
-
-#[hotpath::measure(label = "sessions.git_correlation.ingest_spans")]
-pub fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanObservation> {
-    messages
-        .iter()
-        .filter_map(|message| {
-            let parsed = parsed_message_metadata(message)?;
-            span_observation_from_metadata(message, parsed.as_object()?)
-        })
-        .collect()
-}
-
 fn parsed_message_metadata(message: &SessionMessageRecord) -> Option<serde_json::Value> {
     message
         .metadata_json

@@ -33,14 +33,6 @@ pub fn inspect_profile_store_orphans(
     report
 }
 
-pub fn inspect_registry_orphan_manifest(
-    manifest_path: &Path,
-    profile_root: &Path,
-    verified_at: i64,
-) -> RegistryOrphanRelinkReport {
-    inspect_registry_orphan_manifest_inner(manifest_path, profile_root, verified_at, false)
-}
-
 fn inspect_registry_orphan_manifest_inner(
     manifest_path: &Path,
     profile_root: &Path,

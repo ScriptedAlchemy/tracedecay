@@ -6,8 +6,7 @@ use crate::code_intelligence::identity::CodeGenerationId;
 use crate::feedback::{
     CiFailureGenerationEvidenceV1, CiFailureLocalizationResultV1, CiFailureRunIdentityV1,
     GitHubPullRequestIdV1, GitHubReviewCommentIdV1, GitHubReviewIdV1,
-    GitHubReviewImmutableAnchorV1, GitHubReviewIngressResultV1, GitHubReviewItemV1,
-    GitHubReviewThreadIdV1,
+    GitHubReviewImmutableAnchorV1, GitHubReviewIngressResultV1, GitHubReviewThreadIdV1,
 };
 use crate::git::{
     GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
@@ -515,60 +514,6 @@ pub struct ReviewSnapshotAnchorRefV1 {
 }
 
 impl ReviewSnapshotAnchorRefV1 {
-    pub fn from_item(
-        pull_request: PullRequestSnapshotAnchorRefV1,
-        item: &GitHubReviewItemV1,
-    ) -> Result<Self, DomainError> {
-        item.validate()?;
-        let mut sources = Vec::new();
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::PullRequestObservation,
-            pull_request.source_anchor_id.clone(),
-        )?;
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::ReviewOriginal,
-            item.remap.original.retrieval_anchor_id.clone(),
-        )?;
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::ReviewAuthor,
-            item.author_anchor.clone(),
-        )?;
-        push_source(
-            &mut sources,
-            GitTopologySourceRoleV1::ReviewBody,
-            item.body_anchor.clone(),
-        )?;
-        if let Some(anchor_id) = &item.safe_url_anchor {
-            push_source(
-                &mut sources,
-                GitTopologySourceRoleV1::ReviewSafeUrl,
-                anchor_id.clone(),
-            )?;
-        }
-        let value = Self {
-            pull_request,
-            review_id: item.review_id.clone(),
-            thread_id: item.thread_id.clone(),
-            comment_id: item.comment_id.clone(),
-            reply_to_comment_id: item.reply_to_comment_id.clone(),
-            original: item.remap.original.clone(),
-            item_digest: canonical_sha256(item)?,
-            sources,
-        };
-        if item.repository_id != value.pull_request.repository_id
-            || item.pull_request_id != value.pull_request.pull_request_id
-        {
-            return Err(DomainError::SnapshotMismatch {
-                field: "review pull request snapshot",
-            });
-        }
-        value.validate()?;
-        Ok(value)
-    }
-
     pub fn validate(&self) -> Result<(), DomainError> {
         self.pull_request.validate()?;
         self.review_id
