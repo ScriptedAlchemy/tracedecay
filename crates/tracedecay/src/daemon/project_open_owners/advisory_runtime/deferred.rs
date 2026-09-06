@@ -303,6 +303,23 @@ async fn classify_failure(
             .is_none()
     {
         Attempt::AwaitNextPublication
+    } else if invocation
+        .code_index_schedulers
+        .latest_complete_ready(project_root)
+        .await
+        .is_none()
+    {
+        // `try_mount` also admits the recovered text-serving level, but the
+        // feedback cycle it then composes mints its provider identity through
+        // `ProductionFeedbackDocumentIdentityPort`, which serves only
+        // `latest_complete_ready` for the exact root. When the text projection
+        // is ahead of that authority the composition fails with "project-open
+        // provider code-index identity is inconsistent with the application
+        // contract" — earliness, not a missing composition. Classifying it
+        // terminal abandoned the upgrade for the daemon's whole life: the
+        // project kept the typed-unavailable feedback cycle and the warming
+        // LSP owner that advertises no analyzer method at all.
+        Attempt::AwaitNextPublication
     } else {
         // A serving generation exists and no feedback cycle was published, so
         // the composition itself is missing rather than early. Nothing retries
