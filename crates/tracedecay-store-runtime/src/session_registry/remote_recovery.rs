@@ -11,6 +11,7 @@ use tracedecay_application::remote::recovery::{
 };
 use tracedecay_domain::{ManifestDigest, ProjectId, RemoteWriterFenceV1, canonical_sha256};
 use tracedecay_graph_db::GraphDbRegistry;
+use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
@@ -57,6 +58,7 @@ pub(super) struct RemoteRecoveryPublicationContextV1 {
     registry: StoreRuntimeRegistry,
     graph_registry: GraphDbRegistry,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
+    operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
     profile_pin: ProfileAuthorityPin,
     project_owners: ProjectRuntimeOwnerRegistryV1,
     replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
@@ -74,6 +76,7 @@ impl RemoteRecoveryPublicationContextV1 {
         registry: StoreRuntimeRegistry,
         graph_registry: GraphDbRegistry,
         graph_lifecycle_cancelled: Arc<AtomicBool>,
+        operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
         profile_pin: ProfileAuthorityPin,
         project_owners: ProjectRuntimeOwnerRegistryV1,
         replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
@@ -89,6 +92,7 @@ impl RemoteRecoveryPublicationContextV1 {
             registry,
             graph_registry,
             graph_lifecycle_cancelled,
+            operation_task_owner,
             profile_pin,
             project_owners,
             replay,
