@@ -7,8 +7,8 @@ mod schema;
 
 pub use refusal_census::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
 pub use reset::{ObservationAuthorityResetV1, reset_refused_observation_authority};
-pub use schema::OBSERVATION_AUTHORITY;
 pub(super) use schema::ensure_observation_schema;
+pub use schema::{OBSERVATION_AUTHORITY, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION};
 
 use tracedecay_domain::{
     AnchorSourceGenerationV2, CanonicalObservationIdV1, ObservationScopeV1,

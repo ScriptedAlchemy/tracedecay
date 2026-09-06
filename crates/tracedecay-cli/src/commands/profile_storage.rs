@@ -357,6 +357,10 @@ fn handle_reset_authority(
         report.cleared_session_message_rows
     );
     println!(
+        "  cleared {} observation-derived session-temporal row(s)",
+        report.cleared_derived_temporal_rows
+    );
+    println!(
         "the authority content re-derives from the preserved transcripts at the \
          next daemon open"
     );
