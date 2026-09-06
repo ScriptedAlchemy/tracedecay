@@ -83,7 +83,7 @@ fn refresh_generated_plugins_at(
         let ctx = tracedecay::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            tool_permissions: tracedecay::agents::expected_tool_perms()?,
             project_root: None,
             dashboard: true,
         };

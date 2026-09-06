@@ -290,7 +290,7 @@ pub(crate) fn rendered_plugin_files(
     tracedecay_bin: &str,
     generator_commit: &str,
 ) -> Result<Vec<(&'static str, String)>> {
-    let tools = advertised_tools();
+    let tools = advertised_tools()?;
     rendered_plugin_files_with_tools(tracedecay_bin, generator_commit, &tools)
 }
 

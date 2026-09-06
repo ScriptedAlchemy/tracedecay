@@ -10,9 +10,11 @@
 //! Only the composition root can fill them, and it must do so before any
 //! transcript ingest, host installer, hook, or branch lock runs. That is what
 //! [`register_runtime_ports`] is: the complete, idempotent, root-owned wiring
-//! call. The CLI first installs the non-catalog subset and then completes the
-//! registration for commands that can reach host integration. Composition-root
-//! registry wrappers (`join_standalone_session_registry`, session-runtime
+//! call. There is no partial form: an earlier split that installed everything
+//! *except* the agent-host MCP tool catalog let any installer reached on that
+//! path write an empty tool permission set with no error, so the catalog is
+//! now read directly from `tracedecay-mcp` by the crate that needs it and is
+//! not wired here at all. Composition-root registry wrappers (`join_standalone_session_registry`, session-runtime
 //! shutdown, host admission) invoke the complete form for embedded and
 //! integration-test runtimes that never pass through `main`. The extracted
 //! store-runtime crate never calls this.
@@ -35,20 +37,9 @@ use tracedecay_domain::errors::Result;
 /// which fail quietly (or fail closed) when the root never registered.
 #[hotpath::measure(label = "runtime_ports.register")]
 pub fn register_runtime_ports() -> Result<()> {
-    register_runtime_ports_without_mcp_tool_catalog();
-    crate::agents::register_mcp_tool_catalog_ports()
-}
-
-/// Installs the runtime ports needed by ordinary command execution without
-/// assembling the agent-host MCP schema catalog.
-///
-/// `tracedecay tool` resolves its selected operation itself, while daemon and
-/// host lifecycle entrypoints still call [`register_runtime_ports`] and retain
-/// the eager catalog failure check before serving or changing integrations.
-#[hotpath::measure(label = "runtime_ports.register_without_mcp_catalog")]
-pub fn register_runtime_ports_without_mcp_tool_catalog() {
     register_session_ports();
     register_agent_host_ports();
+    Ok(())
 }
 
 /// Adapts the root catalog composer to the code-index runtime's provider seam.
@@ -221,6 +212,10 @@ fn hook_timings_enabled(project_root: &Path) -> Option<bool> {
         .map(|telemetry| telemetry.timings)
 }
 
+fn cursor_catch_up_ingest_max_bytes() -> u64 {
+    tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
+}
+
 fn resolve_hook_store_layout(
     project_root: &Path,
 ) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + '_>>
@@ -229,10 +224,6 @@ fn resolve_hook_store_layout(
         crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root),
         label = "runtime_ports.resolve_store_layout"
     ))
-}
-
-fn cursor_catch_up_ingest_max_bytes() -> u64 {
-    tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
 }
 
 #[cfg(test)]
@@ -320,6 +311,17 @@ mod tests {
             ceiling,
             tracedecay_agent_hosts::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
         );
+    }
+
+    /// The tool catalog is no longer wired here at all: host installers read
+    /// it from its owning crate, so it is readable with no registration and an
+    /// unavailable catalog is an error rather than an empty tool set.
+    #[test]
+    fn the_advertised_tool_catalog_needs_no_registration() {
+        let _pinned = registered();
+        let tools = tracedecay_agent_hosts::ports::mcp_tools::advertised_tools()
+            .expect("the advertised tool catalog");
+        assert!(!tools.is_empty());
     }
 
     #[test]

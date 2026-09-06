@@ -193,7 +193,7 @@ impl DashboardGraphTestRuntimeV1 {
         // This fixture bypasses CLI and host-admission constructors, so it
         // must install the same root ports before graph init publishes Hook
         // bindings for the admitted project.
-        crate::register_runtime_ports_without_mcp_tool_catalog();
+        crate::register_runtime_ports()?;
 
         static NEXT_ELECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 

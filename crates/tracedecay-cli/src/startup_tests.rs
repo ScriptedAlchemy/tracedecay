@@ -7,7 +7,7 @@ use super::{
     hotpath_focus_is_valid, hotpath_output_format_is_none, hotpath_output_format_is_valid,
     hotpath_output_path_is_valid, hotpath_requires_protocol_safe_output, is_daemon_run,
     is_full_component_set_adoption, is_local_install_command, normalize_tool_reserved_global_flags,
-    requires_eager_mcp_tool_catalog, should_skip_agent_install_check,
+    should_skip_agent_install_check,
     should_skip_startup_maintenance, stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
@@ -633,7 +633,6 @@ fn normal_commands_keep_startup_maintenance() {
         runtime: false,
     };
     assert!(!should_skip_startup_maintenance(&command));
-    assert!(requires_eager_mcp_tool_catalog(Some(&command)));
 }
 
 #[test]
@@ -645,7 +644,6 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     };
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_check(&command));
-    assert!(!requires_eager_mcp_tool_catalog(Some(&command)));
     assert_eq!(
         async_runtime_flavor(Some(&command)),
         AsyncRuntimeFlavor::CurrentThread

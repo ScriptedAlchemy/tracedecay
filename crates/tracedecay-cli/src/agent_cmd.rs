@@ -864,7 +864,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
     let context = tracedecay::agents::InstallContext {
         home: home.clone(),
         tracedecay_bin,
-        tool_permissions: tracedecay::agents::expected_tool_perms(),
+        tool_permissions: tracedecay::agents::expected_tool_perms()?,
         project_root: Some(project_path.clone()),
         dashboard: false,
     };
@@ -2111,7 +2111,7 @@ fn feedback_rollback_apply(
         home: home.clone(),
         tracedecay_bin: tracedecay::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
-        tool_permissions: tracedecay::agents::expected_tool_perms(),
+        tool_permissions: tracedecay::agents::expected_tool_perms()?,
         project_root: None,
         dashboard: state.dashboard_enabled,
     };
@@ -2463,7 +2463,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
         home,
         tracedecay_bin: tracedecay::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
-        tool_permissions: tracedecay::agents::expected_tool_perms(),
+        tool_permissions: tracedecay::agents::expected_tool_perms()?,
         project_root: None,
         dashboard: state.dashboard_enabled,
     };
@@ -2752,7 +2752,7 @@ pub(crate) async fn handle_install_command(
         let context = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            tool_permissions: tracedecay::agents::expected_tool_perms()?,
             project_root: None,
             dashboard: !no_dashboard,
         };
@@ -2807,7 +2807,7 @@ pub(crate) async fn handle_install_command(
             let context = tracedecay::agents::InstallContext {
                 home: home.clone(),
                 tracedecay_bin: tracedecay_bin.clone(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
+                tool_permissions: tracedecay::agents::expected_tool_perms()?,
                 project_root: None,
                 dashboard: !no_dashboard,
             };
@@ -2955,7 +2955,7 @@ pub(crate) async fn handle_update_plugin_command(
         let context = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            tool_permissions: tracedecay::agents::expected_tool_perms()?,
             project_root: None,
             dashboard,
         };
@@ -3011,7 +3011,7 @@ pub(crate) fn handle_reinstall_preflight_command() -> tracedecay_domain::errors:
         let install_context = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            tool_permissions: tracedecay::agents::expected_tool_perms()?,
             project_root: None,
             dashboard,
         };
@@ -3212,10 +3212,19 @@ async fn reinstall_agent_integrations_with_dashboard_policies(
             }
         };
         let dashboard = dashboard_policies.get(id).copied().unwrap_or(true);
+        // An unreadable tool catalog is this agent's reinstall failure, not a
+        // silent install with an empty permission allowlist.
+        let tool_permissions = match tracedecay::agents::expected_tool_perms() {
+            Ok(tool_permissions) => tool_permissions,
+            Err(error) => {
+                results.push((id.clone(), Err(error)));
+                continue;
+            }
+        };
         let context = tracedecay::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            tool_permissions,
             project_root: None,
             dashboard,
         };
@@ -5019,7 +5028,7 @@ exit 0
             .prepare_non_interactive_install(&tracedecay::agents::InstallContext {
                 home: home.path().to_path_buf(),
                 tracedecay_bin: tracedecay_bin.clone(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
+                tool_permissions: tracedecay::agents::expected_tool_perms().expect("tool catalog"),
                 project_root: None,
                 dashboard: true,
             })
@@ -5569,7 +5578,7 @@ exit 0
         let ctx = tracedecay::agents::InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "new-tracedecay".to_string(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            tool_permissions: tracedecay::agents::expected_tool_perms().expect("tool catalog"),
             project_root: None,
             dashboard: true,
         };
@@ -5653,7 +5662,7 @@ exit 0
         let ctx = tracedecay::agents::InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: tracedecay_bin.clone(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            tool_permissions: tracedecay::agents::expected_tool_perms().expect("tool catalog"),
             project_root: None,
             dashboard: true,
         };
