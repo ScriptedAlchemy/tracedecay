@@ -1621,13 +1621,30 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     .expect("relational project open must not wait for derived graph recovery")
     .expect("relational project open remains available");
     assert_eq!(reopened.database_path(), database_path);
-    assert!(matches!(
-        reopened.issue_memory_graph_runtime_operation(),
-        Err(
-            tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
-                | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable
-        )
-    ));
+    // The relational open never waits for the derived graph: the memory-graph
+    // attachment is a retained background task, so the operation reads
+    // `Unbound` until that task settles. Recovery then rebuilds the corrupt
+    // derived graph and binds it -- on Linux roughly one tick after the mount
+    // returns, on macOS before the first read -- so asserting the warm-up
+    // window is asserting a race. Wait for the settled outcome instead, and
+    // keep refusing the one result that would mean the relational owner was
+    // damaged.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match reopened.issue_memory_graph_runtime_operation() {
+                Ok(_) => return,
+                Err(
+                    tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unbound
+                    | tracedecay_runtime_core::db::MemoryGraphRuntimeOperationErrorV1::Unavailable,
+                ) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                Err(error) => {
+                    panic!("corrupt derived graph must not fault the relational owner: {error:?}")
+                }
+            }
+        }
+    })
+    .await
+    .expect("derived graph recovery rebinds the memory graph to its relational owner");
     drop(reopened);
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
