@@ -63,7 +63,7 @@ impl CodeIndexAtomicPublicationPort for BenchmarkPublication {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         Ok(None)
     }
 
