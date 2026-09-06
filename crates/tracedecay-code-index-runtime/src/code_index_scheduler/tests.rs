@@ -13138,6 +13138,96 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
     registry.shutdown().await;
 }
 
+/// A text freshness query that arrives while the worker still owns a pass
+/// cannot run the ladder itself, and the in-flight pass observed the source
+/// when *it* started — after publication it is still projecting text or
+/// seating the graph of the previous source state. Answering stale without
+/// leaving a wake stranded the remedy until an unrelated hint arrived; the
+/// out-of-band commit stayed unserved (issue #917, the flaky tail of
+/// `unpinned_query_serves_freshness_resolved_latest_generation`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off worktree");
+    let initial_text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    let initial = initial_text.metadata().manifest().generation_id.clone();
+    let snapshot = initial_text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+
+    // Let the mount pass finish, then keep the worker from starting another
+    // one so the wake this query leaves behind stays observable.
+    let settled_deadline = Instant::now() + Duration::from_secs(10);
+    while registry
+        .reconcile_in_progress_for_test(fixture.path())
+        .await
+    {
+        assert!(
+            Instant::now() <= settled_deadline,
+            "initial graph-off mount never released its owner pass"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    // Stand in for the worker's own pass: in-progress, scheduler mutex free.
+    let owner_pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "external"]);
+
+    let (latest, current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("the seated text owner keeps serving during owner work");
+    assert_eq!(
+        latest.metadata().manifest().generation_id,
+        initial,
+        "the query is answered from the retained text generation"
+    );
+    assert!(
+        !current,
+        "a source the query could not verify is reported stale, never current"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the query must leave a follow-up wake for the worker to re-run the freshness ladder"
+    );
+
+    // Release the worker: the follow-up pass alone must reconcile the commit.
+    drop(owner_pass);
+    drop(admission);
+    let next = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
+    assert_ne!(next.metadata().manifest().generation_id, initial);
+    registry.shutdown().await;
+}
+
 /// An explicit caller-pinned generation is served generation-bound and
 /// read-only: the freshness ladder is bypassed, so an out-of-band commit after
 /// indexing never mutates the served generation and never triggers a reconcile.
