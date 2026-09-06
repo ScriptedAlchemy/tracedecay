@@ -181,22 +181,52 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         "opening a linked worktree must not create a branch database"
     );
 
-    let session_id = "session.linked-worktree-follow-up";
-    notify_workspace_open(linked_server.as_ref(), session_id, &linked).await;
-    let routed = files_for_session(primary_server.as_ref(), session_id).await;
+    // `f347a0a46` ("fix(index): require opt-in for linked worktree scopes")
+    // gates project-open code-index activation for a linked worktree behind
+    // `sync.watch_linked_worktrees`, which defaults off. The linked route still
+    // reaches its full upgrade — the daemon publishes
+    // `phase=full_published code_index=linked_worktree_disabled` for it — and
+    // keeps the exact server and scheduler bindings this test is about, but it
+    // owns no verified code graph. A graph query routed to it must therefore
+    // answer the typed `code-graph-unavailable` refusal rather than silently
+    // serving another worktree's listing.
+    let linked_session_id = "session.linked-worktree-follow-up";
+    notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
+    let routed = files_for_session(primary_server.as_ref(), linked_session_id).await;
     assert!(
-        routed.error.is_none(),
-        "a follow-up on another daemon server must retain the linked route: {routed:?}"
+        routed.result.is_none(),
+        "a linked worktree without the watch opt-in must not serve a file listing: {routed:?}"
     );
-    let routed_text = routed
+    let routed_error = routed
+        .error
+        .as_ref()
+        .unwrap_or_else(|| panic!("linked route must refuse with a typed error: {routed:?}"));
+    let routed_data = routed_error
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("linked-route refusal must be structured: {routed_error:?}"));
+    assert_eq!(routed_data["reason_code"], "code-graph-unavailable");
+    assert_eq!(routed_data["tool"], "tracedecay_files");
+
+    // The refusal is exact to the route, not a project-wide outage: the primary
+    // route shares the same store authority, is admitted, and still answers the
+    // listing — with its own census, never the linked worktree's sources.
+    let primary_session_id = "session.primary-route-follow-up";
+    notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
+    let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
+    assert!(
+        primary_listing.error.is_none(),
+        "a follow-up on another daemon server must retain the primary route: {primary_listing:?}"
+    );
+    let primary_text = primary_listing
         .result
         .as_ref()
         .and_then(|result| result["content"].as_array())
         .and_then(|content| content.first())
         .and_then(|item| item["text"].as_str())
-        .unwrap_or_else(|| panic!("files response must contain text: {routed:?}"));
-    assert!(routed_text.contains("linked.rs"), "{routed_text}");
-    assert!(!routed_text.contains("README.md"), "{routed_text}");
+        .unwrap_or_else(|| panic!("files response must contain text: {primary_listing:?}"));
+    assert!(primary_text.contains("indexed files"), "{primary_text}");
+    assert!(!primary_text.contains("linked.rs"), "{primary_text}");
 
     primary_graph
         .db()
