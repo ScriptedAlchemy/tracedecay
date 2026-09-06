@@ -31,10 +31,10 @@ use super::{
 /// by-handle file index. Timestamps only supplement it.
 ///
 /// The persisted shape is platform-neutral, so one journal row means the same
-/// thing wherever it is read, and every field defaults. A `(0, 0)` pair is
-/// therefore not an identity but the absence of one: it is what a row written
-/// before this fence deserializes to, and what a filesystem that declines to
-/// report a durable id produces. Identity unknown fails closed to a full
+/// thing wherever it is read, and every field defaults. Both parts must be
+/// nonzero, and the inode/file index must not be the unsupported `u64::MAX`
+/// sentinel. Anything else is the absence of a provable identity, including a
+/// row written before this fence. Identity unknown fails closed to a full
 /// re-proof — [`super::scope_roots::validate_scope_transaction`] refuses such
 /// a row by name at the journal read, rather than letting a bare deserialize
 /// error surface as unsafe state or letting timestamps alone authorize a
@@ -52,10 +52,11 @@ pub(super) struct ScopeDirectoryIdentityV1 {
 
 impl ScopeDirectoryIdentityV1 {
     /// The durable file id is the only part of this fence a same-timestamp
-    /// replacement cannot forge, so a `(0, 0)` pair is treated as no identity
-    /// at all rather than as one every unidentified directory shares.
+    /// replacement cannot forge, so incomplete and sentinel pairs are treated
+    /// as no identity rather than as an identity unidentified directories can
+    /// share.
     pub(super) fn has_durable_file_id(&self) -> bool {
-        self.device != 0 || self.inode != 0
+        self.device != 0 && self.inode != 0 && self.inode != u64::MAX
     }
 }
 
@@ -604,6 +605,25 @@ mod tests {
                 .expect("a real directory has a durable identity")
                 .has_durable_file_id()
         );
+    }
+
+    #[test]
+    fn durable_file_id_requires_a_complete_nonsentinel_persisted_pair() {
+        let nonzero_device_zero_inode: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":17,"inode":0}"#).unwrap();
+        assert!(!nonzero_device_zero_inode.has_durable_file_id());
+
+        let zero_device_nonzero_inode: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":0,"inode":41}"#).unwrap();
+        assert!(!zero_device_nonzero_inode.has_durable_file_id());
+
+        let sentinel_inode: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":17,"inode":18446744073709551615}"#).unwrap();
+        assert!(!sentinel_inode.has_durable_file_id());
+
+        let valid: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"device":17,"inode":41}"#).unwrap();
+        assert!(valid.has_durable_file_id());
     }
 
     const SCOPE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

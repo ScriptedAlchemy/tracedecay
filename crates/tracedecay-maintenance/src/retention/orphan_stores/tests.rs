@@ -7,8 +7,9 @@ use super::quarantine::classify_recovery_journal_probe;
 use super::quarantine::{
     PendingQuarantineReceiptV1, QuarantineRecoveryOutcome, RegisteredQuarantineDecisionV1,
     RegisteredQuarantineInventoryV1, committed_journal_cleanup_names,
-    read_registered_quarantine_intents_controlled, recover_existing_store_quarantine,
-    recover_named_store_quarantine_controlled, recover_registered_quarantine_intent_controlled,
+    quarantine_candidate_namespace_available, read_registered_quarantine_intents_controlled,
+    recover_existing_store_quarantine, recover_named_store_quarantine_controlled,
+    recover_registered_quarantine_intent_controlled, reserve_quarantine_name_with_sequence,
 };
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -1658,6 +1659,56 @@ fn quarantine_restores_empty_directory_replacement_before_delete() {
     assert!(matches!(result, QuarantineStoreOutcome::Restored { .. }));
     assert!(data_root.is_dir(), "fresh empty replacement must survive");
     assert!(displaced.is_dir(), "inspected empty directory must survive");
+}
+
+#[test]
+fn stale_retired_marker_occupies_the_whole_quarantine_candidate_namespace() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let parent_path = tmp.path().join("stores");
+    let data_root = parent_path.join("stale-authority");
+    let payload_path = data_root.join("payload.bin");
+    let payload = b"new store payload must survive reservation";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(&payload_path, payload).unwrap();
+    let parent =
+        cap_std::fs::Dir::open_ambient_dir(&parent_path, cap_std::ambient_authority()).unwrap();
+    let candidate = format!(
+        ".tracedecay-orphan-quarantine-stale-authority-{}-7",
+        std::process::id()
+    );
+    let retired_marker_path = parent_path.join(format!("{candidate}.receipt-v1.json.retired"));
+    let marker_bytes = b"stale commit authority must remain exact";
+    std::fs::write(&retired_marker_path, marker_bytes).unwrap();
+
+    assert!(
+        !quarantine_candidate_namespace_available(&parent, &candidate).unwrap(),
+        "a retired marker reserves its candidate even when the directory and journal are absent"
+    );
+    let mut sequences = [7, 8].into_iter();
+    let reserved =
+        reserve_quarantine_name_with_sequence(&parent, &data_root, "stale-authority", None, || {
+            sequences
+                .next()
+                .expect("reservation must use only two candidates")
+        })
+        .unwrap();
+    assert_eq!(
+        reserved,
+        format!(
+            ".tracedecay-orphan-quarantine-stale-authority-{}-8",
+            std::process::id()
+        ),
+        "the stale retired marker must force the next sequence"
+    );
+    assert_eq!(
+        retired_marker_path,
+        parent_path.join(format!(
+            ".tracedecay-orphan-quarantine-stale-authority-{}-7.receipt-v1.json.retired",
+            std::process::id()
+        ))
+    );
+    assert_eq!(std::fs::read(&retired_marker_path).unwrap(), marker_bytes);
+    assert_eq!(std::fs::read(&payload_path).unwrap(), payload);
 }
 
 /// A Windows directory capability denies same-parent rename because cap-std
