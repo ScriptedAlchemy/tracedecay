@@ -419,20 +419,10 @@ fn platform_replace_with_rollback(
 type WindowsFileIdentity = (u32, u64);
 
 #[cfg(windows)]
-enum WindowsPublishNamespace {
-    Published(std::fs::File),
-    NamesRetained,
-    Occupied,
-    MoveReady,
-    Contradictory,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Copy)]
-enum WindowsPublishStep {
-    Replace,
-    MoveNoReplace,
-    Inspect(bool, Option<i32>),
+struct WindowsReplacementState {
+    temporary: Option<(std::fs::File, WindowsFileIdentity)>,
+    destination: Option<(std::fs::File, WindowsFileIdentity)>,
+    backup: Option<(std::fs::File, WindowsFileIdentity)>,
 }
 
 #[cfg(windows)]
@@ -456,60 +446,119 @@ fn open_windows_identity(
 }
 
 #[cfg(windows)]
-fn inspect_windows_publish_namespace(
+fn has_windows_identity(
+    file: &Option<(std::fs::File, WindowsFileIdentity)>,
+    identity: WindowsFileIdentity,
+) -> bool {
+    file.as_ref().is_some_and(|(_, found)| *found == identity)
+}
+
+#[cfg(windows)]
+fn inspect_windows_identity_bounded(path: &Path) -> std::io::Result<Option<WindowsFileIdentity>> {
+    let mut identity = None;
+    crate::storage::retry_transient_file_op(|| {
+        identity = Some(open_windows_identity(path)?.map(|(_, identity)| identity));
+        Ok(())
+    })?;
+    Ok(identity.flatten())
+}
+
+#[cfg(windows)]
+fn inspect_windows_replacement(
     temporary: &Path,
     destination: &Path,
-    intended: WindowsFileIdentity,
-) -> std::io::Result<WindowsPublishNamespace> {
-    let destination = open_windows_identity(destination)?;
-    let temporary = open_windows_identity(temporary)?;
-    Ok(match (destination, temporary) {
-        (Some((file, identity)), None) if identity == intended => {
-            WindowsPublishNamespace::Published(file)
-        }
-        (Some((_, destination)), Some((_, temporary)))
-            if destination != intended && temporary == intended =>
-        {
-            WindowsPublishNamespace::NamesRetained
-        }
-        (Some((_, identity)), _) if identity != intended => WindowsPublishNamespace::Occupied,
-        (None, Some((_, identity))) if identity == intended => WindowsPublishNamespace::MoveReady,
-        _ => WindowsPublishNamespace::Contradictory,
+    backup: &Path,
+) -> std::io::Result<WindowsReplacementState> {
+    Ok(WindowsReplacementState {
+        temporary: open_windows_identity(temporary)?,
+        destination: open_windows_identity(destination)?,
+        backup: open_windows_identity(backup)?,
     })
 }
 
 #[cfg(windows)]
-fn windows_error_code() -> i32 {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(i32::MIN)
+fn encode_windows_path(path: &Path) -> Vec<u16> {
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 #[cfg(windows)]
-fn is_transient_windows_publish_error(code: i32) -> bool {
-    matches!(code, 5 | 32 | 33)
-}
-
-#[cfg(windows)]
-fn is_move_ready_replace_error(code: i32) -> bool {
-    matches!(code, 2 | 1176 | 1177)
-}
-
-#[cfg(windows)]
-fn required_windows_error(code: Option<i32>, message: &str) -> std::io::Result<std::io::Error> {
-    code.map(std::io::Error::from_raw_os_error)
-        .ok_or_else(|| std::io::Error::other(message.to_string()))
-}
-
-#[cfg(windows)]
-fn contextual_windows_publish_error(native_error: Option<i32>, message: &str) -> std::io::Error {
-    match native_error {
-        Some(code) => {
-            let error = std::io::Error::from_raw_os_error(code);
-            std::io::Error::new(error.kind(), format!("{error}; {message}"))
-        }
-        None => std::io::Error::other(message.to_string()),
+fn sync_exact_windows_file(
+    file: &std::fs::File,
+    identity: WindowsFileIdentity,
+) -> std::io::Result<()> {
+    let actual = crate::storage::retry_transient_file_op(|| file.sync_all())
+        .and_then(|()| windows_file_identity(file));
+    match actual {
+        Ok(actual) if actual == identity => Ok(()),
+        Ok(_) => Err(std::io::Error::other("synced Windows identity changed")),
+        Err(error) => Err(std::io::Error::new(
+            error.kind(),
+            format!("exact Windows sync failed: {error}"),
+        )),
     }
+}
+
+#[cfg(windows)]
+fn move_windows_file_no_replace(
+    source: &Path,
+    destination: &Path,
+    identity: WindowsFileIdentity,
+) -> std::io::Result<()> {
+    let source_wide = encode_windows_path(source);
+    let destination_wide = encode_windows_path(destination);
+    crate::storage::retry_transient_file_op(|| {
+        let moved = unsafe {
+            MoveFileExW(
+                source_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        let native_error = (moved == 0).then(std::io::Error::last_os_error);
+        let source_after = open_windows_identity(source)?;
+        let destination_after = open_windows_identity(destination)?;
+        if source_after.is_none()
+            && let Some((file, destination_identity)) = destination_after
+            && destination_identity == identity
+        {
+            return sync_exact_windows_file(&file, identity);
+        }
+        match native_error {
+            Some(error) => Err(error),
+            None => Err(std::io::Error::other("contradictory no-replace move")),
+        }
+    })
+}
+
+#[cfg(windows)]
+fn contextual_windows_error(
+    error: &std::io::Error,
+    message: impl std::fmt::Display,
+) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{error}; {message}"))
+}
+
+#[cfg(windows)]
+fn finish_windows_replacement(
+    state: &WindowsReplacementState,
+    temporary_identity: WindowsFileIdentity,
+    destination_identity: WindowsFileIdentity,
+    backup: &Path,
+) -> std::io::Result<bool> {
+    if state.temporary.is_some()
+        || !has_windows_identity(&state.destination, temporary_identity)
+        || !has_windows_identity(&state.backup, destination_identity)
+    {
+        return Ok(false);
+    }
+    let (destination, _) = state.destination.as_ref().expect("verified destination");
+    sync_exact_windows_file(&destination, temporary_identity)?;
+    crate::storage::retry_transient_file_op(|| std::fs::remove_file(backup))
+        .map_err(|error| contextual_windows_error(&error, "could not remove verified backup"))?;
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -518,129 +567,123 @@ pub(super) fn replace_file_atomically(
     path: &Path,
     record_name: &str,
 ) -> Result<()> {
-    let inspection = crate::windows_security::open_private_file(temporary).map_err(|error| {
-        access_io_error(
-            &format!("inspect {record_name} replacement"),
-            temporary,
-            &error,
-        )
+    let temporary_identity = inspect_windows_identity_bounded(temporary)
+        .and_then(|identity| {
+            identity.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "temporary"))
+        })
+        .map_err(|error| {
+            access_io_error(
+                &format!("inspect {record_name} replacement"),
+                temporary,
+                &error,
+            )
+        })?;
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".tracedecay-replace-backup");
+    let backup = std::path::PathBuf::from(backup);
+    let mut destination_identity = inspect_windows_identity_bounded(path).map_err(|error| {
+        access_io_error(&format!("inspect {record_name} destination"), path, &error)
     })?;
-    let intended = windows_file_identity(&inspection).map_err(|error| {
-        access_io_error(
-            &format!("identify {record_name} replacement"),
-            temporary,
-            &error,
-        )
+    let backup_identity = inspect_windows_identity_bounded(&backup).map_err(|error| {
+        access_io_error(&format!("inspect {record_name} backup"), &backup, &error)
     })?;
-    drop(inspection);
 
-    let temporary_wide = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination_wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let mut step = WindowsPublishStep::Replace;
-    crate::storage::retry_transient_file_op(|| {
-        loop {
-            match step {
-                WindowsPublishStep::Replace => {
-                    let replaced = unsafe {
-                        ReplaceFileW(
-                            destination_wide.as_ptr(),
-                            temporary_wide.as_ptr(),
-                            std::ptr::null(),
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                        )
-                    };
-                    step = WindowsPublishStep::Inspect(
-                        false,
-                        (replaced == 0).then(windows_error_code),
-                    );
-                }
-                WindowsPublishStep::MoveNoReplace => {
-                    let moved = unsafe {
-                        MoveFileExW(
-                            temporary_wide.as_ptr(),
-                            destination_wide.as_ptr(),
-                            MOVEFILE_WRITE_THROUGH,
-                        )
-                    };
-                    step = WindowsPublishStep::Inspect(true, (moved == 0).then(windows_error_code));
-                }
-                WindowsPublishStep::Inspect(move_only, native_error) => {
-                    match inspect_windows_publish_namespace(temporary, path, intended)? {
-                        WindowsPublishNamespace::Published(file) => {
-                            file.sync_all()?;
-                            if windows_file_identity(&file)? == intended {
-                                return Ok(());
-                            }
-                            return Err(std::io::Error::other(
-                                "published Windows file changed identity while syncing",
-                            ));
-                        }
-                        WindowsPublishNamespace::MoveReady
-                            if !move_only
-                                && native_error.is_some_and(is_move_ready_replace_error) =>
-                        {
-                            step = WindowsPublishStep::MoveNoReplace;
-                        }
-                        WindowsPublishNamespace::NamesRetained => {
-                            let error = required_windows_error(
-                                native_error,
-                                "Windows publish reported success but retained both names",
-                            )?;
-                            if is_transient_windows_publish_error(
-                                error.raw_os_error().unwrap_or_default(),
-                            ) {
-                                step = if move_only {
-                                    WindowsPublishStep::MoveNoReplace
-                                } else {
-                                    WindowsPublishStep::Replace
-                                };
-                            }
-                            return Err(error);
-                        }
-                        WindowsPublishNamespace::Occupied => {
-                            return Err(required_windows_error(
-                                native_error,
-                                "Windows destination was occupied after reported success",
-                            )?);
-                        }
-                        WindowsPublishNamespace::MoveReady if move_only => {
-                            let error = required_windows_error(
-                                native_error,
-                                "no-replace Windows move reported success without moving",
-                            )?;
-                            if is_transient_windows_publish_error(
-                                error.raw_os_error().unwrap_or_default(),
-                            ) {
-                                step = WindowsPublishStep::MoveNoReplace;
-                            }
-                            return Err(error);
-                        }
-                        WindowsPublishNamespace::MoveReady => {
-                            return Err(contextual_windows_publish_error(
-                                native_error,
-                                "Windows replacement left only the temporary name",
-                            ));
-                        }
-                        WindowsPublishNamespace::Contradictory => {
-                            return Err(contextual_windows_publish_error(
-                                native_error,
-                                "Windows replacement produced contradictory file identities",
-                            ));
-                        }
-                    }
-                }
-            }
+    match (destination_identity, backup_identity) {
+        (None, Some(identity)) => {
+            move_windows_file_no_replace(&backup, path, identity).map_err(|error| {
+                access_io_error(&format!("restore {record_name} backup"), &backup, &error)
+            })?;
+            destination_identity = Some(identity);
         }
+        (Some(_), Some(_)) => {
+            return Err(access_error(
+                &format!("publish {record_name}"),
+                path,
+                &format!(
+                    "destination and reserved backup both exist at '{}'",
+                    backup.display()
+                ),
+            ));
+        }
+        _ => {}
+    }
+
+    let Some(destination_identity) = destination_identity else {
+        return move_windows_file_no_replace(temporary, path, temporary_identity)
+            .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error));
+    };
+    let temporary_wide = encode_windows_path(temporary);
+    let destination_wide = encode_windows_path(path);
+    let backup_wide = encode_windows_path(&backup);
+    crate::storage::retry_transient_file_op(|| {
+        let replaced = unsafe {
+            ReplaceFileW(
+                destination_wide.as_ptr(),
+                temporary_wide.as_ptr(),
+                backup_wide.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        let native_error = (replaced == 0).then(std::io::Error::last_os_error);
+        let state = inspect_windows_replacement(temporary, path, &backup).map_err(|error| {
+            contextual_windows_error(
+                &error,
+                format!("could not reconcile reserved backup '{}'", backup.display()),
+            )
+        })?;
+        if finish_windows_replacement(&state, temporary_identity, destination_identity, &backup)? {
+            return Ok(());
+        }
+
+        let error = native_error.unwrap_or_else(|| {
+            std::io::Error::other("ReplaceFileW reported success with contradictory identities")
+        });
+        let code = error.raw_os_error();
+        let names_retained = has_windows_identity(&state.destination, destination_identity)
+            && has_windows_identity(&state.temporary, temporary_identity);
+        if matches!(code, Some(1175 | 1176)) && names_retained {
+            return Err(error);
+        }
+        let recoverable_1177 = code == Some(1177)
+            && state.destination.is_none()
+            && has_windows_identity(&state.temporary, temporary_identity)
+            && has_windows_identity(&state.backup, destination_identity);
+        if recoverable_1177 {
+            drop(state);
+            return match move_windows_file_no_replace(&backup, path, destination_identity) {
+                Ok(())
+                    if inspect_windows_identity_bounded(temporary)? == Some(temporary_identity) =>
+                {
+                    Err(error)
+                }
+                Ok(()) => Err(contextual_windows_error(
+                    &error,
+                    format!(
+                        "1177 recovery changed replacement identity; backup: '{}'",
+                        backup.display()
+                    ),
+                )),
+                Err(recovery_error) => Err(contextual_windows_error(
+                    &error,
+                    format!(
+                        "1177 recovery failed: {recovery_error}; backup: '{}'",
+                        backup.display()
+                    ),
+                )),
+            };
+        }
+        if names_retained && state.backup.is_none() {
+            return Err(error);
+        }
+        Err(contextual_windows_error(
+            &error,
+            format!(
+                "reserved backup state is contradictory at '{}'",
+                backup.display()
+            ),
+        ))
     })
     .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
