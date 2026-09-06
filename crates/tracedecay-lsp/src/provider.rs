@@ -152,8 +152,14 @@ impl AnalyzerSupervisor {
             });
         }
         let next = match (self.state, event) {
+            // A start in flight has exactly one owner, serialized by the
+            // analyzer client lock. A second `StartRequested` therefore means
+            // that owner went away without concluding, and this caller is
+            // taking the start over — not that two are racing.
             (
-                AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff,
+                AnalyzerState::AwaitingStart
+                | AnalyzerState::RestartBackoff
+                | AnalyzerState::Starting,
                 AnalyzerEvent::StartRequested,
             ) => AnalyzerState::Starting,
             (AnalyzerState::Starting | AnalyzerState::Ready, AnalyzerEvent::Ready) => {
