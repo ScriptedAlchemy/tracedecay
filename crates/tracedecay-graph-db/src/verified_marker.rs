@@ -175,9 +175,6 @@ impl ContainerIdentity {
 
     fn from_opened(file: &std::fs::File) -> Option<Self> {
         let metadata = file.metadata().ok()?;
-        if !metadata.is_file() {
-            return None;
-        }
         Self::from_opened_metadata(file, &metadata)?.if_durable()
     }
 
