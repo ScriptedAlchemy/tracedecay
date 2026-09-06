@@ -316,6 +316,35 @@ fn checked_acquire_returns_busy_when_the_carried_deadline_has_elapsed() {
     drop(publisher);
 }
 
+/// An already-expired caller deadline is a typed busy result even when the
+/// pool is free. Checking after `try_lock` would take the lock and lose the
+/// deadline, or — on Windows — turn a native lock-conflict into Storage.
+#[test]
+fn checked_acquire_returns_busy_for_an_elapsed_deadline_without_taking_a_free_pool() {
+    let (_root, pool) = isolated_pool();
+    let started = Instant::now();
+    let error = match acquire_graph_replay_pool_lock_checked(&pool, Instant::now(), &|| false) {
+        Ok(_) => panic!("an elapsed deadline must not take a free pool"),
+        Err(error) => error,
+    };
+    let elapsed = started.elapsed();
+
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::GraphReplayPoolBusy
+    ));
+    assert!(
+        elapsed < Duration::from_millis(20),
+        "an expired deadline must not poll, took {elapsed:?}"
+    );
+    assert!(
+        try_acquire_code_generation_store_lock(&pool)
+            .expect("probe after expired-deadline refuse")
+            .is_some(),
+        "an expired deadline must leave a free pool untouched"
+    );
+}
+
 #[test]
 fn checked_acquire_takes_a_free_pool_and_releases_without_leak() {
     let (_root, pool) = isolated_pool();
