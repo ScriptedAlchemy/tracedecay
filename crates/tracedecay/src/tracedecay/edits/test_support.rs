@@ -638,10 +638,24 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     drop(held_candidate);
     let result = execution.unwrap();
 
-    assert!(matches!(
-        result.outcome,
-        SourceEditOutcome::EffectUnknown { .. }
-    ));
+    // Prove the outcome came from the injected publication fault, not from a
+    // digest mismatch or some other refusal that happens to read as
+    // `EffectUnknown`: the message carries the `file_authority::publish` step
+    // that failed, and the step differs per host with the injection above.
+    #[cfg(not(windows))]
+    const INJECTED_PUBLISH_STEP: &str = "create source edit temporary file";
+    #[cfg(windows)]
+    const INJECTED_PUBLISH_STEP: &str = "atomically publish source edit candidate";
+    match &result.outcome {
+        SourceEditOutcome::EffectUnknown { message } => assert!(
+            message.contains("requires reconciliation: ")
+                && message.contains(INJECTED_PUBLISH_STEP),
+            "EffectUnknown must name the injected publication fault ({INJECTED_PUBLISH_STEP:?}): {message}"
+        ),
+        other => {
+            panic!("expected EffectUnknown from the injected publication fault, got {other:?}")
+        }
+    }
     assert_eq!(
         result.effect.as_ref().unwrap().receipt.outcome,
         EffectTermination::EffectUnknown
