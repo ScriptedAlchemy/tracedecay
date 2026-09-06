@@ -11,9 +11,6 @@ use tracedecay_domain::{
     SymbolOccurrenceId, TestAttributionEvidenceClassV1,
 };
 
-use super::diagnostics::GenerationDiagnosticJoinV1;
-use super::git_join::{GenerationGitBlameJoinV1, GenerationGitHistoryJoinV1, GenerationGitJoinV1};
-use super::impact_join::GenerationImpactJoinV1;
 use super::test_attribution::GenerationTestJoinV1;
 
 /// Native graph-impact evidence consumed by generation-bound index joins.
@@ -165,63 +162,10 @@ pub enum GenerationProviderContractErrorV1 {
     StateCoverageMismatch,
 }
 
-/// Read adapter implemented by the existing Git authority for the query
-/// owner. Joined values are views over native Git results, never Git storage.
-pub trait GenerationGitJoinReadPort {
-    fn read_git_diff(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationGitJoinV1>;
-
-    fn read_git_history(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationGitHistoryJoinV1>;
-
-    fn read_git_blame(
-        &self,
-        generation: &CodeGenerationId,
-        file: &FileOccurrenceId,
-    ) -> GenerationProviderReadV1<GenerationGitBlameJoinV1>;
-}
-
-/// Read adapter implemented over the managed diagnostic authority.
-pub trait GenerationDiagnosticJoinReadPort {
-    fn read_generation_diagnostics(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationDiagnosticJoinV1>;
-}
-
 /// Read adapter over canonical generation-bound test-attribution records.
 pub trait GenerationTestAttributionJoinReadPort {
     fn read_test_attribution(
         &self,
         generation: &CodeGenerationId,
     ) -> GenerationProviderReadV1<GenerationTestJoinV1>;
-}
-
-/// Existing graph and test authorities implement this adapter; the code index
-/// only validates the occurrence identities in their returned payloads.
-pub trait GenerationImpactEvidenceReadPort {
-    fn read_graph_impact(
-        &self,
-        generation: &CodeGenerationId,
-        symbol: &SymbolOccurrenceId,
-    ) -> GenerationProviderReadV1<CodeIndexGraphImpactEvidenceV1>;
-
-    fn read_affected_tests(
-        &self,
-        generation: &CodeGenerationId,
-        symbol: &SymbolOccurrenceId,
-    ) -> GenerationProviderReadV1<CodeIndexAffectedTestsEvidenceV1>;
-}
-
-/// Query-owner adapter over the validated graph/test composition.
-pub trait GenerationImpactJoinReadPort {
-    fn read_generation_impact(
-        &self,
-        generation: &CodeGenerationId,
-        symbol: &SymbolOccurrenceId,
-    ) -> GenerationProviderReadV1<GenerationImpactJoinV1>;
 }

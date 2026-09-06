@@ -14,16 +14,16 @@ use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EphemeralSanitizedQueryViewV1,
     ExactAdmissionProof, ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1,
     FixedPointScore, RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest,
-    Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, exact_search_canonical, is_cli_flag_token, is_commit_hash,
-    is_compiler_error_code_token, is_configuration_key_token, is_identifier_token, is_path_shape,
-    is_qualified_name_token, is_runtime_error_code_token, is_tool_name_token,
+    RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    exact_search_canonical, is_cli_flag_token, is_commit_hash, is_compiler_error_code_token,
+    is_configuration_key_token, is_identifier_token, is_path_shape, is_qualified_name_token,
+    is_runtime_error_code_token, is_tool_name_token,
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, ExactTermPostingReadPort, LaneBoundEvidence,
-    LaneEvidenceRejections, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error, lane_bound_evidence, lane_candidate_cap,
+    CodeCandidateBindingV1, ExactTermPostingReadPort, LaneBoundEvidence, LaneEvidenceRejections,
+    RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest, contract_error,
+    lane_bound_evidence, lane_candidate_cap,
 };
 
 /// Wording the exact lane uses when a port-emitted batch fails the shared
@@ -813,33 +813,6 @@ where
             &outcome,
         );
         Ok(outcome)
-    }
-}
-
-impl<'a, A, P> Retriever<ExactLaneRequest<'a>, ExactLaneEvidence> for ExactLane<A, P>
-where
-    A: ExactAdmissionAuthority,
-    P: ExactTermPostingReadPort,
-{
-    fn retrieve(
-        &self,
-        request: &ExactLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalError> {
-        self.retrieve_exact(request)
-            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
-    }
-}
-
-impl<'a, A, P> CompactCandidateLane<ExactLaneRequest<'a>, ExactLaneEvidence> for ExactLane<A, P>
-where
-    A: ExactAdmissionAuthority,
-    P: ExactTermPostingReadPort,
-{
-    fn candidates(
-        &self,
-        request: &ExactLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
-        self.retrieve_exact(request)
     }
 }
 

@@ -196,40 +196,17 @@ pub struct ProductionConfigurationDaemonClient {
     control_plane: SharedConfigurationControlPlane,
 }
 
+/// Read and mutation operations come straight from the control plane; the
+/// client only adds the typed `set`/`unset`/`batch` conveniences and `current`.
+impl std::ops::Deref for ProductionConfigurationDaemonClient {
+    type Target = dyn ConfigurationControlPlane + Send + Sync;
+
+    fn deref(&self) -> &Self::Target {
+        self.control_plane.as_ref()
+    }
+}
+
 impl ProductionConfigurationDaemonClient {
-    pub fn list(
-        &self,
-        actor: AuthorizedActor,
-    ) -> ConfigurationOperationFuture<'_, Vec<SettingSummary>> {
-        self.control_plane.list(actor)
-    }
-
-    pub fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        self.control_plane.explain(actor, key)
-    }
-
-    pub fn get(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        self.control_plane.get(actor, key)
-    }
-
-    pub fn mutate_direct(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        mutation: DirectConfigurationMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.control_plane
-            .mutate_direct(authority, mutation, expected_revision)
-    }
-
     pub fn set(
         &self,
         authority: ConfigurationMutationAuthority,
@@ -274,66 +251,6 @@ impl ProductionConfigurationDaemonClient {
             DirectConfigurationMutation::Batch { mutations },
             expected_revision,
         )
-    }
-
-    pub fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        self.control_plane
-            .write_credential(authority, write, expected_revision)
-    }
-
-    pub fn observed_state(
-        &self,
-        actor: AuthorizedActor,
-    ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
-        self.control_plane.observed_state(actor)
-    }
-
-    pub fn dry_run_protected_change(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        change: ProtectedChange,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        self.control_plane
-            .dry_run_protected_change(authority, change, expected_revision)
-    }
-
-    pub fn apply_protected_change(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        request: ProtectedApplyRequest,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.control_plane
-            .apply_protected_change(authority, request)
-    }
-
-    pub fn dry_run_rollback(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        rollback: ConfigurationRollbackRequest,
-    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        self.control_plane.dry_run_rollback(authority, rollback)
-    }
-
-    pub fn apply_rollback(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        request: ProtectedApplyRequest,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.control_plane.apply_rollback(authority, request)
-    }
-
-    pub fn audit(
-        &self,
-        actor: AuthorizedActor,
-        query: ConfigurationAuditQuery,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
-        self.control_plane.audit(actor, query)
     }
 
     pub fn current(&self) -> ConfigurationOperationFuture<'_, PinnedRuntimeConfiguration> {

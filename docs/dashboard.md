@@ -48,7 +48,7 @@ Hermes wrapper the same routes are reverse-proxied at
 `GET /api/capabilities` advertises `features.graph: true` and lists `graph`
 in `dashboards`; hosts can feature-detect via
 `window.__HERMES_PLUGIN_SDK__.capabilities`. Full legacy-frontend history
-(views, wiring, tests) is archived at `docs/archive/graph-explorer.md`.
+(views, wiring, tests) lives in git history under `docs/archive/graph-explorer.md`.
 
 ## Hermes plugin and LCM diagnostics
 

@@ -23,17 +23,17 @@ use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
     CursorPayloadDigest, EmbeddingMetricV1, EmbeddingProjectionKeyV1,
     EphemeralSanitizedQueryViewV1, FixedPointScore, FreshnessCompatibilityV1, ManifestDigest,
-    ProjectionKeyV1, QueryDigest, RetrievalBudget, RetrievalBudgetUsage, RetrievalError,
-    RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SEMANTIC_ANN_RECALL_POLICY_V1,
-    SemanticSearchIndexKeyV1, SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1,
-    SourceOccurrenceId, VectorGenerationIdV1,
+    ProjectionKeyV1, QueryDigest, RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure,
+    RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome, SEMANTIC_ANN_RECALL_POLICY_V1, SemanticSearchIndexKeyV1,
+    SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1, SourceOccurrenceId,
+    VectorGenerationIdV1,
 };
 use tracedecay_graph_db::MAX_VECTOR_SEARCH_LIMIT;
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError, candidate_checkpoint_prefix,
-    checkpoint_digest, contract_error, lane_candidate_cap,
+    CodeCandidateBindingV1, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
+    contract_error, lane_candidate_cap,
 };
 
 /// Fallback exact-flat scan deadline when both request budgets omit
@@ -1127,38 +1127,6 @@ pub(super) fn observe_semantic_lane_failure(stage: &'static str, error_class: &'
         _ => {
             hotpath::gauge!("query.lane.semantic.failure.class.unknown").inc(1_u64);
         }
-    }
-}
-
-impl<'request, E, V, C> Retriever<SemanticRetrievalRequestV1<'request>, CodeSemanticEvidenceV1>
-    for SemanticCodeRetriever<'_, E, V, C>
-where
-    E: SemanticQueryEmbeddingPort,
-    V: SemanticVectorReadPort,
-    C: SemanticExecutionControl,
-{
-    fn retrieve(
-        &self,
-        request: &SemanticRetrievalRequestV1<'request>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalError> {
-        self.retrieve_semantic(request)
-            .map_err(RetrievalError::from)
-    }
-}
-
-impl<'request, E, V, C>
-    CompactCandidateLane<SemanticRetrievalRequestV1<'request>, CodeSemanticEvidenceV1>
-    for SemanticCodeRetriever<'_, E, V, C>
-where
-    E: SemanticQueryEmbeddingPort,
-    V: SemanticVectorReadPort,
-    C: SemanticExecutionControl,
-{
-    fn candidates(
-        &self,
-        request: &SemanticRetrievalRequestV1<'request>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
-        self.retrieve_semantic(request)
     }
 }
 

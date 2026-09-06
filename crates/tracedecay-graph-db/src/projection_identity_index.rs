@@ -34,7 +34,7 @@ use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 use crate::projection_read::IdentityScope;
-use crate::schema::{has_native_label, nodes_with_label, nodes_with_label_count};
+use crate::schema::{has_native_label, nodes_with_label};
 use crate::{GraphCancellation, GraphDbError};
 
 /// Identity bytes one cached index may retain. A projection whose identities
@@ -63,12 +63,6 @@ pub(crate) struct ProjectionIdentityIndex {
     /// [`Self::node_count`] keeps reporting node cardinality even if a corrupt
     /// projection were to repeat an identity.
     node_count: usize,
-    /// Owner-label cardinality this index was built from.
-    /// Owner-label cardinality this index was built from. Retained for
-    /// diagnostics: the epoch authorizes cache hits, so this is no longer
-    /// re-checked per read.
-    #[allow(dead_code)]
-    owner_node_count: usize,
 }
 
 impl ProjectionIdentityIndex {
@@ -143,18 +137,13 @@ impl IdentityIndexCache {
         // to run here walked `all_labels()` and split every key on the
         // composite separator - O(label universe) per page, which made the
         // catalog warm quadratic again once paging itself was O(page): 1079
-        // counts x 633ms measured against a 430k-chunk generation. The count
-        // is still computed on the miss path below and retained on the entry,
-        // so a rebuilt index reports the cardinality it was built from.
+        // counts x 633ms measured against a 430k-chunk generation. The count is
+        // no longer computed or retained: the epoch alone authorizes cache hits.
         if let Some(index) = self.cached(&key, epoch)? {
             return Ok(Some(index));
         }
 
-        let owner_node_count =
-            nodes_with_label_count(database.graph_store().as_ref(), scope.owner_label);
-
-        let Some(index) = build_identity_index(database, scope, owner_node_count, cancellation)?
-        else {
+        let Some(index) = build_identity_index(database, scope, cancellation)? else {
             return Ok(None);
         };
         let index = Arc::new(index);
@@ -197,7 +186,6 @@ impl IdentityIndexCache {
 fn build_identity_index(
     database: &GrafeoDB,
     scope: IdentityScope<'_>,
-    owner_node_count: usize,
     cancellation: &dyn GraphCancellation,
 ) -> Result<Option<ProjectionIdentityIndex>, GraphDbError> {
     check_cancelled(cancellation)?;
@@ -236,7 +224,6 @@ fn build_identity_index(
     Ok(Some(ProjectionIdentityIndex {
         identities: identities.into_boxed_slice(),
         node_count,
-        owner_node_count,
     }))
 }
 
@@ -259,7 +246,6 @@ mod tests {
         ProjectionIdentityIndex {
             identities: sorted.into_boxed_slice(),
             node_count,
-            owner_node_count: node_count,
         }
     }
 

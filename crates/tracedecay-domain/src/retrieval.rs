@@ -850,17 +850,6 @@ pub enum RetrieverOutcome<T> {
     Cancelled,
 }
 
-/// The single generic retriever port. Composition lives in the query
-/// adapters; this crate owns the pure contract. `R` is the lane's typed
-/// request; `E` is the lane's typed per-occurrence evidence.
-pub trait Retriever<R, E> {
-    /// Retrieve one committed candidate prefix against the pinned snapshot.
-    ///
-    /// Implementations are provided by root query adapters, never by this
-    /// crate.
-    fn retrieve(&self, request: &R) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalError>;
-}
-
 /// The sole authority that may mint an [`ExactAdmissionProof`].
 /// Implemented once, centrally; lane adapters consume proofs, they never
 /// construct them.

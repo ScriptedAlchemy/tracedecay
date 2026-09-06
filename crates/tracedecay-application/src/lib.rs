@@ -303,7 +303,7 @@ pub use retrieval::catalog::{
 };
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
-    AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationAdmission,
+    CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationAdmission,
     CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, CallableCodeOperationKind,
     CallableCodeOperations, CallableCodeQueryFuture, CallableCodeQueryPort,
     CallableCodeQueryService, CodeFacetDimension, CodeFacetRecord, CodeFacetRequest,
@@ -311,16 +311,14 @@ pub use retrieval::{
     CodeLexicalFieldFilter, CodeNavigationRequest, CodeOccurrenceRecord, CodeQueryPage,
     CodeQueryScope, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
     CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    GraphCallersRequest, GraphImpactRequest, GraphImpactResult, GraphImpactRetrievalPort,
-    GraphRetrievalPort, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
+    GraphImpactResult, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
     HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1,
     HealthDimensionPointV1, HealthReadRequest, LexicalOccurrenceRecord, MAX_APPLICATION_PAGE_SIZE,
     ModuleApiRequest, OperationalRetrievalPort, PageRequest, PhraseSearchRequest,
     QualifiedNameRequest, ResultProjection, RetrievalOrder, RetrievalPortContext,
     RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest, SourceLinesRequest,
     SourceLinesResult, SourceMetadataRecord, SourceMetadataRequest, SourceRetrievalPort,
-    SymbolRetrievalPort, SymbolSearchRequest, SymbolSearchResult, TemporalRetrievalPort,
-    UNPINNED_LATEST_GENERATION_SENTINEL, callable_code_catalog_contribution,
+    TemporalRetrievalPort, UNPINNED_LATEST_GENERATION_SENTINEL, callable_code_catalog_contribution,
     callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
     callable_code_request_schema, callable_code_result_schema,
 };

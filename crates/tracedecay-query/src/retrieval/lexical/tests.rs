@@ -11,10 +11,10 @@ use std::fmt;
 use tracedecay_domain::{
     CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1,
-    PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalError, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
-    VectorWatermark, split_subtokens, technical_tokens,
+    PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverBatch, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros, VectorWatermark,
+    split_subtokens, technical_tokens,
 };
 
 use super::{
@@ -616,11 +616,15 @@ fn lexical_lane_satisfies_the_generic_retriever_contract() {
     let request = lexical_request(8);
     let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
 
-    let outcome = Retriever::retrieve(&lane, &request).expect("generic retrieval succeeds");
+    let outcome = lane
+        .retrieve_lexical(&request)
+        .expect("generic retrieval succeeds");
     assert_eq!(complete_batch(outcome).candidates.len(), 3);
 
     let mut invalid = lexical_request(8);
     invalid.budget.max_candidates_per_lane = 0;
-    let error = Retriever::retrieve(&lane, &invalid).expect_err("invalid budget is rejected");
-    assert!(matches!(error, RetrievalError::InvalidRequest(_)));
+    let error = lane
+        .retrieve_lexical(&invalid)
+        .expect_err("invalid budget is rejected");
+    assert!(matches!(error, RetrievalPortError::Contract(_)));
 }
