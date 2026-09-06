@@ -500,11 +500,12 @@ async fn aborted_read_only_cannot_outlive_operation_owner_shutdown() {
     recovery_started.notified().await;
 
     caller.abort();
+    let join_error = match caller.await {
+        Err(join_error) => join_error,
+        Ok(_) => panic!("read-only caller unexpectedly completed"),
+    };
     assert!(
-        caller
-            .await
-            .expect_err("read-only caller must abort")
-            .is_cancelled(),
+        join_error.is_cancelled(),
         "caller abort must drop only the live result receiver"
     );
     operation_owner.begin_shutdown();
