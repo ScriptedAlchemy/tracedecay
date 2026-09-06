@@ -50,6 +50,7 @@ pub(super) async fn handle_automation_skills_command(
             id,
             title,
             summary,
+            routing_description,
             category,
             body,
             pinned,
@@ -60,6 +61,7 @@ pub(super) async fn handle_automation_skills_command(
                     id,
                     title,
                     summary,
+                    routing_description,
                     category,
                     targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(
                     ),
@@ -88,6 +90,7 @@ pub(super) async fn handle_automation_skills_command(
             id,
             title,
             summary,
+            routing_description,
             category,
             body,
             pinned,
@@ -100,6 +103,7 @@ pub(super) async fn handle_automation_skills_command(
                 ManagedSkillUpdate {
                     title,
                     summary,
+                    routing_description,
                     category,
                     body_markdown: body,
                     pinned,
@@ -151,6 +155,10 @@ fn print_managed_skill(
     println!("id: {}", skill.metadata.id);
     println!("title: {}", skill.metadata.title);
     println!("summary: {}", skill.metadata.summary);
+    println!(
+        "routing description: {}",
+        skill.metadata.routing_description
+    );
     println!("category: {}", skill.metadata.category);
     println!("state: {:?}", skill.metadata.state);
     println!("pinned: {}", skill.metadata.pinned);

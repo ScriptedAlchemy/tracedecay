@@ -1087,8 +1087,9 @@ async fn reset_then_reconnect_client(
 
 #[derive(Clone, Copy)]
 enum UnsettledControl {
-    CancellationDelivered,
-    CancellationConnectionRejected,
+    Delivered,
+    DeliveredThenResponseClosed,
+    ConnectionRejected,
 }
 
 async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -> UnsettledDaemon {
@@ -1101,7 +1102,7 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
     let (release, released) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
-        let (invocation_reader, _invocation_writer) = invocation_stream.into_split();
+        let (invocation_reader, invocation_writer) = invocation_stream.into_split();
         let mut invocation_lines = BufReader::new(invocation_reader).lines();
         invocation_lines
             .next_line()
@@ -1117,8 +1118,8 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
             serde_json::from_str(&request_line).expect("typed invocation request");
         assert_eq!(request.request_id, request_id);
 
-        let _control_connection = match control {
-            UnsettledControl::CancellationDelivered => {
+        let (_control_connection, close_response) = match control {
+            UnsettledControl::Delivered | UnsettledControl::DeliveredThenResponseClosed => {
                 let _ = request_admitted.send(());
                 let control_stream = listener.accept().await.expect("accept cancellation");
                 let (control_reader, control_writer) = control_stream.into_split();
@@ -1136,15 +1137,22 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
                 let cancellation = parse_daemon_invocation_cancellation_request(&cancellation_line)
                     .expect("typed invocation cancellation");
                 assert_eq!(cancellation.target_request_id(), request_id);
-                Some((control_lines, control_writer))
+                (
+                    Some((control_lines, control_writer)),
+                    matches!(control, UnsettledControl::DeliveredThenResponseClosed),
+                )
             }
-            UnsettledControl::CancellationConnectionRejected => {
+            UnsettledControl::ConnectionRejected => {
                 drop(listener);
                 let _ = request_admitted.send(());
-                None
+                (None, false)
             }
         };
         let _ = control_phase_done.send(());
+        if close_response {
+            drop(invocation_writer);
+            return;
+        }
         // Hold the invocation connection open without ever answering; the
         // test releases it once the client has settled the effect itself.
         let _ = released.await;
@@ -1286,7 +1294,7 @@ async fn remote_effect_deadline_requests_daemon_cancel_and_awaits_settlement() {
 #[tokio::test]
 async fn remote_effect_without_authoritative_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-no-settlement";
-    let daemon = unsettled_client(REQUEST_ID, UnsettledControl::CancellationDelivered).await;
+    let daemon = unsettled_client(REQUEST_ID, UnsettledControl::Delivered).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-no-settlement").expect("cancellation");
 
@@ -1298,14 +1306,51 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
 #[tokio::test]
 async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-cancel-delivery-failure";
-    let daemon =
-        unsettled_client(REQUEST_ID, UnsettledControl::CancellationConnectionRejected).await;
+    let daemon = unsettled_client(REQUEST_ID, UnsettledControl::ConnectionRejected).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-delivery-failure").expect("cancellation");
 
     let response = settle_without_daemon_response(daemon, REQUEST_ID, cancellation).await;
 
     assert_authoritative_settlement(response);
+}
+
+#[tokio::test]
+async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
+    const REQUEST_ID: &str = "request.remote-effect-response-eof";
+    let UnsettledDaemon {
+        client,
+        admitted,
+        control_observed,
+        release: _release,
+        server,
+    } = unsettled_client(REQUEST_ID, UnsettledControl::DeliveredThenResponseClosed).await;
+    let cancellation =
+        CancellationSignal::active("cancel.remote-effect-response-eof").expect("cancellation");
+    let deadline = deadline_after(Duration::from_secs(10));
+    let call_cancellation = cancellation.clone();
+    let call = tokio::spawn(async move {
+        client
+            .invoke_controlled(
+                invocation_request(REQUEST_ID, deadline.clone()),
+                deadline,
+                call_cancellation,
+                InvocationCancellationPolicy::AuthoritativeEffect,
+            )
+            .await
+    });
+    admitted.await.expect("request admission");
+    assert!(cancellation.cancel(now_micros()));
+    control_observed
+        .await
+        .expect("cancellation delivery reached the server");
+    let response = call
+        .await
+        .expect("authoritative invocation task")
+        .expect("response EOF is an indeterminate effect");
+
+    assert_authoritative_settlement(response);
+    server.await.expect("server task");
 }
 
 #[tokio::test]

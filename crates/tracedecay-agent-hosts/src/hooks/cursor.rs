@@ -10,6 +10,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
 
+use crate::ports::hook_runtime::HookRuntimeV1;
+
 use super::post_tool_use::{
     EmptyPathPolicy, captured_tool_output, notify_edited_paths, trusted_tool_failure,
 };
@@ -50,11 +52,12 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
 
 /// Cursor `subagentStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.subagent_start")]
-pub async fn hook_cursor_subagent_start() -> i32 {
+pub async fn hook_cursor_subagent_start(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let _hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         "subagentStart",
@@ -63,6 +66,7 @@ pub async fn hook_cursor_subagent_start() -> i32 {
     );
     if let Some(decision) = evaluate_cursor_subagent_start(&event)
         && !super::write_hook_output(
+            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
@@ -88,19 +92,21 @@ pub async fn hook_cursor_subagent_start() -> i32 {
 /// category is emitted at most once per session via
 /// [`super::tool_hints::ToolHintDedupe`] persisted under `.tracedecay/`.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.post_tool_use")]
-pub async fn hook_cursor_post_tool_use() -> i32 {
+pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let _hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         "postToolUse",
         &event,
         &parsed,
     );
-    if let Some(decision) = cursor_post_tool_use_decision(&event)
+    if let Some(decision) = cursor_post_tool_use_decision(runtime, &event)
         && !super::write_hook_output(
+            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
@@ -122,19 +128,21 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
 /// regular capped catch-up ingest applies. The response is logged but unused,
 /// so an empty object is emitted. Fail-open.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_end")]
-pub async fn hook_cursor_session_end() -> i32 {
-    hook_cursor_session_completion("sessionEnd").await
+pub async fn hook_cursor_session_end(runtime: &HookRuntimeV1) -> i32 {
+    hook_cursor_session_completion(runtime, "sessionEnd").await
 }
 
-async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
+async fn hook_cursor_session_completion(runtime: &HookRuntimeV1, hook_name: &str) -> i32 {
     let event = read_hook_event!();
     // One parse feeds root resolution, the analytics row, the ingest scope,
     // and the session-review id; payloads can approach the wire cap.
     let Ok(parsed) = serde_json::from_str::<Value>(&event) else {
         // A malformed event keeps the fail-open telemetry row and empty
         // output the handler always produced, but is never ingested.
-        let hook_telemetry = record_hook_invoked(None, HintAgent::Cursor, hook_name, &event);
+        let hook_telemetry =
+            record_hook_invoked(runtime, None, HintAgent::Cursor, hook_name, &event);
         if !super::write_hook_output(
+            runtime,
             None,
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
@@ -147,8 +155,9 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         }
         return 0;
     };
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         hook_name,
@@ -159,6 +168,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         && let Some(root) = root.as_deref()
     {
         super::dispatch::dispatch(
+            runtime,
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             root,
@@ -171,6 +181,7 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         None
     };
     let outcome = super::ingest_transcript_for_event(
+        runtime,
         "cursor",
         &event,
         root.as_deref(),
@@ -181,13 +192,14 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     .await;
     if outcome.should_schedule_user_review() {
         let session_id = event_session_id(&parsed);
-        super::schedule_user_session_review("cursor", session_id.as_deref()).await;
+        super::schedule_user_session_review(runtime, "cursor", session_id.as_deref()).await;
     }
     let output = guidance.map_or_else(
         || serde_json::json!({}).to_string(),
         |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
     );
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
@@ -208,8 +220,8 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
 /// tails appended during the turn. The `stop` output is informational only, so
 /// we emit an empty object and never ask the agent to continue. Fail-open.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.stop")]
-pub async fn hook_cursor_stop() -> i32 {
-    hook_cursor_session_completion("stop").await
+pub async fn hook_cursor_stop(runtime: &HookRuntimeV1) -> i32 {
+    hook_cursor_session_completion(runtime, "stop").await
 }
 
 /// Cursor `preCompact` hook handler.
@@ -220,11 +232,12 @@ pub async fn hook_cursor_stop() -> i32 {
 /// content remains typed unavailable because Cursor does not expose it.
 /// The hook is fail-open and emits Cursor's empty object shape.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.pre_compact")]
-pub async fn hook_cursor_pre_compact() -> i32 {
+pub async fn hook_cursor_pre_compact(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         "preCompact",
@@ -232,6 +245,7 @@ pub async fn hook_cursor_pre_compact() -> i32 {
         &parsed,
     );
     let outcome = super::cursor_compact::cursor_pre_compact_via_daemon_with_telemetry(
+        runtime,
         &event,
         Some(&hook_telemetry),
     )
@@ -243,6 +257,7 @@ pub async fn hook_cursor_pre_compact() -> i32 {
         );
     }
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
@@ -272,11 +287,12 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 ///    documented `additional_context` output shape with the same per-session
 ///    dedupe and initialized-store gating as `postToolUse`.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.after_file_edit")]
-pub async fn hook_cursor_after_file_edit() -> i32 {
+pub async fn hook_cursor_after_file_edit(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         "afterFileEdit",
@@ -285,6 +301,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     );
     if let Some(root) = root.as_deref()
         && let Some(guidance) = super::dispatch::dispatch(
+            runtime,
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
             root,
@@ -295,6 +312,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     {
         if let Some(guidance) = guidance
             && !super::write_hook_output(
+                runtime,
                 Some(root),
                 tracedecay_hooks::HookHostV1::CursorDesktop,
                 &event,
@@ -308,10 +326,11 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         return 0;
     }
     if let Some(root) = root.as_deref() {
-        notify_cursor_after_file_edit(&parsed, root, &hook_telemetry).await;
+        notify_cursor_after_file_edit(runtime, &parsed, root, &hook_telemetry).await;
     }
-    if let Some(decision) = cursor_after_file_edit_decision(&event)
+    if let Some(decision) = cursor_after_file_edit_decision(runtime, &event)
         && !super::write_hook_output(
+            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::CursorDesktop,
             &event,
@@ -326,10 +345,11 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_start")]
-pub async fn hook_cursor_session_start() -> i32 {
+pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
-    let (root, output) = cursor_session_start_response(&event).await;
+    let (root, output) = cursor_session_start_response(runtime, &event).await;
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
@@ -345,10 +365,14 @@ pub async fn hook_cursor_session_start() -> i32 {
 
 /// Returns the identity-resolved root alongside the response so the handler
 /// does not repeat the registry-probing resolution for output delivery.
-async fn cursor_session_start_response(event: &str) -> (Option<PathBuf>, String) {
+async fn cursor_session_start_response(
+    runtime: &HookRuntimeV1,
+    event: &str,
+) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         "sessionStart",
@@ -356,6 +380,7 @@ async fn cursor_session_start_response(event: &str) -> (Option<PathBuf>, String)
         &parsed,
     );
     let guidance = super::dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::CursorDesktop,
         event,
         root.as_deref(),
@@ -373,18 +398,19 @@ async fn cursor_session_start_response(event: &str) -> (Option<PathBuf>, String)
 /// Notifies the daemon that Cursor completed a shell action. Command text is
 /// not forwarded and cannot become Git or synchronization authority.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.after_shell")]
-pub async fn hook_cursor_after_shell() -> i32 {
+pub async fn hook_cursor_after_shell(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         "afterShellExecution",
         &event,
         &parsed,
     );
-    notify_cursor_after_shell_event(&parsed, root.as_deref(), &hook_telemetry).await;
+    notify_cursor_after_shell_event(runtime, &parsed, root.as_deref(), &hook_telemetry).await;
     0
 }
 
@@ -392,19 +418,21 @@ pub async fn hook_cursor_after_shell() -> i32 {
 ///
 /// Notifies the daemon to run one-shot workspace catch-up. Fail-open.
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.workspace_open")]
-pub async fn hook_cursor_workspace_open() -> i32 {
+pub async fn hook_cursor_workspace_open(runtime: &HookRuntimeV1) -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
         root.as_deref(),
         HintAgent::Cursor,
         "workspaceOpen",
         &event,
         &parsed,
     );
-    notify_cursor_workspace_open(&parsed, root.as_deref(), &hook_telemetry).await;
+    notify_cursor_workspace_open(runtime, &parsed, root.as_deref(), &hook_telemetry).await;
     if !super::write_hook_output(
+        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::CursorDesktop,
         &event,
@@ -457,9 +485,9 @@ fn prepare_cursor_post_tool_use_hint(event_json: &str) -> Option<(String, ToolHi
 
 /// Cursor `postToolUse` hint decision with per-session dedupe persisted under
 /// the project's `.tracedecay/` dir.
-pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
+pub fn cursor_post_tool_use_decision(runtime: &HookRuntimeV1, event_json: &str) -> Option<String> {
     let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
-    let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
+    let hint = deduped_cursor_hint(runtime, event_json, &hint_id, hint)?;
     Some(format_cursor_post_tool_use_decision(&hint))
 }
 
@@ -503,9 +531,14 @@ fn cursor_hint_root(
     Some((root, session_id))
 }
 
-fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
+fn deduped_cursor_hint(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    hint_id: &str,
+    hint: ToolHint,
+) -> Option<ToolHint> {
     let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
-    if !crate::ports::hook_runtime::is_project_initialized(&root) {
+    if !runtime.is_project_initialized(&root) {
         record_hint_analytics(
             Some(&root),
             "suppressed_uninitialized",
@@ -549,18 +582,19 @@ pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<Pa
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.cursor.resolve_root")]
-async fn cursor_project_root_from_parsed_event_with_identity(parsed: &Value) -> Option<PathBuf> {
+async fn cursor_project_root_from_parsed_event_with_identity(
+    runtime: &HookRuntimeV1,
+    parsed: &Value,
+) -> Option<PathBuf> {
     let mut resolved = None;
     for candidate in cursor_hook_root_candidates(parsed) {
-        if let Some(root) =
-            crate::ports::hook_runtime::resolve_project_root_with_identity(&candidate).await
-        {
+        if let Some(root) = runtime.resolve_project_root_with_identity(&candidate).await {
             resolved = Some(root);
             break;
         }
     }
     let cwd_root = match cursor_hook_cwd(parsed) {
-        Some(cwd) => crate::ports::hook_runtime::resolve_project_root_with_identity(&cwd).await,
+        Some(cwd) => runtime.resolve_project_root_with_identity(&cwd).await,
         None => None,
     };
     match (cwd_root, resolved) {
@@ -675,6 +709,7 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
 /// Resolves the edited repo-relative paths locally, then lets the daemon own
 /// scheduling and sync execution. No-ops when no in-project paths were edited.
 async fn notify_cursor_after_file_edit(
+    runtime: &HookRuntimeV1,
     parsed: &Value,
     root: &Path,
     telemetry: &super::analytics::HookTimingSpan,
@@ -682,6 +717,7 @@ async fn notify_cursor_after_file_edit(
     // Cursor's event carries nothing but the edited paths, so an edit that
     // touched nothing inside the project is not sent.
     notify_edited_paths(
+        runtime,
         root,
         parsed,
         || cursor_after_file_edit_rel_paths_from_parsed(parsed, root),
@@ -694,6 +730,7 @@ async fn notify_cursor_after_file_edit(
 
 /// Best-effort daemon notification for Cursor `afterShellExecution`.
 async fn notify_cursor_after_shell_event(
+    runtime: &HookRuntimeV1,
     parsed: &Value,
     root: Option<&Path>,
     telemetry: &super::analytics::HookTimingSpan,
@@ -701,11 +738,12 @@ async fn notify_cursor_after_shell_event(
     let Some(root) = root else {
         return;
     };
-    if !crate::ports::hook_runtime::is_project_initialized(root) {
+    if !runtime.is_project_initialized(root) {
         return;
     }
     let cwd = cursor_hook_cwd(parsed).unwrap_or_else(|| root.to_path_buf());
     super::notify_hook_event_with_telemetry(
+        runtime,
         root,
         DaemonHookEvent::cursor_after_shell_execution(cwd)
             .with_route(Some(hook_route_metadata_from_parsed(parsed, root))),
@@ -716,6 +754,7 @@ async fn notify_cursor_after_shell_event(
 
 /// Best-effort daemon notification for Cursor `workspaceOpen`.
 async fn notify_cursor_workspace_open(
+    runtime: &HookRuntimeV1,
     parsed: &Value,
     root: Option<&Path>,
     telemetry: &super::analytics::HookTimingSpan,
@@ -723,10 +762,11 @@ async fn notify_cursor_workspace_open(
     let Some(root) = root else {
         return;
     };
-    if !crate::ports::hook_runtime::is_project_initialized(root) {
+    if !runtime.is_project_initialized(root) {
         return;
     }
     super::notify_hook_event_with_telemetry(
+        runtime,
         root,
         DaemonHookEvent::cursor_workspace_open(root.to_path_buf())
             .with_route(Some(hook_route_metadata_from_parsed(parsed, root))),
@@ -847,9 +887,12 @@ fn prepare_cursor_after_file_edit_hint(event_json: &str) -> Option<(String, Tool
 /// Shares [`deduped_cursor_hint`] with `postToolUse`, so the redundancy category
 /// surfaces at most once per Cursor session regardless of which surface emits
 /// it first.
-pub fn cursor_after_file_edit_decision(event_json: &str) -> Option<String> {
+pub fn cursor_after_file_edit_decision(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+) -> Option<String> {
     let (hint_id, hint) = prepare_cursor_after_file_edit_hint(event_json)?;
-    let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
+    let hint = deduped_cursor_hint(runtime, event_json, &hint_id, hint)?;
     Some(format_cursor_post_tool_use_decision(&hint))
 }
 
@@ -868,7 +911,9 @@ mod tests {
         ]);
         let event = serde_json::json!({ "session_id": "cursor-budget" }).to_string();
 
+        let runtime = crate::ports::hook_runtime::crate_test_runtime();
         let outcome = crate::hooks::ingest_transcript_for_event(
+            &runtime,
             "cursor",
             &event,
             None,
@@ -900,7 +945,9 @@ mod tests {
         let _daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
         let event = serde_json::json!({ "session_id": "cursor-fail" }).to_string();
 
+        let runtime = crate::ports::hook_runtime::crate_test_runtime();
         let outcome = crate::hooks::ingest_transcript_for_event(
+            &runtime,
             "cursor",
             &event,
             None,
@@ -1023,7 +1070,7 @@ mod tests {
         // States the dependency explicitly: this path gates on
         // `is_project_initialized`, which is a composition capability, not a
         // value this crate can default.
-        crate::ports::hook_runtime::install_crate_test_runtime();
+        let runtime = crate::ports::hook_runtime::crate_test_runtime();
         let _lock = crate::hooks::lock_test_env();
         let project = tempfile::tempdir().unwrap();
         let profile = tempfile::tempdir().unwrap();
@@ -1061,11 +1108,11 @@ mod tests {
         .to_string();
 
         assert!(
-            cursor_after_file_edit_decision(&event).is_some(),
+            cursor_after_file_edit_decision(&runtime, &event).is_some(),
             "first qualifying edit in a session must emit the nudge"
         );
         assert!(
-            cursor_after_file_edit_decision(&event).is_none(),
+            cursor_after_file_edit_decision(&runtime, &event).is_none(),
             "the redundancy nudge must be deduped within the session"
         );
     }

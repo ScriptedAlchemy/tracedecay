@@ -66,13 +66,12 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
     let (mounted, exact_scope) = mounted_scope("project.work-evidence-mount");
     let federated = Arc::new(MissingFederatedAuthority);
 
-    let first = mounted
+    mounted
         .work_evidence_retrieval(&exact_scope, federated.clone())
         .expect("exact project scope must bind the concrete evidence adapter");
-    let second = mounted
+    mounted
         .work_evidence_retrieval(&exact_scope, federated)
-        .expect("the same concrete authority must be reusable");
-    assert!(first.same_authority(&second));
+        .expect("the same mounted authority must keep binding new adapters");
 
     let (_, foreign_scope) = mounted_scope("project.work-evidence-foreign");
     assert!(
