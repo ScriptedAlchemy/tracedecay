@@ -5,10 +5,15 @@
 //! same identity instead of collapsing every stream of a session onto
 //! `for_provider`.
 //!
-//! Providers whose committed identity is *not* the plain provider/session pair
-//! own that decision in their own host module — Codex commits under
-//! [`crate::runtime::codex::codex_observation_source_v2`] — so this stays a
-//! plain constructor with no per-provider table.
+//! Every host but one commits under the plain provider/session pair, so this
+//! is a constructor rather than a registry. Codex is the exception, and it is
+//! a deliberate one: its observations commit under a hashed v2 identity, and
+//! `for_provider` names only the pre-v2 legacy source that replay reconciles,
+//! so a lookup that reconstructed the pair would read the wrong cursor. The
+//! knowledge of what that identity is stays in the Codex host module
+//! ([`crate::runtime::codex::codex_observation_source_v2`]); only the routing
+//! to it lives here, because a caller holding just a provider string has no
+//! other way to reach the host that owns the answer.
 
 use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
 
@@ -25,6 +30,11 @@ pub fn native_ingest_source_identity(
     session_id: &str,
     source_key: Option<&str>,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+    // See the module doc: Codex, and only Codex, commits under an identity the
+    // provider/session pair cannot reconstruct.
+    if provider == "codex" && source_key.is_none() {
+        return crate::runtime::codex::codex_observation_source_v2(session_id);
+    }
     let provider = ProviderId::new(provider)?;
     let session_id = SessionId::new(session_id.to_string())?;
     Ok(match source_key {
@@ -68,6 +78,21 @@ mod tests {
             assert_eq!(source.session_id().as_str(), "session-1");
             assert!(source.explicit_source_key().is_none());
         }
+    }
+
+    #[test]
+    fn codex_lookup_uses_the_v2_authority_not_the_legacy_session_source() {
+        let written =
+            crate::runtime::codex::codex_observation_source_v2("codex-goal-dedupe").unwrap();
+        let looked_up = native_ingest_source_identity("codex", "codex-goal-dedupe", None).unwrap();
+        let legacy = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
+            tracedecay_domain::ProviderId::new("codex").unwrap(),
+            SessionId::new("codex-goal-dedupe".to_owned()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written, looked_up);
+        assert_ne!(written, legacy);
+        assert!(written.explicit_source_key().is_some());
     }
 
     #[test]
