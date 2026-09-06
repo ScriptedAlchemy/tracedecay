@@ -328,6 +328,20 @@ mod tests {
         assert!(layout.identity.project_id.is_some());
     }
 
+    /// The automation host-I/O bundle is still a process-global slot the
+    /// root fills whole; this pins that registration installs every callback
+    /// of the bundle rather than a partial one.
+    #[test]
+    fn the_automation_host_io_bundle_is_registered_after_registration() {
+        let _pinned = registered();
+        let io = tracedecay_automation_runtime::automation::host_io::registered()
+            .expect("register_runtime_ports must install the automation host-I/O bundle");
+        assert!(
+            !(io.codex_agent_files)().is_empty(),
+            "the registered bundle must serve the embedded Codex agent files"
+        );
+    }
+
     /// The tool catalog is no longer wired here at all: host installers read
     /// it from its owning crate, so it is readable with no registration and an
     /// unavailable catalog is an error rather than an empty tool set.
