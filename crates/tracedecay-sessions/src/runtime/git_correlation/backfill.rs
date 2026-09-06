@@ -71,15 +71,6 @@ impl SessionActivityRow {
             _ => None,
         }
     }
-
-    /// The activity timestamp the incremental backfill orders and watermarks by:
-    /// the newest message time, else the declared end, else the start. Mirrors
-    /// the `COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)` key used by
-    /// [`session_activity_page_after`], so the returned value compares directly
-    /// against the persisted watermark (both are raw, un-normalized bounds).
-    pub fn activity_sort_key(&self) -> Option<i64> {
-        self.message_max_ts.or(self.ended_at).or(self.started_at)
-    }
 }
 
 /// One `HEAD` position in a worktree's reflog timeline: the branch `HEAD`
