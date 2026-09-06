@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 
+use crate::parallelism;
+
 use super::lexical_page_source::scan_layout;
 use super::*;
 
@@ -236,12 +238,15 @@ pub(super) fn assemble_published_generation(
     )?;
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
         hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
-            let ignored_source_roster = IgnoredSourceRosterV1::restore(
-                &snapshot,
-                &repository_parse_identity,
-                ignored_source_admissions,
-                ignored_source_admissions_digest,
-            )?;
+            let ignored_source_roster =
+                hotpath::measure_block!("code_index.sealed_decode.ignored_roster", {
+                    IgnoredSourceRosterV1::restore(
+                        &snapshot,
+                        &repository_parse_identity,
+                        ignored_source_admissions,
+                        ignored_source_admissions_digest,
+                    )
+                })?;
             // Persist pages moved into `files` exactly once, and chunk/symbol
             // rows are `Arc`-shared between those pages and the generation
             // aggregates: this flatten clones row pointers and per-file
@@ -254,15 +259,31 @@ pub(super) fn assemble_published_generation(
                 .iter()
                 .flat_map(|file| file.artifacts.symbols.iter().cloned())
                 .collect::<Vec<_>>();
-            let chunks = GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
-                .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let symbols = GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
-                .map_err(CodeIndexProductionErrorV1::Lineage)?;
-            let imports = derive_import_evidence(&files);
-            let (edges, edge_abstentions) = collect_edge_evidence(&files);
+            let chunks = hotpath::measure_block!("code_index.sealed_decode.chunk_manifest", {
+                // Aggregate validation fans out over chunks too. Keep it on
+                // the same admitted pool as file restoration instead of
+                // entering Rayon's unrelated global worker pool.
+                parallelism::install(|| {
+                    GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
+                })
+            })?
+            .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let symbols = hotpath::measure_block!("code_index.sealed_decode.symbol_index", {
+                GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
+            })
+            .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            let imports = hotpath::measure_block!("code_index.sealed_decode.import_evidence", {
+                derive_import_evidence(&files)
+            });
+            let (edges, edge_abstentions) =
+                hotpath::measure_block!("code_index.sealed_decode.edge_evidence", {
+                    collect_edge_evidence(&files)
+                });
             let projection =
-                ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
-                    .map_err(CodeIndexProductionErrorV1::Projection)?;
+                hotpath::measure_block!("code_index.sealed_decode.projection_handoff", {
+                    ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
+                })
+                .map_err(CodeIndexProductionErrorV1::Projection)?;
             Ok::<_, CodeIndexProductionErrorV1>((
                 ignored_source_roster,
                 chunks,
