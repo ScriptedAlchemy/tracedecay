@@ -1,10 +1,11 @@
 use std::path::Path;
 
+use serde_json::json;
 use tracedecay_agent_hosts::hooks::{
     HookWorkspaceStatus, build_codex_session_context_for_workspace, codex_apply_patch_rel_paths,
     cursor_session_start_json, native_capture_material,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_hooks::{HookHostV1, NativeHookCaptureSourceV1, NativeHookDecodeError};
 
 #[test]
@@ -93,28 +94,48 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
     ));
 }
 
+/// No composition root runs in this test binary, so the hook runtime handle is
+/// absent — the one condition, reported the same way by every reader instead
+/// of nine per-capability defaults.
 #[tokio::test]
-async fn unregistered_root_ports_fail_closed() {
-    let error = tracedecay_agent_hosts::ports::hook_runtime::daemon_tool_json(
-        None,
-        "tracedecay_status",
-        serde_json::json!({}),
-        false,
-    )
-    .await
-    .expect_err("unregistered daemon port must not fabricate success");
-    assert!(error.to_string().contains("no daemon tool invoker"));
+async fn an_uninstalled_hook_runtime_is_reported_as_a_bootstrap_failure() {
+    use tracedecay_agent_hosts::ports::hook_runtime;
+
     assert!(
-        tracedecay_agent_hosts::ports::hook_runtime::resolve_project_root_with_identity(Path::new(
-            "/workspace/project",
-        ))
+        hook_runtime::installed().is_none(),
+        "this binary has no composition root"
+    );
+
+    let error = hook_runtime::daemon_tool_json(None, "tracedecay_status", json!({}), false)
         .await
-        .is_none()
-    );
+        .expect_err("an uninstalled hook runtime must not fabricate success");
+    assert!(error.to_string().contains("never installed HookRuntimeV1"));
+
+    let scope_error = hook_runtime::resolve_hook_scope(
+        Path::new("/workspace/project"),
+        &ProjectId::new("project.hooks-boundary").expect("valid project id"),
+    )
+    .expect_err("an uninstalled hook runtime must not fabricate a scope");
+    assert!(scope_error.contains("never installed HookRuntimeV1"));
+
+    let layout_error = hook_runtime::resolve_store_layout(Path::new("/workspace/project"))
+        .await
+        .expect_err("an uninstalled hook runtime must not fabricate a layout");
     assert!(
-        tracedecay_agent_hosts::ports::hook_runtime::hook_timings_enabled(Path::new(
-            "/workspace/project"
-        ))
-        .is_none()
+        layout_error
+            .to_string()
+            .contains("never installed HookRuntimeV1")
     );
+
+    // Readers whose signature cannot carry the failure log it and answer
+    // conservatively; none of them substitutes a plausible production value.
+    assert!(
+        hook_runtime::resolve_project_root_with_identity(Path::new("/workspace/project"))
+            .await
+            .is_none()
+    );
+    assert!(hook_runtime::hook_timings_enabled(Path::new("/workspace/project")).is_none());
+    assert!(!hook_runtime::is_project_initialized(Path::new(
+        "/workspace/project"
+    )));
 }

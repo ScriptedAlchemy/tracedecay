@@ -686,11 +686,11 @@ use crate::tool_name::{
 };
 
 /// Every managed tracedecay tool's plugin-namespace permission entry.
-fn plugin_tool_perms() -> Vec<String> {
-    super::tool_names()
+fn plugin_tool_perms() -> crate::errors::Result<Vec<String>> {
+    Ok(super::tool_names()?
         .into_iter()
         .map(|name| format!("{PLUGIN_TOOL_PERM_PREFIX}{name}"))
-        .collect()
+        .collect())
 }
 
 /// The single documented allow rule covering every plugin tool: the literal
@@ -767,13 +767,18 @@ fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
 /// True when the settings allowlist covers every plugin tool without
 /// prompting: either the single wildcard rule or an explicit per-tool grant
 /// for each managed tool.
-fn plugin_perms_satisfied(installed: &[&str]) -> bool {
-    plugin_perms_covered(installed, &plugin_tool_perms())
+fn plugin_perms_satisfied(installed: &[&str]) -> crate::errors::Result<bool> {
+    // The wildcard rule alone is coverage, so answer it before paying for a
+    // catalog read that can fail.
+    if installed.contains(&plugin_wildcard_perm().as_str()) {
+        return Ok(true);
+    }
+    Ok(plugin_perms_covered(installed, &plugin_tool_perms()?))
 }
 
 /// Coverage check against a concrete expected-tool list. An empty expected
-/// list (the tool catalog was never registered in this process) must not read
-/// as vacuously satisfied — only the wildcard rule can cover it.
+/// list must not read as vacuously satisfied — only the wildcard rule can
+/// cover it.
 fn plugin_perms_covered(installed: &[&str], per_tool: &[String]) -> bool {
     installed.contains(&plugin_wildcard_perm().as_str())
         || (!per_tool.is_empty()
@@ -1116,15 +1121,28 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
     // this is the real adoption gate. Install/update add the one managed
     // wildcard while preserving the rest of Claude's host-owned settings.
     let wildcard = plugin_wildcard_perm();
+    let per_tool = match plugin_tool_perms() {
+        Ok(per_tool) => per_tool,
+        Err(error) => {
+            // An unreadable catalog is a composition failure, never "this host
+            // advertises no tools" — say so instead of reporting coverage of
+            // an empty set.
+            dc.fail(&format!(
+                "Could not read the advertised tool catalog, so tool permissions cannot be \
+                 checked: {error}"
+            ));
+            return;
+        }
+    };
     if installed.contains(&wildcard.as_str()) {
         dc.pass(&format!(
             "Plugin tool permissions covered by the single allow rule \"{wildcard}\""
         ));
-    } else if plugin_perms_satisfied(&installed) {
+    } else if plugin_perms_covered(&installed, &per_tool) {
         dc.pass(&format!(
             "All {} plugin tool permissions granted individually — the single allow rule \
              \"{wildcard}\" would replace them",
-            plugin_tool_perms().len()
+            per_tool.len()
         ));
     } else {
         dc.fail(&format!(
@@ -1135,7 +1153,15 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
         ));
     }
 
-    let expected = expected_tool_perms();
+    let expected = match expected_tool_perms() {
+        Ok(expected) => expected,
+        Err(error) => {
+            dc.fail(&format!(
+                "Could not read the advertised tool catalog: {error}"
+            ));
+            return;
+        }
+    };
     let missing: Vec<&String> = expected
         .iter()
         .filter(|p| !installed.contains(&p.as_str()))
@@ -1218,13 +1244,19 @@ fn warn_missing_permissions(settings: &serde_json::Value) {
     // lack coverage of the `mcp__plugin_tracedecay_graph__*` namespace, which
     // is exactly what causes per-call prompts, so that is the gap worth
     // warning about — with the one-rule remedy, not a tool census.
-    if !plugin_perms_satisfied(&installed) {
-        eprintln!(
+    match plugin_perms_satisfied(&installed) {
+        Ok(true) => {}
+        Ok(false) => eprintln!(
             "\x1b[33mwarning: tracedecay plugin tools are not yet permitted in Claude Code \
              (calls will prompt). Add the single allow rule \"{}\" to `permissions.allow` in \
              ~/.claude/settings.json, or allow it via `/permissions` in Claude Code.\x1b[0m",
             plugin_wildcard_perm()
-        );
+        ),
+        // Distinguishable from "not permitted": the catalog itself could not
+        // be read, so no claim about the allowlist can be made.
+        Err(error) => eprintln!(
+            "\x1b[33mwarning: could not check Claude Code tool permissions: {error}\x1b[0m"
+        ),
     }
 }
 #[cfg(test)]

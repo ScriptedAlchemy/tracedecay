@@ -1116,9 +1116,7 @@ fn report_cursor_session_ingest<'a>(
             dc.info(&format!("  - {path}"));
         }
     }
-    if health.max_transcript_pending_bytes
-        > crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes()
-    {
+    if health.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES {
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
@@ -1128,7 +1126,7 @@ fn report_cursor_session_ingest<'a>(
             health.max_transcript_pending_bytes,
             health.pending_bytes,
             health.pending_transcripts,
-            crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes(),
+            crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES,
             project_path.display(),
         ));
     } else {
@@ -1356,7 +1354,7 @@ mod tests {
         let context = InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "/opt/tracedecay-previous".to_string(),
-            tool_permissions: super::super::expected_tool_perms(),
+            tool_permissions: super::super::expected_tool_perms().expect("tool catalog"),
             project_root: None,
             dashboard: true,
         };
@@ -2554,17 +2552,12 @@ mod tests {
 
     #[test]
     fn session_ingest_healthcheck_reports_daemon_snapshot() {
-        // Register a finite ceiling: the unwired default is `u64::MAX`, which
-        // both overflows the `+ 1` below and means the over-ceiling warning
-        // path could never be exercised.
-        crate::ports::hook_runtime::register_cursor_catch_up_ingest_max_bytes(|| 8 * 1024 * 1024);
         let mut counters = DoctorCounters::new();
         let health = CursorSessionIngestHealth {
             tracked_transcripts: 2,
             pending_transcripts: 1,
-            pending_bytes: crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() + 1,
-            max_transcript_pending_bytes:
-                crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() + 1,
+            pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
+            max_transcript_pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
         };
 
         report_cursor_session_ingest(

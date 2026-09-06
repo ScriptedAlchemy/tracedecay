@@ -727,7 +727,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
         .expect("mount retained linked-worktree generation");
     let latest = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(latest) = schedulers.latest_complete_serving_for_scope(&scope).await {
+            if let Some(latest) = schedulers.latest_text_serving_for_scope(&scope).await {
                 break latest;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

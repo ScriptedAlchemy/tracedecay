@@ -2956,26 +2956,30 @@ mod git_hook_tests {
     }
 }
 
-pub fn tool_names() -> Vec<String> {
-    advertised_tools()
+/// Every advertised tool name. Errors when the catalog is unavailable, so no
+/// caller can mistake a broken catalog read for "this host advertises nothing".
+pub fn tool_names() -> crate::errors::Result<Vec<String>> {
+    Ok(advertised_tools()?
         .into_iter()
         .map(|tool| tool.name)
-        .collect()
+        .collect())
 }
 
-pub fn read_only_tool_names() -> Vec<String> {
-    advertised_tools()
+/// The read-only subset of [`tool_names`].
+pub fn read_only_tool_names() -> crate::errors::Result<Vec<String>> {
+    Ok(advertised_tools()?
         .into_iter()
         .filter(|tool| tool.read_only)
         .map(|tool| tool.name)
-        .collect()
+        .collect())
 }
 
-pub fn expected_tool_perms() -> Vec<String> {
-    advertised_tools()
+/// Legacy-namespace permission entries for every advertised tool.
+pub fn expected_tool_perms() -> crate::errors::Result<Vec<String>> {
+    Ok(advertised_tools()?
         .iter()
         .map(|tool| format!("{}{}", crate::tool_name::LEGACY_TOOL_PREFIX, tool.name))
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
