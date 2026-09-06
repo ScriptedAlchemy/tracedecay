@@ -513,6 +513,31 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
 
+      # `tracedecay-cli::source_provenance_test` drives a nested `cargo
+      # generate-lockfile --offline` / `cargo build --offline` on a fixture
+      # crate whose build-dependency mirrors this crate's own (`serde_json =
+      # "1"`, see `CargoFixture::new`). The Linux/macOS lanes resolve that
+      # from the registry cache their own build just filled; a shard runner
+      # only receives the archive and starts with an empty Cargo home, so the
+      # offline resolution finds no index at all. Fetch that one dependency
+      # graph here so the fixture stays offline and hermetic.
+      - name: Seed the Cargo registry for the source-provenance fixture
+        shell: pwsh
+        run: |
+          $seed = Join-Path $env:RUNNER_TEMP "source-provenance-seed"
+          New-Item -ItemType Directory -Force -Path (Join-Path $seed "src") | Out-Null
+          Set-Content -Path (Join-Path $seed "Cargo.toml") -Value @'
+          [package]
+          name = "source-provenance-seed"
+          version = "0.1.0"
+          edition = "2024"
+
+          [build-dependencies]
+          serde_json = "1"
+          '@
+          Set-Content -Path (Join-Path $seed "src/main.rs") -Value "fn main() {}"
+          cargo fetch --manifest-path (Join-Path $seed "Cargo.toml")
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
