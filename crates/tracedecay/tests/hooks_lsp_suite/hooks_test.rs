@@ -48,17 +48,12 @@ fn enroll_profile_project(project_root: &Path, project_id: &str) {
     pin_fixture_repository_identity(project_root, project_id).unwrap();
 }
 
-/// Installs the composition-root runtime ports the hook implementation reads.
-///
-/// Hook and host behavior moved into `tracedecay-agent-hosts`, which reaches
-/// registered project identity and the canonical store layout through the
-/// `ports::hook_runtime` slots the root fills at startup. Unregistered, those
-/// slots answer "no project" and "no layout", so an in-process hook test sees
-/// every event as a generic workspace. Only the composition root can register
-/// them, and no test binary runs `main`; registration is `OnceLock::set`, so
-/// calling this from every hook fixture is idempotent.
-fn register_hook_runtime_ports() {
-    tracedecay::register_runtime_ports().expect("root runtime ports");
+/// The composition root's hook runtime handle, built explicitly for each
+/// fixture. Hook and host behavior lives in `tracedecay-agent-hosts`, which
+/// reaches registered project identity and the canonical store layout only
+/// through this handle; no slot exists for a test binary to leave empty.
+fn hook_runtime() -> tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1 {
+    tracedecay::hook_runtime()
 }
 
 #[test]
@@ -525,8 +520,7 @@ async fn test_codex_user_prompt_submit_generic_workspace_suppresses_code_hints()
     })
     .to_string();
 
-    register_hook_runtime_ports();
-    let context = codex_user_prompt_submit_context_for_event(&event).await;
+    let context = codex_user_prompt_submit_context_for_event(&hook_runtime(), &event).await;
 
     // Prompt steering is turn-local: UserPromptSubmit no longer repeats the
     // session bootstrap, so a generic workspace produces no context at all.
@@ -554,7 +548,6 @@ async fn test_codex_user_prompt_submit_generic_workspace_suppresses_code_hints()
 #[allow(clippy::await_holding_lock)]
 async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_session_hint() {
     let _lock = lock_global_db_env();
-    register_hook_runtime_ports();
     let project = tempfile::tempdir().unwrap();
     let generic = tempfile::tempdir().unwrap();
     let profile = tempfile::tempdir().unwrap();
@@ -571,7 +564,8 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
         "prompt": "Who calls build_codex_session_context?"
     })
     .to_string();
-    let generic_context = codex_user_prompt_submit_context_for_event(&generic_event).await;
+    let generic_context =
+        codex_user_prompt_submit_context_for_event(&hook_runtime(), &generic_event).await;
     // Turn-local steering: a generic workspace still records its workspace
     // status but emits no prompt context.
     assert!(
@@ -584,7 +578,8 @@ async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_sess
         "prompt": "Please explain the impact of changing parse_user"
     })
     .to_string();
-    let prompt_context = codex_user_prompt_submit_context_for_event(&prompt_event).await;
+    let prompt_context =
+        codex_user_prompt_submit_context_for_event(&hook_runtime(), &prompt_event).await;
     assert!(prompt_context.contains("tracedecay hint:"));
 
     let profile_events = read_hook_analytics_events(&profile_root);
@@ -884,7 +879,6 @@ fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context
 #[test]
 fn test_codex_subagent_start_counts_and_formats_log_line() {
     let _lock = lock_global_db_env();
-    register_hook_runtime_ports();
     let project = tempfile::tempdir().unwrap();
     let profile = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
@@ -904,11 +898,11 @@ fn test_codex_subagent_start_counts_and_formats_log_line() {
         .build()
         .unwrap_or_else(|err| panic!("failed to build tokio runtime: {err}"));
     assert_eq!(
-        runtime.block_on(record_codex_subagent_start(&input)),
+        runtime.block_on(record_codex_subagent_start(&hook_runtime(), &input)),
         Some(1)
     );
     assert_eq!(
-        runtime.block_on(record_codex_subagent_start(&input)),
+        runtime.block_on(record_codex_subagent_start(&hook_runtime(), &input)),
         Some(2)
     );
 
