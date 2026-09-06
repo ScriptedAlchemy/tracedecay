@@ -484,21 +484,30 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
         after_explicit_wake > baseline_admissions,
         "the explicit ensure wake must retain its projection discovery",
     );
+    // An explicit wake runs the projection refresh *and* the retained-summary
+    // convergence page that `4480b0208` put in every scheduler pass. A
+    // history-only retry runs only the convergence page, so its read cost must
+    // stay strictly below a wake's; equality would mean the retry rediscovered
+    // temporal projections.
+    let explicit_wake_reads = after_explicit_wake.saturating_sub(baseline_admissions);
     ingestor.release_third.notify_waiters();
     assert!(
         registry
             .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
             .await
     );
-    assert_eq!(
-        authority
-            .database()
-            .read_connection()
-            .reader_pool_occupancy()
-            .expect("registered reader pool")
-            .snapshot_admissions,
-        after_explicit_wake,
-        "history-only no-progress retries must not rediscover temporal projections",
+    let history_retry_reads = authority
+        .database()
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("registered reader pool")
+        .snapshot_admissions
+        .saturating_sub(after_explicit_wake);
+    assert!(
+        history_retry_reads < explicit_wake_reads,
+        "history-only no-progress retries must not rediscover temporal \
+         projections: retry read {history_retry_reads} snapshots, an explicit \
+         wake reads {explicit_wake_reads}",
     );
 
     registry.shutdown().await;
