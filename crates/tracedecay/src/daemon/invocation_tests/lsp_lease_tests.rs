@@ -238,10 +238,13 @@ async fn abrupt_disconnect_reclaims_session_at_its_bounded_lease() {
 }
 
 #[tokio::test]
-async fn explicit_detach_reports_actor_failure_after_closing_session_state() {
+async fn explicit_detach_accepts_an_actor_the_daemon_already_detached() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
     let session = open_session(&service, &registry, "request.detach-failure").await;
+    // Exactly what `disconnect_lsp_session` leaves behind when a connection
+    // goes away: the actor is already detached, which is the state this
+    // request is asking for.
     detach_runtime_actor(&service, &session).await;
 
     let response = service
@@ -262,9 +265,7 @@ async fn explicit_detach_reports_actor_failure_after_closing_session_state() {
 
     assert!(matches!(
         response.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
-        }
+        DaemonInvocationOutcome::LspDetached
     ));
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert!(service.lsp_sessions.lock().await.is_empty());
@@ -412,14 +413,22 @@ async fn explicit_detach_racing_disconnect_leaves_no_unowned_lease_task() {
             .await;
         disconnect.await.expect("disconnect race task");
 
-        assert!(matches!(
-            response.outcome,
-            DaemonInvocationOutcome::LspDetached
-                | DaemonInvocationOutcome::Problem {
-                    problem: DaemonInvocationProblem::Unavailable
-                        | DaemonInvocationProblem::NotFoundOrNotAuthorized
-                }
-        ));
+        // Losing this race is either "already detached" or "already gone",
+        // never "authority unavailable": an explicit detach that arrives
+        // after the connection teardown detached the same session has its
+        // request satisfied, and a bridge exiting gracefully must not see a
+        // failure for it.
+        assert!(
+            matches!(
+                response.outcome,
+                DaemonInvocationOutcome::LspDetached
+                    | DaemonInvocationOutcome::Problem {
+                        problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+                    }
+            ),
+            "attempt {attempt} surfaced {:?}",
+            response.outcome
+        );
         assert_eq!(registry.lock().await.active_sessions(), 0);
         assert!(service.lsp_sessions.lock().await.is_empty());
         assert_eq!(
