@@ -6,6 +6,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
+use tokio::sync::watch;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, VectorGenerationIdV1, WorktreeId,
@@ -361,6 +362,7 @@ struct SemanticVectorOperationTaskStateV1 {
     accepting: bool,
     next_task_id: u64,
     tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
+    shutdown_completion: Option<watch::Receiver<Option<Result<(), String>>>>,
 }
 
 struct SemanticVectorOperationTaskFinalizerV1 {
@@ -401,6 +403,7 @@ impl SemanticVectorOperationTaskOwnerV1 {
                 accepting: true,
                 next_task_id: 0,
                 tasks: BTreeMap::new(),
+                shutdown_completion: None,
             })),
         }
     }
@@ -453,26 +456,51 @@ impl SemanticVectorOperationTaskOwnerV1 {
     /// fence. Operation results are delivered separately to live callers, so
     /// only an actual settlement-task join failure is reported here.
     pub async fn shutdown(&self) -> Result<(), String> {
-        let tasks = {
+        let mut completion = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.accepting = false;
-            std::mem::take(&mut state.tasks)
-        };
-        let mut failures = Vec::new();
-        for (task_id, task) in tasks {
-            if let Err(error) = task.await {
-                failures.push(format!(
-                    "semantic vector operation settlement task {task_id} join failed: {error}"
-                ));
+            if let Some(completion) = state.shutdown_completion.clone() {
+                completion
+            } else {
+                let tasks = std::mem::take(&mut state.tasks);
+                let (publish_completion, completion) = watch::channel(None);
+                state.shutdown_completion = Some(completion.clone());
+                drop(tokio::spawn(async move {
+                    let mut failures = Vec::new();
+                    for (task_id, task) in tasks {
+                        if let Err(error) = task.await {
+                            failures.push(format!(
+                                "semantic vector operation settlement task {task_id} join failed: {error}"
+                            ));
+                        }
+                    }
+                    let result = if failures.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(failures.join("; "))
+                    };
+                    publish_completion.send_replace(Some(result));
+                }));
+                completion
             }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
+        };
+
+        loop {
+            if let Some(result) = completion.borrow().clone() {
+                return result;
+            }
+            if completion.changed().await.is_err() {
+                if let Some(result) = completion.borrow().clone() {
+                    return result;
+                }
+                return Err(
+                    "semantic vector operation settlement reaper ended without publishing shutdown completion"
+                        .to_owned(),
+                );
+            }
         }
     }
 }
@@ -490,6 +518,8 @@ impl Drop for SemanticVectorOperationTaskOwnerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.accepting = false;
+        // A started shutdown has already transferred its handles to the
+        // detached reaper. Only tasks still owned by this map may be aborted.
         for (_, task) in std::mem::take(&mut state.tasks) {
             task.abort();
         }
