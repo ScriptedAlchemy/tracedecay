@@ -405,9 +405,12 @@ mod tests {
     }
 
     fn initialize_params(root: &Path) -> serde_json::Value {
+        let uri = url::Url::from_directory_path(root)
+            .or_else(|_| url::Url::from_file_path(root))
+            .expect("workspace root file URI");
         json!({
             "roots": [{
-                "uri": format!("file://{}", root.display()),
+                "uri": uri.as_str(),
                 "name": "workspace"
             }]
         })

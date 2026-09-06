@@ -2826,8 +2826,10 @@ pub async fn open_production_primitive_runtime(
 pub fn admitted_root_uri_for_project(
     project_root: &Path,
 ) -> Result<String, ApplicationContractError> {
-    let uri =
-        Url::from_file_path(project_root).map_err(|()| ApplicationContractError::Inconsistent {
+    let identity = tracedecay_runtime_core::path_safety::canonical_root_identity(project_root);
+    let uri = Url::from_file_path(&identity)
+        .or_else(|_| Url::from_file_path(project_root))
+        .map_err(|()| ApplicationContractError::Inconsistent {
             field: "application primitive admitted root URI",
         })?;
     Ok(uri.to_string())

@@ -3020,16 +3020,33 @@ fn validated_document_path(
     let path = url
         .to_file_path()
         .map_err(|()| LspRuntimeFailure::new("document-uri-invalid"))?;
-    let relative = path
-        .strip_prefix(project_root)
-        .map_err(|_| LspRuntimeFailure::new("document-outside-registered-root"))?;
-    validate_relative_path(relative)?;
-    let relative = normalize_overlay_relative(project_dir, relative)?;
+    let relative = relative_beneath_authorized_root(project_root, &path)?;
+    validate_relative_path(&relative)?;
+    let relative = normalize_overlay_relative(project_dir, &relative)?;
     validate_relative_path(&relative)?;
     Ok(ValidatedDocumentPath {
         absolute: project_root.join(&relative),
         relative,
     })
+}
+
+/// Maps a decoded document path onto the authorized root's identity.
+///
+/// The admitted root is the canonical identity. Client URIs and
+/// `Url::to_file_path` routinely arrive in a different spelling — a macOS
+/// `/var` alias, a Windows native path against a `\\?\` root — so
+/// `strip_prefix` on the raw pair reports a descendant as outside the root.
+/// Existing ancestors are resolved; a still-missing overlay suffix is
+/// reattached and then validated lexically.
+fn relative_beneath_authorized_root(
+    project_root: &Path,
+    path: &Path,
+) -> Result<PathBuf, LspRuntimeFailure> {
+    let root = tracedecay_runtime_core::path_safety::canonical_root_identity(project_root);
+    let path = tracedecay_runtime_core::path_safety::canonical_root_identity(path);
+    path.strip_prefix(&root)
+        .map(Path::to_path_buf)
+        .map_err(|_| LspRuntimeFailure::new("document-outside-registered-root"))
 }
 
 fn validate_relative_path(path: &Path) -> Result<(), LspRuntimeFailure> {
@@ -3185,6 +3202,36 @@ mod path_tests {
             validated_document_path(&root, &root_url, &root_dir, uri.as_str()).expect("overlay");
 
         assert_eq!(document.absolute, root.join("new/nested/overlay.rs"));
+        assert_eq!(document.relative, Path::new("new/nested/overlay.rs"));
+        assert!(
+            document
+                .relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        );
+    }
+
+    /// The admitted root is the canonical identity; a client URI may still
+    /// arrive through a host alias. The missing overlay suffix is validated
+    /// lexically beneath that identity rather than requiring the decoded
+    /// native path to `strip_prefix` the verbatim/canonical spelling.
+    #[cfg(unix)]
+    #[test]
+    fn unsaved_overlay_accepts_an_alias_root_spelling() {
+        let temp = TempDir::new().expect("temporary directory");
+        let real = temp.path().join("private").join("root");
+        std::fs::create_dir_all(&real).expect("create real root");
+        std::os::unix::fs::symlink(temp.path().join("private"), temp.path().join("var"))
+            .expect("host alias");
+        let alias = temp.path().join("var").join("root");
+        let root = real.canonicalize().expect("canonical admitted root");
+        let root_url = Url::from_directory_path(&alias).expect("alias root URI");
+        let root_dir =
+            Dir::open_ambient_dir(&root, ambient_authority()).expect("open admitted root");
+        let uri = root_url.join("new/nested/overlay.rs").expect("overlay URI");
+
+        let document = validated_document_path(&root, &root_url, &root_dir, uri.as_str())
+            .expect("overlay under aliased root spelling");
         assert_eq!(document.relative, Path::new("new/nested/overlay.rs"));
         assert!(
             document

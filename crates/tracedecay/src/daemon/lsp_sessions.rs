@@ -55,7 +55,9 @@ pub(super) async fn cleanup_connection_lsp_sessions(
 }
 
 pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoot> {
-    url::Url::from_file_path(project_path)
+    let identity = tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
+    url::Url::from_file_path(&identity)
+        .or_else(|_| url::Url::from_file_path(project_path))
         .ok()
         .map(|uri| AdmittedRoot::new(uri.to_string()))
 }
@@ -137,15 +139,26 @@ async fn authorize_lsp_workspace_for_uris(
             return None;
         }
         let requested_path = uri.to_file_path().ok()?.canonicalize().ok()?;
-        if single_root && requested_path != active_project_path {
+        if single_root
+            && !tracedecay_runtime_core::path_safety::same_canonical_path(
+                &requested_path,
+                &active_project_path,
+            )
+        {
             return None;
         }
-        if requested_path == active_project_path {
+        if tracedecay_runtime_core::path_safety::same_canonical_path(
+            &requested_path,
+            &active_project_path,
+        ) {
             admits_active_project = true;
         }
         let mut candidates = Vec::new();
         for graph in &graphs {
-            if graph.project_root() != requested_path {
+            if !tracedecay_runtime_core::path_safety::same_canonical_path(
+                graph.project_root(),
+                &requested_path,
+            ) {
                 continue;
             }
             let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {

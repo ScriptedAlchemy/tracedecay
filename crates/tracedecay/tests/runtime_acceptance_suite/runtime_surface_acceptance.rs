@@ -2139,11 +2139,13 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let projected_root = projection["result"]["rootUri"]
         .as_str()
         .expect("projected root URI");
-    assert_eq!(
-        url::Url::parse(projected_root)
-            .ok()
-            .and_then(|url| url.to_file_path().ok()),
-        Some(fixture.project.clone()),
+    let projected_path = url::Url::parse(projected_root)
+        .ok()
+        .and_then(|url| url.to_file_path().ok());
+    assert!(
+        projected_path.as_ref().is_some_and(|path| {
+            tracedecay_runtime_core::path_safety::same_canonical_path(path, &fixture.project)
+        }),
         "the projection must name the admitted root, got {projected_root}"
     );
     assert_eq!(projection["result"]["documentUri"], document_uri);
