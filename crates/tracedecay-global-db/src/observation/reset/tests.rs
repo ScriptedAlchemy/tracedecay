@@ -609,3 +609,115 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
         "the store must still be refused after a rolled-back reset"
     );
 }
+
+/// The reset's promise is that the rebuilt authority re-reads what it lost.
+/// Row counts alone do not prove it: an ingestion cursor, an advance ledger
+/// entry, or a projector checkpoint that outlived the reset would each silently
+/// skip exactly the native events the rebuild depends on re-offering. Every
+/// pre-reset cursor must therefore be refused after the reset — the tables come
+/// back at the canonical shape and empty, the identical advance re-presents as
+/// new rather than deduping against a survivor, and the temporal refresh query
+/// discovers the re-ingested stream from zero instead of the frozen frontier.
+#[tokio::test]
+async fn pre_reset_cursors_are_refused_and_the_rebuilt_stream_is_rediscovered() {
+    const ADVANCE: (&str, &str, &str) = (
+        r#"{"provider":"claude"}"#,
+        r#"{"project":"project.fixture"}"#,
+        r#"{"through":100}"#,
+    );
+
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        seed_preserved_transcript_rows(&raw);
+        install_legacy_observation_shape(&raw);
+        seed_active_temporal_generation(&raw);
+        raw.execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![ADVANCE.0, ADVANCE.1, ADVANCE.2],
+        )
+        .expect("seed the pre-reset ingestion cursor");
+        raw.execute(
+            "INSERT INTO source_cursor_advances
+                (source_json, scope_json, coverage_json, reason, receipt_id)
+             VALUES (?1, ?2, ?3, 'admitted', 'receipt.legacy')",
+            rusqlite::params![ADVANCE.0, ADVANCE.1, ADVANCE.2],
+        )
+        .expect("seed the pre-reset advance ledger entry");
+        raw.execute_batch(
+            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
+             VALUES ('projector.v1', 100);",
+        )
+        .expect("seed the pre-reset projector checkpoint");
+        assert_eq!(
+            refresh_discovery_frontier(&raw, "session.fixture"),
+            None,
+            "the seeded store must start with the rebuild suppressed, or this \
+             test proves nothing"
+        );
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report =
+        reset_refused_observation_authority(&mut raw).expect("scoped reset of a cursored store");
+    for table in [
+        "source_cursors",
+        "source_cursor_advances",
+        "observation_projection_checkpoints",
+    ] {
+        assert!(
+            report.reset_tables.iter().any(|reset| reset == table),
+            "{table} decides what gets re-offered and must be part of the reset: {report:?}"
+        );
+        assert!(
+            table_exists(&raw, table),
+            "{table} must be recreated at the canonical shape"
+        );
+        assert_eq!(
+            count(&raw, table),
+            0,
+            "no pre-reset cursor may survive to skip the events the rebuild re-reads"
+        );
+    }
+
+    // Re-ingest the native event the pre-reset advance already claimed to
+    // cover, re-presenting that exact advance identity. A surviving row would
+    // collide on the advance primary key; a refused one lets the rebuilt
+    // authority record its own coverage.
+    raw.execute_batch(
+        "INSERT INTO sanitization_receipts
+            (receipt_id, sanitizer_version, payload_digest, receipt_json)
+         VALUES ('receipt.rebuilt', 'v1', 'digest.payload', '{}');
+         INSERT INTO observations
+            (observation_id, payload_digest, receipt_id, observation_json,
+             committed_cursor_json)
+         VALUES ('observation.rebuilt', 'digest.payload', 'receipt.rebuilt', '{}', '{}');
+         INSERT INTO session_temporal_observation_effects
+            (observation_id, observation_sequence, session_id, receipt_id,
+             effect_digest, output_count, recorded_at)
+         VALUES ('observation.rebuilt', 1, 'session.fixture', 'receipt.rebuilt',
+                 'digest.effect', 1, 9);",
+    )
+    .expect("re-ingest one native event under the rebuilt authority");
+    raw.execute(
+        "INSERT INTO source_cursor_advances
+            (source_json, scope_json, coverage_json, reason, receipt_id)
+         VALUES (?1, ?2, ?3, 'admitted', 'receipt.rebuilt')",
+        rusqlite::params![ADVANCE.0, ADVANCE.1, ADVANCE.2],
+    )
+    .expect("the rebuilt authority must be able to record the same coverage again");
+
+    assert_eq!(
+        refresh_discovery_frontier(&raw, "session.fixture"),
+        Some(0),
+        "the rebuilt stream must be rediscovered from zero, not excluded by the \
+         frontier of the generation the reset invalidated"
+    );
+    assert!(
+        foreign_key_violations(&raw).is_empty(),
+        "the re-ingested stream must be referentially coherent"
+    );
+}
