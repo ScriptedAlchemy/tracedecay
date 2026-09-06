@@ -405,9 +405,13 @@ impl GraphVectorGenerationStoreV1 {
         retained: &RetainedSemanticVectorGraphV1,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
         let cancellation = Arc::clone(retained.cancellation());
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            Arc::clone(&cancellation),
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
         let store = Self::from_retained(retained);
         store
-            .dispatch(move |state| state.open_records(cancellation))
+            .dispatch(move |state| state.open_records(&authority, cancellation))
             .await?;
         Ok(store)
     }
@@ -420,9 +424,13 @@ impl GraphVectorGenerationStoreV1 {
         retained: &RetainedSemanticVectorGraphV1,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
         let cancellation = Arc::clone(retained.cancellation());
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            cancellation,
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
         let store = Self::from_retained(retained);
         store
-            .dispatch(move |state| state.read_only_records(cancellation))
+            .dispatch(move |state| state.read_only_records(&authority))
             .await?;
         Ok(store)
     }
@@ -435,10 +443,14 @@ impl GraphVectorGenerationStoreV1 {
         generation_id: &VectorGenerationIdV1,
     ) -> Result<Option<Self>, VectorGenerationStoreErrorV1> {
         let cancellation = Arc::clone(retained.cancellation());
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            cancellation,
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
         let generation_id = generation_id.clone();
         let store = Self::from_retained(retained);
         let found = store
-            .dispatch(move |state| state.read_only_generation_records(&generation_id, cancellation))
+            .dispatch(move |state| state.read_only_generation_records(&generation_id, &authority))
             .await?;
         Ok(found.then_some(store))
     }
@@ -523,18 +535,26 @@ impl GraphVectorGenerationStoreV1 {
                 )
             })?;
         let state = Arc::clone(&self.state);
-        settle_blocking(tokio::task::spawn_blocking(move || {
-            let outcome = operation(state.as_ref());
-            drop(permit);
-            outcome
-        }))
-        .await?
+        let settlement_owner = tokio::spawn(async move {
+            let blocking_child = tokio::task::spawn_blocking(move || {
+                // State pins the graph/database lifetime, while the permit
+                // prevents a successor until this child has settled.
+                let outcome = operation(state.as_ref());
+                drop(state);
+                drop(permit);
+                outcome
+            });
+            settle_blocking(blocking_child).await?
+        });
+        // Caller cancellation only detaches this await; the independent owner
+        // continues joining the started blocking child.
+        settle_blocking(settlement_owner).await?
     }
 }
 
-/// Await one dispatched blocking job. A panic inside the job stays a panic on
-/// the caller, exactly as the synchronous call it replaced; only a runtime
-/// shutdown that drops the job answers as cancellation.
+/// Await one operation-settlement task. A panic inside it stays a panic on the
+/// caller, exactly as the synchronous call it replaced; only a runtime
+/// shutdown that drops the task answers as cancellation.
 async fn settle_blocking<T>(
     handle: tokio::task::JoinHandle<T>,
 ) -> Result<T, VectorGenerationStoreErrorV1> {
@@ -550,9 +570,10 @@ async fn settle_blocking<T>(
 impl GraphVectorGenerationStoreStateV1 {
     fn open_records(
         &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
-        self.read_only_records(Arc::clone(&cancellation))?;
+        self.read_only_records(authority)?;
         check_cancelled(cancellation.as_ref())?;
         if self.optional_snapshot()?.is_some() {
             self.verify_existing_state(cancellation)?;
@@ -562,25 +583,17 @@ impl GraphVectorGenerationStoreStateV1 {
 
     fn read_only_records(
         &self,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
-        let authority = SemanticGraphExecutionAuthorityV1::new(
-            cancellation,
-            Instant::now() + GRAPH_OPERATION_DEADLINE,
-        );
-        self.refresh_snapshot(&authority)?;
+        self.refresh_snapshot(authority)?;
         Ok(())
     }
 
     fn read_only_generation_records(
         &self,
         generation_id: &VectorGenerationIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
-        let authority = SemanticGraphExecutionAuthorityV1::new(
-            cancellation,
-            Instant::now() + GRAPH_OPERATION_DEADLINE,
-        );
         let (_, binding) = self.runtime.staging_binding();
         let scope = self.runtime.scope();
         let key = SemanticVectorPublishedGenerationKey {
@@ -595,7 +608,7 @@ impl GraphVectorGenerationStoreStateV1 {
         };
         let (record, verified_head) = match self
             .runtime
-            .published_semantic_generation(&key, &authority)
+            .published_semantic_generation(&key, authority)
             .map_err(map_graph_error)?
         {
             SemanticVectorPublishedGenerationLookup::Missing => return Ok(false),
@@ -613,7 +626,7 @@ impl GraphVectorGenerationStoreStateV1 {
         }
         let snapshot = self
             .runtime
-            .recover_verified_generation(&verified_head.key, &authority)
+            .recover_verified_generation(&verified_head.key, authority)
             .map_err(map_graph_error)?;
         if snapshot.verified_head() != verified_head.as_ref() {
             return Err(map_graph_error(GraphDbError::conflict_observed(
