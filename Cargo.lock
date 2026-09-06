@@ -6903,6 +6903,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-search-eval",
  "tracedecay-sessions",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
