@@ -2964,6 +2964,135 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
     );
 }
 
+/// Bytes the unmodified pre-paging writer emitted (see the fixture README and
+/// `provenance.json`; the current writer always emits a page table, so it
+/// cannot produce this manifest). Both public readers accept them and agree on
+/// the segment identities, the full path authenticates and restores the exact
+/// generation the historical writer sealed, and only the full path refuses an
+/// unauthenticated envelope.
+#[test]
+fn historical_writer_bytes_read_through_both_partitioned_readers() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/partitioned_pre_paging");
+    let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
+    let expected =
+        std::fs::read(fixture.join("expected-generation.json")).expect("historical generation");
+    let provenance: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.join("provenance.json")).expect("fixture provenance"),
+    )
+    .expect("provenance JSON");
+    assert_eq!(
+        hex::encode(Sha256::digest(&manifest)),
+        provenance["manifest_sha256"],
+        "manifest bytes are the exported historical bytes"
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(&expected)),
+        provenance["expected_generation_sha256"],
+        "expected generation bytes are the exported historical bytes"
+    );
+
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("full reader authenticates the historical manifest")
+        .expect("revision seven partitioned manifest");
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            manifest.as_slice(),
+        )
+        .expect("retention reader accepts the historical manifest"),
+        Some(identities.clone()),
+    );
+    let referenced = provenance["referenced_segments"]
+        .as_array()
+        .expect("referenced segments")
+        .iter()
+        .map(|segment| {
+            (
+                segment["digest"]
+                    .as_str()
+                    .expect("segment digest")
+                    .to_owned(),
+                segment["bytes"].as_u64().expect("segment size"),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        identities
+            .iter()
+            .map(|identity| (identity.digest.as_str().to_owned(), identity.size_bytes))
+            .collect::<BTreeSet<_>>(),
+        referenced,
+        "both readers name exactly the segments the historical export referenced"
+    );
+
+    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        let (digest, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                offset,
+                length,
+                ..
+            } => (digest, offset, length),
+        };
+        let name = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .expect("sha256 segment digest");
+        let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
+            .expect("historical segment bytes");
+        let start = usize::try_from(offset).expect("segment offset");
+        let end = start + usize::try_from(length).expect("segment length");
+        buffer.clear();
+        buffer.extend_from_slice(&bytes[start..end]);
+        Ok(())
+    };
+    assert!(
+        CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
+            .expect("historical segments verify")
+    );
+    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read)
+        .expect("historical bytes decode")
+        .expect("revision seven partitioned manifest");
+    assert_eq!(
+        restored.encode_sealed().expect("restored generation seals"),
+        expected,
+        "the historical writer's generation restores byte exact"
+    );
+    assert_eq!(
+        restored.manifest().generation_id.as_str(),
+        provenance["generation_id"]
+    );
+
+    let corrupted = &identities[0].digest;
+    let corrupt = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+        let hit = match &request {
+            SealedGenerationSegmentReadV1::Whole { digest, .. }
+            | SealedGenerationSegmentReadV1::Range { digest, .. } => *digest == corrupted,
+        };
+        read(request, buffer)?;
+        if hit {
+            buffer[0] ^= 1;
+        }
+        Ok(())
+    };
+    assert!(CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, corrupt).is_err());
+    assert!(CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, corrupt).is_err());
+
+    let mut unauthenticated: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("historical envelope");
+    unauthenticated["state_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let bytes = serde_json::to_vec(&unauthenticated).expect("unauthenticated envelope");
+    assert!(CodeIndexPublishedGenerationV1::partitioned_segment_identities(&bytes).is_err());
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+            bytes.as_slice()
+        )
+        .expect("retention leaves outer authentication to its caller"),
+        Some(identities),
+    );
+}
+
 /// Both public descriptor readers share one layout validator, so every
 /// malformed descriptor mutation must be refused by both, while the supported
 /// historical unpaged descriptor is accepted by both. Only the outer
