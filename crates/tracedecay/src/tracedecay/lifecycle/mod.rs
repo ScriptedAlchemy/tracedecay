@@ -373,7 +373,10 @@ impl TraceDecay {
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
         // Scout owner is absent, so init must start it too.
-        tracedecay_agent_hosts::hooks::publish_hook_bindings(&ts.store_layout)?;
+        tracedecay_agent_hosts::hooks::publish_hook_bindings(
+            &crate::runtime_ports::hook_runtime(),
+            &ts.store_layout,
+        )?;
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
@@ -609,7 +612,10 @@ impl TraceDecay {
             _standalone_maintenance_scope: None,
         };
 
-        tracedecay_agent_hosts::hooks::publish_hook_bindings(&ts.store_layout)?;
+        tracedecay_agent_hosts::hooks::publish_hook_bindings(
+            &crate::runtime_ports::hook_runtime(),
+            &ts.store_layout,
+        )?;
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
