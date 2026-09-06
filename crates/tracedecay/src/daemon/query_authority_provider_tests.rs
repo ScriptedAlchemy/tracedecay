@@ -395,6 +395,109 @@ fn second_semantic_activation_state(prior: &RetrievalProfileStateV1) -> Retrieva
     .expect("second semantic activation state")
 }
 
+/// Wrap one retrieval profile state as the durable record its epoch
+/// committed, binding the current activation to the active profile's own
+/// semantic pins.
+fn committed_semantic_activation(
+    epoch: i64,
+    scope: ResolvedScope,
+    state: RetrievalProfileStateV1,
+) -> CommittedRetrievalProfileStateV1 {
+    let pins = state
+        .active()
+        .compatibility()
+        .semantic
+        .clone()
+        .expect("active semantic pins");
+    let configuration = SemanticConfigurationPinV1 {
+        revision_id: state.configuration_revision().clone(),
+        snapshot_id: id::<ConfigurationSnapshotId>("configuration.snapshot.query-activation-test"),
+        effective_behavior_digest: digest('3'),
+    };
+    let command = SemanticActivationCommandV1::new(
+        configuration,
+        SemanticActivationRequestV1::new(pins.vector_generation_id.clone(), None, None)
+            .expect("semantic activation request"),
+    )
+    .expect("semantic activation command");
+    let receipt = SemanticActivationReceiptV1::issue(&command, UtcMicros(30 + epoch))
+        .expect("semantic activation receipt");
+    CommittedRetrievalProfileStateV1 {
+        epoch,
+        transition_digest: state
+            .audit()
+            .last()
+            .expect("committed transition audit")
+            .event_id
+            .clone(),
+        scope,
+        state,
+        current_activation: Some(
+            SemanticCurrentLinkedActivationV1::new(receipt, pins)
+                .expect("current semantic activation"),
+        ),
+    }
+}
+
+/// The explicit profile rollback: a new authorized activation of the older
+/// immutable semantic artifact sitting in the rollback slot, committed against
+/// the next revision. Both slots stay semantic, so the restored profile is the
+/// one a query must serve afterwards.
+fn semantic_profile_rollback_state(prior: &RetrievalProfileStateV1) -> RetrievalProfileStateV1 {
+    let displaced = prior.active().clone();
+    let restored = prior
+        .rollback_profile()
+        .expect("restored semantic profile")
+        .clone();
+    let base_revision = prior.configuration_revision().clone();
+    let result_revision = id::<ConfigurationRevisionId>("configuration.query-activation-test.6");
+    let actor_id = id("actor.query-activation-test");
+    let operation = RetrievalProfileAuditOperationV1::Rollback {
+        trigger: "configuration_semantic_profile_restored".to_owned(),
+    };
+    let freshness_vector_digest = digest('6');
+    let occurred_at = UtcMicros(60);
+    let audit = RetrievalProfileAuditEventV1 {
+        event_id: canonical_sha256(&(
+            "tracedecay.retrieval.profile-audit.v1",
+            &actor_id,
+            &operation,
+            &displaced.profile().profile_id,
+            &restored.profile().profile_id,
+            displaced.profile_digest(),
+            restored.profile_digest(),
+            &restored.profile().evaluation_result_anchor,
+            &freshness_vector_digest,
+            &base_revision,
+            &result_revision,
+            occurred_at,
+        ))
+        .expect("semantic rollback audit digest"),
+        actor_id,
+        operation,
+        prior_active_profile_id: displaced.profile().profile_id.clone(),
+        resulting_active_profile_id: restored.profile().profile_id.clone(),
+        prior_active_digest: displaced.profile_digest().clone(),
+        resulting_active_digest: restored.profile_digest().clone(),
+        evaluation_anchor: restored.profile().evaluation_result_anchor.clone(),
+        freshness_vector_digest,
+        base_revision,
+        result_revision: result_revision.clone(),
+        occurred_at,
+    };
+    let mut audit_history = prior.audit().to_vec();
+    audit_history.push(audit);
+    serde_json::from_value::<RetrievalProfileStateSnapshotV1>(serde_json::json!({
+        "configuration_revision": result_revision,
+        "active": restored,
+        "rollback": displaced,
+        "audit": audit_history,
+    }))
+    .expect("persisted semantic profile rollback state")
+    .into_state()
+    .expect("semantic profile rollback state")
+}
+
 fn query_rollback_committed_state(
     prior: &CommittedRetrievalProfileStateV1,
 ) -> CommittedRetrievalProfileStateV1 {
