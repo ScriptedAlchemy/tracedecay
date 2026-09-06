@@ -666,7 +666,7 @@ async fn persist_prepared_transcript<S: TranscriptIngestStore>(
 pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store: &S,
     provider: &'static str,
-    _path: &Path,
+    path: &Path,
     project_root: &Path,
     loaded: LoadedTranscriptCursor,
     expected_previous: &TranscriptCursorCheckpoint,
@@ -761,7 +761,13 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         title,
         started_at,
         ended_at,
-        transcript_path: Some(cursor_key.durable_text()),
+        // The durable cursor key and the physical transcript path are
+        // separate identities: opaque keys (Codex's hashed key, Claude's
+        // non-Unicode encoding) address `parse_offsets`, while
+        // `transcript_path` stays the real source path that the ingest-health
+        // placeholder scan, the workflow-agent join and the session record
+        // itself all read as a path.
+        transcript_path: Some(path.to_string_lossy().into_owned()),
         metadata_json,
         parent_session_id,
         is_subagent,

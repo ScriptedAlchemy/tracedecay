@@ -315,7 +315,21 @@ fn replay_identity(session_id: &str, domain: &[u8]) -> String {
     format!("sha256:{}", encode_lowercase_hex(&hasher.finalize()))
 }
 
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) fn codex_observation_source_v2(
+    session_id: &str,
+) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+    codex_observation_source_v2_inner(session_id)
+}
+
+#[cfg(feature = "test-helpers")]
+pub fn codex_observation_source_v2(
+    session_id: &str,
+) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+    codex_observation_source_v2_inner(session_id)
+}
+
+fn codex_observation_source_v2_inner(
     session_id: &str,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
     Ok(ObservationSourceIdentityV1::for_provider_source(
