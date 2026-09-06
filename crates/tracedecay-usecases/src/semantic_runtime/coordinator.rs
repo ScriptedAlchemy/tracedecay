@@ -197,7 +197,9 @@ impl ProductionSemanticActivationCoordinatorV1 {
                 now,
             )
             .await
-            .map_err(configuration_error_at("stage_and_activate.stage_activation"))?;
+            .map_err(configuration_error_at(
+                "stage_and_activate.stage_activation",
+            ))?;
         let target = transition
             .result_active_semantic
             .as_ref()

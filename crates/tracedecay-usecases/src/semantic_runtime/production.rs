@@ -3058,8 +3058,9 @@ fn lifecycle_publication_error(
 const fn semantic_runtime_backend_outcome(error: SemanticRuntimeBackendErrorV1) -> &'static str {
     match error {
         SemanticRuntimeBackendErrorV1::Unavailable => "unavailable",
-        SemanticRuntimeBackendErrorV1::Rejected
-        | SemanticRuntimeBackendErrorV1::RejectedAt(_) => "rejected",
+        SemanticRuntimeBackendErrorV1::Rejected | SemanticRuntimeBackendErrorV1::RejectedAt(_) => {
+            "rejected"
+        }
         SemanticRuntimeBackendErrorV1::Conflict => "conflict",
     }
 }

@@ -80,8 +80,9 @@ pub use ports::{
     SemanticRetrievalConfigurationPortV1, SemanticRollbackCommandV1, SemanticRollbackReceiptV1,
     SemanticRollbackRequestV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1,
     SemanticRuntimeContractErrorV1, SemanticRuntimeControlErrorV1, SemanticRuntimeFuture,
-    SemanticRuntimeGenerationInspectorV1, SemanticRuntimeIntegrationPortV1, SemanticRuntimeRefusalV1,
-    SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
+    SemanticRuntimeGenerationInspectorV1, SemanticRuntimeIntegrationPortV1,
+    SemanticRuntimeRefusalV1, SemanticRuntimeRouteV1, SemanticRuntimeStateV1,
+    SemanticRuntimeStatusV1,
 };
 pub use production::{
     ApplicationSemanticSearchParametersV1, AuthorizedProjectSemanticSearchParametersV1,
