@@ -225,43 +225,42 @@ async fn healthy_observation_authority_refuses_the_scoped_reset() {
     );
 }
 
+/// The session-temporal rows keyed to the observation stream are algorithmic
+/// derivations of it, so the scoped reset clears them with the authority they
+/// derive from. Refusing over them instead made the reset unreachable on any
+/// store that had ever ingested. Session-temporal state that is not derived
+/// from observations is preserved.
 #[tokio::test]
-async fn durable_temporal_dependents_fail_the_scoped_reset_closed() {
+async fn observation_derived_temporal_rows_reset_with_the_authority() {
     let directory = TempDir::new().unwrap();
     let database_path = directory.path().join("sessions.db");
     install_registered_store(&database_path).await;
     {
         let raw = rusqlite::Connection::open(&database_path).unwrap();
+        seed_preserved_transcript_rows(&raw);
         install_legacy_observation_shape(&raw);
         raw.execute_batch(
             "INSERT INTO session_temporal_observation_effects
                 (observation_id, observation_sequence, session_id, receipt_id,
                  effect_digest, output_count, recorded_at)
              VALUES ('observation.legacy', 1, 'session.fixture', 'receipt.legacy',
-                     'digest.effect', 0, 1)",
+                     'digest.effect', 0, 1);",
         )
-        .expect("seed one durable temporal dependent row");
+        .expect("seed one observation-derived temporal effect");
     }
 
     let mut raw = rusqlite::Connection::open(&database_path).unwrap();
-    let error = reset_refused_observation_authority(&mut raw)
-        .expect_err("durable temporal dependents must fail the scoped reset closed");
-    assert!(
-        matches!(
-            &error,
-            TraceDecayError::Config { message }
-                if message.contains("would orphan")
-                    && message.contains("session_temporal_observation_effects")
-        ),
-        "unexpected error for durable dependents: {error}"
-    );
-    assert!(
-        table_exists(&raw, "observations"),
-        "a failed-closed reset must mutate nothing"
-    );
+    let report = reset_refused_observation_authority(&mut raw)
+        .expect("observation-derived temporal rows must not block the scoped reset");
+    assert_eq!(report.cleared_derived_temporal_rows, 1);
     assert_eq!(
         count(&raw, "session_temporal_observation_effects"),
+        0,
+        "the derived effect ledger resets with the stream it derives from"
+    );
+    assert_eq!(
+        count(&raw, "sessions"),
         1,
-        "durable dependent rows must be preserved"
+        "state outside the observation derivation must be preserved"
     );
 }

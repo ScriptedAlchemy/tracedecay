@@ -1154,3 +1154,137 @@ async fn cline_like_unknown_project_membership_defers_persistence_and_offset() {
         "cline_like::cline_like_unknown_project_membership_defers_persistence_and_offset",
     );
 }
+
+/// Rebuild boundary for the native-source scheme change (#880).
+///
+/// Before `ff5c895ae` a Cline/Roo/Kilo task committed its `ui_messages.json`
+/// events under the API history's combined `<task>` source. They now carry
+/// their own `<task>:ui_messages` source, so a store still holding the old
+/// rows would re-admit every one of those native UI events once more under
+/// the new key and silently double-count the usage facts derived from them.
+/// Admission must refuse such a store with the typed `ResetRequired` reason
+/// instead, and the scoped rebuild must clear the derived usage together with
+/// the admission cursors so the same unchanged native event is admitted
+/// exactly once afterwards.
+#[cfg(not(windows))]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cline_ui_source_scheme_refuses_old_stores_until_rebuilt() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    let project_id = mark_test_project(&project);
+    let session_id = "cline-scheme-boundary";
+    let ui_source_key = format!("{session_id}:ui_messages");
+    write_task(
+        &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
+        &project,
+        session_id,
+    );
+    let profile_root = project.parent().unwrap().join("tracedecay-test-profile");
+
+    let (database_path, committed_observations, ui_cursor) = {
+        let db = open_project_session_db(&project).await.unwrap();
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cline)).await;
+        let ui_cursor = observation_source_cursor_for_key(&db, "cline", session_id, &ui_source_key)
+            .await
+            .expect("committed UI observation cursor");
+        assert_eq!(
+            ui_cursor.position(),
+            1,
+            "one native UI event on first ingest"
+        );
+        let committed = durable_table_count(&db, "observations").await;
+        assert!(committed > 0);
+        let path = db
+            .runtime()
+            .database_path(tracedecay_sessions::admission::HostAdmissionScope::Project)
+            .expect("project sessions database path")
+            .to_path_buf();
+        (path, committed, ui_cursor)
+    };
+
+    // Make the store look like one recorded under the superseded scheme: every
+    // row stays exactly as committed, only the scheme enrollment is absent.
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        assert_eq!(
+            raw.execute(
+                "DELETE FROM global_schema_migrations WHERE migration = ?1",
+                [tracedecay_global_db::observation::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+            )
+            .unwrap(),
+            1,
+            "a healthy store must record the current native-source scheme"
+        );
+    }
+
+    let refusal = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .err()
+    .expect("an old-scheme store must refuse admission");
+    let (authority, reason) = refusal
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("expected the typed ResetRequired state, got: {refusal}"));
+    assert_eq!(authority, "observations");
+    assert!(
+        reason.contains("ui_messages") && reason.contains("double-count"),
+        "the refusal must name the scheme change it refuses: {reason}"
+    );
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        assert_eq!(
+            u64::try_from(
+                raw.query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap()
+            )
+            .unwrap(),
+            committed_observations,
+            "a refused store must not ingest anything"
+        );
+    }
+
+    let report = {
+        let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+        tracedecay_global_db::observation::reset_refused_observation_authority(&mut raw)
+            .expect("scoped rebuild of the refused authority")
+    };
+    for table in [
+        "observations",
+        "source_cursors",
+        "source_cursor_advances",
+        "observation_provider_usage",
+    ] {
+        assert!(
+            report.reset_tables.iter().any(|reset| reset == table),
+            "the rebuild must reset the derived usage and its admission cursors \
+             together; {table} was missing from {:?}",
+            report.reset_tables
+        );
+    }
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cline)).await;
+    assert_eq!(
+        observation_source_cursor_for_key(&db, "cline", session_id, &ui_source_key)
+            .await
+            .map(|cursor| cursor.position()),
+        Some(ui_cursor.position()),
+        "the same native UI event must be admitted exactly once after the rebuild"
+    );
+    assert_eq!(
+        durable_table_count(&db, "observations").await,
+        committed_observations,
+        "the rebuilt authority must re-admit the unchanged native events exactly \
+         once, not once more on top of what the old scheme committed"
+    );
+}

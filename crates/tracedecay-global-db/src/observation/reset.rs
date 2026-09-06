@@ -1,11 +1,13 @@
 //! Scoped operator recovery for a refused observation authority.
 //!
 //! Admission refuses a sessions store whose `observations` or
-//! `source_cursor_advances` table carries a pre-release branch-local shape
-//! (typed `ResetRequired` naming [`OBSERVATION_AUTHORITY`]). Because the
-//! refusal fires before any runtime can mount the store, recovery runs
-//! offline over a plain connection while the operator holds the profile's
-//! exclusive maintenance lease.
+//! `source_cursor_advances` table carries a pre-release branch-local shape,
+//! or whose retained rows were committed under a superseded native-source
+//! scheme (see [`OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION`]) — both typed
+//! `ResetRequired` naming [`OBSERVATION_AUTHORITY`]. Because the refusal
+//! fires before any runtime can mount the store, recovery runs offline over a
+//! plain connection while the operator holds the profile's exclusive
+//! maintenance lease.
 //!
 //! The reset is scoped to exactly the refused authority: it drops the
 //! observation-authority tables plus their pure projection derivations,
@@ -15,10 +17,15 @@
 //! `session_messages` projector output (classified `Recoverable`; the cleared
 //! evidence re-derives by re-ingesting provider transcripts), and preserves
 //! everything else in the store — transcripts, LCM content, configuration,
-//! registry, workflow, and session-temporal state. It fails closed, without
-//! touching anything, when session-temporal rows reference observation rows:
-//! those tables default to `Durable` in the durability model, so a scoped
-//! reset must not delete them and refuses instead.
+//! registry, workflow, and the session-temporal state that is not derived
+//! from observations. The session-temporal rows that *are* keyed to the
+//! observation stream reset with it (see
+//! [`OBSERVATION_DERIVED_TEMPORAL_DELETES`]) rather than being orphaned.
+//!
+//! The derived usage (`observation_provider_usage`) and the admission cursors
+//! (`source_cursors`, `source_cursor_advances`) always reset together: leaving
+//! either behind is what would let the rebuilt authority double-count or skip
+//! the native events it re-reads.
 
 use std::collections::BTreeSet;
 
@@ -26,13 +33,16 @@ use tracedecay_domain::errors::TraceDecayError;
 
 use super::schema::{
     OBSERVATION_AUTHORITY, OBSERVATION_AUTHORITY_SCHEMA_SQL, OBSERVATION_CANONICAL_COLUMNS,
-    OBSERVATION_SCHEMA_MIGRATION, SOURCE_CURSOR_ADVANCES_CANONICAL_COLUMNS,
+    OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION, OBSERVATION_SCHEMA_MIGRATION,
+    SOURCE_CURSOR_ADVANCES_CANONICAL_COLUMNS,
 };
 use crate::observation_projection::{
     OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL, OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL,
     OBSERVATION_PROJECTION_SCHEMA_SQL,
 };
-use crate::schema_contract::invariant_trigger_sql_for_tables;
+use crate::schema_contract::{
+    invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables,
+};
 
 const OPERATION: &str = "reset refused observation authority";
 
@@ -72,13 +82,36 @@ const OBSERVATION_PROJECTION_TABLES: &[&str] = &[
     "observation_projection_rebuild_workflow_facts",
 ];
 
-/// Session-temporal tables holding foreign keys into `observations`. The
-/// durability model classifies them `Durable` by default, so a scoped
-/// observation reset must not delete their rows; populated rows here make the
-/// scoped reset refuse rather than orphan them.
-const DURABLE_DEPENDENT_TABLES: &[&str] = &[
-    "session_temporal_observation_effects",
-    "session_occurrences",
+/// Session-temporal projection rows keyed to the observation stream, in
+/// dependency order.
+///
+/// Every one of them is an algorithmic derivation of `observations` — the
+/// per-observation effect digest, occurrence ordinals and anchors, turn
+/// membership, span/burst evidence — carrying no user-authored content, so
+/// they reset with the authority they derive from and re-derive when the
+/// preserved transcripts are re-ingested. Refusing over them instead left the
+/// scoped reset unreachable in practice: any store that had ever ingested
+/// held these rows, so a refused authority had no way back.
+///
+/// Everything else session-temporal is left untouched — assertions and their
+/// supersession, summaries, relation receipts, refresh operations — because
+/// none of it is a pure function of the observation stream. Only the
+/// occurrence-anchored half of `session_current_entities` is cleared; its
+/// assertion-anchored rows stay with the assertions they name.
+/// Derived-temporal tables carrying immutability triggers that would abort
+/// the deletes above. Their invariant triggers are dropped and reinstalled
+/// from the same authority around the reset, the way the observation tables
+/// are dropped and recreated: immutability guards ordinary writers, not the
+/// authority rebuild itself.
+const IMMUTABLE_DERIVED_TEMPORAL_TABLES: &[&str] = &["session_temporal_observation_effects"];
+
+const OBSERVATION_DERIVED_TEMPORAL_DELETES: &[&str] = &[
+    "DELETE FROM session_derived_evidence_members",
+    "DELETE FROM session_derived_evidence",
+    "DELETE FROM session_current_entities WHERE entity_kind = 'occurrence_anchor'",
+    "DELETE FROM session_turn_members",
+    "DELETE FROM session_occurrences",
+    "DELETE FROM session_temporal_observation_effects",
 ];
 
 /// Outcome of one completed scoped reset.
@@ -89,6 +122,9 @@ pub struct ObservationAuthorityResetV1 {
     /// `session_messages` projector-output rows cleared (`Recoverable`; the
     /// external-content FTS index is synchronized by its delete trigger).
     pub cleared_session_message_rows: u64,
+    /// Session-temporal projection rows cleared because they derive from the
+    /// reset observation stream (see [`OBSERVATION_DERIVED_TEMPORAL_DELETES`]).
+    pub cleared_derived_temporal_rows: u64,
 }
 
 fn reset_storage(error: rusqlite::Error) -> TraceDecayError {
@@ -102,6 +138,21 @@ fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, TraceD
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
         [table],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(reset_storage)
+}
+
+fn migration_recorded(
+    conn: &rusqlite::Connection,
+    migration: &str,
+) -> Result<bool, TraceDecayError> {
+    if !table_exists(conn, "global_schema_migrations")? {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM global_schema_migrations WHERE migration = ?1)",
+        [migration],
         |row| row.get::<_, bool>(0),
     )
     .map_err(reset_storage)
@@ -143,17 +194,17 @@ fn canonical(columns: &[&str]) -> BTreeSet<String> {
 /// through the shared canonical column sets.
 fn observation_authority_refused(conn: &rusqlite::Connection) -> Result<bool, TraceDecayError> {
     if table_exists(conn, "observations")? {
-        let marker_recorded = table_exists(conn, "global_schema_migrations")?
-            && conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM global_schema_migrations WHERE migration = ?1)",
-                    [OBSERVATION_SCHEMA_MIGRATION],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(reset_storage)?;
-        if !marker_recorded
+        if !migration_recorded(conn, OBSERVATION_SCHEMA_MIGRATION)?
             || table_columns(conn, "observations")? != canonical(OBSERVATION_CANONICAL_COLUMNS)
         {
+            return Ok(true);
+        }
+        // Content identity, not shape: rows written under a superseded
+        // native-source scheme refuse admission because re-offering them
+        // would double-count. Mirrors the schema-side predicate.
+        let populated = row_count(conn, "observations")? > 0
+            || (table_exists(conn, "source_cursors")? && row_count(conn, "source_cursors")? > 0);
+        if populated && !migration_recorded(conn, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION)? {
             return Ok(true);
         }
     }
@@ -169,9 +220,7 @@ fn observation_authority_refused(conn: &rusqlite::Connection) -> Result<bool, Tr
 /// Resets exactly the refused observation authority in one transaction.
 ///
 /// Fails closed, mutating nothing, when the authority is not actually in a
-/// refused shape (protecting healthy data from an accidental reset) or when
-/// durable session-temporal rows still reference observation rows (a scoped
-/// reset must not orphan or delete them).
+/// refused shape, protecting healthy data from an accidental reset.
 pub fn reset_refused_observation_authority(
     conn: &mut rusqlite::Connection,
 ) -> Result<ObservationAuthorityResetV1, TraceDecayError> {
@@ -193,20 +242,33 @@ pub fn reset_refused_observation_authority(
             ),
         });
     }
-    for table in DURABLE_DEPENDENT_TABLES {
+    // The session-temporal projection derives from the observation stream, so
+    // it resets with it rather than being orphaned or refused over.
+    let mut cleared_derived_temporal_rows = 0u64;
+    for name in invariant_trigger_names_for_tables(IMMUTABLE_DERIVED_TEMPORAL_TABLES) {
+        transaction
+            .execute_batch(&format!("DROP TRIGGER IF EXISTS \"{name}\""))
+            .map_err(reset_storage)?;
+    }
+    for statement in OBSERVATION_DERIVED_TEMPORAL_DELETES {
+        let table = statement
+            .strip_prefix("DELETE FROM ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("each derived-temporal statement names its table");
         if !table_exists(&transaction, table)? {
             continue;
         }
-        let rows = row_count(&transaction, table)?;
-        if rows > 0 {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "a scoped {OBSERVATION_AUTHORITY} reset would orphan {rows} durable row(s) \
-                     in {table}; this store needs a session-temporal remediation first, so \
-                     nothing was reset"
-                ),
-            });
-        }
+        let deleted = transaction.execute(statement, []).map_err(reset_storage)?;
+        cleared_derived_temporal_rows =
+            cleared_derived_temporal_rows.saturating_add(u64::try_from(deleted).map_err(|_| {
+                TraceDecayError::Database {
+                    operation: OPERATION.to_string(),
+                    message: format!("{table} delete count overflowed"),
+                }
+            })?);
+    }
+    for sql in invariant_trigger_sql_for_tables(IMMUTABLE_DERIVED_TEMPORAL_TABLES) {
+        transaction.execute_batch(sql).map_err(reset_storage)?;
     }
 
     // Clear the recoverable projector output before dropping the projection
@@ -258,12 +320,17 @@ pub fn reset_refused_observation_authority(
     for sql in invariant_trigger_sql_for_tables(&reset_table_names) {
         transaction.execute_batch(sql).map_err(reset_storage)?;
     }
-    transaction
-        .execute(
-            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-            [OBSERVATION_SCHEMA_MIGRATION],
-        )
-        .map_err(reset_storage)?;
+    for migration in [
+        OBSERVATION_SCHEMA_MIGRATION,
+        OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION,
+    ] {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+                [migration],
+            )
+            .map_err(reset_storage)?;
+    }
     // The observation-authority audit checkpoint attests to rows that no
     // longer exist; clear it so convergence re-audits the recreated authority
     // from the start.
@@ -279,6 +346,7 @@ pub fn reset_refused_observation_authority(
     Ok(ObservationAuthorityResetV1 {
         reset_tables,
         cleared_session_message_rows,
+        cleared_derived_temporal_rows,
     })
 }
 
