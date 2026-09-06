@@ -2,8 +2,6 @@ use std::fmt;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(test)]
-use serde::de::DeserializeOwned;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -428,38 +426,6 @@ fn classify_unaccepted_envelope(
         }
         _ => Ok(None),
     }
-}
-
-#[cfg(test)]
-fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
-    reader: R,
-    admitted_len: u64,
-) -> Result<T, CodeIndexProductionErrorV1> {
-    let bytes = read_admitted_bytes(reader, admitted_len)?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
-    })
-}
-
-fn read_admitted_bytes<R: std::io::Read>(
-    reader: R,
-    admitted_len: u64,
-) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-    admit_sealed_generation_len(admitted_len)?;
-    let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract("sealed generation length overflowed".to_owned())
-    })?;
-    let mut reader = reader.take(read_limit);
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
-    })?;
-    if read_limit - reader.limit() != admitted_len {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation length does not match its admitted length".to_owned(),
-        ));
-    }
-    Ok(bytes)
 }
 
 fn admit_sealed_generation_bytes(
@@ -1097,9 +1063,9 @@ mod tests {
     }
 
     #[test]
-    fn admitted_json_rejects_extra_and_missing_bytes() {
-        let extra = decode_admitted_json::<serde_json::Value, _>(std::io::Cursor::new(b"{} "), 2);
-        let missing = decode_admitted_json::<serde_json::Value, _>(std::io::Cursor::new(b"{}"), 3);
+    fn admitted_bytes_reject_extra_and_missing_bytes() {
+        let extra = admit_sealed_generation_bytes(b"{} ", 2);
+        let missing = admit_sealed_generation_bytes(b"{}", 3);
 
         assert!(matches!(
             extra,
