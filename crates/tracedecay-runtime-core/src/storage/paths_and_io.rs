@@ -439,12 +439,6 @@ fn durable_directory_lock_path(parent: &Path, destination_name: &OsStr) -> PathB
     parent.join(lock_name)
 }
 
-fn is_concurrent_durable_directory_race(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::NotFound
-        || (error.kind() == io::ErrorKind::InvalidInput
-            && error.to_string().contains("parent must already exist"))
-}
-
 fn create_missing_directories_locked(
     path: &Path,
     mut publish: impl FnMut(&Path) -> io::Result<()>,
@@ -458,12 +452,6 @@ fn create_missing_directories_locked(
     let existing_parent = highest_missing
         .parent()
         .ok_or_else(|| invalid_input("durable private store directory has no parent directory"))?;
-    if !existing_parent.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "durable private store directory parent disappeared during concurrent create",
-        ));
-    }
     if existing_parent.parent().is_some() {
         sync_parent_directory(existing_parent)?;
     }
@@ -471,12 +459,6 @@ fn create_missing_directories_locked(
         let parent = destination.parent().ok_or_else(|| {
             invalid_input("durable private store directory has no parent directory")
         })?;
-        if !parent.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "durable private store directory parent disappeared during concurrent create",
-            ));
-        }
         let destination_name = destination
             .file_name()
             .ok_or_else(|| invalid_input("durable private store directory has no file name"))?;
@@ -492,28 +474,9 @@ fn create_missing_directories_locked(
     Ok(())
 }
 
-fn create_dir_all_durable_retrying(
-    path: &Path,
-    mut publish: impl FnMut(&Path) -> io::Result<()>,
-) -> io::Result<()> {
-    const ATTEMPTS: usize = 8;
-    let mut attempt = 0;
-    loop {
-        match create_missing_directories_locked(path, &mut publish) {
-            Ok(()) => return Ok(()),
-            Err(error)
-                if attempt + 1 < ATTEMPTS && is_concurrent_durable_directory_race(&error) =>
-            {
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 #[cfg(unix)]
 fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
-    create_dir_all_durable_retrying(path, |destination| {
+    create_missing_directories_locked(path, |destination| {
         PrivateStoreIo::create_private_directory(destination)?;
         sync_parent_directory(destination)
     })
