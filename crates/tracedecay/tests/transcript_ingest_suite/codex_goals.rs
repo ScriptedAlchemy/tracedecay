@@ -17,6 +17,44 @@ use crate::restart_atomicity::{
 };
 use crate::support::{init_git_repo, setup};
 
+/// Writes a Codex rollout whose only user `response_item` carries Codex's
+/// exact internal goal-context wrapper. Since `9d1f430c1`, an ordinary user
+/// `response_item` is the deduped precursor of `item_completed/UserMessage`
+/// and admits as an unsupported duplicate; only this wrapper keeps a
+/// response-only goal context projected as a canonical message.
+fn write_codex_rollout_with_native_goal_context(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/04");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-04T00-00-00-{session}.jsonl"));
+    write_jsonl(
+        &path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-04T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-04T00:00:01.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "<codex_internal_context source=\"goal\"><objective>ensure all provider session messages are ingested</objective>\nToken budget: 12000\nTokens remaining: 11000</codex_internal_context>"
+                    }]
+                }
+            }),
+        ],
+    );
+    path
+}
+
 /// Writes a Codex rollout carrying a `thread_goal_updated` lifecycle: an
 /// initial `active` goal, an identical follow-up (only token/time drift — must
 /// be deduped), then a `paused` transition (a distinct state — must keep its
@@ -224,6 +262,7 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
     write_codex_rollout_with_goal_events(&home, &project, "codex-wf-goal");
     write_codex_rollout_with_structured_events(&home, &project, "codex-wf-structured");
     write_codex_rollout_with_goal_context(&home, &project, "codex-wf-goal-context");
+    write_codex_rollout_with_native_goal_context(&home, &project, "codex-wf-native-goal");
 
     let runtime = open_project_session_db(&project).await.unwrap();
     let _ = runtime
@@ -271,11 +310,23 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
     );
     assert!(
         blobs.iter().any(|blob| {
-            blob.contains("ensure all provider session messages are ingested")
+            blob.contains("codex_internal_context")
+                && blob.contains("ensure all provider session messages are ingested")
                 && blob.contains("\"kind\":\"message\"")
                 && !blob.contains("\"semantic_kind\":\"goal\"")
         }),
         "goal-context response_item must remain Message-only (no WorkflowLifecycle Goal)"
+    );
+    // `9d1f430c1` made the plain user `response_item` the deduped precursor of
+    // `item_completed/UserMessage`: it admits as an unsupported duplicate
+    // instead of a second canonical Message, and still never becomes a Goal.
+    assert!(
+        blobs.iter().any(|blob| {
+            blob.contains("\"native_kind\":\"response_item.message.user\"")
+                && blob.contains("\"state\":\"unsupported\"")
+                && !blob.contains("\"semantic_kind\":\"goal\"")
+        }),
+        "a non-goal user response_item must stay an unsupported duplicate"
     );
     assert!(
         !blobs
