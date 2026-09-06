@@ -622,10 +622,30 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     let authorization = fixture_authorization(&request);
     let operation = source_edit_operation(request.edit.kind()).unwrap();
 
+    // Inject the publication fault the platform actually honours. A read-only
+    // parent refuses the source-edit temporary file on Unix; Windows ignores
+    // the read-only attribute on directories, so hold the candidate open
+    // without `FILE_SHARE_DELETE` instead. The edit can still read it (the
+    // pre-effect state digest and the pre-rename comparison succeed), but the
+    // atomic rename over it is refused, which is the same crossed boundary.
+    #[cfg(not(windows))]
     let original_permissions = fs::metadata(&locked_directory).unwrap().permissions();
-    let mut read_only_permissions = original_permissions.clone();
-    read_only_permissions.set_readonly(true);
-    fs::set_permissions(&locked_directory, read_only_permissions).unwrap();
+    #[cfg(not(windows))]
+    {
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        fs::set_permissions(&locked_directory, read_only_permissions).unwrap();
+    }
+    #[cfg(windows)]
+    let held_candidate = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(locked_directory.join("a.rs"))
+            .unwrap()
+    };
     let execution = execute_source_edit(
         &graph,
         &code_graph,
@@ -634,7 +654,10 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         &authorization,
     )
     .await;
+    #[cfg(not(windows))]
     fs::set_permissions(&locked_directory, original_permissions).unwrap();
+    #[cfg(windows)]
+    drop(held_candidate);
     let result = execution.unwrap();
 
     assert_effect_unknown_boundary(&result);
