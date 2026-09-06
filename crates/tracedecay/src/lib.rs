@@ -79,7 +79,7 @@ pub use product_runtime::{
 pub mod profile_registry_maintenance;
 mod project_store_runtime;
 mod runtime_ports;
-pub use runtime_ports::{register_runtime_ports, register_runtime_ports_without_mcp_tool_catalog};
+pub use runtime_ports::register_runtime_ports;
 #[cfg(test)]
 #[path = "sessions/claude_observation_benchmark.rs"]
 mod claude_observation_benchmark;

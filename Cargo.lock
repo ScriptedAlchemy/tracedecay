@@ -6033,6 +6033,7 @@ dependencies = [
  "tracedecay-host-integration",
  "tracedecay-lcm",
  "tracedecay-lsp",
+ "tracedecay-mcp",
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",

@@ -1356,7 +1356,7 @@ mod tests {
         let context = InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "/opt/tracedecay-previous".to_string(),
-            tool_permissions: super::super::expected_tool_perms(),
+            tool_permissions: super::super::expected_tool_perms().expect("tool catalog"),
             project_root: None,
             dashboard: true,
         };

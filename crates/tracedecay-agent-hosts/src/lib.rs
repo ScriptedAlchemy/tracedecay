@@ -7,15 +7,16 @@
 //!
 //! ## Registered ports
 //!
-//! A handful of root-owned runtimes cannot become a dependency edge (the MCP
-//! tool catalog, Hook daemon/identity composition, the Codex app-server
-//! backend, and the registered database's canonical project key). Each is a
-//! [`crate::ports`] slot the root registers at startup
-//! (`src/agents.rs::register_mcp_tool_catalog_ports`,
-//! `src/runtime_ports.rs`); every port degrades to a documented inert answer
-//! (daemon reported unavailable, injection disabled, `u64::MAX`, …) when
-//! unregistered, so this crate's own unit tests stay runnable standalone. A
-//! crate-local `cargo check` passing is therefore not evidence the production
+//! A handful of root-owned runtimes cannot become a dependency edge (Hook
+//! daemon/identity composition, the Codex app-server backend, and the
+//! registered database's canonical project key). Those are
+//! [`crate::ports`] slots the root fills at startup (`src/runtime_ports.rs`);
+//! each degrades to a documented inert answer when unregistered.
+//! The MCP tool catalog is no longer among them: `tracedecay-mcp` owns it and
+//! sits below this crate, so installers read it directly and an unavailable
+//! catalog is a typed error rather than an empty allowlist.
+//!
+//! A crate-local `cargo check` passing is not evidence the production
 //! composition root is wired — check the registration call sites too.
 //!
 //! ## Packaging
