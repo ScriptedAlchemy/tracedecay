@@ -294,9 +294,10 @@ fn capture_file_identity(
         digest.update(&buffer[..read]);
     }
     let sha256: [u8; 32] = digest.finalize().into();
+    let identity = capability_identity(&file, &metadata)?;
     Ok(StoreFileIdentity {
-        device: metadata_device(&metadata)?,
-        inode: metadata_inode(&metadata)?,
+        device: identity.device,
+        inode: identity.inode,
         size_bytes: metadata.len(),
         sha256,
     })
@@ -304,35 +305,48 @@ fn capture_file_identity(
 
 fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdentity> {
     let metadata = directory.metadata(".")?;
+    capability_identity(directory, &metadata)
+}
+
+/// Filesystem identity of an already-open capability: the pair a rename
+/// preserves and a replacement changes.
+///
+/// Unix reads `st_dev`/`st_ino` from the capability's metadata. Windows must
+/// read the volume serial number and file index *by handle* — `cap_std`
+/// exposes them on `Metadata` only under the nightly `windows_by_handle`
+/// feature, so the stable build saw `None` and every fence capture failed with
+/// `InspectFailed`, which left every unregistered store unverifiable and every
+/// orphan-store sweep planning nothing.
+#[cfg(unix)]
+fn capability_identity<H>(
+    _handle: &H,
+    metadata: &cap_std::fs::Metadata,
+) -> io::Result<StoreRootIdentity> {
+    use cap_std::fs::MetadataExt;
+
     Ok(StoreRootIdentity {
-        device: metadata_device(&metadata)?,
-        inode: metadata_inode(&metadata)?,
+        device: metadata.dev(),
+        inode: metadata.ino(),
     })
 }
 
-#[cfg(unix)]
-fn metadata_device(metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(metadata.dev())
+#[cfg(windows)]
+fn capability_identity<H: std::os::windows::io::AsRawHandle>(
+    handle: &H,
+    _metadata: &cap_std::fs::Metadata,
+) -> io::Result<StoreRootIdentity> {
+    let information = tracedecay_private_fs::windows_file::information(handle)?;
+    Ok(StoreRootIdentity {
+        device: u64::from(information.volume_serial_number),
+        inode: information.file_index,
+    })
 }
 
-#[cfg(not(unix))]
-fn metadata_device(_metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
-    Err(io::Error::other(
-        "orphan-store filesystem identity is unsupported",
-    ))
-}
-
-#[cfg(unix)]
-fn metadata_inode(metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(metadata.ino())
-}
-
-#[cfg(not(unix))]
-fn metadata_inode(_metadata: &cap_std::fs::Metadata) -> io::Result<u64> {
+#[cfg(not(any(unix, windows)))]
+fn capability_identity<H>(
+    _handle: &H,
+    _metadata: &cap_std::fs::Metadata,
+) -> io::Result<StoreRootIdentity> {
     Err(io::Error::other(
         "orphan-store filesystem identity is unsupported",
     ))
