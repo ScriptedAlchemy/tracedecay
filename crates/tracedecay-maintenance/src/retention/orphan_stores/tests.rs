@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use super::quarantine::classify_recovery_journal_probe;
 use super::quarantine::{
-    PendingQuarantineReceiptV1, QuarantineRecoveryOutcome, recover_existing_store_quarantine,
-    recover_named_store_quarantine_controlled,
+    PendingQuarantineReceiptV1, QuarantineRecoveryOutcome, RegisteredQuarantineDecisionV1,
+    RegisteredQuarantineInventoryV1, read_registered_quarantine_intents_controlled,
+    recover_existing_store_quarantine, recover_named_store_quarantine_controlled,
+    recover_registered_quarantine_intent_controlled,
 };
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -1848,6 +1850,165 @@ fn committed_journal_recovery_removes_the_exact_quarantine() {
         read_pending_quarantine_receipts(&profile_root)
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn registered_remove_clears_journal_after_exact_quarantine_is_already_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/registered-delete-complete");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(
+        data_root.join("payload.bin"),
+        b"registered deletion completed before metadata cleanup",
+    )
+    .unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let quarantine = quarantine_store_for_verified_collection_controlled(
+        &profile_root,
+        &data_root,
+        &expected,
+        QuarantineKindV1::Registered,
+        "proj_registered_delete_complete",
+        "registered-delete-complete",
+        Some(QuarantineRegistryFenceV1 {
+            store_relpath: "stores/registered-delete-complete".to_owned(),
+            created_at: 1_700_000_000,
+            last_write_at: Some(1_700_000_000),
+        }),
+        unbounded_collection_control(),
+    )
+    .unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach verified registered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    let intent = match read_registered_quarantine_intents_controlled(
+        &profile_root,
+        unbounded_collection_control(),
+    )
+    .unwrap()
+    {
+        RegisteredQuarantineInventoryV1::Complete(mut intents) => {
+            assert_eq!(intents.len(), 1);
+            intents.pop().unwrap()
+        }
+        RegisteredQuarantineInventoryV1::Interrupted => panic!("fixture inventory interrupted"),
+    };
+    std::fs::remove_dir_all(&quarantine_path).unwrap();
+
+    let recovery = recover_registered_quarantine_intent_controlled(
+        &profile_root,
+        &intent,
+        RegisteredQuarantineDecisionV1::Remove,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        recovery,
+        Some(QuarantineRecoveryOutcome::Removed {
+            quarantine_path: quarantine_path.clone(),
+            journal_failure: None,
+        })
+    );
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unregistered_committed_recovery_clears_journal_after_quarantine_is_already_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/unregistered-delete-complete");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(
+        data_root.join("payload.bin"),
+        b"unregistered deletion completed before metadata cleanup",
+    )
+    .unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let quarantine =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach verified unregistered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    quarantine.mark_retirement_committed().unwrap();
+    drop(quarantine);
+    std::fs::remove_dir_all(&quarantine_path).unwrap();
+
+    let recovery = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
+
+    assert_eq!(
+        recovery,
+        vec![QuarantineRecoveryOutcome::Removed {
+            quarantine_path: quarantine_path.clone(),
+            journal_failure: None,
+        }]
+    );
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unregistered_uncommitted_recovery_retains_journal_when_both_names_are_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/unregistered-lost-before-commit");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"uncommitted bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(expected_inventory) = &expected else {
+        panic!("fixture must capture an exact present-store fence");
+    };
+    let expected_root_identity = expected_inventory.root.clone();
+    let quarantine =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach verified unregistered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    std::fs::remove_dir_all(&quarantine_path).unwrap();
+
+    let recovery = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
+
+    assert_eq!(
+        recovery,
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            failure: Some(CollectionMutationFailure {
+                operation: CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                raw_os_error: None,
+                target_path: data_root.clone(),
+                expected_root_identity: Some(expected_root_identity),
+                classification: CollectionMutationFailureClassification::NonRetryable,
+            }),
+        }]
+    );
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert_eq!(
+        read_pending_quarantine_receipts(&profile_root).unwrap(),
+        vec![PendingQuarantineReceiptV1 {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path,
+            retirement_committed: false,
+        }]
     );
 }
 
