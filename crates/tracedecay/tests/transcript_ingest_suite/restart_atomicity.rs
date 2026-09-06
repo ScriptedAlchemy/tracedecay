@@ -315,6 +315,28 @@ pub(super) async fn observation_source_cursor(
         .flatten()
 }
 
+/// Committed cursor of one named native stream inside a session, for providers
+/// whose task owns several independently appended sources.
+pub(super) async fn observation_source_cursor_for_key(
+    runtime: &ProjectSessionTestRuntime,
+    provider: &str,
+    session_id: &str,
+    source_key: &str,
+) -> Option<ObservationSourceCursorV1> {
+    let source = ObservationSourceIdentityV1::for_provider_source(
+        ProviderId::new(provider).unwrap(),
+        SessionId::new(session_id).unwrap(),
+        SessionId::new(source_key).unwrap(),
+    )
+    .unwrap();
+    runtime
+        .runtime
+        .project_observation_source_cursor_for_test(&source)
+        .await
+        .ok()
+        .flatten()
+}
+
 async fn observation_source_cursor_position(
     runtime: &ProjectSessionTestRuntime,
     provider: &str,

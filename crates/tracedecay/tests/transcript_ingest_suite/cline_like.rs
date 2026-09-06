@@ -14,7 +14,8 @@ use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks,
     ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
-    open_project_session_db, set_projection_failure, try_ingest_source,
+    observation_source_cursor_for_key, open_project_session_db, set_projection_failure,
+    try_ingest_source,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
@@ -808,6 +809,7 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         mark_test_project(&project);
         let root = vscode_storage_root(&home, extension_id);
         let session_id = format!("{provider}-fault");
+        let ui_source_key = format!("{session_id}:ui_messages");
         let history = write_task(&root, &project, &session_id);
 
         let db = open_project_session_db(&project).await.unwrap();
@@ -823,7 +825,16 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         let prefix_cursor = observation_source_cursor(&db, provider, &session_id, &project)
             .await
             .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
-        assert_eq!(prefix_cursor.position(), 3, "{provider}: initial frontier");
+        // The API history and `ui_messages.json` are appended independently, so
+        // each is its own source: two API entries here, and the uncorrelated
+        // usage event sits at position 1 of the UI stream rather than extending
+        // the API frontier.
+        assert_eq!(prefix_cursor.position(), 2, "{provider}: initial frontier");
+        let ui_cursor =
+            observation_source_cursor_for_key(&db, provider, &session_id, &ui_source_key)
+                .await
+                .unwrap_or_else(|| panic!("{provider}: committed UI observation cursor"));
+        assert_eq!(ui_cursor.position(), 1, "{provider}: initial UI frontier");
         drop(db);
 
         // Exact restart is a no-op.
@@ -875,14 +886,19 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             prefix_cursor.generation(),
             "{provider}: replacement starts a new snapshot generation"
         );
-        // Full coverage of the replacement snapshot — three conversation rows
-        // plus the uncorrelated ui_messages usage record — commits before
-        // projection acknowledgement; the failed projection replays from the
-        // durable queue rather than wedging the observation frontier.
+        // Full coverage of the replacement snapshot — three conversation rows —
+        // commits before projection acknowledgement; the failed projection
+        // replays from the durable queue rather than wedging the observation
+        // frontier. The unchanged UI stream keeps its own frontier.
         assert_eq!(
             committed_cursor.position(),
-            4,
+            3,
             "{provider}: observation frontier commits before projection acknowledgement"
+        );
+        assert_eq!(
+            observation_source_cursor_for_key(&replay, provider, &session_id, &ui_source_key).await,
+            Some(ui_cursor.clone()),
+            "{provider}: API replacement leaves the UI stream frontier untouched"
         );
         assert_eq!(
             replay.session_message_count().await.unwrap(),
