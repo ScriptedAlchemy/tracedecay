@@ -418,7 +418,7 @@ async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup(
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, prepared, descriptor) = prepared_generation(
         &source,
         "chunk.retired-after-lookup",
@@ -450,7 +450,9 @@ async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup(
     let error = match GraphVectorGenerationStoreV1::read_only_generation(
         &historical,
         &publication.generation_id,
-    ) {
+    )
+    .await
+    {
         Err(error) => error,
         Ok(_) => panic!("a retired graph generation must not be served from stale mapping"),
     };
@@ -480,30 +482,21 @@ async fn read_only_snapshot_recovery_leaves_the_only_runtime_worker_free() {
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
+    let recovery_started = Arc::new(Notify::new());
     let (release, gate) = std::sync::mpsc::channel();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         recover_snapshot_gate: Mutex::new(Some(gate)),
+        recover_snapshot_started: Some(Arc::clone(&recovery_started)),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(retained.runtime()))
     });
     let retained = RetainedSemanticVectorGraphV1::new(probe, Arc::clone(retained.cancellation()));
 
-    let ticks = Arc::new(AtomicUsize::new(0));
-    let heartbeat_ticks = Arc::clone(&ticks);
-    let heartbeat = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
-        }
-    });
     let holder = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        recovery_started.notified().await;
         release.send(()).is_ok()
     });
 
-    let started = Instant::now();
     let store = GraphVectorGenerationStoreV1::read_only(&retained).await;
-    let elapsed = started.elapsed();
-    heartbeat.abort();
 
     assert!(
         store.is_ok(),
@@ -512,14 +505,6 @@ async fn read_only_snapshot_recovery_leaves_the_only_runtime_worker_free() {
     assert!(
         holder.await.unwrap(),
         "the transaction holder must still run and release snapshot recovery"
-    );
-    assert!(
-        ticks.load(Ordering::SeqCst) > 0,
-        "the single runtime worker must keep ticking while snapshot recovery waits"
-    );
-    assert!(
-        elapsed < WRITER_GATE_LEASE,
-        "read-only recovery must not wait out the lease: {elapsed:?}"
     );
 }
 
@@ -586,8 +571,8 @@ async fn aborted_read_only_cannot_outlive_operation_owner_shutdown() {
 /// synchronously. Running that on the runtime is what starved the tasks that
 /// would commit the transaction it waits for, so the writer stayed occupied
 /// until its idle lease expired. On a single-worker runtime the contender must
-/// leave that worker free: a heartbeat keeps ticking and the transaction holder
-/// still gets polled to release the writer, well inside the idle limit.
+/// leave that worker free so the transaction holder is polled after the probe
+/// observes contention and releases the writer before the idle limit.
 #[tokio::test(flavor = "current_thread")]
 async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     let source = CodeGenerationId::new("code-generation.writer-contention").unwrap();
@@ -608,31 +593,22 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
         &admitted_embedding(),
     );
     store.configure_stage(descriptor).unwrap();
+    let begin_started = Arc::new(Notify::new());
     let (release, gate) = std::sync::mpsc::channel();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         begin_gate: Mutex::new(Some(gate)),
+        begin_started: Some(Arc::clone(&begin_started)),
         recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
 
-    let ticks = Arc::new(AtomicUsize::new(0));
-    let heartbeat_ticks = Arc::clone(&ticks);
-    let heartbeat = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
-        }
-    });
     let holder = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        begin_started.notified().await;
         release.send(()).is_ok()
     });
 
-    let started = Instant::now();
     let outcome = store.begin_generation(plan, cancellation).await;
-    let elapsed = started.elapsed();
-    heartbeat.abort();
 
     assert!(
         matches!(
@@ -644,14 +620,6 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     assert!(
         holder.await.unwrap(),
         "the transaction holder must still be polled while the writer is contended"
-    );
-    assert!(
-        ticks.load(Ordering::SeqCst) > 0,
-        "the single runtime worker must keep running other tasks while the store waits"
-    );
-    assert!(
-        elapsed < WRITER_GATE_LEASE,
-        "begin must not have waited out the lease: {elapsed:?}"
     );
 }
 
@@ -712,6 +680,8 @@ struct PublicationAuthorityProbeRuntime {
     /// Stands in for the project's exclusive exact-SQL writer: `begin_stage`
     /// blocks here until the transaction holder releases it.
     begin_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Signals when stage begin has entered the blocking child.
+    begin_started: Option<Arc<Notify>>,
     /// Stands in for that writer while verified snapshot recovery blocks.
     recover_snapshot_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// Signals when verified snapshot recovery has entered the blocking child.
@@ -737,6 +707,7 @@ impl PublicationAuthorityProbeRuntime {
             reserve_deadline: Mutex::new(None),
             cancellation_to_trip: None,
             begin_gate: Mutex::new(None),
+            begin_started: None,
             recover_snapshot_gate: Mutex::new(None),
             recover_snapshot_started: None,
             simulated_verify_elapsed: None,
@@ -762,7 +733,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         }
         if let Some(gate) = self.recover_snapshot_gate.lock().unwrap().take() {
             gate.recv_timeout(WRITER_GATE_LEASE)
-                .map_err(|_| GraphDbError::Cancelled)?;
+                .map_err(|_| GraphDbError::DeadlineExceeded)?;
         }
         if let Some(cancellation) = &self.cancellation_to_trip {
             cancellation.store(true, Ordering::SeqCst);
@@ -805,12 +776,15 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         plan: &SemanticVectorStagePlan,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
+        if let Some(started) = &self.begin_started {
+            started.notify_one();
+        }
         if let Some(gate) = self.begin_gate.lock().unwrap().take() {
             // Bounded exactly as the real writer wait is bounded: by the
             // abandoned-transaction lease. Expiring here means the holder was
             // never polled to release, which is the starvation this guards.
             gate.recv_timeout(WRITER_GATE_LEASE)
-                .map_err(|_| GraphDbError::Cancelled)?;
+                .map_err(|_| GraphDbError::DeadlineExceeded)?;
         }
         if self.require_background_begin {
             let remaining = authority
