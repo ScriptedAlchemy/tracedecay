@@ -1,6 +1,13 @@
 # Force LF line endings for test fixtures — tree-sitter grammars
 # expect Unix line endings and produce wrong parse trees with CRLF.
 tests/fixtures/** text eol=lf
+# The search-quality candidate workload pins each corpus document against the
+# blob in the pinned source tree, and the packaged evaluator assets are pulled
+# into the binary with include_bytes! under a pinned digest. One corpus
+# document lives outside tests/fixtures, and the packaged mirror is a separate
+# tree; a CRLF checkout rewrites either and fails both byte-exact contracts.
+evals/agent_adoption/fixture/** text eol=lf
+crates/tracedecay-query/assets/runtime-root/** text eol=lf
 # Force LF for bundled plugin skill docs; the skill hygiene tests assert the
 # canonical source files are LF-only, and Windows checkout otherwise rewrites
 # them before the lint runs.
