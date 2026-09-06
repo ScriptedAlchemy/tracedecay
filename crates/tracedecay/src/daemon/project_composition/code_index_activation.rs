@@ -103,14 +103,27 @@ pub(super) fn code_index_activation_mount(
                     }
                     outcome = mount => outcome.map_err(|error| error.to_string())?,
                 }
-                project_open_owners::install_semantic_activation_runtime_owner(
+                // Semantic readiness sits above code-index warming in the
+                // lifecycle: a failed semantic owner degrades semantic
+                // activation, it never fails the text/graph mount.
+                if let Err(error) = project_open_owners::install_semantic_activation_runtime_owner(
                     &invocation,
                     &project_root,
                     configuration_runtime,
                     scope.clone(),
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                {
+                    log_daemon_event(
+                        "project_open_phase",
+                        &[
+                            ("project", project_root.display().to_string()),
+                            ("phase", "semantic_activation_owner".to_owned()),
+                            ("outcome", "degraded".to_owned()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                }
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked after code-index mount".to_owned());
                 }
