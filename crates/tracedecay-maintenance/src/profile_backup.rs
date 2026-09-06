@@ -14,7 +14,7 @@
 
 use std::{
     cell::Cell,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -894,15 +894,42 @@ fn copy_verified_file(
             ))
         })?;
     }
-    fs::copy(source, destination).map_err(|error| {
+    copy_private_artifact(source, destination)?;
+    verify_file(destination, expected)
+}
+
+/// Copies one plain artifact byte-for-byte into a destination created through
+/// the private-fs authority.
+///
+/// A plain `fs::copy` lets the new file inherit whatever the destination
+/// directory grants (on Windows, the parent's ACEs and the token's default
+/// owner), which the strict private readers — the profile-identity record
+/// above all — then refuse. Creating the destination privately keeps the
+/// owner-only contract across backup and restore without touching the source.
+fn copy_private_artifact(source: &Path, destination: &Path) -> Result<(), ProfileBackupError> {
+    let mut reader = File::open(source).map_err(|error| {
         ProfileBackupError::unavailable(format!(
-            "copy backup file '{}' to '{}': {error}",
-            source.display(),
+            "open backup file '{}' for copy: {error}",
+            source.display()
+        ))
+    })?;
+    let mut writer = tracedecay_private_fs::create_private_file(destination).map_err(|error| {
+        ProfileBackupError::unavailable(format!(
+            "create private backup file '{}': {error}",
             destination.display()
         ))
     })?;
-    sync_file(destination)?;
-    verify_file(destination, expected)
+    let copied = std::io::copy(&mut reader, &mut writer).and_then(|_| writer.sync_all());
+    drop(writer);
+    if let Err(error) = copied {
+        let _ = fs::remove_file(destination);
+        return Err(ProfileBackupError::unavailable(format!(
+            "copy backup file '{}' to '{}': {error}",
+            source.display(),
+            destination.display()
+        )));
+    }
+    Ok(())
 }
 
 fn verify_file(path: &Path, expected: &ProfileBackupEntry) -> Result<(), ProfileBackupError> {
@@ -1021,26 +1048,13 @@ fn sha256_file(path: &Path) -> Result<String, ProfileBackupError> {
 }
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), ProfileBackupError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
+    let mut file = tracedecay_private_fs::create_private_file(path).map_err(|error| {
         ProfileBackupError::unavailable(format!("create '{}': {error}", path.display()))
     })?;
     file.write_all(bytes).map_err(|error| {
         ProfileBackupError::unavailable(format!("write '{}': {error}", path.display()))
     })?;
     file.sync_all().map_err(|error| {
-        ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
-    })
-}
-
-fn sync_file(path: &Path) -> Result<(), ProfileBackupError> {
-    tracedecay_private_fs::framed_log::sync_file_at(path).map_err(|error| {
         ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
     })
 }
@@ -1062,7 +1076,23 @@ fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
     })
 }
 
-#[cfg(not(unix))]
+/// Windows analogue of the 0700 mode above: the rehearsal staging directory
+/// was created by this attempt moments ago, so re-owning it and installing the
+/// protected current-user DACL is the same "make our own new directory
+/// private" step, not a repair of foreign material.
+#[cfg(windows)]
+fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
+    tracedecay_private_fs::make_private_directory(path)
+        .map(drop)
+        .map_err(|error| {
+            ProfileBackupError::unavailable(format!(
+                "restrict directory '{}': {error}",
+                path.display()
+            ))
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn restrict_private_directory(_path: &Path) -> Result<(), ProfileBackupError> {
     Ok(())
 }
