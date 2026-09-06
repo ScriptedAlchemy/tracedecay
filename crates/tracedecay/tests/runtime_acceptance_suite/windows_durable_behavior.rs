@@ -162,12 +162,13 @@ mod lcm_query_behavior {
             .expect("store canonical LCM record");
 
         let status = runtime
-            .lcm_status_for_test("cursor", Some("durable-query-session"))
+            .lcm_status_deep_for_test("cursor", Some("durable-query-session"))
             .await
             .expect("read canonical LCM status");
         assert_eq!(status.raw_message_count, 1);
         assert_eq!(status.store.messages, 1);
         assert!(status.store.token_estimate.complete);
+        assert_eq!(status.store.token_estimate.scanned_messages, 1);
     }
 }
 
