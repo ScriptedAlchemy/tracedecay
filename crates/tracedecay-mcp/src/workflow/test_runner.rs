@@ -269,11 +269,18 @@ pub async fn run_cargo_tests(
     .map_err(|_| TestRunFailure::Spawn("cargo test runner task ended unexpectedly".to_owned()))?
 }
 
-pub fn cargo_test_args(profile: TestProfile, test_identity: &str) -> Vec<String> {
+/// Cargo arguments that select the compilation units for one managed test
+/// run, without the libtest filter that follows the `--` separator.
+fn cargo_test_build_args(profile: TestProfile) -> Vec<String> {
     let mut args = vec!["test".to_string(), "--no-fail-fast".to_string()];
     if profile == TestProfile::Release {
         args.push("--release".to_string());
     }
+    args
+}
+
+pub fn cargo_test_args(profile: TestProfile, test_identity: &str) -> Vec<String> {
+    let mut args = cargo_test_build_args(profile);
     args.extend([
         "--".to_string(),
         "--exact".to_string(),
@@ -673,21 +680,161 @@ pub fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::{self, Display};
     use std::fs;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::{
-        MAX_TEST_RUN_OUTPUT_BYTES, TestProfile, TestRunControl, TestRunFailure, TestRunStream,
-        run_bounded_test_command, run_cargo_tests,
+        MAX_TEST_RUN_OUTPUT_BYTES, TestProfile, TestRunControl, TestRunFailure, TestRunOutput,
+        TestRunStream, cargo_test_build_args, run_bounded_test_command, run_cargo_tests,
     };
 
     const FIXTURE_MODE: &str = "TRACEDECAY_TEST_RUNNER_FIXTURE_MODE";
     const FIXTURE_MARKER: &str = "TRACEDECAY_TEST_RUNNER_FIXTURE_MARKER";
     const LIMITED_OUTPUT_BYTES: usize = 96 * 1024;
+
+    /// Budget for provisioning a cargo fixture (cold compile plus test
+    /// discovery) before the phase whose execution deadline is under test.
+    ///
+    /// Cold compilation of even a tiny fixture on a fresh Windows runner can
+    /// exceed the execution deadline the exact-test cases assert against, so
+    /// provisioning gets its own generous budget and its own output budget.
+    /// The production runner's timeout semantics are unchanged: the execution
+    /// phase below still runs `run_cargo_tests` against the genuine deadline.
+    const FIXTURE_PROVISION_BUDGET: Duration = Duration::from_mins(5);
+    /// Deadline for the execution phase once the fixture test binary is warm.
+    const EXACT_TEST_EXECUTION_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// A cargo fixture whose test binary is compiled and whose tests are
+    /// discovered before any execution-deadline phase starts.
+    ///
+    /// The recorded phase timings attribute a failure to provisioning
+    /// (compile, discovery) or execution rather than conflating them.
+    struct ProvisionedFixture {
+        root: tempfile::TempDir,
+        compile_elapsed: Duration,
+        discovery_elapsed: Duration,
+        discovered_tests: Vec<String>,
+    }
+
+    impl ProvisionedFixture {
+        fn path(&self) -> &Path {
+            self.root.path()
+        }
+
+        fn phases(&self) -> FixturePhases<'_> {
+            FixturePhases(self)
+        }
+
+        /// Runs the execution phase against the genuine production deadline
+        /// and attributes any failure to that phase.
+        async fn execute(&self, test_names: Vec<String>) -> Result<TestRunOutput, TestRunFailure> {
+            let started = Instant::now();
+            let result = run_cargo_tests(
+                self.path().to_path_buf(),
+                TestProfile::Debug,
+                test_names,
+                EXACT_TEST_EXECUTION_DEADLINE,
+                TestRunControl::default(),
+            )
+            .await;
+            if let Err(TestRunFailure::Timeout { partial, .. }) = &result {
+                panic!(
+                    "execution phase exceeded its {:?} deadline after {:?} on a warm fixture ({}); stderr:\n{}",
+                    EXACT_TEST_EXECUTION_DEADLINE,
+                    started.elapsed(),
+                    self.phases(),
+                    partial.as_ref().map_or("", |output| output.stderr.as_str()),
+                );
+            }
+            result
+        }
+    }
+
+    struct FixturePhases<'a>(&'a ProvisionedFixture);
+
+    impl Display for FixturePhases<'_> {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "compile {:?}, discovery {:?}, discovered {:?}",
+                self.0.compile_elapsed, self.0.discovery_elapsed, self.0.discovered_tests
+            )
+        }
+    }
+
+    fn write_fixture_package(root: &Path, name: &str, lib_source: &str) {
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .expect("manifest");
+        fs::write(root.join("src/lib.rs"), lib_source).expect("source");
+    }
+
+    fn provision_fixture(name: &str, lib_source: &str) -> ProvisionedFixture {
+        let root = tempfile::TempDir::new().expect("temp");
+        write_fixture_package(root.path(), name, lib_source);
+        let compile_elapsed = compile_fixture_tests(root.path());
+        let (discovery_elapsed, discovered_tests) = discover_fixture_tests(root.path());
+        ProvisionedFixture {
+            root,
+            compile_elapsed,
+            discovery_elapsed,
+            discovered_tests,
+        }
+    }
+
+    /// Compile phase: build exactly the units the production runner will
+    /// invoke, using the same cargo flags plus `--no-run`.
+    fn compile_fixture_tests(root: &Path) -> Duration {
+        let mut args = cargo_test_build_args(TestProfile::Debug);
+        args.push("--no-run".to_owned());
+        run_provisioning_phase("compile", root, &args).0
+    }
+
+    /// Discovery phase: list the compiled test binary's tests so a later
+    /// `NoMatch` or missing result can be attributed to selection rather than
+    /// to a fixture that never contained the test.
+    fn discover_fixture_tests(root: &Path) -> (Duration, Vec<String>) {
+        let mut args = cargo_test_build_args(TestProfile::Debug);
+        args.extend(["--".to_owned(), "--list".to_owned()]);
+        let (elapsed, stdout) = run_provisioning_phase("discovery", root, &args);
+        let mut discovered: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_suffix(": test"))
+            .map(str::to_owned)
+            .collect();
+        discovered.sort();
+        (elapsed, discovered)
+    }
+
+    fn run_provisioning_phase(phase: &str, root: &Path, args: &[String]) -> (Duration, String) {
+        let mut command = Command::new("cargo");
+        command.current_dir(root).args(args);
+        let started = Instant::now();
+        let result = run_bounded_test_command(
+            &mut command,
+            FIXTURE_PROVISION_BUDGET,
+            TestRunControl::default(),
+        );
+        let elapsed = started.elapsed();
+        match result {
+            Ok(output) if output.exit_code == Some(0) => (elapsed, output.stdout),
+            Ok(output) => panic!(
+                "fixture {phase} phase failed after {elapsed:?} with exit {:?}; stderr:\n{}",
+                output.exit_code, output.stderr
+            ),
+            Err(failure) => panic!(
+                "fixture {phase} phase did not complete within {FIXTURE_PROVISION_BUDGET:?} (took {elapsed:?}): {failure:?}"
+            ),
+        }
+    }
 
     #[test]
     fn bounded_runner_fixture() {
@@ -740,62 +887,69 @@ mod tests {
 
     #[tokio::test]
     async fn cargo_runner_executes_every_requested_exact_test_once() {
-        let temp = tempfile::TempDir::new().expect("temp");
-        fs::create_dir_all(temp.path().join("src")).expect("source directory");
-        fs::write(
-            temp.path().join("Cargo.toml"),
-            "[package]\nname = \"bounded-runner-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("manifest");
-        fs::write(
-            temp.path().join("src/lib.rs"),
+        let fixture = provision_fixture(
+            "bounded-runner-fixture",
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn selected_one() {}\n\n    #[test]\n    fn selected_two() {}\n\n    #[test]\n    fn excluded() { panic!(\"must stay filtered\"); }\n}\n",
-        )
-        .expect("source");
+        );
+        assert_eq!(
+            fixture.discovered_tests,
+            [
+                "tests::excluded",
+                "tests::selected_one",
+                "tests::selected_two"
+            ],
+            "discovery phase must see every fixture test ({})",
+            fixture.phases()
+        );
 
-        let output = run_cargo_tests(
-            temp.path().to_path_buf(),
-            TestProfile::Debug,
-            vec![
+        let output = fixture
+            .execute(vec![
                 "tests::selected_one".to_owned(),
                 "tests::selected_two".to_owned(),
-            ],
-            Duration::from_secs(10),
-            TestRunControl::default(),
-        )
-        .await
-        .expect("selected cargo tests");
+            ])
+            .await
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "execution phase must run the selected tests ({}): {failure:?}",
+                    fixture.phases()
+                )
+            });
 
         assert_eq!(output.exit_code, Some(0));
-        assert!(output.stdout.contains("test tests::selected_one ... ok"));
-        assert!(output.stdout.contains("test tests::selected_two ... ok"));
+        assert_eq!(
+            super::parse_libtest_output(&output.stdout),
+            vec![
+                ("tests::selected_one".to_owned(), true),
+                ("tests::selected_two".to_owned(), true)
+            ],
+            "each requested exact test must execute exactly once ({})",
+            fixture.phases()
+        );
         assert!(!output.stdout.contains("tests::excluded"));
     }
 
     #[tokio::test]
     async fn cargo_runner_reports_passing_and_failing_exact_tests() {
-        let temp = tempfile::TempDir::new().expect("temp");
-        fs::create_dir_all(temp.path().join("src")).expect("source directory");
-        fs::write(
-            temp.path().join("Cargo.toml"),
-            "[package]\nname = \"failing-exact-runner-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("manifest");
-        fs::write(
-            temp.path().join("src/lib.rs"),
+        let fixture = provision_fixture(
+            "failing-exact-runner-fixture",
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn passes() {}\n\n    #[test]\n    fn fails() { panic!(\"expected failure\"); }\n}\n",
-        )
-        .expect("source");
+        );
+        assert_eq!(
+            fixture.discovered_tests,
+            ["tests::fails", "tests::passes"],
+            "discovery phase must see every fixture test ({})",
+            fixture.phases()
+        );
 
-        let output = run_cargo_tests(
-            temp.path().to_path_buf(),
-            TestProfile::Debug,
-            vec!["tests::passes".to_owned(), "tests::fails".to_owned()],
-            Duration::from_secs(10),
-            TestRunControl::default(),
-        )
-        .await
-        .expect("the runner must retain an observed failing test result");
+        let output = fixture
+            .execute(vec!["tests::passes".to_owned(), "tests::fails".to_owned()])
+            .await
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "the runner must retain an observed failing test result ({}): {failure:?}",
+                    fixture.phases()
+                )
+            });
 
         assert_eq!(output.exit_code, Some(101));
         assert_eq!(
@@ -803,38 +957,105 @@ mod tests {
             vec![
                 ("tests::passes".to_owned(), true),
                 ("tests::fails".to_owned(), false)
-            ]
+            ],
+            "result collection must keep the failing result ({})",
+            fixture.phases()
         );
     }
 
     #[tokio::test]
     async fn cargo_runner_rejects_a_vacuous_exact_test_run() {
-        let temp = tempfile::TempDir::new().expect("temp");
-        fs::create_dir_all(temp.path().join("src")).expect("source directory");
-        fs::write(
-            temp.path().join("Cargo.toml"),
-            "[package]\nname = \"vacuous-runner-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("manifest");
-        fs::write(
-            temp.path().join("src/lib.rs"),
+        let fixture = provision_fixture(
+            "vacuous-runner-fixture",
             "#[cfg(test)]\nmod tests { #[test] fn present() {} }\n",
-        )
-        .expect("source");
+        );
+        assert_eq!(
+            fixture.discovered_tests,
+            ["tests::present"],
+            "discovery phase must confirm the requested test is genuinely absent ({})",
+            fixture.phases()
+        );
 
+        let result = fixture.execute(vec!["tests::missing".to_owned()]).await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(TestRunFailure::NoMatch { test_identity, .. }) if test_identity == "tests::missing"
+            ),
+            "a selection that matches nothing must be NoMatch, not a timeout or pass ({}): {result:?}",
+            fixture.phases()
+        );
+    }
+
+    /// The cold-build contract, kept distinct from the warm execution cases:
+    /// cancelling while cargo is still compiling terminates the whole cargo
+    /// process tree, including the build script it spawned.
+    #[tokio::test]
+    async fn cancelling_a_stalled_fixture_compile_terminates_the_cargo_process_tree() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let marker = temp.path().join("build-script.pid");
+        let staging = temp.path().join("build-script.pid.partial");
+        write_fixture_package(
+            temp.path(),
+            "stalled-compile-fixture",
+            "#[cfg(test)]\nmod tests { #[test] fn present() {} }\n",
+        );
+        // Write the pid to a staging file and rename it into place so the
+        // marker is only ever observed complete.
+        fs::write(
+            temp.path().join("build.rs"),
+            format!(
+                concat!(
+                    "fn main() {{\n",
+                    "    std::fs::write({staging:?}, std::process::id().to_string()).expect(\"staging marker\");\n",
+                    "    std::fs::rename({staging:?}, {marker:?}).expect(\"publish marker\");\n",
+                    "    std::thread::sleep(std::time::Duration::from_secs(60));\n",
+                    "}}\n",
+                ),
+                staging = staging.to_str().expect("utf-8 staging path"),
+                marker = marker.to_str().expect("utf-8 marker path"),
+            ),
+        )
+        .expect("build script");
+
+        let control = TestRunControl::default();
+        let canceller = {
+            let control = control.clone();
+            let marker = marker.clone();
+            thread::spawn(move || {
+                let deadline = Instant::now() + FIXTURE_PROVISION_BUDGET;
+                while !marker.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let stalled = marker.exists();
+                control.cancel();
+                stalled
+            })
+        };
+
+        let started = Instant::now();
         let result = run_cargo_tests(
             temp.path().to_path_buf(),
             TestProfile::Debug,
-            vec!["tests::missing".to_owned()],
-            Duration::from_secs(10),
-            TestRunControl::default(),
+            vec!["tests::present".to_owned()],
+            FIXTURE_PROVISION_BUDGET + Duration::from_secs(30),
+            control,
         )
         .await;
+        let elapsed = started.elapsed();
+        let stalled = canceller.join().expect("canceller");
 
-        assert!(matches!(
-            result,
-            Err(TestRunFailure::NoMatch { test_identity, .. }) if test_identity == "tests::missing"
-        ));
+        assert!(
+            stalled,
+            "compile phase never reached the stalled build script within {FIXTURE_PROVISION_BUDGET:?}: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(TestRunFailure::Cancelled { .. })),
+            "cancelling a stalled compile must report Cancelled after {elapsed:?}, not a timeout or NoMatch: {result:?}"
+        );
+        #[cfg(unix)]
+        assert_reaped(&marker);
     }
 
     #[tokio::test]
