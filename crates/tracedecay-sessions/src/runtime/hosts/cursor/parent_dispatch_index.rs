@@ -715,6 +715,12 @@ mod tests {
         assert_eq!(appended.bytes_parsed, delta);
         assert_eq!(appended.records_parsed, 1);
         assert!(!appended.rescanned_from_zero);
+
+        let (model, unchanged) = lookup(&layout, "late-agent");
+        assert_eq!(model.as_deref(), Some("late-model"));
+        assert_eq!(unchanged.bytes_parsed, 0);
+        assert_eq!(unchanged.records_parsed, 0);
+        assert!(!unchanged.rescanned_from_zero);
     }
 
     #[test]
