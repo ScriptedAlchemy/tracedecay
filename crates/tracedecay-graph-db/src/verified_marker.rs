@@ -23,12 +23,13 @@
 //! * for each generation proven against that container, the recovered digest
 //!   that was proven and the number of canonical bytes the proof hashed.
 //!
-//! On a later open the container is stat'ed once (microseconds) and compared
-//! against the recorded identity. An exact match means the bytes that back the
-//! in-RAM store are the bytes the proof already ran over, so the recorded
-//! digest stands and the enumeration is skipped. Anything else -- a missing
-//! marker, an unparseable one, a self-digest mismatch, an identity mismatch,
-//! or a generation the marker does not list -- falls back to the full proof.
+//! On a later open the container is identified from an opened handle
+//! (microseconds) and compared against the recorded identity. An exact match
+//! means the bytes that back the in-RAM store are the bytes the proof already
+//! ran over, so the recorded digest stands and the enumeration is skipped.
+//! Anything else -- a missing marker, an unparseable one, a self-digest
+//! mismatch, an identity mismatch, a missing durable file identity, or a
+//! generation the marker does not list -- falls back to the full proof.
 //!
 //! # What a marker cannot do
 //!
@@ -135,11 +136,14 @@ impl GenerationVerification {
 
 /// The identity of a `.grafeo` container as the filesystem reports it.
 ///
-/// On Unix this is the real `(device, inode, mtime)` triple. Elsewhere the
-/// device and inode are zero and the witness narrows to length plus
-/// modification time, which is weaker but still fails closed: a rewritten
-/// container that happens to match falls back to the full proof only if it
-/// *does* match, and any mismatch re-verifies.
+/// Identity is taken from an opened container handle, not from a path-only
+/// stat. On Unix that is the handle's `(device, inode, mtime)` triple. On
+/// Windows it is the volume serial and file index from
+/// `GetFileInformationByHandle`, plus length and modification time. A pair
+/// of `(device, inode) = (0, 0)` is not a file identity -- that was the
+/// historical non-Unix fallback, and it lets a same-length replacement that
+/// preserved its timestamp reuse a stale marker. Readers therefore treat a
+/// missing or zero file-id as a marker miss and run the full proof.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ContainerIdentity {
@@ -153,20 +157,40 @@ pub(crate) struct ContainerIdentity {
 impl ContainerIdentity {
     /// Reads the identity of `path`, or `None` when it cannot be established.
     ///
-    /// A missing file, an unreadable one, or a modification time the platform
-    /// declines to report all yield `None`, which callers treat as "no usable
-    /// marker" rather than as an error: failing to take a shortcut is never a
-    /// failure.
+    /// A missing file, a symlink, an unreadable handle, a modification time
+    /// the platform declines to report, or a handle that does not expose a
+    /// durable file identity all yield `None`, which callers treat as "no
+    /// usable marker" rather than as an error: failing to take a shortcut is
+    /// never a failure.
     pub(crate) fn read(path: &Path) -> Option<Self> {
+        // Refuse to follow a symlink at the container path: the marker must
+        // name the object the path itself denotes.
         let metadata = std::fs::symlink_metadata(path).ok()?;
-        if !metadata.is_file() {
+        if !metadata.file_type().is_file() {
             return None;
         }
-        Self::from_metadata(&metadata)
+        let file = std::fs::File::open(path).ok()?;
+        Self::from_opened(&file)
+    }
+
+    fn from_opened(file: &std::fs::File) -> Option<Self> {
+        let metadata = file.metadata().ok()?;
+        Self::from_opened_metadata(file, &metadata)?.if_durable()
+    }
+
+    /// A file identity is usable only when the durable file-id pair is not
+    /// the historical `(0, 0)` placeholder. Length and mtime alone cannot
+    /// distinguish a replacement that preserved those fields.
+    fn has_durable_file_id(self) -> bool {
+        self.device != 0 || self.inode != 0
+    }
+
+    fn if_durable(self) -> Option<Self> {
+        self.has_durable_file_id().then_some(self)
     }
 
     #[cfg(unix)]
-    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+    fn from_opened_metadata(_file: &std::fs::File, metadata: &std::fs::Metadata) -> Option<Self> {
         use std::os::unix::fs::MetadataExt;
         Some(Self {
             device: metadata.dev(),
@@ -177,26 +201,36 @@ impl ContainerIdentity {
         })
     }
 
-    #[cfg(not(unix))]
-    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
-        let modified = metadata.modified().ok()?;
-        let (seconds, nanoseconds) = match modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(since) => (i64::try_from(since.as_secs()).ok()?, since.subsec_nanos()),
-            Err(before) => {
-                let since = before.duration();
-                (
-                    i64::try_from(since.as_secs()).ok()?.checked_neg()?,
-                    since.subsec_nanos(),
-                )
-            }
-        };
+    #[cfg(windows)]
+    fn from_opened_metadata(file: &std::fs::File, metadata: &std::fs::Metadata) -> Option<Self> {
+        let information = tracedecay_private_fs::windows_file::information(file).ok()?;
+        let (modified_seconds, modified_nanoseconds) = modified_stamp(metadata.modified().ok()?)?;
         Some(Self {
-            device: 0,
-            inode: 0,
+            device: u64::from(information.volume_serial_number),
+            inode: information.file_index,
             len: metadata.len(),
-            modified_seconds: seconds,
-            modified_nanoseconds: nanoseconds,
+            modified_seconds,
+            modified_nanoseconds,
         })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn from_opened_metadata(_file: &std::fs::File, _metadata: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn modified_stamp(modified: std::time::SystemTime) -> Option<(i64, u32)> {
+    match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => Some((i64::try_from(since.as_secs()).ok()?, since.subsec_nanos())),
+        Err(before) => {
+            let since = before.duration();
+            Some((
+                i64::try_from(since.as_secs()).ok()?.checked_neg()?,
+                since.subsec_nanos(),
+            ))
+        }
     }
 }
 
@@ -288,8 +322,13 @@ fn load(
         return BTreeMap::new();
     }
     // The identity gate. A marker written against different bytes describes a
-    // container this one is not.
-    if marker.body.container != observed {
+    // container this one is not. A `(0, 0)` file-id -- recorded by the
+    // historical non-Unix fallback or observed when the platform cannot name
+    // the file -- is not an identity, so it cannot authorize a hit.
+    if !observed.has_durable_file_id()
+        || !marker.body.container.has_durable_file_id()
+        || marker.body.container != observed
+    {
         return BTreeMap::new();
     }
     marker
@@ -357,9 +396,10 @@ pub(crate) struct GenerationMarkers {
 impl GenerationMarkers {
     /// Opens the marker set for a persistent container.
     ///
-    /// `observed` must be the identity stat'ed **before** grafeo opens the
-    /// container, because an open may checkpoint the WAL and move the
-    /// modification time before any caller could read it.
+    /// `observed` must be the identity read from an opened handle **before**
+    /// grafeo opens the container, because an open may checkpoint the WAL and
+    /// move the modification time before any caller could read it. The durable
+    /// file-id half of that identity does not move with the WAL.
     pub(crate) fn open(container: &Path, observed: Option<ContainerIdentity>) -> Self {
         let admitted = observed
             .map(|observed| load(container, observed))
@@ -551,6 +591,60 @@ mod tests {
 
         // Same inode, different length: the container grew since the proof.
         assert!(load(&container, identity(65)).is_empty());
+    }
+
+    /// Length plus mtime is not a file identity. A marker that recorded
+    /// `(device, inode) = (0, 0)` -- the historical non-Unix fallback -- must
+    /// miss even when the observed stat matches those zeros exactly. Otherwise
+    /// a same-size replacement that preserved its timestamp would reuse the
+    /// witness, which is what Windows shard 4 observed.
+    #[test]
+    fn a_zero_identity_marker_is_rejected_even_when_length_and_mtime_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let container = temp.path().join("graph.grafeo");
+        let mut body = body(64, "sha256:abc");
+        body.container.device = 0;
+        body.container.inode = 0;
+        let digest = body.digest().unwrap();
+        write_marker(&container, body.clone(), digest);
+
+        assert!(
+            load(&container, body.container).is_empty(),
+            "a marker without a durable file identity must not be believed"
+        );
+    }
+
+    #[test]
+    fn replacing_a_file_with_identical_bytes_and_mtime_changes_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.grafeo");
+        std::fs::write(&path, [7_u8; 128]).unwrap();
+        let first = ContainerIdentity::read(&path).expect("original identity");
+        assert!(
+            first.has_durable_file_id(),
+            "a real container must expose a durable file identity, got {first:?}"
+        );
+
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let staged = path.with_extension("grafeo-copy");
+        std::fs::copy(&path, &staged).unwrap();
+        let staged_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&staged)
+            .unwrap();
+        staged_file.set_modified(original_mtime).unwrap();
+        staged_file.sync_all().unwrap();
+        drop(staged_file);
+        std::fs::rename(&staged, &path).unwrap();
+
+        let second = ContainerIdentity::read(&path).expect("replacement identity");
+        assert!(second.has_durable_file_id());
+        assert_eq!(first.len, second.len);
+        assert_ne!(
+            (first.device, first.inode),
+            (second.device, second.inode),
+            "a replaced container must carry a new file identity, got {first:?} then {second:?}"
+        );
     }
 
     /// The forged-marker case. Swapping the recorded digest without recomputing

@@ -1044,8 +1044,9 @@ async fn reset_then_reconnect_client(
 
 #[derive(Clone, Copy)]
 enum UnsettledControl {
-    CancellationDelivered,
-    CancellationConnectionRejected,
+    Delivered,
+    DeliveredThenResponseClosed,
+    ConnectionRejected,
 }
 
 async fn unsettled_client(
@@ -1054,6 +1055,7 @@ async fn unsettled_client(
 ) -> (
     DaemonInvocationClient,
     tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
     let (listener, endpoint) =
@@ -1061,9 +1063,10 @@ async fn unsettled_client(
             .await
             .expect("bind invocation listener");
     let (request_admitted, admitted) = tokio::sync::oneshot::channel();
+    let (control_boundary_reached, control_reached) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
-        let (invocation_reader, _invocation_writer) = invocation_stream.into_split();
+        let (invocation_reader, invocation_writer) = invocation_stream.into_split();
         let mut invocation_lines = BufReader::new(invocation_reader).lines();
         invocation_lines
             .next_line()
@@ -1080,7 +1083,7 @@ async fn unsettled_client(
         assert_eq!(request.request_id, request_id);
 
         match control {
-            UnsettledControl::CancellationDelivered => {
+            UnsettledControl::Delivered | UnsettledControl::DeliveredThenResponseClosed => {
                 let _ = request_admitted.send(());
                 let control_stream = listener.accept().await.expect("accept cancellation");
                 let (control_reader, _control_writer) = control_stream.into_split();
@@ -1098,10 +1101,20 @@ async fn unsettled_client(
                 let cancellation = parse_daemon_invocation_cancellation_request(&cancellation_line)
                     .expect("typed invocation cancellation");
                 assert_eq!(cancellation.target_request_id(), request_id);
+                control_boundary_reached
+                    .send(())
+                    .expect("report cancellation delivery");
+                if matches!(control, UnsettledControl::DeliveredThenResponseClosed) {
+                    drop(invocation_writer);
+                    return;
+                }
             }
-            UnsettledControl::CancellationConnectionRejected => {
+            UnsettledControl::ConnectionRejected => {
                 drop(listener);
                 let _ = request_admitted.send(());
+                control_boundary_reached
+                    .send(())
+                    .expect("report cancellation rejection");
             }
         }
         std::future::pending::<()>().await;
@@ -1130,6 +1143,7 @@ async fn unsettled_client(
             handshake,
         ),
         admitted,
+        control_reached,
         server,
     )
 }
@@ -1199,11 +1213,11 @@ async fn remote_effect_deadline_requests_daemon_cancel_and_awaits_settlement() {
     server.await.expect("server task");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn remote_effect_without_authoritative_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-no-settlement";
-    let (client, admitted, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::CancellationDelivered).await;
+    let (client, admitted, control_reached, server) =
+        unsettled_client(REQUEST_ID, UnsettledControl::Delivered).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-no-settlement").expect("cancellation");
     let deadline = deadline_after(Duration::from_secs(10));
@@ -1220,6 +1234,10 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     });
     admitted.await.expect("request admission");
     assert!(cancellation.cancel(now_micros()));
+    control_reached
+        .await
+        .expect("cancellation delivery reached the server");
+    tokio::time::pause();
     tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
         .await;
     let response = call
@@ -1231,11 +1249,11 @@ async fn remote_effect_without_authoritative_settlement_returns_reset_required()
     server.abort();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-cancel-delivery-failure";
-    let (client, admitted, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::CancellationConnectionRejected).await;
+    let (client, admitted, control_reached, server) =
+        unsettled_client(REQUEST_ID, UnsettledControl::ConnectionRejected).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-delivery-failure").expect("cancellation");
     let deadline = deadline_after(Duration::from_secs(10));
@@ -1252,6 +1270,10 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     });
     admitted.await.expect("request admission");
     assert!(cancellation.cancel(now_micros()));
+    control_reached
+        .await
+        .expect("cancellation endpoint rejection reached the server");
+    tokio::time::pause();
     tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
         .await;
     let response = call
@@ -1261,6 +1283,39 @@ async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
 
     assert_authoritative_settlement(response);
     server.abort();
+}
+
+#[tokio::test]
+async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
+    const REQUEST_ID: &str = "request.remote-effect-response-eof";
+    let (client, admitted, control_reached, server) =
+        unsettled_client(REQUEST_ID, UnsettledControl::DeliveredThenResponseClosed).await;
+    let cancellation =
+        CancellationSignal::active("cancel.remote-effect-response-eof").expect("cancellation");
+    let deadline = deadline_after(Duration::from_secs(10));
+    let call_cancellation = cancellation.clone();
+    let call = tokio::spawn(async move {
+        client
+            .invoke_controlled(
+                invocation_request(REQUEST_ID, deadline.clone()),
+                deadline,
+                call_cancellation,
+                InvocationCancellationPolicy::AuthoritativeEffect,
+            )
+            .await
+    });
+    admitted.await.expect("request admission");
+    assert!(cancellation.cancel(now_micros()));
+    control_reached
+        .await
+        .expect("cancellation delivery reached the server");
+    let response = call
+        .await
+        .expect("authoritative invocation task")
+        .expect("response EOF is an indeterminate effect");
+
+    assert_authoritative_settlement(response);
+    server.await.expect("server task");
 }
 
 #[tokio::test(start_paused = true)]

@@ -881,8 +881,8 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
         UserProfileId::new("profile.offered-decode").expect("profile id"),
         project_id.clone(),
     );
-    let provider = DaemonCodeGraphManifestProviderV1::default();
-    provider
+    let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+    let _route = provider
         .bind(
             shard.clone(),
             project_id.clone(),
@@ -965,8 +965,9 @@ async fn offered_decode_hydrates_without_reading_the_sealed_payload_again() {
             &|| Ok(()),
         )
         .expect("predecessor relational replay");
-    let reconstructed = GraphGenerationManifest::from_replay(&legacy_replay, &provider, &|| Ok(()))
-        .expect("the exact historical predecessor must hydrate and verify");
+    let reconstructed =
+        GraphGenerationManifest::from_replay(&legacy_replay, provider.as_ref(), &|| Ok(()))
+            .expect("the exact historical predecessor must hydrate and verify");
     assert_eq!(reconstructed, *legacy_manifest);
 
     // A different sealed payload must never be answered from this offer.
