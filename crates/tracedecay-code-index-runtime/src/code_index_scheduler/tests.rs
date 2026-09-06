@@ -8317,7 +8317,28 @@ async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
 async fn search_fails_fast_when_no_complete_generation_exists() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    // The mounted registry only lends this test a real scope; the queries
+    // below run against an empty registry, so a text-current seat is all the
+    // scope derivation needs and graph seating is not awaited.
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    let snapshot = text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
 
     let empty = CodeIndexSchedulerRegistryV1::new(1);
     assert!(
@@ -10033,7 +10054,10 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
             .await
             .expect("mount daemon-owned scheduler")
     );
-    let first = wait_for_initial_generation(&registry, fixture.path()).await;
+    // A saved edit is reconciled when its generation is text-current; graph
+    // seating of the successor is a separate, optional phase this test does
+    // not assert on.
+    let first = wait_for_queryable_text_generation_id(&registry, fixture.path()).await;
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     assert!(
@@ -10041,7 +10065,12 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await
     );
-    let second = wait_for_generation_change(&registry, fixture.path(), &first).await;
+    let second = wait_for_queryable_text_generation_change(&registry, fixture.path(), &first)
+        .await
+        .metadata()
+        .manifest()
+        .generation_id
+        .clone();
 
     assert_ne!(first, second);
     registry.shutdown().await;
@@ -11067,7 +11096,7 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
         )
         .await
         .expect("mount worktree");
-    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+    let initial = wait_for_queryable_text_generation_id(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -11087,7 +11116,8 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .notify_path(fixture.path().join("src/lib.rs"));
-    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    // The worker survived the poison when the edit becomes text-current.
+    let _ = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
     registry.shutdown().await;
 }
 
@@ -12665,6 +12695,27 @@ async fn wait_for_queryable_text_generation(
     .expect("queryable text generation seated")
 }
 
+/// The generation id of the text-current seat.
+///
+/// Tests whose assertions only need exact/lexical text serving (a saved edit
+/// was reconciled, a newer generation is current, a scope resolves) must wait
+/// on this rather than on [`CodeIndexSchedulerRegistryV1::latest_generation_id`]:
+/// that resolver prefers the graph-bearing serving slot and keeps answering
+/// the previous generation until optional graph activation of the successor
+/// finishes, so a text-only test waiting on it was really waiting on graph
+/// seating (issue #917).
+async fn wait_for_queryable_text_generation_id(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> tracedecay_domain::CodeGenerationId {
+    wait_for_queryable_text_generation(registry, path)
+        .await
+        .metadata()
+        .manifest()
+        .generation_id
+        .clone()
+}
+
 /// Wait until the text owner seats a generation distinct from `previous`.
 async fn wait_for_queryable_text_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
@@ -12954,12 +13005,14 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
         )
         .await
         .expect("mount target worktree");
-    wait_for_initial_generation(&registry, first.path()).await;
-    let target_latest = wait_for_live_complete_generation(&registry, target.path()).await;
-    let target_generation = target_latest.generation.manifest().generation_id.clone();
-    let repository = target_latest.generation.snapshot().repository.clone();
+    // Unpinned exact queries resolve through the text owner, so the target
+    // must be text-current; neither worktree's graph seat is exercised here.
+    wait_for_queryable_text_generation(&registry, first.path()).await;
+    let target_latest = wait_for_queryable_text_generation(&registry, target.path()).await;
+    let target_generation = target_latest.metadata().manifest().generation_id.clone();
+    let repository = target_latest.metadata().snapshot().repository.clone();
     let worktree = target_latest
-        .generation
+        .metadata()
         .snapshot()
         .worktree
         .clone()
@@ -12971,7 +13024,7 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
         &registry,
         target.path(),
         &context,
-        target_latest.generation.manifest().privacy_domain.clone(),
+        target_latest.metadata().manifest().privacy_domain.clone(),
     )
     .await;
     let scope =
@@ -13123,8 +13176,17 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         .latest_complete_fresh(fixture.path())
         .await
         .expect("retained generation stays servable while the rebuild runs");
+    // The cursor's immutability is tested against a *text-current* successor:
+    // an unpinned exact query now resolves the new generation while the
+    // continuation must stay on the one the cursor was minted for. Graph
+    // seating of that successor is irrelevant to exact serving.
     let refreshed =
-        wait_for_generation_change(&registry, fixture.path(), &original_generation).await;
+        wait_for_queryable_text_generation_change(&registry, fixture.path(), &original_generation)
+            .await
+            .metadata()
+            .manifest()
+            .generation_id
+            .clone();
     assert_ne!(refreshed, original_generation);
 
     let continuation_request = ExactOccurrenceRequest::new(
@@ -13381,6 +13443,96 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
         "query admission reconciled the out-of-band commit into the served text generation"
     );
 
+    registry.shutdown().await;
+}
+
+/// A text freshness query that arrives while the worker still owns a pass
+/// cannot run the ladder itself, and the in-flight pass observed the source
+/// when *it* started — after publication it is still projecting text or
+/// seating the graph of the previous source state. Answering stale without
+/// leaving a wake stranded the remedy until an unrelated hint arrived; the
+/// out-of-band commit stayed unserved (issue #917, the flaky tail of
+/// `unpinned_query_serves_freshness_resolved_latest_generation`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_policy(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            super::CodeGraphActivationPolicyV1::RefusedByConfiguration,
+        )
+        .await
+        .expect("mount graph-off worktree");
+    let initial_text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    let initial = initial_text.metadata().manifest().generation_id.clone();
+    let snapshot = initial_text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+
+    // Let the mount pass finish, then keep the worker from starting another
+    // one so the wake this query leaves behind stays observable.
+    let settled_deadline = Instant::now() + Duration::from_secs(10);
+    while registry
+        .reconcile_in_progress_for_test(fixture.path())
+        .await
+    {
+        assert!(
+            Instant::now() <= settled_deadline,
+            "initial graph-off mount never released its owner pass"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background reconcile admission");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    // Stand in for the worker's own pass: in-progress, scheduler mutex free.
+    let owner_pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "external"]);
+
+    let (latest, current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("the seated text owner keeps serving during owner work");
+    assert_eq!(
+        latest.metadata().manifest().generation_id,
+        initial,
+        "the query is answered from the retained text generation"
+    );
+    assert!(
+        !current,
+        "a source the query could not verify is reported stale, never current"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the query must leave a follow-up wake for the worker to re-run the freshness ladder"
+    );
+
+    // Release the worker: the follow-up pass alone must reconcile the commit.
+    drop(owner_pass);
+    drop(admission);
+    let next = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
+    assert_ne!(next.metadata().manifest().generation_id, initial);
     registry.shutdown().await;
 }
 
@@ -14025,8 +14177,17 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
         .expect("mount with retained generation");
 
     // The retained generation is not queryable until its freshness frontier is
-    // proved. The mount wake must verify against gix and publish the new content.
-    let refreshed = wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
+    // proved. The mount wake must verify against gix and publish the new
+    // content. "Published and queryable" is the text seat: the retained stale
+    // generation may take the graph-bearing serving slot first, and the
+    // successor's graph seating is not what this cadence test measures.
+    let refreshed =
+        wait_for_queryable_text_generation_change(&registry, fixture.path(), &first_generation)
+            .await
+            .metadata()
+            .manifest()
+            .generation_id
+            .clone();
     assert_ne!(refreshed, first_generation);
 
     // Early publish records the Published receipt on the source pass; a

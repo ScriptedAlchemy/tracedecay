@@ -43,13 +43,25 @@ print_compact_file() {
 # One line of code-index progress from a status payload, for the attempts
 # log: which phase the index is in and how far along, so a timeout report
 # shows where the journey stalled without rerunning it.
+#
+# The line names every identity strict readiness turns on, because they move
+# independently: `generation` is the sealed generation the worktree reports,
+# `progress_generation`/`sealed_source` identify the source the text projection
+# is committing against, and `serving` is graph seating. A `phase=None` row
+# with `rebuild=true` and no generation is the pre-seal source capture, which
+# publishes no progress record; it is not text or graph work.
+#
+# `rss_kb`/`peak_rss_kb` sample the daemon process the harness exported
+# (Linux `/proc` only; `n/a` elsewhere) so a timeout report carries memory
+# evidence, not only PASS/FAIL.
 summarize_status_progress() {
   local path="$1"
+  local progress
   [[ -s "$path" ]] || {
-    echo "progress=unavailable"
+    echo "progress=unavailable $(summarize_daemon_memory)"
     return 0
   }
-  python3 -S - "$path" <<'PY' 2>/dev/null || echo "progress=unparsed"
+  progress="$(python3 -S - "$path" <<'PY' 2>/dev/null || echo "progress=unparsed"
 import json, sys
 
 try:
@@ -58,12 +70,30 @@ try:
 except (OSError, ValueError):
     print("progress=unparsed")
     raise SystemExit(0)
+
+
+def short(identity):
+    if not isinstance(identity, str):
+        return identity
+    # generation.v1.<repo>.<ordinal>.<digest> -> keep the distinguishing tail.
+    parts = identity.rsplit(".", 2)
+    if len(parts) == 3 and len(parts[2]) > 12:
+        return "%s.%s" % (parts[1], parts[2][:12])
+    # sha256:<hex> -> the algorithm and a prefix of the digest.
+    algorithm, separator, digest = identity.partition(":")
+    if separator and len(digest) > 12:
+        return "%s:%s" % (algorithm, digest[:12])
+    return identity
+
+
 freshness = payload.get("code_index_freshness") or {}
 worktree = freshness.get("worktree") or {}
 progress = worktree.get("progress") or {}
 serving = worktree.get("code_graph_serving") or {}
 print(
-    "status=%s serving=%s phase=%s files=%s/%s pages=%s blocked=%s"
+    "status=%s serving=%s phase=%s files=%s/%s pages=%s blocked=%s "
+    "rebuild=%s staleness=%s generation=%s progress_generation=%s sealed_source=%s "
+    "eta_s=%s"
     % (
         freshness.get("status"),
         serving.get("state"),
@@ -72,7 +102,86 @@ print(
         progress.get("total_files"),
         progress.get("committed_pages"),
         progress.get("blocked_reason"),
+        worktree.get("rebuild_in_flight"),
+        worktree.get("staleness_state"),
+        short(worktree.get("latest_generation_id")),
+        short(progress.get("generation_id")),
+        short(progress.get("sealed_source_digest")),
+        progress.get("estimated_remaining_seconds"),
     )
+)
+PY
+)"
+  echo "$progress $(summarize_daemon_memory)"
+}
+
+# Current and peak resident memory of the harness daemon, when the harness
+# exported its pid and the platform exposes `/proc`.
+summarize_daemon_memory() {
+  local pid="${TRACEDECAY_DAEMON_HARNESS_PID:-}"
+  if [[ -n "$pid" && -r "/proc/$pid/status" ]]; then
+    awk '
+      /^VmRSS:/ { rss = $2 }
+      /^VmHWM:/ { peak = $2 }
+      END { printf "rss_kb=%s peak_rss_kb=%s\n", (rss == "" ? "n/a" : rss), (peak == "" ? "n/a" : peak) }
+    ' "/proc/$pid/status" 2>/dev/null || echo "rss_kb=n/a peak_rss_kb=n/a"
+  else
+    echo "rss_kb=n/a peak_rss_kb=n/a"
+  fi
+}
+
+# Compact phase timeline from the attempts log: the first elapsed time each
+# distinct (status, serving, phase) row was observed plus the peak daemon RSS,
+# so a report shows when the journey crossed each readiness boundary (or where
+# it stopped) without reading every attempt.
+summarize_phase_timeline() {
+  local attempts_log="$1"
+  [[ -s "$attempts_log" ]] || return 0
+  python3 -S - "$attempts_log" <<'PY' 2>/dev/null || true
+import sys
+
+first_seen = []
+seen = set()
+peak_rss = None
+last_elapsed = None
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        fields = dict(
+            token.split("=", 1) for token in line.split() if "=" in token
+        )
+        elapsed = fields.get("elapsed_ms")
+        if elapsed is None:
+            continue
+        last_elapsed = elapsed
+        key = (
+            fields.get("status"),
+            fields.get("serving"),
+            fields.get("phase"),
+        )
+        if key not in seen:
+            seen.add(key)
+            first_seen.append(
+                (
+                    elapsed,
+                    key,
+                    fields.get("files"),
+                    fields.get("generation"),
+                )
+            )
+        peak = fields.get("peak_rss_kb")
+        if peak not in (None, "n/a"):
+            try:
+                peak_rss = max(peak_rss or 0, int(peak))
+            except ValueError:
+                pass
+for elapsed, (status, serving, phase), files, generation in first_seen:
+    print(
+        "tracedecay_ci_phase first_seen_elapsed_ms=%s status=%s serving=%s phase=%s files=%s generation=%s"
+        % (elapsed, status, serving, phase, files, generation)
+    )
+print(
+    "tracedecay_ci_phase_summary last_elapsed_ms=%s distinct_rows=%s daemon_peak_rss_kb=%s"
+    % (last_elapsed, len(first_seen), "n/a" if peak_rss is None else peak_rss)
 )
 PY
 }
@@ -209,6 +318,7 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
       cat "$output_dir/status.validation.stdout"
       echo "tracedecay_ci_timing phase=status elapsed_ms=$duration_ms status=0"
       echo "tracedecay_ci_readiness attempts=$attempts elapsed_ms=$duration_ms"
+      summarize_phase_timeline "$output_dir/status.attempts.log"
       return 0
     fi
 
@@ -222,6 +332,8 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
   duration_ms="$(elapsed_ms "$started_ms")"
   echo "tracedecay_ci_timing phase=status elapsed_ms=$duration_ms status=1"
   echo "error: TraceDecay PR dogfood did not reach strict index readiness within ${timeout_seconds}s" >&2
+  echo "----- phase timeline (first observation of each status/serving/phase row) -----" >&2
+  summarize_phase_timeline "$output_dir/status.attempts.log" >&2
   print_compact_file "status readiness attempts" "$output_dir/status.attempts.log"
   print_compact_file "last complete status output" "$output_dir/status.json"
   print_compact_file "last complete status stderr" "$output_dir/status.stderr"
@@ -317,7 +429,13 @@ main() {
 
   started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
   status=0
-  HOME="$WORK_DIR/home" \
+  # The daemon's stderr defaults to WARN, which hides every phase boundary the
+  # scheduler reports at INFO (reconcile pass started / interrupted, generation
+  # published, serving generation seated). A timeout report needs those
+  # timestamps to attribute the warming window, so enable exactly that target
+  # unless the operator already chose a filter.
+  RUST_LOG="${RUST_LOG:-warn,tracedecay_code_index_runtime::code_index_scheduler=info}" \
+    HOME="$WORK_DIR/home" \
     XDG_DATA_HOME="$WORK_DIR/home/.local/share" \
     XDG_CONFIG_HOME="$WORK_DIR/home/.config" \
     TRACEDECAY_BIN="$binary" \

@@ -20,7 +20,7 @@ use std::{
 #[cfg(test)]
 use std::sync::Condvar;
 
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_code_index::production::{CodeIndexInterruptionV1, CodeIndexPublishedGenerationV1};
 use tracedecay_dashboard_api::code_index_freshness_api::{
     CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
 };
@@ -1447,6 +1447,24 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| Arc::clone(&worktree.reconcile_in_progress));
         reconcile_in_progress
             .is_some_and(|reconcile_in_progress| reconcile_in_progress.load(Ordering::Acquire) != 0)
+    }
+
+    /// Test-only: hold an exact mounted worktree's owner-pass authority, as
+    /// the worker does from claiming a wake through text projection and graph
+    /// seating, without holding the scheduler mutex.
+    #[cfg(test)]
+    pub async fn hold_reconcile_pass_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Option<super::ReconcilePassGuard> {
+        let project_root = project_root.canonicalize().ok()?;
+        let reconcile_in_progress = self
+            .mounted
+            .lock()
+            .await
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.reconcile_in_progress))?;
+        Some(super::ReconcilePassGuard::enter(&reconcile_in_progress))
     }
 
     /// Serving slot only — no Git open, no freshness ladder, no wake.
@@ -3101,6 +3119,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
+                // Writer wait starts when the wake is observed and ends when
+                // this pass holds every gate it needs to run; a pass that
+                // spends its budget here is blocked on a sibling holder, not
+                // on its own source work.
+                let pass_wake_observed_at = Instant::now();
                 // A quarantined or backing-off panic unit must not consume the
                 // pending arrival: the wake stays outstanding so a later
                 // eligible pass still measures its full queue wait.
@@ -3141,6 +3164,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 };
+                let writer_wait_micros =
+                    u64::try_from(pass_wake_observed_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 let scheduler = Arc::clone(&worker_scheduler);
                 let graph_activation_enabled = worker_graph_activation.policy().is_enabled();
                 // A coalesced text-slice wake can outlive the graph-off pass
@@ -3382,6 +3407,28 @@ impl CodeIndexSchedulerRegistryV1 {
                     });
                 let retained_text_metadata =
                     retained_text.as_ref().map(|text| text.metadata().clone());
+                // Phase boundary: source reconciliation begins. Together with
+                // `code_index_generation_published` / `_interrupted` and
+                // `code_index_serving_generation_seated` this lets a status
+                // reader attribute a `progress: null` warming window to the
+                // uninstrumented capture+seal instead of to text or graph work.
+                tracing::info!(
+                    event = "code_index_reconcile_pass_started",
+                    path = "background_worker",
+                    trigger = trigger.label(),
+                    arrival = arrival.label(),
+                    queue_delay_micros = ?arrival
+                        .wake_micros()
+                        .map(|wake_micros| started_micros.saturating_sub(wake_micros).max(0)),
+                    writer_wait_micros,
+                    retained_text = retained_text_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.manifest().generation_id.as_str()),
+                    text_serving_ready,
+                    serving_empty,
+                    graph_activation_deferred,
+                    "code-index background reconcile pass started"
+                );
                 let shutting_down = Arc::clone(&worker_shutting_down);
                 let source_result = hotpath::future!(
                     tokio::task::spawn_blocking(move || {
@@ -3600,6 +3647,19 @@ impl CodeIndexSchedulerRegistryV1 {
                                              contract violation before graph seating; status \
                                              reports it typed and every wake re-checks"
                                         );
+                                    } else if matches!(
+                                        &error,
+                                        tracedecay_query::retrieval::RetrievalPortError::Cancelled
+                                    ) && worker_shutting_down.load(Ordering::Acquire)
+                                    {
+                                        // Shutdown retired the text control mid-slice.
+                                        // The slice stops typed; nothing failed.
+                                        tracing::info!(
+                                            event = "code_index_text_projection_interrupted",
+                                            origin = "shutdown",
+                                            "published text projection stopped before graph seating"
+                                        );
+                                        return;
                                     } else {
                                         tracing::warn!(
                                             event = "code_index_text_projection_failed",
@@ -4239,7 +4299,13 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .as_str()
                                 .to_owned();
                             match outcome {
-                                ServingSwapOutcomeV1::Seated => tracing::debug!(
+                                // Graph seating is the last strict-readiness
+                                // boundary after text publication, so it is
+                                // `info` like `code_index_generation_published`:
+                                // a dogfood or operator log must be able to
+                                // tell "text current, graph pending" from
+                                // "graph seated" without a debug filter.
+                                ServingSwapOutcomeV1::Seated => tracing::info!(
                                     event = "code_index_serving_generation_seated",
                                     generation_id,
                                     "the sealed generation now serves"
@@ -4303,6 +4369,33 @@ impl CodeIndexSchedulerRegistryV1 {
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
                     match &result {
+                        Ok((Err(error), _, _)) if error.reconcile_interruption().is_some() => {
+                            // An interrupted pass ran to a typed stop, not a
+                            // failure: shutdown, or a newer source observation
+                            // advanced the cancellation epoch. Every epoch
+                            // advance is paired with a wake, so the restored
+                            // arrival below is picked up by the pass that
+                            // observation already scheduled. Attribute the
+                            // origin instead of reporting the served
+                            // generation stale.
+                            panic_guard.record_progress();
+                            capacity_retry.record_progress();
+                            let origin = if worker_shutting_down.load(Ordering::Acquire) {
+                                "shutdown"
+                            } else {
+                                match error.reconcile_interruption() {
+                                    Some(CodeIndexInterruptionV1::DeadlineExceeded) => "deadline",
+                                    _ => "superseded_by_source_observation",
+                                }
+                            };
+                            tracing::info!(
+                                event = "code_index_reconcile_interrupted",
+                                path = "background_worker",
+                                origin,
+                                trigger = trigger.label(),
+                                "code-index background reconcile was interrupted; the pending wake re-runs it"
+                            );
+                        }
                         Ok((Err(error), _, _)) => {
                             // The pass completed; whatever refused it was not an
                             // unwind, so panic accounting restarts.
@@ -4312,6 +4405,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 event = "code_index_reconcile_failed",
                                 path = "background_worker",
                                 transient_capacity,
+                                trigger = trigger.label(),
                                 error = %error,
                                 "code-index background reconcile failed; the served generation stays stale"
                             );
@@ -6065,11 +6159,26 @@ impl CodeIndexSchedulerRegistryV1 {
                 .filter(|latest| {
                     latest.text_serving_is_ready() && text_matches_scope_identity(latest, &scope)
                 })?;
-            if pending_wake.has_pending_arrival()
-                || reconcile_in_progress.load(Ordering::Acquire) != 0
-            {
-                // The existing worker owns the freshness remedy. Re-requesting
-                // here would enqueue a redundant pass behind it.
+            if pending_wake.has_pending_arrival() {
+                // A pass is already queued behind the current owner work; it
+                // re-observes the source when it starts, so it also supplies
+                // this query's remedy.
+                return Some((latest, false));
+            }
+            if reconcile_in_progress.load(Ordering::Acquire) != 0 {
+                // In-flight owner work observed the source when *it* started,
+                // which may predate the change this query is asking about:
+                // after publication the same pass still owns the text
+                // projection and optional graph seating of the previous
+                // source state. Returning stale without a wake stranded that
+                // remedy until an unrelated hint arrived (issue #917). Post the
+                // coalesced follow-up the busy-lock arm below posts, so the
+                // worker re-runs the freshness ladder once this pass ends.
+                Self::note_wake(
+                    &pending_wake,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::BusyFollowUp,
+                );
                 return Some((latest, false));
             }
             let mut scheduler = match scheduler.try_lock() {
