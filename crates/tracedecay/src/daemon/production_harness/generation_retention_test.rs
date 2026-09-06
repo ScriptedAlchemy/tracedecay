@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::result::Result;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -15,7 +16,10 @@ use tracedecay_domain::{
     EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
     PrivacyDomainId, ProjectionBatchRequestV1, ProjectionReplayReasonV1,
 };
-use tracedecay_graph_db::NeverCancelled;
+use tracedecay_graph_db::{
+    GraphDbError, GraphWriteBatch, NeverCancelled, VerifiedGenerationBatchCommit,
+    VerifiedGenerationBeginV1, VerifiedGraphSnapshot,
+};
 use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
 use tracedecay_semantic_contracts::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticResourceCeilings,
@@ -26,8 +30,18 @@ use super::*;
 use tracedecay_code_index_retention::code_index_generations::{
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
 };
+use tracedecay_store::{
+    GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
+    SemanticVectorPublishedGenerationLookup, SemanticVectorStageBatchReceipt,
+    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
+    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1,
+    StoreShardIdV1,
+};
 use tracedecay_usecases::semantic_runtime::{
-    ProjectSemanticActivationExt, project_semantic_retained_vector_generations,
+    ProjectSemanticActivationExt, RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
+    SemanticVectorGraphScopeV1, SemanticVectorRetentionAuthorizationV1,
+    VerifiedSemanticVectorGraphRuntimeV1, project_semantic_retained_vector_generations,
 };
 use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, SemanticVectorStageDescriptorV1, VectorGenerationPlanV1,
@@ -217,6 +231,205 @@ async fn publish_vector_generation(
     publication.generation_id
 }
 
+struct BeginStageContentionProbe {
+    inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl VerifiedSemanticVectorGraphRuntimeV1 for BeginStageContentionProbe {
+    fn scope(&self) -> &SemanticVectorGraphScopeV1 {
+        self.inner.scope()
+    }
+
+    fn recover_verified_snapshot(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        self.inner.recover_verified_snapshot(authority)
+    }
+
+    fn recover_verified_generation(
+        &self,
+        publication: &GraphPublicationKeyV1,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.inner
+            .recover_verified_generation(publication, authority)
+    }
+
+    fn staging_binding(&self) -> (&StoreShardIdV1, &StoreRuntimeBindingV1) {
+        self.inner.staging_binding()
+    }
+
+    fn verified_head(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<Option<GraphVerifiedHeadV1>, GraphDbError> {
+        self.inner.verified_head(authority)
+    }
+
+    fn begin_stage(
+        &self,
+        plan: &SemanticVectorStagePlan,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            entered
+                .send(())
+                .expect("semantic contention observer remains live");
+        }
+        self.inner.begin_stage(plan, authority)
+    }
+
+    fn resume_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStageResumeOutcome, GraphDbError> {
+        self.inner.resume_stage(stage, authority)
+    }
+
+    fn published_semantic_generation(
+        &self,
+        key: &SemanticVectorPublishedGenerationKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorPublishedGenerationLookup, GraphDbError> {
+        self.inner.published_semantic_generation(key, authority)
+    }
+
+    fn append_stage_batch(
+        &self,
+        receipt: &SemanticVectorStageBatchReceipt,
+        batch: GraphWriteBatch,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGenerationBatchCommit, GraphDbError> {
+        self.inner.append_stage_batch(receipt, batch, authority)
+    }
+
+    fn cancel_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStageCancelOutcome, GraphDbError> {
+        self.inner.cancel_stage(stage, authority)
+    }
+
+    fn prepare_publication_from_staged_native(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStagePublicationPrepareOutcome, GraphDbError> {
+        self.inner
+            .prepare_publication_from_staged_native(stage, authority)
+    }
+
+    fn publish_ready_stage(
+        &self,
+        stage: &SemanticVectorStageKey,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.inner.publish_ready_stage(stage, authority)
+    }
+
+    fn settle_published(
+        &self,
+        settlement: &SemanticVectorStagePublishSettlement,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<SemanticVectorStagePublishOutcome, GraphDbError> {
+        self.inner.settle_published(settlement, authority)
+    }
+
+    fn reserve_one_generation(
+        &self,
+        after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionStep, GraphDbError> {
+        self.inner.reserve_one_generation(after, authority)
+    }
+
+    fn finalize_reserved_generation(
+        &self,
+        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
+        authorization: &SemanticVectorRetentionAuthorizationV1,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionAction, GraphDbError> {
+        self.inner
+            .finalize_reserved_generation(reservation, authorization, authority)
+    }
+
+    fn release_reserved_generation(
+        &self,
+        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
+    ) -> Result<(), GraphDbError> {
+        self.inner.release_reserved_generation(reservation)
+    }
+
+    fn source_generation_has_live_reference(
+        &self,
+        generation: &tracedecay_store::SemanticVectorSourceGenerationId,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner
+            .source_generation_has_live_reference(generation, expected_revision, authority)
+    }
+
+    fn source_scope_has_live_reference(
+        &self,
+        source_scope: &StoreShardIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner
+            .source_scope_has_live_reference(source_scope, expected_revision, authority)
+    }
+
+    fn published_generation_dependency(
+        &self,
+        generation: &tracedecay_domain::VectorGenerationIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorPublishedGenerationDependencyLookup, GraphDbError>
+    {
+        self.inner
+            .published_generation_dependency(generation, expected_revision, authority)
+    }
+
+    fn validate_project_census_revision(
+        &self,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<(), GraphDbError> {
+        self.inner
+            .validate_project_census_revision(expected_revision, authority)
+    }
+
+    fn source_scope_binding(
+        &self,
+        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorSourceScopeBindingLookup, GraphDbError> {
+        self.inner
+            .source_scope_binding(code_scope_hash, expected_revision, authority)
+    }
+
+    fn remove_source_scope_binding(
+        &self,
+        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
+        source_scope: &StoreShardIdV1,
+        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, GraphDbError> {
+        self.inner.remove_source_scope_binding(
+            code_scope_hash,
+            source_scope,
+            expected_revision,
+            authority,
+        )
+    }
+}
+
 async fn wait_for_changed_generation(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -254,6 +467,171 @@ async fn publish_code_edit(
         "mounted scheduler accepts the exact worktree hint"
     );
     wait_for_changed_generation(schedulers, project_root, prior).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progress() {
+    let isolation = TempDir::new().expect("CPU-quota production composition");
+    let project_root = isolation.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    initialize_git_project(&project_root);
+    let harness =
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project_root.clone()])
+            .await
+            .expect("mounted production composition");
+    let resources = harness.resources.as_ref().expect("live harness resources");
+    let graph = harness
+        .server(&project_root)
+        .expect("project server")
+        .cg()
+        .await;
+    let canonical_root = graph.project_root().to_path_buf();
+    let source = resources
+        .invocation
+        .code_index_schedulers
+        .latest_generation_id(&canonical_root)
+        .await
+        .expect("sealed source generation");
+    let provider = resources
+        .invocation
+        .code_index_schedulers
+        .semantic_vector_graph_provider(&canonical_root)
+        .await
+        .expect("semantic vector provider");
+    let retained = provider
+        .graph_for_current()
+        .await
+        .expect("retained semantic vector graph");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let probed = RetainedSemanticVectorGraphV1::new(
+        Arc::new(BeginStageContentionProbe {
+            inner: Arc::clone(retained.runtime()),
+            entered: Mutex::new(Some(entered_tx)),
+        }),
+        Arc::clone(retained.cancellation()),
+    );
+    let store =
+        GraphVectorGenerationStoreV1::open(&probed).expect("open semantic vector generation store");
+    let prepared = prepared_vector(&source);
+    store
+        .configure_stage(
+            SemanticVectorStageDescriptorV1::from_changes(
+                prepared.embedding_key.clone(),
+                &prepared.request.changes,
+            )
+            .expect("semantic stage descriptor"),
+        )
+        .expect("configure semantic stage");
+    let plan = VectorGenerationPlanV1 {
+        target_projection_key: prepared.embedding_key.projection_key().clone(),
+        source_generation: source,
+        source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
+        expected_chunk_ids: prepared
+            .request
+            .changes
+            .added_or_changed
+            .iter()
+            .map(|change| change.chunk_id.clone())
+            .collect::<Vec<_>>()
+            .into(),
+        base_generation: None,
+    };
+
+    let transaction = graph
+        .db()
+        .begin_write_transaction("semantic vector CPU-quota contention")
+        .await
+        .expect("hold project transaction");
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS semantic_vector_contention_fixture (
+                fixture_id INTEGER PRIMARY KEY
+             );
+             INSERT OR REPLACE INTO semantic_vector_contention_fixture (fixture_id) VALUES (1);",
+        )
+        .await
+        .expect("establish held project write");
+
+    let route_tasks = crate::daemon::ProjectOpenTasks::default();
+    let route = crate::daemon::ProjectRouteKey {
+        profile_root: isolation.path().join("route-profile"),
+        global_db_path: isolation.path().join("route-profile/global.db"),
+        project_path: canonical_root.clone(),
+        scope_prefix: None,
+    };
+    let route_started = Arc::new(tokio::sync::Notify::new());
+    let route_started_by_task = Arc::clone(&route_started);
+    let route_state = match route_tasks
+        .start_cancellable(route, move |cancellation| async move {
+            route_started_by_task.notify_one();
+            cancellation.cancelled().await;
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "CPU-quota route cancelled".to_owned(),
+            })
+        })
+        .await
+    {
+        crate::daemon::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("route cancellation fixture must start")
+        }
+        crate::daemon::ProjectOpenTaskClaim::Saturated => {
+            panic!("route cancellation fixture must fit")
+        }
+    };
+    route_started.notified().await;
+
+    let semantic =
+        tokio::spawn(async move { store.begin_generation(plan, Arc::new(NeverCancelled)).await });
+    entered_rx
+        .await
+        .expect("semantic operation reached the contended writer boundary");
+
+    let bootstrap_request: tracedecay_mcp::JsonRpcRequest =
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 913,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "cpu-quota-regression", "version": "1"}
+            }
+        }))
+        .expect("bootstrap request");
+    let bootstrap = tokio::spawn(async move {
+        crate::daemon::daemon_bootstrap_response(&bootstrap_request, None, None)
+    });
+    let bootstrap_response = bootstrap
+        .await
+        .expect("bootstrap task")
+        .expect("initialize is a bootstrap request")
+        .expect("initialize bootstrap response");
+    assert_eq!(
+        bootstrap_response.result.expect("bootstrap result")["protocolVersion"],
+        serde_json::json!("2024-11-05")
+    );
+
+    route_tasks.shutdown().await;
+    assert_eq!(route_tasks.tracked_task_count().await, 0);
+    assert_eq!(route_tasks.tracked_route_count().await, 0);
+    crate::daemon::ProjectOpenTasks::wait_for_completion(route_state)
+        .await
+        .expect_err("route shutdown publishes terminal cancellation");
+
+    transaction
+        .commit()
+        .await
+        .expect("transaction holder commits before its idle lease");
+    semantic
+        .await
+        .expect("semantic operation task")
+        .expect("semantic operation completes after holder commit");
+
+    drop(probed);
+    drop(retained);
+    drop(graph);
+    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

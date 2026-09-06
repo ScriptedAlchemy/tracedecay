@@ -71,7 +71,8 @@ pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
     ]
 }
 
-fn managed_skill_description(summary: &str) -> String {
+/// Preserve the discovery text exported by retained summary-only skill records.
+pub fn legacy_managed_skill_routing_description(summary: &str) -> String {
     let trimmed = summary.trim();
     let description = if trimmed
         .get(..8)
@@ -184,6 +185,7 @@ pub struct ManagedSkillDraft {
     pub id: String,
     pub title: String,
     pub summary: String,
+    pub routing_description: String,
     pub category: String,
     #[serde(default = "default_managed_skill_targets")]
     pub targets: Vec<SkillInstallTarget>,
@@ -201,6 +203,7 @@ impl ManagedSkillDraft {
                 id: self.id,
                 title: self.title,
                 summary: self.summary,
+                routing_description: self.routing_description,
                 category: self.category,
                 targets: self.targets,
                 state: ManagedSkillState::Active,
@@ -228,6 +231,7 @@ pub struct ManagedSkillMetadata {
     pub id: String,
     pub title: String,
     pub summary: String,
+    pub routing_description: String,
     pub category: String,
     #[serde(default = "default_managed_skill_targets")]
     pub targets: Vec<SkillInstallTarget>,
@@ -263,6 +267,7 @@ pub struct ManagedSkill {
 pub struct ManagedSkillUpdate {
     pub title: Option<String>,
     pub summary: Option<String>,
+    pub routing_description: Option<String>,
     pub category: Option<String>,
     pub targets: Option<Vec<SkillInstallTarget>>,
     pub body_markdown: Option<String>,
@@ -330,6 +335,11 @@ impl ManagedSkill {
             "summary: {}",
             frontmatter_string(&self.metadata.summary)
         );
+        let _ = writeln!(
+            output,
+            "routing_description: {}",
+            frontmatter_string(&self.metadata.routing_description)
+        );
         let _ = writeln!(output, "category: {}", self.metadata.category);
         let target_list = self
             .metadata
@@ -370,7 +380,7 @@ impl ManagedSkill {
         let _ = writeln!(
             output,
             "description: {}",
-            frontmatter_string(&managed_skill_description(&self.metadata.summary))
+            frontmatter_string(&self.metadata.routing_description)
         );
         output.push_str("---\n\n");
         output.push_str(&self.body_markdown);
@@ -414,11 +424,11 @@ impl ManagedSkill {
 
     fn render_materialized_skill_markdown_with_hash(&self, package_hash: &str) -> Result<String> {
         let name = native_skill_name(&self.metadata.id);
-        let description = managed_skill_description(&self.metadata.summary);
+        let description = &self.metadata.routing_description;
         {
             let native_only = format!(
                 "---\nname: {name}\ndescription: {}\n---\n\n{}\n",
-                frontmatter_string(&description),
+                frontmatter_string(description),
                 self.body_markdown
             );
             validate_native_skill_markdown(&native_only)?;
@@ -427,7 +437,7 @@ impl ManagedSkill {
         let mut output = String::new();
         output.push_str("---\n");
         let _ = writeln!(output, "name: {name}");
-        let _ = writeln!(output, "description: {}", frontmatter_string(&description));
+        let _ = writeln!(output, "description: {}", frontmatter_string(description));
         let _ = writeln!(output, "managed-by: {MATERIALIZED_SKILL_MANAGED_BY}");
         let _ = writeln!(
             output,
@@ -449,6 +459,8 @@ impl ManagedSkill {
         hasher.update(self.metadata.title.as_bytes());
         hasher.update(b"\0");
         hasher.update(self.metadata.summary.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.metadata.routing_description.as_bytes());
         hasher.update(b"\0");
         hasher.update(self.metadata.category.as_bytes());
         hasher.update(b"\0");
@@ -498,7 +510,8 @@ mod tests {
         let skill = ManagedSkillDraft {
             id: "native-escape".to_string(),
             title: "Native escape".to_string(),
-            summary: r#"Use when checking "quoted" paths like C:\tmp"#.to_string(),
+            summary: "Check path quoting.".to_string(),
+            routing_description: r#"Diagnose "quoted" paths like C:\tmp"#.to_string(),
             category: "testing".to_string(),
             targets: vec![SkillInstallTarget::Codex],
             body_markdown: "# Native escape\n".to_string(),
@@ -512,12 +525,49 @@ mod tests {
         .materialize()
         .unwrap();
 
-        let markdown = skill.render_native_skill_markdown().unwrap();
-        let frontmatter = parse_skill_frontmatter(&markdown).unwrap();
-
+        for markdown in [
+            skill.render_native_skill_markdown().unwrap(),
+            skill.render_materialized_skill_markdown().unwrap(),
+        ] {
+            let frontmatter = parse_skill_frontmatter(&markdown).unwrap();
+            assert_eq!(
+                frontmatter["description"].as_scalar(),
+                Some(r#"Diagnose "quoted" paths like C:\tmp"#)
+            );
+        }
+        let metadata_markdown = skill.render_skill_markdown();
+        let metadata = parse_skill_frontmatter(&metadata_markdown).unwrap();
         assert_eq!(
-            frontmatter["description"].as_scalar(),
-            Some(r#"Use when checking "quoted" paths like C:\tmp"#)
+            metadata["routing_description"].as_scalar(),
+            Some(skill.metadata.routing_description.as_str())
+        );
+
+        let mut updated = skill.clone();
+        updated.metadata.routing_description = "Investigate Windows path escaping.".to_string();
+        updated.refresh_checksum();
+        assert_ne!(updated.metadata.checksum, skill.metadata.checksum);
+        assert_ne!(
+            updated.materialized_package_hash().unwrap(),
+            skill.materialized_package_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_summary_conversion_preserves_previous_export() {
+        assert_eq!(
+            legacy_managed_skill_routing_description("  Diagnose indexing  "),
+            "Use when Diagnose indexing"
+        );
+        for description in ["Use when indexing", "uSe ThIs SkIlL wHeN indexing"] {
+            assert_eq!(
+                legacy_managed_skill_routing_description(description),
+                description
+            );
+        }
+        let summary = format!("{}  tail", "é".repeat(1014));
+        assert_eq!(
+            legacy_managed_skill_routing_description(&summary),
+            format!("Use when {}", "é".repeat(1014))
         );
     }
 
@@ -527,6 +577,7 @@ mod tests {
             id: "immediate-activation".to_string(),
             title: "Immediate activation".to_string(),
             summary: "Materialize policy-validated guidance immediately.".to_string(),
+            routing_description: "Activate policy-validated guidance.".to_string(),
             category: "testing".to_string(),
             targets: vec![SkillInstallTarget::Claude],
             body_markdown: "# Immediate activation\n".to_string(),
@@ -551,6 +602,7 @@ mod tests {
             id: "legacy-skill".to_string(),
             title: "Legacy skill".to_string(),
             summary: "Read records written before consolidation metadata.".to_string(),
+            routing_description: "Inspect retained skill consolidation records.".to_string(),
             category: "testing".to_string(),
             targets: vec![SkillInstallTarget::Codex],
             body_markdown: "# Legacy\n".to_string(),

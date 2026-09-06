@@ -376,6 +376,9 @@ pub(crate) struct ManagedTestRunCurrentScope {
     pub(crate) root_uri: String,
     pub(crate) head_commit_id: Option<CommitId>,
     pub(crate) code_generation_id: Option<CodeGenerationId>,
+    /// The identity a managed run recorded the document's digest under: the
+    /// canonical project root joined with the project-relative path, never a
+    /// client's alias spelling of the same file.
     pub(crate) document_uri: Option<String>,
     pub(crate) document_content_digest: Option<ContentDigest>,
 }
