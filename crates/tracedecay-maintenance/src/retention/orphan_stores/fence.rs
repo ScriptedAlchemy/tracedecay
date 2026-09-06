@@ -303,7 +303,7 @@ fn capture_file_identity(
     })
 }
 
-fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdentity> {
+pub(crate) fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdentity> {
     let metadata = directory.metadata(".")?;
     capability_identity(directory, &metadata)
 }
