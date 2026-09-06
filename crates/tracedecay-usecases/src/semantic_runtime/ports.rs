@@ -668,12 +668,54 @@ impl SemanticRuntimeStatusV1 {
     }
 }
 
+/// The stage of a semantic transition that refused, with the durable
+/// invariant it refused on when the refusal came from a typed contract check.
+///
+/// Every refusing stage of a linked activation or rollback answers with the
+/// same `Rejected` category. Without this the operator learns only that
+/// something refused, which is not enough to reach the stage from a public
+/// problem or a daemon event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticRuntimeRefusalV1 {
+    pub stage: &'static str,
+    pub cause: Option<SemanticRuntimeContractErrorV1>,
+}
+
+impl SemanticRuntimeRefusalV1 {
+    pub const fn at(stage: &'static str) -> Self {
+        Self { stage, cause: None }
+    }
+
+    pub const fn contract(stage: &'static str, cause: SemanticRuntimeContractErrorV1) -> Self {
+        Self {
+            stage,
+            cause: Some(cause),
+        }
+    }
+}
+
+impl std::fmt::Display for SemanticRuntimeRefusalV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "semantic runtime rejected the transition at {}",
+            self.stage
+        )?;
+        match self.cause {
+            Some(cause) => write!(formatter, ": {cause}"),
+            None => Ok(()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum SemanticRuntimeBackendErrorV1 {
     #[error("semantic runtime unavailable")]
     Unavailable,
     #[error("semantic runtime rejected the transition")]
     Rejected,
+    #[error("{0}")]
+    RejectedAt(SemanticRuntimeRefusalV1),
     #[error("semantic runtime compare-and-swap conflict")]
     Conflict,
 }
@@ -716,6 +758,8 @@ pub enum SemanticRuntimeControlErrorV1 {
     InvalidRequest,
     #[error("semantic runtime rejected the transition")]
     Rejected,
+    #[error("{0}")]
+    RejectedAt(SemanticRuntimeRefusalV1),
     #[error("semantic runtime compare-and-swap conflict")]
     Conflict,
     #[error("semantic runtime returned an invalid receipt")]
@@ -1161,6 +1205,11 @@ pub enum SemanticConfigurationBackendErrorV1 {
     Unavailable,
     #[error("retrieval configuration transition was rejected")]
     Rejected,
+    /// The same refusal, carrying the stage of the linked transition that
+    /// produced it. Every stage of a staged rollback answers `Rejected`, so a
+    /// detail-free refusal cannot be reached from a public problem.
+    #[error("retrieval configuration transition was rejected at {0}")]
+    RejectedAt(&'static str),
     #[error("retrieval configuration compare-and-swap conflicted")]
     Conflict,
 }

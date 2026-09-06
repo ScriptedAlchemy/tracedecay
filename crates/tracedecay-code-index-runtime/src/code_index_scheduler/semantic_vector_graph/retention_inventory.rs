@@ -23,6 +23,9 @@ impl ProjectVectorRetentionFailure {
     ) -> Self {
         use tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1;
         match error {
+            SemanticConfigurationBackendErrorV1::RejectedAt(stage) => Self::Corrupt(format!(
+                "semantic configuration inventory was rejected by its authority at {stage}"
+            )),
             SemanticConfigurationBackendErrorV1::Conflict => Self::ResetRequired(
                 "semantic configuration inventory changed during retention".to_owned(),
             ),

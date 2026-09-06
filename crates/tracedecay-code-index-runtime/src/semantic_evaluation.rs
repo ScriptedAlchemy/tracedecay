@@ -213,6 +213,11 @@ fn coordination_error_from_runtime(
                 "semantic runtime rejected the verified evaluation target authority".to_owned(),
             )
         }
+        SemanticRuntimeBackendErrorV1::RejectedAt(refusal) => {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(format!(
+                "semantic runtime rejected the verified evaluation target authority: {refusal}"
+            ))
+        }
         SemanticRuntimeBackendErrorV1::Conflict => SemanticActivationCoordinationErrorV1::Conflict,
     }
 }

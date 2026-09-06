@@ -158,6 +158,9 @@ fn map_backend_error(error: SemanticRuntimeBackendErrorV1) -> SemanticRuntimeCon
             SemanticRuntimeControlErrorV1::RuntimeUnavailable
         }
         SemanticRuntimeBackendErrorV1::Rejected => SemanticRuntimeControlErrorV1::Rejected,
+        SemanticRuntimeBackendErrorV1::RejectedAt(refusal) => {
+            SemanticRuntimeControlErrorV1::RejectedAt(refusal)
+        }
         SemanticRuntimeBackendErrorV1::Conflict => SemanticRuntimeControlErrorV1::Conflict,
     }
 }

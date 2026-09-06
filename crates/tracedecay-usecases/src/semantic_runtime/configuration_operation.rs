@@ -596,7 +596,11 @@ impl ProductionSemanticConfigurationOperationV1 {
             .current_profile_state()
             .await?
             .into_state()
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "rollback: current retrieval profile state is not committed".to_owned(),
+                )
+            })?;
         let expected = RetrievalProfileCasV1 {
             expected_configuration_revision: state.configuration_revision().clone(),
             expected_active_digest: state.active().profile_digest().clone(),
@@ -621,15 +625,22 @@ impl ProductionSemanticConfigurationOperationV1 {
                     expected.expected_configuration_revision,
                 )
                 .await
-                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+                .map_err(|_| {
+                    SemanticActivationCoordinationErrorV1::RejectedDetail(
+                        "rollback: direct configuration mutation refused while no semantic \
+                         profile is active"
+                            .to_owned(),
+                    )
+                })?;
             return Ok(SemanticAppliedRollbackV1 {
                 configuration_receipt: receipt,
             });
         }
-        let restored_digest = expected
-            .expected_rollback_digest
-            .as_ref()
-            .ok_or(SemanticActivationCoordinationErrorV1::Rejected)?;
+        let restored_digest = expected.expected_rollback_digest.as_ref().ok_or_else(|| {
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "rollback: no rollback profile is staged".to_owned(),
+            )
+        })?;
         let restored = self
             .accepted_profiles
             .resolve(restored_digest)
@@ -637,7 +648,11 @@ impl ProductionSemanticConfigurationOperationV1 {
             .map_err(map_authority_error)?;
         let base_configuration = current_configuration_state(&self.configuration).await?;
         let base_pin = super::SemanticConfigurationPinV1::from_current(&base_configuration)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+            .map_err(|_| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "rollback: base configuration is not pinnable".to_owned(),
+                )
+            })?;
         let preview = coordinator
             .preview_central_mutation(
                 &request.authority,

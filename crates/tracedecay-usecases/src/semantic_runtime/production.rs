@@ -109,8 +109,8 @@ use super::ports::{
     SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticConfigurationPinV1,
     SemanticExecutableGenerationLeaseV1, SemanticExecutableGenerationV1, SemanticRollbackCommandV1,
     SemanticRollbackReceiptV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1,
-    SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
+    SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeRefusalV1,
+    SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
@@ -1441,11 +1441,7 @@ impl ProductionSemanticRuntimeV1 {
             tracing::warn!(
                 event = "semantic_evaluation_target_snapshot",
                 stage = "executable_generation",
-                outcome = match error {
-                    SemanticRuntimeBackendErrorV1::Unavailable => "unavailable",
-                    SemanticRuntimeBackendErrorV1::Rejected => "rejected",
-                    SemanticRuntimeBackendErrorV1::Conflict => "conflict",
-                },
+                outcome = semantic_runtime_backend_outcome(*error),
             );
         })?;
         // Publication identity stays i64 on the wire; the graph adapter's
@@ -2718,14 +2714,20 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
                 &required.vector_generation_id,
             )
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
-            .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+            .ok_or(SemanticRuntimeBackendErrorV1::RejectedAt(
+                SemanticRuntimeRefusalV1::at("inspect_generation.unpublished_generation"),
+            ))?;
             let generation = store
                 .generation(&required.vector_generation_id, cancellation)
                 .await
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
-                .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+                .ok_or(SemanticRuntimeBackendErrorV1::RejectedAt(
+                    SemanticRuntimeRefusalV1::at("inspect_generation.uncataloged_generation"),
+                ))?;
             if !configured_resource_ceiling_covers(&self.resources, required.resources) {
-                return Err(SemanticRuntimeBackendErrorV1::Rejected);
+                return Err(SemanticRuntimeBackendErrorV1::RejectedAt(
+                    SemanticRuntimeRefusalV1::at("inspect_generation.resource_ceiling"),
+                ));
             }
             let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
@@ -2737,7 +2739,9 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             if artifact_bytes.model != required.resources.model_bytes
                 || artifact_bytes.tokenizer != required.resources.tokenizer_bytes
             {
-                return Err(SemanticRuntimeBackendErrorV1::Rejected);
+                return Err(SemanticRuntimeBackendErrorV1::RejectedAt(
+                    SemanticRuntimeRefusalV1::at("inspect_generation.artifact_member_bytes"),
+                ));
             }
             let lifecycle = Arc::clone(&self.lifecycle);
             let projection = generation.embedding_key().clone();
@@ -2751,12 +2755,18 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             })
             .await
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+            .map_err(|_| {
+                SemanticRuntimeBackendErrorV1::RejectedAt(SemanticRuntimeRefusalV1::at(
+                    "inspect_generation.load_artifact",
+                ))
+            })?;
             if verified.projection() != generation.embedding_key()
                 || required.projection != *generation.embedding_key()
                 || required.implementation_revision.as_str() != "semantic.fastembed.production.v1"
             {
-                return Err(SemanticRuntimeBackendErrorV1::Rejected);
+                return Err(SemanticRuntimeBackendErrorV1::RejectedAt(
+                    SemanticRuntimeRefusalV1::at("inspect_generation.projection_identity"),
+                ));
             }
             let lifecycle = self.lifecycle.status();
             let state = lifecycle
@@ -2767,7 +2777,9 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             if artifact_digest != expected_artifact
                 && expected_artifact.strip_prefix("sha256:") != Some(artifact_digest)
             {
-                return Err(SemanticRuntimeBackendErrorV1::Rejected);
+                return Err(SemanticRuntimeBackendErrorV1::RejectedAt(
+                    SemanticRuntimeRefusalV1::at("inspect_generation.artifact_digest"),
+                ));
             }
             let expected_runtime_digest = canonical_sha256(&(
                 "tracedecay.semantic-runtime-compatibility.v1",
@@ -2779,9 +2791,15 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
                 generation.embedding_key().embedding_key().device_class,
                 generation.embedding_key().embedding_key().precision,
             ))
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+            .map_err(|_| {
+                SemanticRuntimeBackendErrorV1::RejectedAt(SemanticRuntimeRefusalV1::at(
+                    "inspect_generation.runtime_compatibility_digest",
+                ))
+            })?;
             if required.runtime_compatibility_digest != expected_runtime_digest {
-                return Err(SemanticRuntimeBackendErrorV1::Rejected);
+                return Err(SemanticRuntimeBackendErrorV1::RejectedAt(
+                    SemanticRuntimeRefusalV1::at("inspect_generation.runtime_compatibility"),
+                ));
             }
             let evidence = SemanticExecutableGenerationV1::new(
                 required.clone(),
@@ -2789,7 +2807,12 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
                 true,
                 true,
             )
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+            .map_err(|cause| {
+                SemanticRuntimeBackendErrorV1::RejectedAt(SemanticRuntimeRefusalV1::contract(
+                    "inspect_generation.executable_evidence",
+                    cause,
+                ))
+            })?;
             Ok(SemanticExecutableGenerationLeaseV1::new(
                 evidence,
                 (store, retained),
@@ -3002,9 +3025,9 @@ fn check_evaluation_cancellation(
 fn revalidation_error(error: SemanticRuntimeBackendErrorV1) -> SemanticRuntimeBackendErrorV1 {
     match error {
         SemanticRuntimeBackendErrorV1::Unavailable => SemanticRuntimeBackendErrorV1::Unavailable,
-        SemanticRuntimeBackendErrorV1::Rejected | SemanticRuntimeBackendErrorV1::Conflict => {
-            SemanticRuntimeBackendErrorV1::Conflict
-        }
+        SemanticRuntimeBackendErrorV1::Rejected
+        | SemanticRuntimeBackendErrorV1::RejectedAt(_)
+        | SemanticRuntimeBackendErrorV1::Conflict => SemanticRuntimeBackendErrorV1::Conflict,
     }
 }
 
@@ -3035,7 +3058,8 @@ fn lifecycle_publication_error(
 const fn semantic_runtime_backend_outcome(error: SemanticRuntimeBackendErrorV1) -> &'static str {
     match error {
         SemanticRuntimeBackendErrorV1::Unavailable => "unavailable",
-        SemanticRuntimeBackendErrorV1::Rejected => "rejected",
+        SemanticRuntimeBackendErrorV1::Rejected
+        | SemanticRuntimeBackendErrorV1::RejectedAt(_) => "rejected",
         SemanticRuntimeBackendErrorV1::Conflict => "conflict",
     }
 }
