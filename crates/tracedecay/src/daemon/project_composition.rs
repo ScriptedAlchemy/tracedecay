@@ -437,11 +437,17 @@ async fn production_project_server_inner(
         canonical_project_path.to_path_buf(),
     ));
     let route_registered = Arc::new(AtomicBool::new(true));
+    // Route-owned cancellation lifetime. Terminal route revocation (a failed
+    // owner rekey) must end this route's activation and query waiters without
+    // touching the caller's project-open token, so they hang off a child:
+    // cancelling a child never propagates to its parent.
+    let route_cancellation = cancellation.child_token();
     let database_owner_reconciler = runtime.database_owner_reconciler(
         store_administration,
         Arc::clone(&current_key),
         Arc::clone(&current_project_path),
         Arc::clone(&route_registered),
+        route_cancellation.clone(),
         handshake.clone(),
     );
     let automation_scheduler_reconciler = runtime.automation_scheduler_reconciler(
@@ -494,7 +500,7 @@ async fn production_project_server_inner(
         native_graph_activation: runtime_configuration.config.native_graph_activation,
         scope: code_search_scope.clone(),
         route_registered: Arc::clone(&route_registered),
-        cancellation: cancellation.clone(),
+        cancellation: route_cancellation.clone(),
         graph_runtime: Arc::clone(&graph_runtime),
         graph_publication_database: Arc::new(cg.db().clone()),
         configuration_runtime: Arc::clone(cg.configuration_runtime()),
@@ -516,7 +522,7 @@ async fn production_project_server_inner(
         code_index_scheduler::CodeIndexActivationV1::new_with_admission(
             canonical_project_path,
             Arc::clone(&route_registered),
-            cancellation.clone(),
+            route_cancellation.clone(),
             code_index_automatic_admission,
             code_index_mount,
             code_index_hint_sink,
