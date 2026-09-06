@@ -625,7 +625,7 @@ fn prepare_verified_quarantine(
         }
         Ok(QuarantineStoreOutcome::Restored {
             restored_path,
-            journal_failure,
+            failure,
         }) => {
             outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                 store_id: store_id.to_owned(),
@@ -638,7 +638,7 @@ fn prepare_verified_quarantine(
                 store_id: store_id.to_owned(),
                 kind: CollectionFailureKind::PayloadChanged,
             });
-            if let Some(failure) = journal_failure {
+            if let Some(failure) = failure {
                 outcome.errors.push(CollectionFailure {
                     store_id: store_id.to_owned(),
                     kind: CollectionFailureKind::RemoveFailed(failure),
@@ -731,13 +731,6 @@ fn finalize_verified_quarantine(
     match quarantine.finalize(control) {
         QuarantineFinalizeOutcome::Removed { journal_failure } => {
             if let Some(failure) = journal_failure {
-                outcome.recovery_receipts.push(CollectionRecoveryReceipt {
-                    store_id: store_id.to_owned(),
-                    original_path: data_root.to_path_buf(),
-                    quarantine_path: data_root.to_path_buf(),
-                    actual_path: data_root.to_path_buf(),
-                    action: CollectionRecoveryAction::DeleteUnconfirmed,
-                });
                 outcome.errors.push(CollectionFailure {
                     store_id: store_id.to_owned(),
                     kind: CollectionFailureKind::RemoveFailed(failure),
@@ -792,22 +785,26 @@ fn reconcile_existing_quarantine(
         Ok(recoveries) if recoveries.is_empty() => true,
         Ok(recoveries) => {
             for recovery in recoveries {
-                let (quarantine_path, actual_path, action) = match recovery {
+                let (quarantine_path, actual_path, action, failure) = match recovery {
                     QuarantineRecoveryOutcome::Restored {
                         restored_path,
-                        journal_pending,
+                        failure,
                     } => {
-                        let action = if journal_pending {
+                        let action = if failure.is_some() {
                             CollectionRecoveryAction::RetainedForRecovery
                         } else {
                             CollectionRecoveryAction::Restored
                         };
-                        (data_root.to_path_buf(), restored_path, action)
+                        (data_root.to_path_buf(), restored_path, action, failure)
                     }
-                    QuarantineRecoveryOutcome::Retained { quarantine_path } => (
+                    QuarantineRecoveryOutcome::Retained {
+                        quarantine_path,
+                        failure,
+                    } => (
                         quarantine_path.clone(),
                         quarantine_path,
                         CollectionRecoveryAction::RetainedForRecovery,
+                        failure,
                     ),
                 };
                 outcome.recovery_receipts.push(CollectionRecoveryReceipt {
@@ -817,6 +814,12 @@ fn reconcile_existing_quarantine(
                     actual_path,
                     action,
                 });
+                if let Some(failure) = failure {
+                    outcome.errors.push(CollectionFailure {
+                        store_id: store_id.to_owned(),
+                        kind: CollectionFailureKind::RemoveFailed(failure),
+                    });
+                }
             }
             outcome.errors.push(CollectionFailure {
                 store_id: store_id.to_owned(),
