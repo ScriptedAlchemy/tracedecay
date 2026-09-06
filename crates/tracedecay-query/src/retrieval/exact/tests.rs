@@ -11,7 +11,7 @@ use tracedecay_domain::{
     CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1, FixedPointScore,
     FreshnessCompatibilityV1, PrincipalId, QueryNormalizationRevision, RetrievalBudget,
-    RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch,
+    RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
     RetrieverKind, RetrieverOutcome, SanitizerRevision, SingleRootScopeV1, SourceFreshness,
     TemporalModeV1, UtcMicros, VectorWatermark,
 };
@@ -694,13 +694,17 @@ fn exact_lane_satisfies_the_generic_retriever_contract() {
     let port = FakeExactPort::complete(vec![exact_pair(&authority, &request, "occ.a", 0)]);
     let lane = ExactLane::new(authority, port);
 
-    let outcome = Retriever::retrieve(&lane, &request).expect("generic retrieval succeeds");
+    let outcome = lane
+        .retrieve_exact(&request)
+        .expect("generic retrieval succeeds");
     assert_eq!(complete_batch(outcome).candidates.len(), 1);
 
     let mut invalid = exact_request(&FixtureAuthority::new(), "reserve_stock", 8);
     invalid.budget.max_candidates_per_lane = 0;
-    let error = Retriever::retrieve(&lane, &invalid).expect_err("invalid budget is rejected");
-    assert!(matches!(error, RetrievalError::InvalidRequest(_)));
+    let error = lane
+        .retrieve_exact(&invalid)
+        .expect_err("invalid budget is rejected");
+    assert!(matches!(error, RetrievalPortError::Contract(_)));
 }
 
 #[test]

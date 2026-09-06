@@ -12,16 +12,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, ComponentRevision, CursorPayloadDigest,
-    EphemeralSanitizedQueryViewV1, FixedPointScore, RetrievalBudget, RetrievalError,
-    RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, split_subtokens,
-    technical_tokens,
+    EphemeralSanitizedQueryViewV1, FixedPointScore, RetrievalBudget, RetrievalFailure,
+    RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome, ScoreDomainId, split_subtokens, technical_tokens,
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, LaneBoundEvidence, LaneEvidenceRejections,
-    LexicalPostingReadPort, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error, lane_bound_evidence, lane_candidate_cap,
+    CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
+    RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest, contract_error,
+    lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;
@@ -492,31 +491,6 @@ where
             &outcome,
         );
         Ok(outcome)
-    }
-}
-
-impl<'a, P> Retriever<LexicalLaneRequest<'a>, LexicalLaneEvidence> for LexicalLane<P>
-where
-    P: LexicalPostingReadPort,
-{
-    fn retrieve(
-        &self,
-        request: &LexicalLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalError> {
-        self.retrieve_lexical(request)
-            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
-    }
-}
-
-impl<'a, P> CompactCandidateLane<LexicalLaneRequest<'a>, LexicalLaneEvidence> for LexicalLane<P>
-where
-    P: LexicalPostingReadPort,
-{
-    fn candidates(
-        &self,
-        request: &LexicalLaneRequest<'a>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
-        self.retrieve_lexical(request)
     }
 }
 
