@@ -6,6 +6,7 @@
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -19,10 +20,11 @@ use crate::{
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
-    BoundedGitControl, CommitRelationFilter, CorrelationIndexHealth, CorrelationIndexPresence,
-    DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, GitCorrelationError, GitCorrelationSessionStore,
-    GitEvidenceProjectionStore, GitReflogSource, SessionGitCorrelationHit, SessionsForQuery,
-    SpanObservation, git_evidence_projection_identity, pending_git_evidence_publication_count,
+    BoundedGitControl, CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth,
+    CorrelationIndexPresence, DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, GitCorrelationError,
+    GitCorrelationSessionStore, GitEvidenceProjectionStore, GitReflogSource,
+    SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
+    git_evidence_projection_identity, pending_git_evidence_publication_count,
     publish_transcript_graph_evidence, read_meta_value, recover_git_evidence_projection,
     replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
     run_bounded_history_index_page, run_incremental_backfill, run_incremental_backfill_outcome,
@@ -133,6 +135,36 @@ fn shared_git_evidence_publication_lock_for_identity(
     let lock = Arc::new(Mutex::new(()));
     locks.insert(identity, Arc::downgrade(&lock));
     Ok(lock)
+}
+
+async fn publish_owned_git_evidence(
+    runtime: VerifiedGraphRuntimeWeakProxyV1,
+    publication_lock: Arc<GitEvidencePublicationLock>,
+    publication_prefix: String,
+    new_spans: Vec<SessionGitSpan>,
+    new_commits: Vec<CommitSessionRecord>,
+) -> Result<(usize, usize), GitCorrelationError> {
+    let publication = tokio::task::spawn_blocking(move || {
+        GitEvidenceProjectionStore::publish_graph_evidence_with_runtime(
+            &runtime,
+            publication_lock.as_ref(),
+            &publication_prefix,
+            &new_spans,
+            &new_commits,
+            Arc::new(AtomicBool::new(false)),
+        )
+    })
+    .await;
+    match publication {
+        Ok(result) => result,
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => Err(GitCorrelationError::Unavailable(
+                "Git evidence publication settlement task was cancelled before its blocking worker joined"
+                    .to_owned(),
+            )),
+        },
+    }
 }
 
 async fn converge_session_git_evidence<S, G>(
@@ -514,6 +546,44 @@ where
         GlobalDbGitCorrelationStore::open_write_transaction(self).await
     }
 
+    fn publish_graph_evidence_owned(
+        &self,
+        publication_prefix: String,
+        new_spans: Vec<SessionGitSpan>,
+        new_commits: Vec<CommitSessionRecord>,
+    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send {
+        let publication_authority = self.require_project_sessions_authority().and_then(|()| {
+            let runtime = self.graph_runtime.clone().ok_or_else(|| {
+                GitCorrelationError::Unavailable(
+                    "registered project graph runtime is not mounted".to_owned(),
+                )
+            })?;
+            let publication_lock = match &self.graph_publication_lock {
+                Some(Ok(lock)) => Arc::clone(lock),
+                Some(Err(detail)) => {
+                    return Err(GitCorrelationError::Unavailable(detail.clone()));
+                }
+                None => {
+                    return Err(GitCorrelationError::Unavailable(
+                        "registered project graph runtime is not mounted".to_owned(),
+                    ));
+                }
+            };
+            Ok((runtime, publication_lock))
+        });
+        async move {
+            let (runtime, publication_lock) = publication_authority?;
+            publish_owned_git_evidence(
+                runtime,
+                publication_lock,
+                publication_prefix,
+                new_spans,
+                new_commits,
+            )
+            .await
+        }
+    }
+
     fn git_evidence_publication_lock(&self) -> Result<Arc<Mutex<()>>, GitCorrelationError> {
         match &self.graph_publication_lock {
             Some(Ok(lock)) => Ok(Arc::clone(lock)),
@@ -569,6 +639,35 @@ impl GitCorrelationSessionStore for RegisteredGlobalDb {
         RegisteredGlobalDb::begin_write_transaction(self)
             .await
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
+    }
+
+    fn publish_graph_evidence_owned(
+        &self,
+        publication_prefix: String,
+        new_spans: Vec<SessionGitSpan>,
+        new_commits: Vec<CommitSessionRecord>,
+    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send {
+        let publication_authority = self.require_project_sessions_authority().and_then(|()| {
+            let runtime = self.project_graph_runtime().cloned().ok_or_else(|| {
+                GitCorrelationError::Unavailable(
+                    "registered project graph runtime is not mounted".to_owned(),
+                )
+            })?;
+            let publication_lock = shared_git_evidence_publication_lock(&runtime)
+                .map_err(GitCorrelationError::Unavailable)?;
+            Ok((runtime, publication_lock))
+        });
+        async move {
+            let (runtime, publication_lock) = publication_authority?;
+            publish_owned_git_evidence(
+                runtime,
+                publication_lock,
+                publication_prefix,
+                new_spans,
+                new_commits,
+            )
+            .await
+        }
     }
 
     fn git_evidence_publication_lock(&self) -> Result<Arc<Mutex<()>>, GitCorrelationError> {
