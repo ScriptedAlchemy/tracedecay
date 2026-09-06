@@ -24,6 +24,19 @@ pub(super) fn git(root: &Path, args: &[&str]) {
     );
 }
 
+/// Spells a fixture path for [`git`]'s argument list or for a gitfile Git will
+/// read back.
+///
+/// Fixture roots come from [`canonical_temp_root`], which on Windows is the
+/// `\\?\` verbatim form Git rejects as an argument (`//?/D:/...`). The
+/// spelling changes at this boundary only; the fixture keeps the verbatim
+/// `PathBuf` as the root identity it hands to the server and asserts against.
+pub(super) fn git_path_argument(path: &Path) -> String {
+    tracedecay_runtime_core::git::git_path_argument(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
 pub(crate) struct WriterTestFixtureAuthority {
     _pin: PinnedUserDataDir,
     runtime: Arc<HostAdmissionTestRuntimeV1>,
