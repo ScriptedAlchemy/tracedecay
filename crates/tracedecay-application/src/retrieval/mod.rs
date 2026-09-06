@@ -89,10 +89,9 @@ pub use git_topology_anchor::{
 };
 pub use grep_analysis::RedundancyResultV1;
 pub use ports::{
-    AffectedTestsRetrievalPort, AnchorHydrationPort, GraphImpactRetrievalPort, GraphRetrievalPort,
-    OperationalRetrievalPort, RetrievalPortContext, RetrievalPortOutcome,
-    SessionRetrievalBudgetStageV1, SessionRetrievalStructuralRefusalV1, SourceRetrievalPort,
-    SymbolRetrievalPort, TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
+    AffectedTestsRetrievalPort, OperationalRetrievalPort, RetrievalPortContext,
+    RetrievalPortOutcome, SessionRetrievalBudgetStageV1, SessionRetrievalStructuralRefusalV1,
+    SourceRetrievalPort, TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
 };
 pub use primitive_surface::{
     CalleeV1, CalleesResultV1, CalleesSurfaceRequestV1, ContextCodeBlockV1, ContextModeV1,
@@ -117,17 +116,16 @@ pub use requests::{
     DiagnosticPrimitiveRecord, DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult,
     DiagnosticsPrimitiveScope, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
     FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, FileMetadataRecord,
-    GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
-    HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaRequest,
-    HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
-    HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, ModuleApiPrimitiveRequest,
-    ModuleApiPrimitiveResult, PageRequest, PrimitiveInvocation, PrimitiveRequest,
-    QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult, ResultProjection, RetrievalOrder,
-    RetrievalRequestMeta, SessionLookupRequest, SessionLookupResult, SourceBodyPrimitiveRequest,
-    SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
-    SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, SourceReference,
-    StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
-    SymbolSearchRequest, SymbolSearchResult,
+    GraphImpactResult, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
+    HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1,
+    HealthDimensionPointV1, HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE,
+    ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult, PageRequest, PrimitiveInvocation,
+    PrimitiveRequest, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
+    ResultProjection, RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest,
+    SessionLookupResult, SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceLinesRequest,
+    SourceLinesResult, SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult,
+    SourceReference, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult,
 };
 pub use source_read::{
     MAX_SOURCE_READ_PATH_BYTES, SourceReadModeV1, SourceReadPortContext, SourceReadPortFuture,
