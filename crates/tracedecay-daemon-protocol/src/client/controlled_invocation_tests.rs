@@ -932,11 +932,48 @@ async fn controlled_client(
     )
 }
 
+/// Phase signals from a fixture daemon that never settles a remote effect.
+///
+/// The choreography runs over real loopback connections, so the tests keep
+/// real time until `control_observed` fires and only then pause and advance
+/// the clock past the authoritative-settlement grace. Pausing earlier lets
+/// the paused clock auto-advance past the admission deadline while the
+/// runtime waits for loopback readiness, which drops the invocation
+/// connection before its handshake is written (observed on macOS).
+struct UnsettledDaemon {
+    client: DaemonInvocationClient,
+    /// The daemon read the typed invocation request.
+    admitted: tokio::sync::oneshot::Receiver<()>,
+    /// The daemon finished its cancellation-control phase: it either read the
+    /// typed cancellation request or closed its listener so the control
+    /// connection is refused. In the refused case the client's bounded
+    /// cancel-delivery attempt still runs after this fires; every path it can
+    /// take ends in the same indeterminate settlement.
+    control_observed: tokio::sync::oneshot::Receiver<()>,
+    /// Lets the daemon drop the invocation connection it holds open and exit.
+    release: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+/// Pauses the clock and advances it past the authoritative-settlement grace.
+///
+/// Only call this once every real loopback exchange the test depends on has
+/// completed and the remaining work is timer-bound; the paused clock
+/// auto-advances to the next timer whenever the runtime would otherwise wait
+/// for I/O. Tests that perform more real I/O afterwards must
+/// `tokio::time::resume()` first.
+async fn virtualize_response_grace() {
+    tokio::time::pause();
+    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
+        .await;
+}
+
 async fn reset_then_reconnect_client(
     first_request_id: &'static str,
     second_request_id: &'static str,
 ) -> (
     DaemonInvocationClient,
+    tokio::sync::oneshot::Receiver<()>,
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
@@ -945,6 +982,7 @@ async fn reset_then_reconnect_client(
             .await
             .expect("bind invocation listener");
     let (first_admitted, admitted) = tokio::sync::oneshot::channel();
+    let (cancellation_observed, control_observed) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let first_stream = listener.accept().await.expect("accept first invocation");
         let (first_reader, _first_writer) = first_stream.into_split();
@@ -972,11 +1010,15 @@ async fn reset_then_reconnect_client(
             .await
             .expect("read cancellation handshake")
             .expect("cancellation handshake");
-        control_lines
+        let cancellation_line = control_lines
             .next_line()
             .await
             .expect("read cancellation request")
             .expect("cancellation request");
+        let cancellation = parse_daemon_invocation_cancellation_request(&cancellation_line)
+            .expect("typed invocation cancellation");
+        assert_eq!(cancellation.target_request_id(), first_request_id);
+        let _ = cancellation_observed.send(());
 
         // The response-grace read polls liveness with handshake-less probe
         // connections; skip them like the real daemon's accept loop does.
@@ -1038,6 +1080,7 @@ async fn reset_then_reconnect_client(
             handshake,
         ),
         admitted,
+        control_observed,
         server,
     )
 }
@@ -1049,21 +1092,14 @@ enum UnsettledControl {
     ConnectionRejected,
 }
 
-async fn unsettled_client(
-    request_id: &'static str,
-    control: UnsettledControl,
-) -> (
-    DaemonInvocationClient,
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::task::JoinHandle<()>,
-) {
+async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -> UnsettledDaemon {
     let (listener, endpoint) =
         crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
             .await
             .expect("bind invocation listener");
     let (request_admitted, admitted) = tokio::sync::oneshot::channel();
-    let (control_boundary_reached, control_reached) = tokio::sync::oneshot::channel();
+    let (control_phase_done, control_observed) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
         let (invocation_reader, invocation_writer) = invocation_stream.into_split();
@@ -1082,11 +1118,11 @@ async fn unsettled_client(
             serde_json::from_str(&request_line).expect("typed invocation request");
         assert_eq!(request.request_id, request_id);
 
-        match control {
+        let (_control_connection, close_response) = match control {
             UnsettledControl::Delivered | UnsettledControl::DeliveredThenResponseClosed => {
                 let _ = request_admitted.send(());
                 let control_stream = listener.accept().await.expect("accept cancellation");
-                let (control_reader, _control_writer) = control_stream.into_split();
+                let (control_reader, control_writer) = control_stream.into_split();
                 let mut control_lines = BufReader::new(control_reader).lines();
                 control_lines
                     .next_line()
@@ -1101,23 +1137,25 @@ async fn unsettled_client(
                 let cancellation = parse_daemon_invocation_cancellation_request(&cancellation_line)
                     .expect("typed invocation cancellation");
                 assert_eq!(cancellation.target_request_id(), request_id);
-                control_boundary_reached
-                    .send(())
-                    .expect("report cancellation delivery");
-                if matches!(control, UnsettledControl::DeliveredThenResponseClosed) {
-                    drop(invocation_writer);
-                    return;
-                }
+                (
+                    Some((control_lines, control_writer)),
+                    matches!(control, UnsettledControl::DeliveredThenResponseClosed),
+                )
             }
             UnsettledControl::ConnectionRejected => {
                 drop(listener);
                 let _ = request_admitted.send(());
-                control_boundary_reached
-                    .send(())
-                    .expect("report cancellation rejection");
+                (None, false)
             }
+        };
+        let _ = control_phase_done.send(());
+        if close_response {
+            drop(invocation_writer);
+            return;
         }
-        std::future::pending::<()>().await;
+        // Hold the invocation connection open without ever answering; the
+        // test releases it once the client has settled the effect itself.
+        let _ = released.await;
     });
     let profile = tempfile::tempdir().expect("profile");
     let profile_root = profile.path().to_path_buf();
@@ -1137,15 +1175,55 @@ async fn unsettled_client(
         catalog_version: String::new(),
         moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
-    (
-        DaemonInvocationClient::for_connection_for_test(
+    UnsettledDaemon {
+        client: DaemonInvocationClient::for_connection_for_test(
             DaemonConnection::unauthenticated_for_test(endpoint),
             handshake,
         ),
         admitted,
-        control_reached,
+        control_observed,
+        release,
         server,
-    )
+    }
+}
+
+/// Drives one controlled invocation against an [`UnsettledDaemon`] and returns
+/// the settlement the client produced on its own.
+async fn settle_without_daemon_response(
+    daemon: UnsettledDaemon,
+    request_id: &'static str,
+    cancellation: CancellationSignal,
+) -> DaemonInvocationResponse {
+    let UnsettledDaemon {
+        client,
+        admitted,
+        control_observed,
+        release,
+        server,
+    } = daemon;
+    let deadline = deadline_after(Duration::from_secs(10));
+    let call_cancellation = cancellation.clone();
+    let call = tokio::spawn(async move {
+        client
+            .invoke_controlled(
+                invocation_request(request_id, deadline.clone()),
+                deadline,
+                call_cancellation,
+                InvocationCancellationPolicy::AuthoritativeEffect,
+            )
+            .await
+    });
+    admitted.await.expect("request admission");
+    assert!(cancellation.cancel(now_micros()));
+    control_observed.await.expect("cancellation control phase");
+    virtualize_response_grace().await;
+    let response = call
+        .await
+        .expect("authoritative invocation task")
+        .expect("indeterminate settlement is typed");
+    let _ = release.send(());
+    server.await.expect("server task");
+    response
 }
 
 fn assert_authoritative_settlement(response: DaemonInvocationResponse) {
@@ -1216,80 +1294,37 @@ async fn remote_effect_deadline_requests_daemon_cancel_and_awaits_settlement() {
 #[tokio::test]
 async fn remote_effect_without_authoritative_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-no-settlement";
-    let (client, admitted, control_reached, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::Delivered).await;
+    let daemon = unsettled_client(REQUEST_ID, UnsettledControl::Delivered).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-no-settlement").expect("cancellation");
-    let deadline = deadline_after(Duration::from_secs(10));
-    let call_cancellation = cancellation.clone();
-    let call = tokio::spawn(async move {
-        client
-            .invoke_controlled(
-                invocation_request(REQUEST_ID, deadline.clone()),
-                deadline,
-                call_cancellation,
-                InvocationCancellationPolicy::AuthoritativeEffect,
-            )
-            .await
-    });
-    admitted.await.expect("request admission");
-    assert!(cancellation.cancel(now_micros()));
-    control_reached
-        .await
-        .expect("cancellation delivery reached the server");
-    tokio::time::pause();
-    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
-        .await;
-    let response = call
-        .await
-        .expect("authoritative invocation task")
-        .expect("indeterminate settlement is typed");
+
+    let response = settle_without_daemon_response(daemon, REQUEST_ID, cancellation).await;
 
     assert_authoritative_settlement(response);
-    server.abort();
 }
 
 #[tokio::test]
 async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-cancel-delivery-failure";
-    let (client, admitted, control_reached, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::ConnectionRejected).await;
+    let daemon = unsettled_client(REQUEST_ID, UnsettledControl::ConnectionRejected).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-delivery-failure").expect("cancellation");
-    let deadline = deadline_after(Duration::from_secs(10));
-    let call_cancellation = cancellation.clone();
-    let call = tokio::spawn(async move {
-        client
-            .invoke_controlled(
-                invocation_request(REQUEST_ID, deadline.clone()),
-                deadline,
-                call_cancellation,
-                InvocationCancellationPolicy::AuthoritativeEffect,
-            )
-            .await
-    });
-    admitted.await.expect("request admission");
-    assert!(cancellation.cancel(now_micros()));
-    control_reached
-        .await
-        .expect("cancellation endpoint rejection reached the server");
-    tokio::time::pause();
-    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
-        .await;
-    let response = call
-        .await
-        .expect("authoritative invocation task")
-        .expect("indeterminate settlement is typed");
+
+    let response = settle_without_daemon_response(daemon, REQUEST_ID, cancellation).await;
 
     assert_authoritative_settlement(response);
-    server.abort();
 }
 
 #[tokio::test]
 async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-response-eof";
-    let (client, admitted, control_reached, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::DeliveredThenResponseClosed).await;
+    let UnsettledDaemon {
+        client,
+        admitted,
+        control_observed,
+        release: _release,
+        server,
+    } = unsettled_client(REQUEST_ID, UnsettledControl::DeliveredThenResponseClosed).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-response-eof").expect("cancellation");
     let deadline = deadline_after(Duration::from_secs(10));
@@ -1306,7 +1341,7 @@ async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
     });
     admitted.await.expect("request admission");
     assert!(cancellation.cancel(now_micros()));
-    control_reached
+    control_observed
         .await
         .expect("cancellation delivery reached the server");
     let response = call
@@ -1318,20 +1353,23 @@ async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
     server.await.expect("server task");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn indeterminate_effect_discards_connection_before_next_invocation() {
     const FIRST_ID: &str = "request.remote-effect-reset-state";
     const SECOND_ID: &str = "request.remote-after-effect-reset";
-    // The paused clock virtualizes the response grace the first invocation
-    // must exhaust before it settles as an indeterminate effect; the
-    // choreography itself still runs over real loopback connections.
-    let (client, admitted, server) = reset_then_reconnect_client(FIRST_ID, SECOND_ID).await;
+    let (client, admitted, control_observed, server) =
+        reset_then_reconnect_client(FIRST_ID, SECOND_ID).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-reset-state").expect("cancellation");
     let cancel_after_admission = cancellation.clone();
-    let cancel = tokio::spawn(async move {
+    // Cancel once the daemon has admitted the request, then virtualize the
+    // response grace only after the daemon has read the cancellation: the
+    // choreography itself runs over real loopback connections.
+    let clock = tokio::spawn(async move {
         admitted.await.expect("request admission");
         assert!(cancel_after_admission.cancel(now_micros()));
+        control_observed.await.expect("cancellation delivery");
+        virtualize_response_grace().await;
     });
     let deadline = deadline_after(Duration::from_secs(10));
     let first = client
@@ -1344,6 +1382,9 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
         .await
         .expect("indeterminate effect is typed");
     assert_authoritative_settlement(first);
+    clock.await.expect("clock task");
+    // The reconnect below is real loopback I/O again, so hand real time back.
+    tokio::time::resume();
 
     let second = client
         .invoke(invocation_request(
@@ -1358,7 +1399,6 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
             problem: DaemonInvocationProblem::Unavailable
         }
     ));
-    cancel.await.expect("cancellation task");
     server.await.expect("server task");
 }
 
