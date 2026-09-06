@@ -183,6 +183,7 @@ fn statement(sql: &str, params: Vec<ExactSqlValue>) -> ExactSqlStatement {
     ExactSqlStatement::new(sql.to_owned(), params).unwrap()
 }
 
+mod async_dispatch;
 mod authority;
 mod dispatch;
 mod guard;

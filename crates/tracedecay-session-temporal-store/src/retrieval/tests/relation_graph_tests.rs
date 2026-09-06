@@ -1,6 +1,7 @@
 use tracedecay_domain::{
     CopyProofV1, MessageOccurrenceIdV1, ObservationId, ProjectId, UserProfileId,
 };
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_temporal_query::candidates::CandidateClause;
 
 use super::*;
@@ -162,10 +163,13 @@ async fn summary_expansion_ids(
         .collect()
 }
 
+/// Materializes one published summary's records in `Current` mode. The read
+/// is provider-unscoped: a provider scope additionally demands retained
+/// source occurrences the raw-only production seed never projects, which
+/// would leave the summary predicate under test unexercised.
 async fn current_summary_records(
     read: &RegisteredTemporalRead,
     session_id: &str,
-    provider: &str,
     generation: u64,
     summary_id: &str,
     anchor_id: &str,
@@ -175,16 +179,11 @@ async fn current_summary_records(
     candidate.channel = CandidateChannel::Summary;
     candidate.retriever_record_id = summary_id.to_string();
     candidate.session = Some(session_id.to_string());
-    candidate.source = Some(provider.to_string());
+    candidate.source = None;
     candidate.participant_generation = generation;
     records_from_projection(
         read,
-        &scoped_snapshot_for_session(
-            session_id,
-            generation,
-            Some(provider),
-            TemporalModeV1::Current,
-        ),
+        &scoped_snapshot_for_session(session_id, generation, None, TemporalModeV1::Current),
         candidate,
         &record_request(),
         projection,
@@ -516,8 +515,182 @@ async fn provider_filter_uses_grafeo_retained_summary_anchors() {
     );
 }
 
+/// Records the session's first raw message as a revised (dirty) source. The
+/// schema trigger seeds the matching pending `raw_message` invalidation work,
+/// which is the durable state every protection revision leaves behind until
+/// the convergence worker starts its walk.
+async fn mark_first_raw_message_dirty(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    provider: &str,
+    session_id: &str,
+) {
+    Executor::execute(
+        &database
+            .writer_connection()
+            .expect("registered profile writer"),
+        "INSERT INTO lcm_summary_convergence_dirty_raw(
+             provider, session_id, store_id, rewind_frontier_store_id
+         )
+         SELECT ?1, ?2, MIN(store_id), MAX(0, MIN(store_id) - 1)
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, session_id],
+    )
+    .await
+    .expect("durable dirty raw revision");
+}
+
+/// Leaves the walk's partial-closure marker: it enqueues `summary_node` work
+/// only once it has staled at least one summary and still has more to visit.
+async fn enqueue_partial_summary_invalidation(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    provider: &str,
+    session_id: &str,
+    summary_id: &str,
+) {
+    Executor::execute(
+        &database
+            .writer_connection()
+            .expect("registered profile writer"),
+        "INSERT INTO lcm_summary_convergence_invalidation_work(
+             provider, session_id, raw_store_id,
+             source_kind, source_id, depth, after_node_id
+         )
+         SELECT provider, session_id, store_id, 'summary_node', ?3, 1, ''
+         FROM lcm_summary_convergence_dirty_raw
+         WHERE provider = ?1 AND session_id = ?2",
+        params![provider, session_id, summary_id],
+    )
+    .await
+    .expect("durable partial invalidation marker");
+}
+
+async fn active_generation(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    session_id: &str,
+) -> u64 {
+    crate::SessionTemporalAccess::new(database)
+        .freeze_session_temporal_snapshot_result(
+            tracedecay_store::SessionTemporalSnapshotRequestV1::new(
+                SessionId::new(session_id).expect("session"),
+            ),
+        )
+        .await
+        .expect("published summary generation")
+        .watermarks()
+        .active_generation()
+        .value()
+}
+
 #[tokio::test]
-async fn current_temporal_reads_hide_a_durably_dirty_summary_across_restart() {
+async fn current_temporal_reads_serve_summaries_while_raw_revision_work_is_only_queued() {
+    const PROVIDER: &str = "cursor";
+    const SESSION_ID: &str = "queued-revision-session";
+    const SUMMARY_TEXT: &str = "production dirty summary sentinel";
+
+    let directory = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .expect("registered profile runtime");
+    let summary = seed_production_summary(&runtime, PROVIDER, SESSION_ID).await;
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let generation = active_generation(database, SESSION_ID).await;
+    mark_first_raw_message_dirty(database, PROVIDER, SESSION_ID).await;
+
+    let read = runtime.retrieval_read_for_test().await;
+    let pending_work = read
+        .text_column(
+            "SELECT source_kind FROM lcm_summary_convergence_invalidation_work
+             WHERE provider = ?1 AND session_id = ?2 AND state = 'pending'",
+            vec![
+                SqlValue::Text(PROVIDER.to_string()),
+                SqlValue::Text(SESSION_ID.to_string()),
+            ],
+            0,
+        )
+        .await;
+    assert_eq!(
+        pending_work,
+        ["raw_message"],
+        "a queued revision seeds only raw_message work before the walk starts"
+    );
+    let anchor_id = read
+        .text_column(
+            "SELECT summary_anchor_id FROM session_summary_nodes WHERE summary_id = ?1",
+            vec![SqlValue::Text(summary.node_id.clone())],
+            0,
+        )
+        .await
+        .into_iter()
+        .next()
+        .expect("published summary anchor");
+    let (scope, relation_store) =
+        crate::SessionTemporalRegisteredDb::session_relation_store(database)
+            .expect("registered relation authority");
+    let projection = relation_store
+        .load_projection(
+            &scope,
+            &SessionId::new(SESSION_ID).expect("session"),
+            generation,
+            256,
+            256,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("published relation projection");
+    assert_eq!(
+        summary_search_ids(
+            &read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::Current,
+            CandidateChannel::Summary,
+            SUMMARY_TEXT,
+        )
+        .await,
+        [summary.node_id.as_str()],
+        "queued-but-unstarted revision work must not hide current summary search"
+    );
+    assert_eq!(
+        summary_search_ids(
+            &read,
+            SESSION_ID,
+            PROVIDER,
+            generation,
+            TemporalModeV1::Current,
+            CandidateChannel::Anchor,
+            &anchor_id,
+        )
+        .await,
+        [summary.node_id.as_str()],
+        "queued-but-unstarted revision work must not hide current anchor search"
+    );
+    let records = current_summary_records(
+        &read,
+        SESSION_ID,
+        generation,
+        &summary.node_id,
+        &anchor_id,
+        projection,
+    )
+    .await;
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, TemporalRecord::Summary(_))),
+        "queued-but-unstarted revision work must not block summary materialization: {records:?}"
+    );
+    assert_eq!(
+        summary_expansion_ids(&runtime, SESSION_ID, TemporalModeV1::Current).await,
+        [summary.node_id.as_str()],
+        "queued-but-unstarted revision work must not hide current summary expansion"
+    );
+}
+
+#[tokio::test]
+async fn current_temporal_reads_hide_a_partially_invalidated_summary_across_restart() {
     const PROVIDER: &str = "cursor";
     const SESSION_ID: &str = "dirty-summary-session";
     const SUMMARY_TEXT: &str = "production dirty summary sentinel";
@@ -530,29 +703,9 @@ async fn current_temporal_reads_hide_a_durably_dirty_summary_across_restart() {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
-    let frozen = crate::SessionTemporalAccess::new(database)
-        .freeze_session_temporal_snapshot_result(
-            tracedecay_store::SessionTemporalSnapshotRequestV1::new(
-                SessionId::new(SESSION_ID).expect("session"),
-            ),
-        )
-        .await
-        .expect("published summary generation");
-    let generation = frozen.watermarks().active_generation().value();
-    Executor::execute_batch(
-        &database
-            .writer_connection()
-            .expect("registered profile writer"),
-        "INSERT INTO lcm_summary_convergence_dirty_raw(
-             provider, session_id, store_id, rewind_frontier_store_id
-         )
-         SELECT 'cursor', 'dirty-summary-session', MIN(store_id),
-                MAX(0, MIN(store_id) - 1)
-         FROM lcm_raw_messages
-         WHERE provider = 'cursor' AND session_id = 'dirty-summary-session';",
-    )
-    .await
-    .expect("durable partial invalidation marker");
+    let generation = active_generation(database, SESSION_ID).await;
+    mark_first_raw_message_dirty(database, PROVIDER, SESSION_ID).await;
+    enqueue_partial_summary_invalidation(database, PROVIDER, SESSION_ID, &summary.node_id).await;
 
     let read = runtime.retrieval_read_for_test().await;
     let anchor_id = read
@@ -626,7 +779,6 @@ async fn current_temporal_reads_hide_a_durably_dirty_summary_across_restart() {
         current_summary_records(
             &read,
             SESSION_ID,
-            PROVIDER,
             generation,
             &summary.node_id,
             &anchor_id,
@@ -696,7 +848,6 @@ async fn current_temporal_reads_hide_a_durably_dirty_summary_across_restart() {
         current_summary_records(
             &restarted_read,
             SESSION_ID,
-            PROVIDER,
             generation,
             &summary.node_id,
             &anchor_id,

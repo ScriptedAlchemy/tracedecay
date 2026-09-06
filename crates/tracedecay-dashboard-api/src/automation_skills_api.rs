@@ -30,6 +30,7 @@ pub struct ManagedSkillCreateRequest {
     id: String,
     title: String,
     summary: String,
+    routing_description: String,
     category: String,
     #[serde(
         default = "tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets"
@@ -136,6 +137,7 @@ impl ManagedSkillCreateRequest {
                 id: self.id,
                 title: self.title,
                 summary: self.summary,
+                routing_description: self.routing_description,
                 category: self.category,
                 targets: self.targets,
                 body_markdown: self.body_markdown,
