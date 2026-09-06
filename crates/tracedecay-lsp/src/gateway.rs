@@ -79,8 +79,25 @@ impl AdmittedRoot {
                 Some((admitted_url, admitted_segments)),
                 Some((candidate_url, candidate_segments)),
             ) => {
-                admitted_url.host_str() == candidate_url.host_str()
-                    && admitted_segments == candidate_segments
+                if admitted_url.host_str() != candidate_url.host_str() {
+                    return false;
+                }
+                if admitted_segments == candidate_segments {
+                    return true;
+                }
+                // Segment equality is host-independent and stays the first
+                // check. When both URIs name a local directory, equivalent
+                // identities (`/var` vs `/private/var`, `\\?\` vs native)
+                // are the same admitted root. Sibling paths still differ.
+                match (admitted_url.to_file_path(), candidate_url.to_file_path()) {
+                    (Ok(admitted_path), Ok(candidate_path)) => {
+                        tracedecay_runtime_core::path_safety::same_canonical_path(
+                            &admitted_path,
+                            &candidate_path,
+                        )
+                    }
+                    _ => false,
+                }
             }
             _ => false,
         }
@@ -2718,6 +2735,42 @@ mod tests {
 
         assert!(root.matches_root_uri("file:///root/project/"));
         assert!(!root.matches_root_uri("file:///root/project-other/"));
+    }
+
+    /// Host aliases (`/var` → `/private/var`) and Windows verbatim vs native
+    /// spellings name one directory. Segment equality alone treats them as
+    /// two roots and refuses initialize before any capability is negotiated.
+    #[cfg(unix)]
+    #[test]
+    fn admitted_root_matches_host_alias_spelling_and_refuses_siblings() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let real = temp.path().join("private").join("root");
+        std::fs::create_dir_all(&real).expect("create real root");
+        std::os::unix::fs::symlink(temp.path().join("private"), temp.path().join("var"))
+            .expect("host alias");
+        let alias = temp.path().join("var").join("root");
+        let sibling = temp.path().join("var").join("root-other");
+        std::fs::create_dir(&sibling).expect("create sibling root");
+
+        let admitted = url::Url::from_file_path(real.canonicalize().expect("canonical root"))
+            .expect("admitted file URI")
+            .to_string();
+        let candidate = url::Url::from_directory_path(&alias)
+            .expect("alias directory URI")
+            .to_string();
+        let sibling_uri = url::Url::from_directory_path(&sibling)
+            .expect("sibling directory URI")
+            .to_string();
+
+        let root = AdmittedRoot::new(admitted);
+        assert!(
+            root.matches_root_uri(&candidate),
+            "equivalent host-alias spelling must be the same admitted root"
+        );
+        assert!(
+            !root.matches_root_uri(&sibling_uri),
+            "a sibling root must stay outside the admitted identity"
+        );
     }
 
     /// Root admission and document containment must not depend on whether the

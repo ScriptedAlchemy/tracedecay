@@ -38,7 +38,7 @@ pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String
         // CLI. Reporting it as an unavailable Git turns "this project root is
         // gone" into a host-installation problem, so it stays the same
         // "no churn to read" answer a non-repository directory gets.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if missing_project_root_error(&error) => {
             return Ok(HashMap::new());
         }
         Err(error) => return Err(TraceDecayError::Io(error)),
@@ -59,4 +59,13 @@ pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String
         *churn.entry(trimmed.to_string()).or_insert(0) += 1;
     }
     Ok(churn)
+}
+
+fn missing_project_root_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::InvalidInput
+    )
 }

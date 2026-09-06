@@ -241,6 +241,15 @@ mod tests {
         pinned
     }
 
+    /// YAML double-quoted scalars treat `\t`/`\U` as escapes. A Windows
+    /// native path must be written so those separators survive as separators.
+    fn hermes_project_root_yaml(project_root: &str) -> String {
+        format!(
+            "plugins:\n  tracedecay:\n    project_root: '{}'\n",
+            project_root.replace('\'', "''")
+        )
+    }
+
     #[test]
     fn hermes_profile_pin_resolves_a_pinned_root_after_registration() {
         let _pinned = registered();
@@ -249,10 +258,7 @@ mod tests {
         let pinned = temp.path().join("pinned-project");
         std::fs::write(
             &config,
-            format!(
-                "plugins:\n  tracedecay:\n    project_root: \"{}\"\n",
-                pinned.display()
-            ),
+            hermes_project_root_yaml(&pinned.display().to_string()),
         )
         .expect("write hermes profile config");
 
@@ -262,6 +268,22 @@ mod tests {
             tracedecay_sessions::host_ports::hermes_profile_pin::resolve(&config),
             Some(pinned.display().to_string()),
             "registered resolver must back the hermes profile pin port"
+        );
+    }
+
+    #[test]
+    fn hermes_profile_pin_preserves_windows_escape_prone_separators() {
+        let _pinned = registered();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config.yaml");
+        let windows_root = r"C:\Users\temp\pinned-project";
+        std::fs::write(&config, hermes_project_root_yaml(windows_root))
+            .expect("write hermes profile config");
+
+        assert_eq!(
+            tracedecay_sessions::host_ports::hermes_profile_pin::resolve(&config),
+            Some(windows_root.to_string()),
+            "a Windows native path must round-trip through YAML without bell/tab escapes"
         );
     }
 

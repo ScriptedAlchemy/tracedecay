@@ -238,9 +238,14 @@ fn authority_honors_repository_included_ignore_configuration() {
     let excludes = config_dir.path().join("ignored");
     std::fs::write(&excludes, "from-included-config.txt\n").unwrap();
     let config = config_dir.path().join("gitconfig");
+    // Git config treats `\` as an escape. Spell the native path so Windows
+    // `\t`/`\U` separators cannot become tab/Unicode before git reads them.
+    let excludes_for_git = tracedecay_runtime_core::path_safety::plain_host_path(&excludes)
+        .to_string_lossy()
+        .replace('\\', "/");
     std::fs::write(
         &config,
-        format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+        format!("[core]\n\texcludesFile = {excludes_for_git}\n"),
     )
     .unwrap();
     fixture.git(&["config", "include.path", config.to_str().unwrap()]);

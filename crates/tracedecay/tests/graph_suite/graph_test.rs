@@ -225,11 +225,12 @@ async fn test_file_churn() {
 
 #[tokio::test]
 async fn test_file_churn_nonexistent_dir() {
-    let churn = file_churn(
-        std::path::Path::new("/nonexistent/path/that/does/not/exist"),
-        90,
-    )
-    .await
-    .expect("file_churn should not error for nonexistent dir");
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-churn-root-{}",
+        std::process::id()
+    ));
+    let churn = file_churn(&missing, 90)
+        .await
+        .expect("file_churn should not error for nonexistent dir");
     assert!(churn.is_empty());
 }
