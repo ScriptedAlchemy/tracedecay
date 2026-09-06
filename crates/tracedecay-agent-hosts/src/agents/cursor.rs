@@ -1116,9 +1116,7 @@ fn report_cursor_session_ingest<'a>(
             dc.info(&format!("  - {path}"));
         }
     }
-    if health.max_transcript_pending_bytes
-        > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES
-    {
+    if health.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES {
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
@@ -2559,8 +2557,7 @@ mod tests {
             tracked_transcripts: 2,
             pending_transcripts: 1,
             pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
-            max_transcript_pending_bytes:
-                crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
+            max_transcript_pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
         };
 
         report_cursor_session_ingest(
