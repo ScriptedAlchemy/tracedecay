@@ -2566,6 +2566,7 @@ impl HostBundleWriterV1 {
                 sync_cap_dir(&parent)?;
             }
         }
+        drop(backup_dir);
         match journal.previous_receipt {
             Some(receipt) => self.write_receipt(&receipt)?,
             None => self.remove_receipt(journal.host, journal.component)?,
@@ -2731,6 +2732,7 @@ impl HostBundleWriterV1 {
                 }
             }
         }
+        drop(backup_dir);
 
         let receipt = HostBundleInstallReceiptV1 {
             schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
@@ -2941,6 +2943,7 @@ impl HostBundleWriterV1 {
 
             let backup_dir = self.open_or_create_backup_dir(request.operation_id)?;
             self.backup_component_set_entries(&prepared, &mut journal, &backup_dir)?;
+            drop(backup_dir);
             self.write_component_set_entries(&prepared, &mut journal)?;
 
             // Mark this before calling into host registration: a failing
@@ -3821,6 +3824,12 @@ impl HostBundleWriterV1 {
         Ok(())
     }
 
+    /// Retires an operation's rollback backups once no receipt still names it.
+    ///
+    /// Every caller must drop its `Dir` capability on the operation's backup
+    /// directory first: `cap_std` opens directories without `FILE_SHARE_DELETE`,
+    /// so on Windows a live handle makes the removal below fail with a sharing
+    /// violation and turns a completed transaction into a storage failure.
     fn cleanup_unreferenced_backup_dir(
         &self,
         operation_id: [u8; 16],
