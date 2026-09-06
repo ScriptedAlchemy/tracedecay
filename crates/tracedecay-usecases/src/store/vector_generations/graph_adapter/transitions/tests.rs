@@ -538,10 +538,59 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     );
 }
 
+/// #915: waiting for store admission must consume the operation budget, not
+/// mint a fresh timeout after contention.
+#[tokio::test(flavor = "current_thread")]
+async fn operation_authority_is_minted_before_store_admission_wait() {
+    let source = CodeGenerationId::new("code-generation.admission-authority").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
+    let probe = Arc::new(PublicationAuthorityProbeRuntime::wrapping(Arc::clone(
+        store.runtime(),
+    )));
+    store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
+    let store = Arc::new(store);
+    let admission_permit = Arc::clone(&store.admission).acquire_owned().await.unwrap();
+    let (call_started_tx, call_started_rx) = tokio::sync::oneshot::channel();
+
+    let reserve = tokio::spawn(async move {
+        let call_started = Instant::now();
+        call_started_tx.send(call_started).unwrap();
+        store.reserve_one_generation(None, cancellation).await
+    });
+    let call_started = call_started_rx.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(admission_permit);
+
+    let outcome = reserve.await.unwrap();
+    assert!(
+        matches!(outcome, Err(VectorGenerationStoreErrorV1::Unavailable(_))),
+        "isolated evaluation retention must remain unavailable: {outcome:?}"
+    );
+    let reserve_deadline = probe
+        .reserve_deadline
+        .lock()
+        .unwrap()
+        .expect("reserve authority deadline");
+    assert!(
+        reserve_deadline <= call_started + GRAPH_OPERATION_DEADLINE + Duration::from_millis(50),
+        "store admission wait must not extend the operation timeout"
+    );
+}
+
 struct PublicationAuthorityProbeRuntime {
     inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
     require_background_begin: bool,
     prepare_deadline: Mutex<Option<Instant>>,
+    reserve_deadline: Mutex<Option<Instant>>,
     cancellation_to_trip: Option<Arc<AtomicBool>>,
     /// Stands in for the project's exclusive exact-SQL writer: `begin_stage`
     /// blocks here until the transaction holder releases it.
@@ -565,6 +614,7 @@ impl PublicationAuthorityProbeRuntime {
             inner,
             require_background_begin: false,
             prepare_deadline: Mutex::new(None),
+            reserve_deadline: Mutex::new(None),
             cancellation_to_trip: None,
             begin_gate: Mutex::new(None),
             recover_snapshot_gate: Mutex::new(None),
@@ -746,6 +796,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<tracedecay_graph_db::SemanticVectorRetentionStep, GraphDbError> {
+        *self.reserve_deadline.lock().unwrap() = Some(authority.deadline());
         self.inner.reserve_one_generation(after, authority)
     }
 
