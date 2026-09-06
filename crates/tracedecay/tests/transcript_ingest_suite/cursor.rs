@@ -23,7 +23,9 @@ use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, fixture_project_id,
     mark_test_project, open_project_session_db, try_ingest_source,
 };
-use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
+use crate::support::{
+    assert_metadata_path_eq, assert_path_text_eq, init_git_repo, init_project, init_project_at,
+};
 
 async fn ingest_cursor_transcript_event(
     event_json: &str,
@@ -880,7 +882,7 @@ async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
         .get_session("cursor", "cursor-session")
         .await
         .expect("session should be stored under root B");
-    assert_eq!(session.project_path, root_b.to_string_lossy());
+    assert_path_text_eq(&session.project_path, &root_b);
     assert_eq!(session.project_key, db.project_id().as_str());
 }
 
@@ -1285,7 +1287,7 @@ async fn cursor_sweep_ingests_historical_transcripts() {
         .get_session("cursor", "sweep-session")
         .await
         .expect("swept parent session should be stored");
-    assert_eq!(parent_session.project_path, project.to_string_lossy());
+    assert_path_text_eq(&parent_session.project_path, &project);
     assert!(!parent_session.is_subagent);
 
     let child_session = db

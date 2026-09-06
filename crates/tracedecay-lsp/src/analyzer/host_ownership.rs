@@ -334,19 +334,21 @@ mod tests {
 
     #[test]
     fn the_home_config_path_prefers_an_absolute_xdg_config_home() {
-        let home = Path::new("/isolated/home");
+        let fixture = tempfile::tempdir().expect("home configuration fixture");
+        let home = fixture.path().join("home");
+        let xdg_config_home = fixture.path().join("xdg-config");
 
         assert_eq!(
-            opencode_home_config_path(home, None),
-            Path::new("/isolated/home/.config/opencode/opencode.json")
+            opencode_home_config_path(&home, None),
+            home.join(".config/opencode/opencode.json")
         );
         assert_eq!(
-            opencode_home_config_path(home, Some(OsStr::new("/xdg/config"))),
-            Path::new("/xdg/config/opencode/opencode.json")
+            opencode_home_config_path(&home, Some(xdg_config_home.as_os_str())),
+            xdg_config_home.join("opencode/opencode.json")
         );
         assert_eq!(
-            opencode_home_config_path(home, Some(OsStr::new("relative/config"))),
-            Path::new("/isolated/home/.config/opencode/opencode.json"),
+            opencode_home_config_path(&home, Some(OsStr::new("relative/config"))),
+            home.join(".config/opencode/opencode.json"),
             "a relative $XDG_CONFIG_HOME does not name a usable config root"
         );
     }

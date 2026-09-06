@@ -548,6 +548,7 @@ fn capture_child_with_deadline(mut child: Child, timeout: Duration) -> ChildCapt
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::path_safety::same_canonical_path;
 
     #[test]
     fn git_program_is_stable_and_absolute() {
@@ -599,7 +600,10 @@ mod tests {
         )
         .expect("PATH candidate should resolve");
 
-        assert_eq!(resolved, executable.into_os_string());
+        assert!(
+            same_canonical_path(Path::new(&resolved), &executable),
+            "resolved PATH candidate must identify the fixture executable: resolved={resolved:?}, fixture={executable:?}"
+        );
     }
 
     #[test]

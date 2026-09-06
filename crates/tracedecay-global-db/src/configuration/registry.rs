@@ -1020,7 +1020,7 @@ mod context_scout_tests {
 
 #[cfg(test)]
 mod semantic_runtime_payload_tests {
-    use std::path::PathBuf;
+    use std::path::Path;
 
     use super::*;
     use tracedecay_domain::ManifestDigest;
@@ -1030,7 +1030,7 @@ mod semantic_runtime_payload_tests {
         SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).expect("semantic runtime key")
     }
 
-    fn realistic_activation_config() -> SemanticConfig {
+    fn realistic_activation_config(root: &Path) -> SemanticConfig {
         let artifact_digest = "ab".repeat(32);
         SemanticConfig {
             selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
@@ -1040,12 +1040,12 @@ mod semantic_runtime_payload_tests {
                 accepted_profile_digest: ManifestDigest::new(format!("sha256:{artifact_digest}"))
                     .expect("accepted profile digest"),
                 artifact_digest,
-                artifact_path: PathBuf::from(concat!(
-                    "/var/lib/tracedecay/semantic-models/",
-                    "jina-embeddings-v2-base-code/",
-                    "revision-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
-                    "onnx/model.onnx"
-                )),
+                artifact_path: root
+                    .join("semantic-models")
+                    .join("jina-embeddings-v2-base-code")
+                    .join("revision-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                    .join("onnx")
+                    .join("model.onnx"),
             }),
             rollback_profile: None,
             resources: SemanticResourceCeilings {
@@ -1062,9 +1062,9 @@ mod semantic_runtime_payload_tests {
         }
     }
 
-    fn encoded_activation_payload() -> String {
-        let encoded =
-            serde_json::to_string(&realistic_activation_config()).expect("semantic runtime JSON");
+    fn encoded_activation_payload(root: &Path) -> String {
+        let encoded = serde_json::to_string(&realistic_activation_config(root))
+            .expect("semantic runtime JSON");
         assert!(
             encoded.len() > CANONICAL_TEXT_MAX_BYTES,
             "activation payload must exceed the 512-byte label bound, got {}",
@@ -1075,8 +1075,9 @@ mod semantic_runtime_payload_tests {
 
     #[test]
     fn semantic_runtime_accepts_a_realistic_activation_payload() {
+        let root = tempfile::tempdir().expect("semantic runtime fixture root");
         let registry = ConfigurationRegistry::core().expect("registry");
-        let payload = encoded_activation_payload();
+        let payload = encoded_activation_payload(root.path());
         registry
             .validate_value(
                 &semantic_runtime_key(),
@@ -1102,8 +1103,10 @@ mod semantic_runtime_payload_tests {
 
     #[test]
     fn semantic_runtime_rejects_an_unknown_field() {
+        let root = tempfile::tempdir().expect("semantic runtime fixture root");
         let registry = ConfigurationRegistry::core().expect("registry");
-        let mut document = serde_json::to_value(realistic_activation_config()).expect("json value");
+        let mut document =
+            serde_json::to_value(realistic_activation_config(root.path())).expect("json value");
         document
             .as_object_mut()
             .expect("object")
@@ -1139,8 +1142,9 @@ mod semantic_runtime_payload_tests {
 
     #[test]
     fn semantic_runtime_rejects_an_invalid_artifact_digest() {
+        let root = tempfile::tempdir().expect("semantic runtime fixture root");
         let registry = ConfigurationRegistry::core().expect("registry");
-        let mut config = realistic_activation_config();
+        let mut config = realistic_activation_config(root.path());
         if let Some(profile) = config.active_profile.as_mut() {
             profile.artifact_digest = "0".repeat(63);
         }

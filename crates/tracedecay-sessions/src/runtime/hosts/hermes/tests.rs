@@ -1375,7 +1375,7 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(open_read_only_strict(&missing).await.is_err());
     assert!(!missing.exists());
 
-    let path = dir.path().join("state #?%.db");
+    let path = dir.path().join("state #%.db");
     write_minimal_legacy_state_db(&path, 1);
     let before = std::fs::read(&path).unwrap();
     let wal = sqlite_sidecar(&path, "-wal");

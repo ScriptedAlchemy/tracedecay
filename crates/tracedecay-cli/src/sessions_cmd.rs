@@ -1068,14 +1068,25 @@ mod tests {
         }
     }
 
-    fn project_context() -> Value {
+    fn project_fixture_authorities() -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join("tracedecay-session-refresh-fixture");
+        assert!(base.is_absolute(), "session refresh fixture base");
+        (
+            base.join("authoritative-worktree"),
+            base.join("repository").join(".git"),
+        )
+    }
+
+    fn project_context(project_root: &Path, git_common_dir: &Path) -> Value {
+        let project_root = project_root.to_string_lossy().into_owned();
+        let git_common_dir = git_common_dir.to_string_lossy().into_owned();
         json!({
             "status": "ok",
             "project": {
                 "project_id": "project.registered",
-                "display_root": "/registered/authoritative-worktree",
-                "canonical_root": "/registered/authoritative-worktree",
-                "git_common_dir": "/registered/repository/.git",
+                "display_root": project_root,
+                "canonical_root": project_root,
+                "git_common_dir": git_common_dir,
                 "default_branch": "master"
             },
             "aliases": [{
@@ -1114,9 +1125,9 @@ mod tests {
         })
     }
 
-    fn active_project_context() -> Value {
+    fn active_project_context(project_root: &Path) -> Value {
         json!({
-            "project_root": "/registered/authoritative-worktree",
+            "project_root": project_root.to_string_lossy(),
             "resolution_source": "active_project",
             "branch": {
                 "current_branch": "feature/selected",
@@ -1177,9 +1188,12 @@ mod tests {
 
     #[tokio::test]
     async fn project_refresh_uses_registered_authorities_and_exact_mcp_payload() {
+        let (project_root, git_common_dir) = project_fixture_authorities();
+        let project_root_text = project_root.to_string_lossy().into_owned();
+        let repository_id = git_common_dir.to_string_lossy().into_owned();
         let transport = FakeDaemonTransport::new([
-            project_context(),
-            active_project_context(),
+            project_context(&project_root, &git_common_dir),
+            active_project_context(&project_root),
             json!({
                 "outcome": "started",
                 "operation_id": "internal-operation-17",
@@ -1212,7 +1226,7 @@ mod tests {
         assert_eq!(
             calls[1],
             RecordedCall {
-                project_root: Some(PathBuf::from("/registered/authoritative-worktree")),
+                project_root: Some(project_root.clone()),
                 tool_name: "tracedecay_active_project".to_string(),
                 arguments: json!({ "format": "json" }),
             }
@@ -1220,15 +1234,15 @@ mod tests {
         assert_eq!(
             calls[2],
             RecordedCall {
-                project_root: Some(PathBuf::from("/registered/authoritative-worktree")),
+                project_root: Some(project_root),
                 tool_name: "tracedecay_session_refresh".to_string(),
                 arguments: json!({
                     "action": "begin",
                     "scope": "project",
                     "project": {
                         "id": "project.registered",
-                        "repository_id": "/registered/repository/.git",
-                        "worktree_id": "/registered/authoritative-worktree",
+                        "repository_id": repository_id,
+                        "worktree_id": project_root_text,
                         "branch_id": "scope.selected"
                     },
                     "profile": { "id": "profile.primary" },
@@ -1384,9 +1398,10 @@ mod tests {
             }
         }
 
+        let (project_root, git_common_dir) = project_fixture_authorities();
         let transport = FakeDaemonTransport::new([
-            project_context(),
-            active_project_context(),
+            project_context(&project_root, &git_common_dir),
+            active_project_context(&project_root),
             json!({ "outcome": "started", "handle": "opaque" }),
         ]);
         execute_session_refresh(

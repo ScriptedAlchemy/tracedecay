@@ -370,7 +370,13 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
 #[tokio::test]
 async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/authoritative");
+    let fixture = tempfile::tempdir().expect("LSP root fixture");
+    let project_root = fixture.path().join("authoritative");
+    let untrusted_root = fixture.path().join("untrusted");
+    std::fs::create_dir_all(&project_root).expect("authoritative LSP root");
+    std::fs::create_dir_all(&untrusted_root).expect("untrusted LSP root");
+    let project_root_uri = fixture_directory_uri(&project_root);
+    let untrusted_root_uri = fixture_directory_uri(&untrusted_root);
     DaemonLspOwnerRegistrar::new(&service)
         .register_factory_for_project(
             project_root.clone(),
@@ -386,14 +392,14 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                project_root_uri.clone(),
             ))),
             None,
             None,
             DaemonInvocationRequest::lsp_open(
                 "request.1",
                 "client.1",
-                Some("file:///untrusted".to_owned()),
+                Some(untrusted_root_uri.clone()),
                 Vec::new(),
                 lsp_deadline(),
                 lsp_cancellation(),
@@ -404,7 +410,16 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
         panic!("expected an admitted LSP session");
     };
 
-    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///untrusted","capabilities":{}}}"#;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "rootUri": untrusted_root_uri,
+            "capabilities": {}
+        }
+    })
+    .to_string();
     let response = service
         .invoke(
             &registry,
@@ -475,7 +490,20 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
         DaemonInvocationOutcome::LspAcknowledged { acknowledged: true }
     ));
 
-    let initialize = r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"rootUri":"file:///authoritative","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "initialize",
+        "params": {
+            "rootUri": project_root_uri,
+            "capabilities": {
+                "general": {
+                    "positionEncodings": ["utf-16"]
+                }
+            }
+        }
+    })
+    .to_string();
     let response = service
         .invoke(
             &registry,
@@ -531,7 +559,9 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
 async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
-    let project_root = PathBuf::from("/quarantined-multi-root");
+    let fixture = tempfile::tempdir().expect("multi-root fixture");
+    let project_root = fixture.path().join("quarantined-multi-root");
+    std::fs::create_dir_all(&project_root).expect("quarantined multi-root project");
     service
         .project_runtimes
         .publish(
@@ -633,7 +663,10 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
 #[tokio::test]
 async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/authoritative");
+    let fixture = tempfile::tempdir().expect("LSP root fixture");
+    let project_root = fixture.path().join("authoritative");
+    std::fs::create_dir_all(&project_root).expect("authoritative LSP root");
+    let project_root_uri = fixture_directory_uri(&project_root);
     DaemonLspOwnerRegistrar::new(&service)
         .register_factory_for_project(
             project_root.clone(),
@@ -650,7 +683,7 @@ async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                project_root_uri,
             ))),
             None,
             None,
@@ -676,7 +709,10 @@ async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
 #[tokio::test]
 async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/authoritative");
+    let fixture = tempfile::tempdir().expect("LSP root fixture");
+    let project_root = fixture.path().join("authoritative");
+    std::fs::create_dir_all(&project_root).expect("authoritative LSP root");
+    let project_root_uri = fixture_directory_uri(&project_root);
     DaemonLspOwnerRegistrar::new(&service)
         .register_factory_for_project(
             project_root.clone(),
@@ -692,7 +728,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                project_root_uri.clone(),
             ))),
             None,
             None,

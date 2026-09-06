@@ -1,5 +1,4 @@
 use std::fmt::Debug;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -76,10 +75,20 @@ fn code_shard(worktree: &str) -> StoreShardIdV1 {
     )
 }
 
-#[derive(Default)]
 pub(super) struct TestResolver {
     pub(super) calls: AtomicUsize,
     pub(super) graph_calls: AtomicUsize,
+    fixture_root: tempfile::TempDir,
+}
+
+impl Default for TestResolver {
+    fn default() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            graph_calls: AtomicUsize::new(0),
+            fixture_root: tempfile::tempdir().expect("store runtime resolver fixture root"),
+        }
+    }
 }
 
 impl StoreRuntimeResolver for TestResolver {
@@ -96,12 +105,12 @@ impl StoreRuntimeResolver for TestResolver {
             key.incarnation,
             LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
         );
-        Box::pin(async move {
-            Ok(ResolvedStoreLocator::new(
-                locator,
-                PathBuf::from(format!("/verified/{call}")),
-            ))
-        })
+        let path = self
+            .fixture_root
+            .path()
+            .join("verified")
+            .join(call.to_string());
+        Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
     }
 
     fn resolve_graph<'a>(
@@ -115,11 +124,13 @@ impl StoreRuntimeResolver for TestResolver {
             key.incarnation,
             LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
-        let path = PathBuf::from(format!(
-            "/verified/graph/{:?}/{}",
-            key.shard_id.scope,
-            key.incarnation.get()
-        ));
+        let path = self
+            .fixture_root
+            .path()
+            .join("verified")
+            .join("graph")
+            .join(format!("{:?}", key.shard_id.scope))
+            .join(key.incarnation.get().to_string());
         Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
     }
 }

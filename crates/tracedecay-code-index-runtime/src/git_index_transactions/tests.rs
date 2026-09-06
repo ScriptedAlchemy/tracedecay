@@ -188,6 +188,31 @@ fn configuration_and_filesystem_capability_digests_are_distinct() {
             .expect("git init starts")
             .success()
     );
+    let set_filemode = |value: &str| {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(["config", "--local", "core.filemode", value])
+                .status()
+                .expect("git config starts")
+                .success()
+        );
+    };
+    let read_filemode = || {
+        let output = Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "--bool", "--get", "core.filemode"])
+            .output()
+            .expect("git config read starts");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("core.filemode is UTF-8")
+            .trim()
+            .to_string()
+    };
+    set_filemode("true");
+    assert_eq!(read_filemode(), "true");
+
     let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
     let configuration_before = runner.configuration_digest().expect("configuration");
     let capabilities_before = runner
@@ -213,14 +238,8 @@ fn configuration_and_filesystem_capability_digests_are_distinct() {
             .filesystem_capabilities_digest()
             .expect("unchanged filesystem capabilities")
     );
-    assert!(
-        Command::new("git")
-            .current_dir(directory.path())
-            .args(["config", "--local", "core.filemode", "false"])
-            .status()
-            .expect("git config starts")
-            .success()
-    );
+    set_filemode("false");
+    assert_eq!(read_filemode(), "false");
     assert_ne!(
         capabilities_before,
         runner

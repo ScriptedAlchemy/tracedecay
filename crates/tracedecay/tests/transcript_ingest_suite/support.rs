@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-fn normalize_path_text(raw: &str) -> String {
+pub fn normalize_path_text(raw: &str) -> String {
     let raw = raw.strip_prefix("\\\\?\\").unwrap_or(raw);
     let unc_path;
     let raw = if let Some(rest) = raw.strip_prefix("UNC\\") {
@@ -23,12 +23,16 @@ fn normalize_path_text(raw: &str) -> String {
     text.strip_prefix("\\\\?\\").unwrap_or(&text).to_string()
 }
 
-pub fn assert_metadata_path_eq(actual: &serde_json::Value, expected: &Path) {
-    let actual = actual.as_str().expect("metadata path should be a string");
+pub fn assert_path_text_eq(actual: &str, expected: &Path) {
     assert_eq!(
         normalize_path_text(actual),
         normalize_path_text(&expected.to_string_lossy())
     );
+}
+
+pub fn assert_metadata_path_eq(actual: &serde_json::Value, expected: &Path) {
+    let actual = actual.as_str().expect("metadata path should be a string");
+    assert_path_text_eq(actual, expected);
 }
 
 /// Initializes `project` as a tracedecay project the ingest resolvers accept
