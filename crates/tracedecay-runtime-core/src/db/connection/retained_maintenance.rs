@@ -117,13 +117,6 @@ impl Database {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
-    #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn truncate_wal_for_test_artifact(&self) -> Result<()> {
-        self.truncate_wal_for_offline_maintenance().await
-    }
-
     #[hotpath::skip]
     pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
         let authority = self.write_authority()?;
