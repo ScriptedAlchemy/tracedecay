@@ -31,28 +31,6 @@ fn daemon_observability_producer_identity(
     )
 }
 
-fn registered_observability_producer_matches_mount(
-    registered: &RegisteredObservabilityProducerV1,
-    database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    project_id: &ProjectId,
-    configuration_revision: &ManifestDigest,
-    configuration_provenance_revision: &ManifestDigest,
-    policy_revision: &ManifestDigest,
-) -> bool {
-    let incumbent = registered.producer();
-    registered.matches(
-        database,
-        configuration_provenance_revision,
-        &tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: project_id.as_str().to_owned(),
-            process_boot_id: incumbent.identity().process_boot_id.clone(),
-            producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
-            configuration_revision: configuration_revision.as_str().to_owned(),
-            policy_revision: policy_revision.as_str().to_owned(),
-        },
-    )
-}
-
 impl DaemonInvocationService {
     #[hotpath::measure(label = "daemon.service.observability.mount", future = true)]
     pub async fn mount_observability_producer(
@@ -61,7 +39,6 @@ impl DaemonInvocationService {
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         project_id: ProjectId,
         configuration_revision: ManifestDigest,
-        configuration_provenance_revision: ManifestDigest,
         policy_revision: ManifestDigest,
     ) -> Result<
         Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
@@ -71,20 +48,18 @@ impl DaemonInvocationService {
             .register_or_reconcile(
                 project_root.clone(),
                 |registered: &mut RegisteredObservabilityProducerV1| {
-                    registered_observability_producer_matches_mount(
-                        registered,
-                        &database,
-                        &project_id,
-                        &configuration_revision,
-                        &configuration_provenance_revision,
-                        &policy_revision,
-                    )
-                    .then_some(())
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message:
-                            "a different observability producer is already mounted for this project"
-                                .to_owned(),
-                    })
+                    registered
+                        .matches(
+                            &database,
+                            project_id.as_str(),
+                            DAEMON_OBSERVABILITY_PRODUCER_REVISION,
+                        )
+                        .then_some(())
+                        .ok_or_else(|| TraceDecayError::Config {
+                            message:
+                                "a different observability producer is already mounted for this project"
+                                    .to_owned(),
+                        })
                 },
                 || async {
                     // The producer and its store-keyed settlement recorder are
@@ -97,8 +72,6 @@ impl DaemonInvocationService {
                         .acquire_or_start(
                             &database,
                             &StoreObservabilityMountV1 {
-                                configuration_provenance_revision:
-                                    configuration_provenance_revision.clone(),
                                 authorized_scope_ref: project_id.as_str().to_owned(),
                                 producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION
                                     .to_owned(),
