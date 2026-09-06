@@ -823,16 +823,7 @@ fn try_acquire_task_lock_blocking(
     if let Some(parent) = path.parent() {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    let coordination = match acquire_task_lock_coordination(path) {
-        Ok(coordination) => coordination,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
-            }
-            acquire_task_lock_coordination(path)?
-        }
-        Err(error) => return Err(error),
-    };
+    let coordination = acquire_task_lock_coordination(path)?;
     for attempt in 0..2 {
         match create_task_lock_file(path, ownership_token, now_secs) {
             Ok(task_lock) => return Ok(Some(task_lock)),
