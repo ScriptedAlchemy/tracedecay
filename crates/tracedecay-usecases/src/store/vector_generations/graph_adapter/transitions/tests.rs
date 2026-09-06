@@ -289,7 +289,6 @@ async fn verify_pass_outlasting_the_interactive_deadline_still_publishes() {
         // Twice the interactive deadline: enough that a shared 30s authority
         // is already spent before the install phase starts.
         simulated_verify_elapsed: Some(2 * GRAPH_OPERATION_DEADLINE),
-        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
@@ -315,7 +314,6 @@ async fn publication_cancelled_during_verify_reports_typed_cancellation() {
         staged_publication("cancelled-verify", 'b', &cancellation).await;
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancel_during_verify: Some(cancellation_flag),
-        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
@@ -349,7 +347,6 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         require_background_begin: true,
-        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
@@ -395,7 +392,6 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancellation_to_trip: Some(cancellation_flag),
-        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
@@ -598,7 +594,6 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         begin_gate: Mutex::new(Some(gate)),
         begin_started: Some(Arc::clone(&begin_started)),
-        recover_snapshot_gate: Mutex::new(None),
         ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
