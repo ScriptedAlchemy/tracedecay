@@ -745,17 +745,29 @@ impl DaemonInvocationService {
             .cancel(access.session_id())
             .await
             .is_ok();
-        let actor_detached = match session.actor.lifecycle() {
-            SessionLifecycle::Exited => true,
-            _ => session.actor.detach().is_ok(),
-        };
+        // Detach is idempotent over every state that already satisfies it.
+        // `LspSessionControl::detach` is a transition, so it refuses
+        // `Detached -> Detached`, and `Exited`/`Expired` are already past it.
+        // Only a still-attached actor needs the transition — and needs it for
+        // the in-flight reset it carries. Reporting the other three as a
+        // failed detach is what made a session the daemon's own connection
+        // teardown (`disconnect_lsp_session`) had already detached come back
+        // as `Unavailable`, so a gracefully exiting stdio bridge failed with
+        // "LSP gateway authority is unavailable" after its own
+        // `shutdown`/`exit`.
+        if !matches!(
+            session.actor.lifecycle(),
+            SessionLifecycle::Detached | SessionLifecycle::Exited | SessionLifecycle::Expired
+        ) {
+            let _ = session.actor.detach();
+        }
         if !endpoint_closed {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         }
-        if !lease_cancelled || !actor_detached {
+        if !lease_cancelled {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
