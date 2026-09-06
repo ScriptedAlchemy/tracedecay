@@ -22,7 +22,12 @@ fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_application::Res
 
 #[test]
 fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
-    let repo_root = checked_in_fixture_root();
+    // The workload pins historical commits that survive only as unreachable
+    // objects on the integration branch; the fixture clone backfills the
+    // checked-in evaluator pack so the historical query resolves here as it
+    // does in the daemon.
+    let fixture = crate::candidate_output::tests::authenticated_repo_fixture();
+    let repo_root = fixture.root.clone();
     let workload = load_candidate_workload(
         &repo_root.join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
     )
@@ -146,7 +151,12 @@ fn baseline_report_is_self_validating_but_not_activation_evidence() {
         return;
     }
 
-    let repo_root = checked_in_fixture_root();
+    // The workload pins historical commits that survive only as unreachable
+    // objects on the integration branch; the fixture clone backfills the
+    // checked-in evaluator pack so the historical query resolves here as it
+    // does in the daemon.
+    let fixture = crate::candidate_output::tests::authenticated_repo_fixture();
+    let repo_root = fixture.root.clone();
     let workload = load_candidate_workload(
         &repo_root.join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
     )
