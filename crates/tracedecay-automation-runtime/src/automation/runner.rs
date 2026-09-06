@@ -836,9 +836,12 @@ fn run_combined_review_for_retrieval_inner<'a>(
                 &reflector_bundle.evidence,
             )
             .await?;
-            let skill_errors =
+            let mut skill_errors =
                 validate_skill_proposals(&skill_bundle.profile_root, &skill_run_id, &skills)
                     .await?;
+            if let Err(error) = skill_writer::validate_skill_writer_decision(&output, &skills) {
+                skill_errors.push(json!({"reason": error.to_string()}));
+            }
             if fact_errors.is_empty() && skill_errors.is_empty() {
                 break;
             }
@@ -1300,13 +1303,15 @@ fn combined_reflector_failure_projection(output: &Value) -> Value {
 }
 
 fn combined_skill_failure_projection(output: &Value) -> Value {
-    json!({
-        "skills": output
-            .get("skills")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    })
+    let mut projection = json!({
+        "skills": output.get("skills").and_then(Value::as_array).cloned().unwrap_or_default(),
+    });
+    for field in ["outcome", "decision"] {
+        if let Some(value) = output.get(field) {
+            projection[field] = value.clone();
+        }
+    }
+    projection
 }
 
 fn build_combined_review_prompt(reflector_evidence: &Value, skill_evidence: &Value) -> String {

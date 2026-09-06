@@ -1,0 +1,17 @@
+{
+  "id": "routing_nonindexed_doc",
+  "category": "routing",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Copyedit this supplied documentation sentence and return only the corrected sentence: \"The warehouse track stock by SKU.\"",
+  "ground_truth": [
+    "The warehouse tracks stock by SKU."
+  ],
+  "max_tool_calls": 0,
+  "allowed_skills": [],
+  "max_tracedecay_calls": 0
+}

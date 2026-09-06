@@ -136,7 +136,7 @@ def hint_signature_drift(source_text: str) -> list[str]:
 _SKILL_IDS = (
     "exploring-code", "tracing-functions", "assessing-impact", "reviewing-changes",
     "project-memory", "editing-safely", "fixing-build-and-type-errors",
-    "managing-session-context", "using-tracedecay", "using-the-cli", "code-health",
+    "managing-session-context", "using-the-cli", "code-health",
     "diagnosing-analytics", "discovering-tracedecay", "inspecting-managed-skills",
 )
 # Substrings/regexes that must never appear in a scenario prompt (case-insensitive).
@@ -173,6 +173,10 @@ def lint_scenarios(scenarios: dict) -> list[str]:
     """Return human-readable violation lines across all scenarios (empty = ok)."""
     problems = []
     for sid in sorted(scenarios):
+        # Scenario ids become transcript basenames in the runner. Generated
+        # cases must not escape the artifact directory or inject TSV records.
+        if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", sid):
+            problems.append(f"{sid!r}: unsafe scenario id")
         hits = lint_prompt(scenarios[sid].get("prompt", ""))
         if hits:
             problems.append(f"{sid}: prompt names {sorted(set(hits))}")
@@ -512,6 +516,18 @@ def invoked_agents(tr: Transcript) -> list[str]:
     return invoked
 
 
+def invoked_skills(tr: Transcript) -> list[str]:
+    """Read explicit host skill invocations, never prose that merely names a skill."""
+    skills = set()
+    for call in tr.tools:
+        if not _is_skill_invocation(call):
+            continue
+        values = _string_leaves(call.input) if call.canon == "Skill" else [call.raw_name]
+        for value in values:
+            skills.update(re.findall(r"tracedecay:([a-z][a-z0-9-]*)", value))
+    return sorted(skills)
+
+
 def _has_hint_signature(text: str) -> bool:
     low = text.lower()
     return any(sig in low for sig in HINT_SIGNATURES)
@@ -642,6 +658,38 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         details["invoked_agent"] = agents[0] if agents else None
         details["invoked_agents"] = agents
 
+    # Routing is reported separately: loading a skill is not task success.
+    if "expected_skill" in scn or "allowed_skills" in scn:
+        expected = scn.get("expected_skill")
+        allowed = scn.get("allowed_skills", [expected] if expected else [])
+        # Codex reads skill files through exec/read tools, without a reliable
+        # invocation event in the supported transcript normalizer. Absence of a
+        # Claude-style Skill event therefore cannot establish a Codex miss.
+        skills_available = run_meta.get("channel_condition", "full") not in {"no-skills", "bare"}
+        measured = tr.host == "claude" and skills_available
+        if not skills_available:
+            unmeasured_reason = "skills_unavailable_in_condition"
+        elif tr.host != "claude":
+            unmeasured_reason = "host_skill_evidence_unsupported"
+        else:
+            unmeasured_reason = None
+        selected = invoked_skills(tr) if measured else None
+        details["skill_routing"] = {
+            "measured": measured,
+            "unmeasured_reason": unmeasured_reason,
+            "expected": expected,
+            "allowed": allowed,
+            "invoked": selected,
+            "missed": bool(expected and expected not in selected) if measured else None,
+            "unexpected": [skill for skill in selected if skill not in allowed] if measured else None,
+        }
+    td_calls = sum(call.is_tracedecay for call in meaningful)
+    details["tracedecay_call_count"] = td_calls
+    if "max_tracedecay_calls" in scn:
+        details["tracedecay_call_budget"] = scn["max_tracedecay_calls"]
+        details["excess_tracedecay_calls"] = max(0, td_calls - scn["max_tracedecay_calls"])
+        subs["efficiency"] *= float(td_calls <= scn["max_tracedecay_calls"])
+
     # weighted score
     total_w = sum(WEIGHTS[k] for k in subs)
     score = sum(subs[k] * WEIGHTS[k] for k in subs) / total_w if total_w else 0.0
@@ -712,7 +760,32 @@ def aggregate(results: list[dict]) -> dict:
                 "mean_score": round(sum(r["score"] for r in crs) / len(crs), 4) if crs else 0.0,
             }
 
+        skill_counts: dict[str, dict[str, int]] = {}
+        no_skill_cases = no_skill_overtrigger = unmeasured_skill_cases = 0
+        for result in rs:
+            routing = result["details"].get("skill_routing")
+            if routing is None:
+                continue
+            if not routing["measured"]:
+                unmeasured_skill_cases += 1
+                continue
+            expected = routing["expected"]
+            if not routing["allowed"]:
+                no_skill_cases += 1
+                no_skill_overtrigger += bool(routing["invoked"])
+            for skill in set(routing["invoked"]) | ({expected} if expected else set()):
+                counts = skill_counts.setdefault(skill, {"tp": 0, "fn": 0, "fp": 0})
+                if skill == expected:
+                    counts["tp" if skill in routing["invoked"] else "fn"] += 1
+                elif skill in routing["unexpected"]:
+                    counts["fp"] += 1
+
         agg[host] = {
+            "skill_routing": skill_counts,
+            "unmeasured_skill_cases": unmeasured_skill_cases,
+            "no_skill_cases": no_skill_cases,
+            "no_skill_overtrigger": no_skill_overtrigger,
+            "excess_tracedecay_calls": sum(r["details"].get("excess_tracedecay_calls", 0) for r in rs),
             "n": n,
             "mean_score": round(sum(r["score"] for r in rs) / n, 4) if n else 0.0,
             "first_tool_choice_rate": rate("first_tool_choice"),
@@ -740,6 +813,18 @@ def render_report(scoreboard: dict) -> str:
     lines.append(f"- git: `{meta.get('git_sha','?')}`")
     lines.append(f"- graded: {len(scoreboard['results'])} transcript(s)")
     lines.append(f"- invalid launches excluded: {len(meta.get('invalid_runs', []))}")
+    lines.append("")
+    lines.append("## Skill routing (separate from task outcomes)")
+    lines.append("")
+    lines.append("| host/model | skill | correct | missed | unexpected |")
+    lines.append("|---|---|---:|---:|---:|")
+    for host, values in scoreboard["aggregate"].items():
+        for skill, counts in values.get("skill_routing", {}).items():
+            lines.append(f"| {host} | {skill} | {counts['tp']} | {counts['fn']} | {counts['fp']} |")
+        lines.append(f"{host}: {values.get('no_skill_overtrigger', 0)} over-triggers in "
+                     f"{values.get('no_skill_cases', 0)} no-skill cases; "
+                     f"{values.get('excess_tracedecay_calls', 0)} excess TraceDecay calls; "
+                     f"{values.get('unmeasured_skill_cases', 0)} skill-routing cases unmeasured.")
     lines.append("")
     lines.append("## Per-host aggregate")
     lines.append("")
@@ -843,6 +928,8 @@ def load_scenarios(scenarios_dir: str) -> dict[str, dict]:
         if fn.endswith(".json"):
             with open(os.path.join(scenarios_dir, fn)) as f:
                 s = json.load(f)
+            if s["id"] in scenarios:
+                raise ValueError(f"duplicate scenario id: {s['id']!r}")
             scenarios[s["id"]] = s
     return scenarios
 
