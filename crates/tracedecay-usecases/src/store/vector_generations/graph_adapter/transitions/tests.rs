@@ -34,7 +34,7 @@ use tracedecay_store::{
 
 use super::{post_commit_publication_settlement_error, semantic_stage_source_identity};
 use crate::semantic_runtime::{
-    SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
+    RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
@@ -403,6 +403,62 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
     ));
 }
 
+#[tokio::test]
+async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup() {
+    let source = CodeGenerationId::new("code-generation.retired-after-lookup").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let (plan, prepared, descriptor) = prepared_generation(
+        &source,
+        "chunk.retired-after-lookup",
+        'f',
+        &admitted_embedding(),
+    );
+    store.configure_stage(descriptor).unwrap();
+    let build = store
+        .begin_generation(plan, Arc::clone(&cancellation))
+        .await
+        .unwrap()
+        .build_id()
+        .clone();
+    store
+        .commit_batch(&build, None, prepared, Arc::clone(&cancellation))
+        .await
+        .unwrap();
+    let publication = store
+        .publish_generation(&build, Arc::clone(&cancellation))
+        .await
+        .unwrap();
+    let retired = Arc::new(AtomicBool::new(false));
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        retire_after_published_lookup: Some(Arc::clone(&retired)),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(retained.runtime()))
+    });
+    let historical = RetainedSemanticVectorGraphV1::new(probe, cancellation);
+
+    let error = match GraphVectorGenerationStoreV1::read_only_generation(
+        &historical,
+        &publication.generation_id,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("a retired graph generation must not be served from stale mapping"),
+    };
+    assert!(retired.load(Ordering::SeqCst));
+    assert!(matches!(
+        error,
+        VectorGenerationStoreErrorV1::Unavailable(ref message)
+            if message == "published graph generation was retired after its mapping read"
+    ));
+}
+
 /// Stands in for `EXACT_SQL_TRANSACTION_IDLE_LIMIT`, shrunk so the test fails
 /// in seconds instead of parking for the real abandoned-transaction lease.
 const WRITER_GATE_LEASE: Duration = Duration::from_secs(2);
@@ -496,6 +552,7 @@ struct PublicationAuthorityProbeRuntime {
     /// Trips lifecycle cancellation from inside the verify pass.
     cancel_during_verify: Option<Arc<AtomicBool>>,
     publish_calls: AtomicUsize,
+    retire_after_published_lookup: Option<Arc<AtomicBool>>,
 }
 
 impl PublicationAuthorityProbeRuntime {
@@ -510,6 +567,7 @@ impl PublicationAuthorityProbeRuntime {
             verify_completed_at: Mutex::new(None),
             cancel_during_verify: None,
             publish_calls: AtomicUsize::new(0),
+            retire_after_published_lookup: None,
         }
     }
 }
@@ -535,6 +593,15 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         publication: &GraphPublicationKeyV1,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        if self
+            .retire_after_published_lookup
+            .as_ref()
+            .is_some_and(|retired| retired.load(Ordering::SeqCst))
+        {
+            return Err(GraphDbError::unavailable(
+                "published graph generation was retired after its mapping read",
+            ));
+        }
         self.inner
             .recover_verified_generation(publication, authority)
     }
@@ -589,7 +656,15 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         key: &SemanticVectorPublishedGenerationKey,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<SemanticVectorPublishedGenerationLookup, GraphDbError> {
-        self.inner.published_semantic_generation(key, authority)
+        let lookup = self.inner.published_semantic_generation(key, authority)?;
+        if matches!(
+            &lookup,
+            SemanticVectorPublishedGenerationLookup::Published { .. }
+        ) && let Some(retired) = &self.retire_after_published_lookup
+        {
+            retired.store(true, Ordering::SeqCst);
+        }
+        Ok(lookup)
     }
 
     fn append_stage_batch(
