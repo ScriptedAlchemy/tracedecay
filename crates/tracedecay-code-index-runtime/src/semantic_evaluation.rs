@@ -287,10 +287,11 @@ pub async fn build_daemon_semantic_evaluation_candidate(
         ))
         .await?
         .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let store = hotpath::measure_block!(
-        "daemon.semantic.evaluation.candidate.vector_store",
-        GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_generation_id)
+    let store = hotpath::future!(
+        GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_generation_id),
+        label = "daemon.semantic.evaluation.candidate.vector_store"
     )
+    .await
     .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
     .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
     let vector = control
