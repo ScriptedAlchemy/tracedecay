@@ -579,20 +579,40 @@ mod tests {
             !owner.retain(async {}),
             "shutdown must fence later settlement admission"
         );
-        let shutdown = tokio::spawn({
+        let first_shutdown = tokio::spawn({
             let owner = Arc::clone(&owner);
             async move { owner.shutdown().await }
         });
         tokio::task::yield_now().await;
         assert!(
-            !shutdown.is_finished(),
-            "shutdown must join retained settlement work"
+            !first_shutdown.is_finished(),
+            "first shutdown waiter must join retained settlement work"
+        );
+
+        first_shutdown.abort();
+        let first_join_error = match first_shutdown.await {
+            Err(error) => error,
+            Ok(_) => panic!("first shutdown waiter unexpectedly completed"),
+        };
+        assert!(
+            first_join_error.is_cancelled(),
+            "aborted first shutdown waiter must join as cancelled"
+        );
+
+        let retry_shutdown = tokio::spawn({
+            let owner = Arc::clone(&owner);
+            async move { owner.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !retry_shutdown.is_finished(),
+            "retried shutdown must retain and join settlement work after waiter cancellation"
         );
 
         release.notify_one();
-        shutdown
+        retry_shutdown
             .await
-            .expect("operation-owner shutdown remains joinable")
-            .expect("operation-owner shutdown joins cleanly");
+            .expect("retried operation-owner shutdown remains joinable")
+            .expect("retried operation-owner shutdown joins cleanly");
     }
 }
