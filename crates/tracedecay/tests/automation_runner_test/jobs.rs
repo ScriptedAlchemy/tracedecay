@@ -1200,11 +1200,11 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
     let lock_path = lock_dir.join("user_job_concurrent-job.lock");
     PrivateStoreIo::create_dir_all_durable(&profile_root).unwrap();
     PrivateStoreIo::create_dir_all_durable(&lock_dir).unwrap();
-    let job = sample_job("concurrent-job");
-    let config = enabled_job_config();
-    let backend = SlowBackend {
+    let job = Arc::new(sample_job("concurrent-job"));
+    let config = Arc::new(enabled_job_config());
+    let backend = Arc::new(SlowBackend {
         calls: AtomicUsize::new(0),
-    };
+    });
     let barrier = Arc::new(Barrier::new(2));
 
     let (first, second) = tokio::join!(
@@ -1214,12 +1214,15 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
             let dashboard_root = dashboard_root.clone();
             let profile_root = profile_root.clone();
             let lock_path = lock_path.clone();
+            let job = Arc::clone(&job);
+            let config = Arc::clone(&config);
+            let backend = Arc::clone(&backend);
             async move {
                 barrier.wait().await;
                 let run = run_user_job_with_backend(
                     &dashboard_root,
                     &config,
-                    &backend,
+                    backend.as_ref(),
                     &job,
                     UserJobRunOptions {
                         trigger: AutomationTrigger::Dashboard,
@@ -1239,12 +1242,15 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
             let dashboard_root = dashboard_root.clone();
             let profile_root = profile_root.clone();
             let lock_path = lock_path.clone();
+            let job = Arc::clone(&job);
+            let config = Arc::clone(&config);
+            let backend = Arc::clone(&backend);
             async move {
                 barrier.wait().await;
                 let run = run_user_job_with_backend(
                     &dashboard_root,
                     &config,
-                    &backend,
+                    backend.as_ref(),
                     &job,
                     UserJobRunOptions {
                         trigger: AutomationTrigger::ManualCli,
