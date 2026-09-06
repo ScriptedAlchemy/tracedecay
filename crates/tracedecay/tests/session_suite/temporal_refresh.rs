@@ -694,7 +694,7 @@ async fn progress_replay_ignores_updated_at_clock_skew() {
         *first.coverage(),
         first.committed_batches(),
         first.committed_records(),
-        UtcMicros(first.updated_at().0 + 5_000),
+        UtcMicros(i64::MAX),
     );
     let replayed = store
         .persist_session_refresh_progress(skewed)
@@ -949,13 +949,15 @@ async fn future_progress_timestamp_is_rejected() {
         coverage(0),
         1,
         0,
-        UtcMicros(now().0 + 3_600_000_000),
+        UtcMicros(i64::MAX),
     );
     assert!(matches!(
         store
             .persist_session_refresh_projection_batch(future, batch_for(&recovery, 0, 0, 0))
             .await,
-        Err(SessionStoreError::InvalidStateTransition { .. })
+        Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh progress timestamp is in the future"
+        })
     ));
 }
 
