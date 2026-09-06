@@ -898,6 +898,33 @@ pub(crate) fn projection_relation_deletion_page_checked(
     .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Records read by retirement page scans on this thread; the retirement
+    /// tests pin that a whole generation is read once across all its pages.
+    static RETIREMENT_PAGE_RECORD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_retirement_page_record_reads() {
+    RETIREMENT_PAGE_RECORD_READS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn retirement_page_record_reads() -> usize {
+    RETIREMENT_PAGE_RECORD_READS.with(std::cell::Cell::get)
+}
+
+/// One bounded page of identities to retire from a projection.
+///
+/// Retirement deletes a generation page by page, so this scan must cost one
+/// page, not the projection: it reads owner-label candidates in index order
+/// and stops as soon as the page is full. Filtering every candidate first
+/// (the `labeled_projection_nodes_checked` shape) re-read the whole
+/// projection per page — measured at ~9.5 s per 4,096-row page against a
+/// 3.4M-row staging release, an O(rows² / page) sweep that kept the
+/// publishing thread, and the serving seat behind it, busy for hours.
+#[hotpath::measure(label = "graph_db.projection.deletion_page")]
 fn projection_identity_deletion_page_checked(
     database: &GrafeoDB,
     owner_label: &str,
@@ -907,21 +934,32 @@ fn projection_identity_deletion_page_checked(
     description: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<String>, GraphDbError> {
-    let nodes = labeled_projection_nodes_checked(
-        database,
-        owner_label,
-        record_label,
-        maximum_records,
-        check,
-    )?;
+    check()?;
     let store = database.graph_store();
+    require_generation_capacity(
+        if record_label == ENTITY_LABEL {
+            "entities"
+        } else {
+            "relations"
+        },
+        nodes_with_label_count(store.as_ref(), owner_label),
+        0,
+        maximum_records,
+    )?;
     let mut identities = BTreeSet::new();
     let mut live_bytes = 0usize;
-    for node in nodes {
+    for node in nodes_with_label(store.as_ref(), owner_label) {
         check()?;
-        let record = store.get_node(node).ok_or_else(|| GraphDbError::Corrupt {
-            message: format!("native graph {description} disappeared during retirement"),
-        })?;
+        #[cfg(test)]
+        RETIREMENT_PAGE_RECORD_READS.with(|count| count.set(count.get() + 1));
+        // A candidate carrying only the owner label is a reference node, not
+        // a record of this kind; the labeled scan skips those the same way.
+        let Some(record) = store
+            .get_node(node)
+            .filter(|record| has_native_label(record, record_label))
+        else {
+            continue;
+        };
         let identity = required_arc_string(
             record.get_property(identity_property),
             &format!("native graph {description} identity"),
