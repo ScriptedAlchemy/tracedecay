@@ -347,6 +347,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         SessionTemporalProjectionBatchReceiptV1,
     )> {
         validate_progress_batch_identity(&progress, &batch)?;
+        let authoritative_validation_time = now_micros(PERSIST_REFRESH)?;
         let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
@@ -361,7 +362,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         .await?;
         validate_batch_binding(&binding, &batch)?;
         validate_progress_binding(&binding, &progress)?;
-        require_progress_timestamp(&progress)?;
 
         if let Some(existing) =
             read_progress(&transaction, progress.session_id(), progress.operation_id()).await?
@@ -398,6 +398,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 });
             }
         }
+        require_progress_timestamp(&progress, authoritative_validation_time)?;
 
         seed_active_projection_in_transaction(&transaction, &batch, &execution_control).await?;
         let receipt = persist_session_temporal_projection_batch_in_transaction(
@@ -439,6 +440,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         &self,
         progress: SessionRefreshProgressV1,
     ) -> SessionStoreResult<SessionRefreshProgressV1> {
+        let authoritative_validation_time = now_micros(PERSIST_REFRESH)?;
         let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
             self.begin_write_transaction()
                 .await
@@ -452,7 +454,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
         validate_progress_binding(&binding, &progress)?;
-        require_progress_timestamp(&progress)?;
         if let Some(existing) =
             read_progress(&transaction, progress.session_id(), progress.operation_id()).await?
         {
@@ -471,6 +472,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 });
             }
         }
+        require_progress_timestamp(&progress, authoritative_validation_time)?;
         let batch_ordinal = progress.committed_batches().checked_sub(1).ok_or(
             SessionStoreError::InvalidStateTransition {
                 context: "refresh progress requires a projection batch",
@@ -1322,9 +1324,11 @@ fn require_progress_batch_ordinal(
     Ok(())
 }
 
-fn require_progress_timestamp(progress: &SessionRefreshProgressV1) -> SessionStoreResult<()> {
-    let now = now_micros(PERSIST_REFRESH)?;
-    if progress.updated_at() > now {
+fn require_progress_timestamp(
+    progress: &SessionRefreshProgressV1,
+    authoritative_validation_time: UtcMicros,
+) -> SessionStoreResult<()> {
+    if progress.updated_at() > authoritative_validation_time {
         return Err(SessionStoreError::InvalidStateTransition {
             context: "refresh progress timestamp is in the future",
         });
@@ -2304,5 +2308,56 @@ fn decode_refresh_state(
             operation,
             "refresh operation state is invalid",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn progress_at(updated_at: UtcMicros) -> SessionRefreshProgressV1 {
+        SessionRefreshProgressV1::new(
+            SessionRefreshOperationIdV1::new("refresh.timestamp-boundary").unwrap(),
+            SessionId::new("timestamp-boundary").unwrap(),
+            SessionRefreshFrontierV1::new(0, 0).unwrap(),
+            TemporalCoverageCountsV1 {
+                visible: 0,
+                hidden: 0,
+                unknown: 0,
+                redacted: 0,
+            },
+            0,
+            0,
+            updated_at,
+        )
+    }
+
+    #[test]
+    fn progress_timestamp_uses_authoritative_validation_boundary() {
+        let authoritative_validation_time = UtcMicros(1_000_000);
+
+        assert!(
+            require_progress_timestamp(
+                &progress_at(UtcMicros(authoritative_validation_time.0 - 1)),
+                authoritative_validation_time,
+            )
+            .is_ok()
+        );
+        assert!(
+            require_progress_timestamp(
+                &progress_at(authoritative_validation_time),
+                authoritative_validation_time,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            require_progress_timestamp(
+                &progress_at(UtcMicros(authoritative_validation_time.0 + 1)),
+                authoritative_validation_time,
+            ),
+            Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh progress timestamp is in the future",
+            })
+        ));
     }
 }
