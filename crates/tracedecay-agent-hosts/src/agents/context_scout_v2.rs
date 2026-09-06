@@ -474,16 +474,20 @@ impl ContextScoutModelExecutionV1 {
         Ok(())
     }
 
+    /// Returns the measured input token count so callers reuse this single
+    /// tokenization. Encoding the serialized request is the most expensive
+    /// step on a deadline-bounded proposal — a cold BPE table build alone can
+    /// spend the whole budget — so it must happen exactly once per request.
     pub fn validate_input(
         &self,
         request: &ContextScoutModelRequestV1,
-    ) -> Result<(), ContextScoutModelErrorV1> {
+    ) -> Result<usize, ContextScoutModelErrorV1> {
         let tokens =
             serialized_token_count(request).ok_or(ContextScoutModelErrorV1::TokenBudgetExceeded)?;
         if tokens > self.max_input_tokens {
             return Err(ContextScoutModelErrorV1::TokenBudgetExceeded);
         }
-        Ok(())
+        Ok(tokens)
     }
 
     pub fn validate_output(
@@ -787,6 +791,23 @@ pub(super) fn serialized_token_count(value: &impl Serialize) -> Option<usize> {
 #[cfg(not(feature = "token-counting"))]
 pub(super) fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
     None
+}
+
+/// Builds the shared tokenizer table, blocking until it exists.
+///
+/// The first `serialized_token_count` anywhere in the process builds a
+/// multi-megabyte BPE table. Measured on one contended Linux core that build
+/// runs 0.9s, and 4.4s at a tenth of a core — while a Scout proposal gives
+/// itself one second for everything, tokenizer included. Paying the build
+/// inside `propose` therefore spends the whole budget before the backend is
+/// ever raced, and the proposal reports `DeadlineExceeded` over a denial or a
+/// disconnect the backend had already produced. Callers that own a
+/// deadline-free moment build it here instead.
+pub(super) fn warm_token_counter() {
+    #[cfg(feature = "token-counting")]
+    {
+        let _ = o200k_base_singleton();
+    }
 }
 
 /// Exact-address burst coalescer. Superseded generations are visible through a

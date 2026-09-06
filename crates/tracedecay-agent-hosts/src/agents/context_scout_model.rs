@@ -8,7 +8,7 @@ use tracedecay_application::context_scout::{
 use super::context_scout_v2::{
     ContextScoutModelAssistantV1, ContextScoutModelCandidateV1, ContextScoutModelErrorV1,
     ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelProposalV1,
-    ContextScoutModelRequestV1, serialized_token_count,
+    ContextScoutModelRequestV1, serialized_token_count, warm_token_counter,
 };
 use crate::ports::pricing::cost_of_turn;
 use tracedecay_automation_runtime::automation::backend::{
@@ -74,6 +74,16 @@ impl ProductionContextScoutModelAssistantV1 {
         backend: Arc<dyn AgentTaskBackend>,
         requested_backend: ContextScoutModelBackendV1,
     ) -> Self {
+        // Construction is the deadline-free moment: this route is built at
+        // project startup and at configuration installs, never inside a
+        // bounded proposal. Build the tokenizer table off one background
+        // thread now so the first proposal does not spend its second on it.
+        // A plain thread, not `spawn_blocking`: constructors here also run
+        // outside a Tokio runtime.
+        static WARM_TOKEN_COUNTER: std::sync::Once = std::sync::Once::new();
+        WARM_TOKEN_COUNTER.call_once(|| {
+            std::thread::spawn(warm_token_counter);
+        });
         Self {
             backend,
             requested_backend,
@@ -95,24 +105,32 @@ impl ContextScoutModelAssistantV1 for ProductionContextScoutModelAssistantV1 {
         let requested_backend = self.requested_backend;
         Box::pin(async move {
             execution.checkpoint()?;
-            execution.validate_input(&request)?;
-            let measured_input_tokens =
-                serialized_token_count(&request).and_then(|tokens| u64::try_from(tokens).ok());
+            // One tokenization, not two: the admission check and the usage
+            // measurement are the same encode of the same request, and that
+            // encode is what a cold BPE table makes expensive.
+            let measured_input_tokens = u64::try_from(execution.validate_input(&request)?).ok();
             let backend_request = backend_request(request, execution.max_output_tokens)?;
             let cancellation = execution.cancellation.clone();
             let deadline = tokio::time::Instant::from_std(execution.deadline.instant());
             let mut task = tokio::task::spawn_blocking(move || backend.run_task(&backend_request));
+            // Fixed order, not a coin flip: cancellation stays authoritative,
+            // then a settled backend result, then the deadline. Preparation
+            // runs inside this budget, so on a slow host the deadline can be
+            // elapsed the moment the race starts; an unbiased select would
+            // then report a timeout roughly half the time over a denial or a
+            // disconnect the backend had already produced.
             let response = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    task.abort();
+                    return Err(ContextScoutModelErrorV1::Cancelled);
+                }
                 // A join failure means the backend worker terminated without
                 // producing a result: the run was lost mid-flight, which is a
                 // disconnect, not an unreachable backend.
                 result = &mut task => result
                     .map_err(|_| ContextScoutModelErrorV1::Disconnected)?
                     .map_err(scout_model_error_from_agent_task)?,
-                () = cancellation.cancelled() => {
-                    task.abort();
-                    return Err(ContextScoutModelErrorV1::Cancelled);
-                }
                 () = tokio::time::sleep_until(deadline) => {
                     task.abort();
                     return Err(ContextScoutModelErrorV1::DeadlineExceeded);
@@ -351,6 +369,10 @@ mod tests {
     }
 
     fn execution(cancellation: CancellationToken) -> ContextScoutModelExecutionV1 {
+        // Start the one-second clock only once the tokenizer exists. Each
+        // nextest process pays that build exactly once, and on a slow runner
+        // it alone outlasts the budget these cases hand the backend.
+        warm_token_counter();
         ContextScoutModelExecutionV1 {
             deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
             cancellation,
