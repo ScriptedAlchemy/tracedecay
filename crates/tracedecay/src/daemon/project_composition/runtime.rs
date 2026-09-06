@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
 use super::DaemonEngine;
@@ -52,6 +53,7 @@ impl ProductionProjectCompositionRuntime {
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
+        route_cancellation: CancellationToken,
         handshake: DaemonHandshake,
     ) -> crate::mcp::DatabaseOwnerReconciler {
         match self {
@@ -60,6 +62,7 @@ impl ProductionProjectCompositionRuntime {
                 current_key,
                 current_project_path,
                 route_registered,
+                route_cancellation,
                 handshake,
             ),
             #[cfg(any(not(unix), test, feature = "test-transport"))]
@@ -67,6 +70,7 @@ impl ProductionProjectCompositionRuntime {
                 _store_administration.clone(),
                 current_key,
                 route_registered,
+                route_cancellation,
                 handshake,
             ),
         }

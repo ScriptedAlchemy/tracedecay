@@ -226,12 +226,14 @@ pub(super) fn portable_database_owner_reconciler(
     store_administration: StoreAdministration,
     current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
     route_registered: Arc<AtomicBool>,
+    route_cancellation: CancellationToken,
     handshake: DaemonHandshake,
 ) -> crate::mcp::DatabaseOwnerReconciler {
     Arc::new(move |fresh| {
         let store_administration = store_administration.clone();
         let current_key = Arc::clone(&current_key);
         let route_registered = Arc::clone(&route_registered);
+        let route_cancellation = route_cancellation.clone();
         let handshake = handshake.clone();
         Box::pin(async move {
             let scope = crate::daemon::branch_admin::graph_writer_scope(
@@ -263,7 +265,11 @@ pub(super) fn portable_database_owner_reconciler(
                         .await
                         .rekey(&old_key, &new_key);
                     if !rekeyed {
+                        // Terminal revocation: this route can never serve
+                        // again, so drop its fence and end everything that
+                        // waits on its lifetime.
                         route_registered.store(false, Ordering::Release);
+                        route_cancellation.cancel();
                     }
                     *current = new_key.clone();
                     Some((old_key.owner, new_key.owner, rekeyed))

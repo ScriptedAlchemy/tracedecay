@@ -754,6 +754,74 @@ fn database_owner_registry_rekeys_and_evicts_stale_routes() {
     assert!(collision.get_route(&route).is_none());
 }
 
+/// A failed rekey is terminal for the route: its replacement key could not be
+/// taken, so this registration can never serve again. Clearing the fence alone
+/// is not enough — the code-index activation mount and the query-authority
+/// waiter no longer poll that flag, they hang off the route's own cancellation
+/// child. The revocation must cancel it, and must leave the project-open token
+/// it descends from alone: that one belongs to the caller, not the route.
+#[tokio::test]
+async fn failed_rekey_cancels_the_route_waiters_but_not_project_open() {
+    let temp = TempDir::new().expect("failed-rekey fixture");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("failed-rekey project");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("failed-rekey source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open_with_options(
+            &project,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+        )
+        .await
+        .expect("open failed-rekey project graph"),
+    );
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let fresh_key = super::super::ProjectServerKey::from_open_project(&graph, &handshake)
+        .expect("fresh project server key");
+    // The route still believes it owns a different physical graph, so the
+    // reconciler attempts a rekey; the registry holds no server under that
+    // stale key, so the transition fails exactly as an owner collision does.
+    let mut stale_key = fresh_key.clone();
+    stale_key.owner.graph_db_path = stale_key.owner.graph_db_path.with_file_name("stale.db");
+    let owners = Arc::new(tokio::sync::Mutex::new(
+        super::super::DatabaseOwnerRegistry::default(),
+    ));
+    let route_registered = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let project_open = super::super::CancellationToken::new();
+    let route_cancellation = project_open.child_token();
+    let reconcile = super::super::portable_database_owner_reconciler(
+        StoreAdministration::with_project_servers(owners),
+        Arc::new(tokio::sync::Mutex::new(stale_key)),
+        Arc::clone(&route_registered),
+        route_cancellation.clone(),
+        handshake,
+    );
+
+    reconcile(Arc::clone(&graph)).await;
+
+    assert!(
+        !route_registered.load(std::sync::atomic::Ordering::Acquire),
+        "a failed rekey must revoke the route registration"
+    );
+    assert!(
+        route_cancellation.is_cancelled(),
+        "a failed rekey must cancel the route's own waiters"
+    );
+    assert!(
+        !project_open.is_cancelled(),
+        "route revocation must not cancel the project-open token it descends from"
+    );
+}
+
 #[test]
 fn database_owner_registry_race_keeps_first_server_and_binds_route() {
     let owner = StoreOwnerKey {

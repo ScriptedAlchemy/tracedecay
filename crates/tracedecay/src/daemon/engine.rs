@@ -1005,6 +1005,7 @@ impl DaemonEngine {
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
+        route_cancellation: CancellationToken,
         handshake: DaemonHandshake,
     ) -> crate::mcp::DatabaseOwnerReconciler {
         let engine = self.clone();
@@ -1013,6 +1014,7 @@ impl DaemonEngine {
             let current_key = Arc::clone(&current_key);
             let current_project_path = Arc::clone(&current_project_path);
             let route_registered = Arc::clone(&route_registered);
+            let route_cancellation = route_cancellation.clone();
             let handshake = handshake.clone();
             Box::pin(hotpath::future!(
                 async move {
@@ -1048,7 +1050,11 @@ impl DaemonEngine {
                             .await
                             .rekey(&old_key, &new_key);
                         if !rekeyed {
+                            // Terminal revocation: this route can never serve
+                            // again, so drop its fence and end everything that
+                            // waits on its lifetime.
                             route_registered.store(false, Ordering::Release);
+                            route_cancellation.cancel();
                         }
                         let project_path = fresh.project_root().to_path_buf();
                         let new_session_db = match new_key.owner.project_id.as_deref() {
