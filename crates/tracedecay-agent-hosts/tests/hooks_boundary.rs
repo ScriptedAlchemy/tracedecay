@@ -121,7 +121,11 @@ async fn an_uninstalled_hook_runtime_is_reported_as_a_bootstrap_failure() {
     let layout_error = hook_runtime::resolve_store_layout(Path::new("/workspace/project"))
         .await
         .expect_err("an uninstalled hook runtime must not fabricate a layout");
-    assert!(layout_error.to_string().contains("never installed HookRuntimeV1"));
+    assert!(
+        layout_error
+            .to_string()
+            .contains("never installed HookRuntimeV1")
+    );
 
     // Readers whose signature cannot carry the failure log it and answer
     // conservatively; none of them substitutes a plausible production value.
@@ -131,5 +135,7 @@ async fn an_uninstalled_hook_runtime_is_reported_as_a_bootstrap_failure() {
             .is_none()
     );
     assert!(hook_runtime::hook_timings_enabled(Path::new("/workspace/project")).is_none());
-    assert!(!hook_runtime::is_project_initialized(Path::new("/workspace/project")));
+    assert!(!hook_runtime::is_project_initialized(Path::new(
+        "/workspace/project"
+    )));
 }
