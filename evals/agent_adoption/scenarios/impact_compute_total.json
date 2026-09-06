@@ -21,20 +21,6 @@
       "tracedecay_search",
       "tracedecay_body",
       "Read"
-    ],
-    "forbidden_first": [
-      "Grep",
-      "Glob"
-    ],
-    "forbidden_bash": [
-      "grep",
-      "rg ",
-      "rg\t",
-      "find ",
-      "cat ",
-      "sed ",
-      "awk ",
-      "ack "
     ]
   },
   "ground_truth": [
@@ -42,5 +28,11 @@
     "pricing_test"
   ],
   "max_tool_calls": 6,
-  "notes": "Blast radius: place_order (caller) and pricing_test (covering test)."
+  "notes": "Blast radius: place_order (caller) and pricing_test (covering test).",
+  "expected_skill": "assessing-impact",
+  "allowed_skills": [
+    "assessing-impact",
+    "find-impact"
+  ],
+  "max_tracedecay_calls": 6
 }

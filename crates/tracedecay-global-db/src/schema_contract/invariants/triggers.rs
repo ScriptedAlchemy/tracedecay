@@ -1706,14 +1706,6 @@ async fn trigger_matches_sql(
         && normalize_trigger_sql(&sql) == normalize_trigger_sql(expected_sql))
 }
 
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.triggers.suspend_immutability"
-)]
-#[hotpath::measure(
-    future = true,
-    label = "global_db.schema_contract.triggers.restore_immutability"
-)]
 #[cfg(test)]
 mod tests {
     use crate::tests::harness::RegisteredGlobalDbHarness;
