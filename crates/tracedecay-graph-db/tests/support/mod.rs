@@ -1,6 +1,8 @@
 #![allow(dead_code)] // shared test support: each contract target uses a subset
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -225,4 +227,122 @@ fn binding() -> StoreRuntimeBindingV1 {
         StoreIncarnationV1::new(1).unwrap(),
         StoreAuthorityEpochV1::new(1).unwrap(),
     )
+}
+
+/// Windows CI exports this to the whole shard as a speed knob. No production
+/// graph or SQLite backend currently reads it; durability fixtures still
+/// unset it so a green run cannot be mistaken for production durability proof.
+pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
+pub const GRAPH_CRASH_CHILD_ROOT_ENV: &str = "TRACEDECAY_GRAPH_CRASH_CHILD_ROOT";
+const GRAPH_CRASH_CHILD_READY: &str = "durable-phase.ready";
+
+/// Removes [`SQLITE_UNSAFE_FAST_ENV`] for the fixture's lifetime.
+pub struct UnsetSqliteUnsafeFast {
+    previous: Option<OsString>,
+}
+
+impl UnsetSqliteUnsafeFast {
+    pub fn new() -> Self {
+        let previous = std::env::var_os(SQLITE_UNSAFE_FAST_ENV);
+        unsafe {
+            std::env::remove_var(SQLITE_UNSAFE_FAST_ENV);
+        }
+        assert!(
+            std::env::var_os(SQLITE_UNSAFE_FAST_ENV).is_none(),
+            "durability fixtures must not credit {SQLITE_UNSAFE_FAST_ENV}"
+        );
+        Self { previous }
+    }
+}
+
+impl Drop for UnsetSqliteUnsafeFast {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(SQLITE_UNSAFE_FAST_ENV, value),
+                None => std::env::remove_var(SQLITE_UNSAFE_FAST_ENV),
+            }
+        }
+    }
+}
+
+pub fn crash_child_root() -> Option<PathBuf> {
+    std::env::var_os(GRAPH_CRASH_CHILD_ROOT_ENV).map(PathBuf::from)
+}
+
+pub fn mark_durable_phase(root: &Path) {
+    std::fs::write(root.join(GRAPH_CRASH_CHILD_READY), b"wal-synced").unwrap_or_else(|error| {
+        panic!("write durable-phase marker: {error}");
+    });
+}
+
+/// Runs this test in a child that exits without closing the store, then copies
+/// the leftover container and WAL sidecar. The copy happens only after the
+/// child has been joined, so Windows is not asked to `fs::copy` a live store.
+pub fn capture_unclean_crash_image(destination: &Path) {
+    let source = tempfile::TempDir::new().expect("crash source");
+    run_unclean_crash_child(source.path());
+    assert!(
+        source.path().join(GRAPH_CRASH_CHILD_READY).is_file(),
+        "crash child must reach the durable phase before exiting"
+    );
+    copy_crash_image(source.path(), destination);
+}
+
+fn current_test_name() -> String {
+    std::env::var("NEXTEST_TEST_NAME")
+        .ok()
+        .or_else(|| std::thread::current().name().map(str::to_owned))
+        .expect("crash child spawn needs the libtest/nextest test name")
+}
+
+fn run_unclean_crash_child(root: &Path) {
+    let test_name = current_test_name();
+    let output = Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", &test_name, "--nocapture"])
+        .env(GRAPH_CRASH_CHILD_ROOT_ENV, root)
+        .env_remove(SQLITE_UNSAFE_FAST_ENV)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("spawn crash child for {test_name}: {error}"));
+    assert!(
+        output.status.success(),
+        "crash child {test_name} failed ({:?})\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Recursively copies a *closed or abandoned* store's container and sidecar.
+/// Callers must not use this against a live Windows handle (lock violation 33).
+pub fn copy_crash_image(from_root: &Path, to_root: &Path) {
+    let from = graph_path(from_root);
+    let to = graph_path(to_root);
+    std::fs::copy(&from, &to).unwrap_or_else(|error| {
+        panic!(
+            "copy abandoned crash container {} -> {}: {error}",
+            from.display(),
+            to.display()
+        );
+    });
+    let from_sidecar = sidecar_wal_path(&from);
+    let to_sidecar = sidecar_wal_path(&to);
+    std::fs::create_dir_all(&to_sidecar).unwrap();
+    for entry in std::fs::read_dir(&from_sidecar).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to_sidecar.join(entry.file_name())).unwrap_or_else(|error| {
+            panic!(
+                "copy abandoned crash WAL {} -> {}: {error}",
+                entry.path().display(),
+                to_sidecar.display()
+            );
+        });
+    }
+}
+
+pub fn sidecar_wal_path(path: &Path) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".wal");
+    PathBuf::from(sidecar)
 }

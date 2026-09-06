@@ -1500,11 +1500,14 @@ mod authority_tests {
         let path = temp.path().join("oversized.payload");
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_VERIFIED_PAYLOAD_FILE_BYTES + 1).unwrap();
+        // Close the creator handle before size-only admission. A held Windows
+        // handle reports sharing/lock violation instead of the size refusal.
+        drop(file);
 
-        assert!(matches!(
-            read_payload_file_for_verify(&path),
-            Err(LcmError::PayloadIntegrityMismatch)
-        ));
+        assert_eq!(
+            read_payload_file_for_verify(&path).expect_err("oversized payload"),
+            LcmError::PayloadIntegrityMismatch
+        );
     }
 
     #[test]

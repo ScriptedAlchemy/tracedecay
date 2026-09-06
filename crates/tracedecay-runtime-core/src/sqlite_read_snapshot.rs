@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use fs2::FileExt;
+use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
@@ -28,22 +29,49 @@ static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> io::Result<()> {
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let source = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(io::Error::other)?;
-        let mut destination = Connection::open_with_flags(
-            &destination,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )
+    tokio::task::spawn_blocking(move || backup_live_sqlite_database_sync(&source, &destination))
+        .await
+        .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
+}
+
+/// Online backup of a possibly-live SQLite family. This is the supported
+/// consistent-copy authority; callers must not `fs::copy` a locked Windows
+/// store instead (issue #933).
+fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
+    backup_live_sqlite_database_with(source, destination, || Ok(()))
+}
+
+fn backup_live_sqlite_database_with(
+    source: &Path,
+    destination: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    checkpoint()?;
+    let source = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(io::Error::other)?;
-        let backup =
-            rusqlite::backup::Backup::new(&source, &mut destination).map_err(io::Error::other)?;
-        backup
-            .run_to_completion(128, Duration::from_millis(1), None)
-            .map_err(io::Error::other)
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
+    let mut destination = Connection::open_with_flags(
+        destination,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )
+    .map_err(io::Error::other)?;
+    let backup =
+        rusqlite::backup::Backup::new(&source, &mut destination).map_err(io::Error::other)?;
+    loop {
+        checkpoint()?;
+        match backup.step(128).map_err(io::Error::other)? {
+            StepResult::Done => break,
+            StepResult::More => {}
+            StepResult::Busy | StepResult::Locked => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "SQLite online backup returned unexpected step result {other:?}"
+                )));
+            }
+        }
+    }
+    checkpoint()
 }
 
 pub struct SnapshotDatabase {
@@ -686,21 +714,29 @@ fn copy_snapshot_family(
     control: &SnapshotReadControl,
 ) -> io::Result<(PreparedSnapshot, Arc<ScratchDirectory>)> {
     control.checkpoint()?;
-    if matches!(prepared.mode, SnapshotMode::Copy) {
-        control.copy_file(&prepared.source, &prepared.target)?;
-    }
-    if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-        for suffix in ["-wal", "-shm"] {
-            let source_member = with_suffix(&prepared.source, suffix);
-            let Some(_) = prepared
-                .source_state
-                .iter()
-                .find(|state| state.path == source_member)
-            else {
-                continue;
-            };
-            control.copy_file(&source_member, &with_suffix(&prepared.target, suffix))?;
+    match prepared.mode {
+        SnapshotMode::Copy => {
+            // Byte-copying a live Windows SQLite family fails with lock
+            // violation 33. The online backup API is the supported consistent
+            // snapshot authority and folds committed WAL frames into one file.
+            backup_live_sqlite_database_with(&prepared.source, &prepared.target, || {
+                control.checkpoint()
+            })?;
         }
+        SnapshotMode::Reflink => {
+            for suffix in ["-wal", "-shm"] {
+                let source_member = with_suffix(&prepared.source, suffix);
+                let Some(_) = prepared
+                    .source_state
+                    .iter()
+                    .find(|state| state.path == source_member)
+                else {
+                    continue;
+                };
+                control.copy_file(&source_member, &with_suffix(&prepared.target, suffix))?;
+            }
+        }
+        SnapshotMode::DirectImmutable => {}
     }
     control.checkpoint()?;
     if family_state(&prepared.source)? != prepared.source_state {
@@ -1237,11 +1273,16 @@ mod tests {
                  BEGIN IMMEDIATE;",
             )
             .unwrap();
+        let journal_mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         let wal = with_suffix(&path, "-wal");
         let shm = with_suffix(&path, "-shm");
         assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
         assert!(shm.is_file());
 
+        // Online backup of the live writer, not fs::copy of locked files (#933).
         let snapshot = open(&path).await.unwrap();
         assert_ne!(snapshot.identity_path, path);
 
