@@ -2451,16 +2451,16 @@ mod tests {
     fn scoop_restore_rewrites_only_the_service_executable() {
         let identity = TaskIdentity::for_package_user_sid(WindowsPackageId::Stable, TEST_SID)
             .expect("stable identity");
+        let expected_profile_root = PathBuf::from("C:/profiles/stable & exact");
         let original = render_task_xml_for(
             &spec(
                 "C:/scoop/apps/tracedecay/5.0.0/tracedecay.exe",
-                "C:/profiles/stable & exact",
+                expected_profile_root.clone(),
             ),
             &identity,
         )
         .expect("task XML");
-        let native_profile_root =
-            profile_root_from_task_xml(&original).expect("native task profile root");
+        let original_action = task_action_from_xml(&original).expect("original action");
         let replacement =
             Path::new("C:/Users/alice/AppData/Local/TraceDecay/service/tracedecay/tracedecay.exe");
         let restored =
@@ -2471,19 +2471,12 @@ mod tests {
             profile_root_from_task_xml(&restored).expect("restored task profile root");
         #[cfg(windows)]
         assert!(
-            windows_paths_equal(&restored_profile_root, &native_profile_root)
+            windows_paths_equal(&restored_profile_root, &expected_profile_root)
                 .expect("compare Windows profile paths")
         );
         #[cfg(not(windows))]
-        assert_eq!(restored_profile_root, native_profile_root);
-        let expected_arguments = format!(
-            "daemon run --profile-root {}",
-            quote_windows_argument(
-                windows_path_text(&native_profile_root, "daemon profile root")
-                    .expect("native profile root text")
-            )
-        );
-        assert_eq!(action.arguments, expected_arguments);
+        assert_eq!(restored_profile_root, expected_profile_root);
+        assert_eq!(action.arguments, original_action.arguments);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
