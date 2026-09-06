@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::Spinner;
 use crate::cli::BranchAction;
 
-use super::daemon::daemon_tool_json;
+use super::daemon::{daemon_tool_json, daemon_tool_json_until};
+
+const BRANCH_ADD_CLIENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(40 * 60);
 
 fn branch_list_rpc_args() -> serde_json::Value {
     serde_json::json!({
@@ -203,7 +205,8 @@ fn handle_branch_action_inner(
 
                 let spinner = Spinner::new();
                 spinner.set_message("syncing changes");
-                let response = daemon_tool_json(
+                let response = daemon_tool_json_until(
+                    tokio::time::Instant::now() + BRANCH_ADD_CLIENT_DEADLINE,
                     Some(&resolved.project_path),
                     "tracedecay_admin_branch_add",
                     serde_json::json!({ "branch": branch_name }),

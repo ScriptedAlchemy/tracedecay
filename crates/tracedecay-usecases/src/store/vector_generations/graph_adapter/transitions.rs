@@ -158,9 +158,13 @@ impl GraphVectorGenerationStoreV1 {
         rebuild: bool,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<VectorGenerationBeginOutcomeV1, VectorGenerationStoreErrorV1> {
+        // Opening or re-adopting a generation can hydrate a corpus-sized graph
+        // snapshot and reconcile a durable predecessor before the first batch.
+        // This is scheduled projection work, so lifecycle cancellation governs
+        // it; the interactive graph deadline would strand large restart paths.
         let authority = SemanticGraphExecutionAuthorityV1::new(
             Arc::clone(&cancellation),
-            Instant::now() + GRAPH_OPERATION_DEADLINE,
+            Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET,
         );
         validate_plan(&plan)?;
         crate::hotpath_observe::vector_candidates(plan.expected_chunk_ids.len());
