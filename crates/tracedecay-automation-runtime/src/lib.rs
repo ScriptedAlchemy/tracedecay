@@ -86,10 +86,6 @@ pub(crate) mod agents {
         safe_write_text_file, uses_default_user_profile, with_host_config_write_intents,
     };
 
-    pub(crate) mod host_cli {
-        pub use crate::automation::host_io::resolve_on_path;
-    }
-
     pub(crate) mod plugin_bundle {
         pub use crate::automation::host_io::{PluginFile, codex_agent_files};
     }

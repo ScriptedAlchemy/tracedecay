@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -66,10 +65,6 @@ fn register_production_host_io() {
             .collect()
     }
 
-    fn resolve_on_path(program: &str, path_var: Option<&OsStr>) -> TdResult<Option<PathBuf>> {
-        production_host_io::resolve_on_path(program, path_var)
-    }
-
     fn codex_agent_files() -> &'static [PluginFile] {
         static FILES: OnceLock<Vec<PluginFile>> = OnceLock::new();
         FILES
@@ -109,7 +104,6 @@ fn register_production_host_io() {
         write_text,
         write_json,
         remove_host_file,
-        resolve_on_path,
         codex_agent_files,
         with_write_intents,
     });

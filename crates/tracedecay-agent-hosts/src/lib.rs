@@ -139,7 +139,6 @@ pub fn register_automation_host_io() {
         write_text: crate::agents::safe_write_text_file,
         write_json: crate::agents::safe_write_json_file,
         remove_host_file: crate::agents::safe_remove_host_file,
-        resolve_on_path: crate::agents::host_cli::resolve_on_path,
         codex_agent_files,
         with_write_intents,
     });
