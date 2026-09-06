@@ -145,7 +145,7 @@ impl AnalyzerSupervisor {
         root: &AdmittedRoot,
         event: AnalyzerEvent,
     ) -> Result<AnalyzerState, AnalyzerTransitionError> {
-        if root != &self.root {
+        if !self.owns(root) {
             return Err(AnalyzerTransitionError::RootMismatch {
                 expected: self.root.clone(),
                 actual: root.clone(),
@@ -192,7 +192,19 @@ impl AnalyzerSupervisor {
             }
         };
         match event {
-            AnalyzerEvent::Ready | AnalyzerEvent::Disabled => self.last_failure = None,
+            // The budget counts *consecutive* failures. An analyzer that
+            // answers again has proven it is not the dead process the budget
+            // exists to stop restarting, so a later transient failure must not
+            // land on a counter left over from a recovered one. Without the
+            // reset, three unrelated transient failures spread across a
+            // daemon's whole life retire a live analyzer permanently, while a
+            // genuinely dead one still exhausts on its consecutive spawn
+            // failures, which never reach `Ready`.
+            AnalyzerEvent::Ready => {
+                self.last_failure = None;
+                self.restart_attempts = 0;
+            }
+            AnalyzerEvent::Disabled => self.last_failure = None,
             AnalyzerEvent::StartRequested => {}
             AnalyzerEvent::Crashed
             | AnalyzerEvent::StartupFailed
@@ -211,7 +223,23 @@ impl AnalyzerSupervisor {
     }
 
     pub fn is_ready_for(&self, root: &AdmittedRoot) -> bool {
-        root == &self.root && self.is_ready()
+        self.owns(root) && self.is_ready()
+    }
+
+    /// Whether `root` addresses the analyzer this supervisor watches.
+    ///
+    /// An analyzer is owned by exactly one admitted root *URI*: that is the
+    /// process's workspace, and it is the identity every caller already checks
+    /// before reaching here. `AdmittedRoot` equality additionally compares the
+    /// optional scope digest, which binds a presentation URI to a resolved
+    /// scope-set and is absent on the plain root the analyzer owner is
+    /// constructed with. Comparing the whole value therefore rejected every
+    /// event raised from a session's authorized root as a cross-project one,
+    /// silently (each call site discards the transition error), so the
+    /// supervisor could never record a failure or authorize a restart on the
+    /// semantic lane.
+    fn owns(&self, root: &AdmittedRoot) -> bool {
+        root.uri() == self.root.uri()
     }
 }
 
@@ -739,6 +767,9 @@ mod tests {
         assert!(supervisor.is_ready_for(&root));
         assert_eq!(supervisor.last_failure(), None);
         assert_eq!(supervisor.failure_evidence(), None);
+        // The budget counts consecutive failures: an analyzer that answered
+        // again must not carry a recovered failure into a later unrelated one.
+        assert_eq!(supervisor.restart_attempts(), 0);
     }
 
     #[test]

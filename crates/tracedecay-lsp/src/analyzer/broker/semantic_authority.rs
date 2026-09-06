@@ -482,4 +482,63 @@ mod tests {
         assert_eq!(after.restart_attempts(), before.restart_attempts());
         assert_eq!(after.last_failure(), before.last_failure());
     }
+
+    /// A diagnostics refresh that fails clears the shared client slot
+    /// (`collect_refresh_batch`) without telling this supervisor anything. The
+    /// analyzer's semantic surface must then restart the process and report
+    /// that start's own typed outcome — never the terminal `Unavailable` the
+    /// gateway renders as `providerUnavailable` on a live project.
+    ///
+    /// A session addresses this authority with its *authorized* root, which
+    /// carries the resolved scope digest; the supervisor is constructed with
+    /// the plain root URI. Comparing whole `AdmittedRoot` values made every
+    /// event from this lane a cross-project one, so the restart above was
+    /// refused and one missed refresh retired every later semantic request.
+    #[tokio::test]
+    async fn failed_refresh_restarts_the_analyzer_instead_of_retiring_semantics() {
+        let authority = StdioLspSemanticAuthority::new(
+            "tracedecay-analyzer-that-cannot-spawn",
+            Vec::new(),
+            "rust",
+            std::env::temp_dir(),
+            "file:///project",
+            LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
+        );
+        let owner_root = AdmittedRoot::new("file:///project");
+        begin_analyzer_start(&authority.inner, &owner_root);
+        mark_analyzer_ready(&authority.inner, &owner_root);
+        assert_eq!(authority.analyzer_readiness().state(), AnalyzerState::Ready);
+        // Exactly what a failed refresh leaves behind: a Ready supervisor over
+        // an empty client slot.
+        assert!(authority.inner.client.lock().await.is_none());
+
+        let session_root = AdmittedRoot::authorized(
+            "file:///project",
+            tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("scope digest"),
+        );
+        let outcome = authority
+            .start(
+                session_root,
+                LspRequestId::Number(1),
+                crate::LspSemanticRequest::from_standard(
+                    "textDocument/documentSymbol",
+                    serde_json::json!({ "textDocument": { "uri": "file:///project/src/lib.rs" } }),
+                ),
+            )
+            .await;
+
+        assert_eq!(
+            outcome,
+            LspSemanticOperationOutcome::Partial {
+                value: serde_json::Value::Null,
+                coverage: "analyzer-start-failed".to_owned(),
+                detail: Some("Analyzer failed to start."),
+            },
+            "a cleared client slot must be answered by a restart attempt, not a retired surface"
+        );
+        let readiness = authority.analyzer_readiness();
+        assert_eq!(readiness.state(), AnalyzerState::RestartBackoff);
+        assert_eq!(readiness.last_failure(), Some(AnalyzerEvent::StartupFailed));
+    }
 }
