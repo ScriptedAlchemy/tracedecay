@@ -41,6 +41,60 @@ pub struct SkillWriterAutomationOptions {
     pub profile_root: Option<PathBuf>,
 }
 
+/// An authoring decision, not a deployment or a successful skill mutation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoSkillNeededDecision {
+    reason: String,
+    remedy: SkillRoutingRemedy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SkillRoutingRemedy {
+    ImproveToolDescription,
+    ImproveHintRouting,
+    InsufficientRepeatedEvidence,
+    GenericReasoning,
+    OneOffTask,
+    NoAction,
+}
+
+fn no_skill_needed_decision(
+    output: &Value,
+    proposals: &[Value],
+) -> Result<Option<NoSkillNeededDecision>> {
+    match output.get("outcome") {
+        None => Ok(None),
+        Some(Value::String(outcome)) if outcome == "no_skill_needed" => {
+            if !proposals.is_empty() {
+                return Err(TraceDecayError::Config {
+                    message: "no_skill_needed cannot include skill mutations".to_owned(),
+                });
+            }
+            let decision: NoSkillNeededDecision =
+                serde_json::from_value(output.get("decision").cloned().ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "no_skill_needed requires a decision".to_owned(),
+                    }
+                })?)?;
+            if decision.reason.trim().is_empty() {
+                return Err(TraceDecayError::Config {
+                    message: "no_skill_needed requires an evidenced reason".to_owned(),
+                });
+            }
+            Ok(Some(decision))
+        }
+        Some(_) => Err(TraceDecayError::Config {
+            message: "unsupported skill writer outcome".to_owned(),
+        }),
+    }
+}
+
+pub(super) fn validate_skill_writer_decision(output: &Value, proposals: &[Value]) -> Result<()> {
+    no_skill_needed_decision(output, proposals).map(|_| ())
+}
+
 pub async fn run_skill_writer_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -409,8 +463,11 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
             .await?;
         let mut validation_repairs = Vec::new();
         for attempt in 1..=2 {
-            let validation_errors =
+            let mut validation_errors =
                 validate_skill_proposals(&profile_root, &run.run_id, &proposals).await?;
+            if let Err(error) = validate_skill_writer_decision(&proposed_ops, &proposals) {
+                validation_errors.push(json!({"reason": error.to_string()}));
+            }
             if validation_errors.is_empty() {
                 break;
             }
@@ -442,7 +499,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                 run.run_id.clone(),
                 AgentTaskKind::SkillWriter,
                 format!(
-                    "Repair the previous skill proposal JSON. Return only {{\"skills\": [...]}}. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
+                    "Repair the previous skill proposal JSON. Return the complete skill writer JSON, including any no_skill_needed decision. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
                     serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))
                         .map_err(TraceDecayError::from)?
                 ),
@@ -600,6 +657,7 @@ pub(super) async fn finalize_skill_writer_success(
         proposals,
         validation_repairs,
     } = output;
+    let no_skill_needed = no_skill_needed_decision(proposed_ops, proposals)?;
     let run_id = finalizer.run_id();
     // Hash the repair transcript before any lifecycle effects are applied so a
     // serialization failure cannot surface after skill mutations committed.
@@ -674,7 +732,9 @@ pub(super) async fn finalize_skill_writer_success(
         && rejected_count == 0
         && !deployment_failed;
     let report = json!({
-        "status": if no_candidate {
+        "status": if no_skill_needed.is_some() {
+            "no_skill_needed"
+        } else if no_candidate {
             "no_candidate"
         } else if fully_applied {
             "applied"
@@ -682,6 +742,7 @@ pub(super) async fn finalize_skill_writer_success(
             "failed_after_partial_effects"
         },
         "dry_run": false,
+        "decision": no_skill_needed,
         "task": "skill_writer",
         "evidence_hash": evidence_hash,
         "activation_policy": activation_policy,
@@ -772,6 +833,8 @@ pub(super) async fn finalize_skill_writer_success(
             .map(str::to_string),
         Some(json!({
             "skills": proposed_ops.get("skills").cloned().unwrap_or_else(|| json!([])),
+            "outcome": report.get("status"),
+            "decision": report.get("decision"),
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
             "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
             "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
@@ -795,6 +858,7 @@ pub(super) async fn finalize_skill_writer_success(
         "status": report.get("status").cloned().unwrap_or_else(|| json!("applied")),
         "dry_run": false,
         "activation_policy": activation_policy,
+        "decision": report.get("decision"),
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "validation_repairs": validation_repairs_summary,
@@ -882,9 +946,9 @@ pub(super) fn build_skill_writer_prompt(evidence: &Value) -> String {
         "- One-off task narratives. A single 'summarize this' or 'analyze this PR' request is not a class of work that warrants a skill.\n",
         "- Secrets, credentials, or tokens in any skill body or support file.\n",
         "\n",
-        "An empty skills array is a real option when the session ran smoothly with no corrections and produced no new technique, but do not reach for it as a default.\n",
+        "A skill is warranted only by repeated workflow evidence not already covered by ordinary reasoning or tool metadata. Evaluate overlapping skills before creation. If no skill change is warranted, return skills: [], outcome: no_skill_needed, and decision with a specific reason and remedy (improve_tool_description, improve_hint_routing, insufficient_repeated_evidence, generic_reasoning, one_off_task, or no_action). This decision creates no skill and performs no deployment. For underused tools, distinguish tool-description or hint-routing fixes from skill changes; missed use alone is not skill evidence. Every create or routing_description change must include routing_validation scenarios for the existing agent-adoption evaluator: positive expected_skill, near-neighbor expected_skill, and negative allowed_skills: []. Each scenario includes id, category, hosts (claude/codex), fixture, status, prompt, ground_truth task-outcome checks, and max_tool_calls. Preserve selection and task outcomes separately; examples are not proof of measured improvement. Authored routing_description is intentional discovery metadata distinct from summary: state the selection boundary concisely without mandatory wording. Prefer references for detailed material; repeated views or patches without successful use warrant archive, merge, or routing redesign.\n",
         "\n",
-        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and optional merged title/summary/category/targets/body_markdown/support_files) or action=archive (include id, base_checksum, reason). Consolidations preserve archived source content. Valid proposals are activated and exported automatically. Never propose merge or archive for pinned or user-authored skills.\n",
+        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, routing_description, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, routing_description, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and optional merged title/summary/routing_description/category/targets/body_markdown/support_files) or action=archive (include id, base_checksum, reason). Consolidations preserve archived source content. Valid proposals are activated and exported automatically. Never propose merge or archive for pinned or user-authored skills.\n",
     );
     format!(
         "{POLICY}{}",
@@ -929,5 +993,32 @@ pub(super) fn rejected_skill_writer_run(
         ledger_record: record,
         backend_response: None,
         committed_receipt: None,
+    }
+}
+
+#[cfg(test)]
+mod routing_decision_tests {
+    use super::no_skill_needed_decision;
+    use serde_json::json;
+
+    #[test]
+    fn no_skill_needed_requires_a_reason_and_refuses_mutations() {
+        let output = json!({
+            "skills": [], "outcome": "no_skill_needed",
+            "decision": {"reason": "The only request was a one-off arithmetic calculation.", "remedy": "one_off_task"}
+        });
+        assert!(no_skill_needed_decision(&output, &[]).unwrap().is_some());
+        assert!(no_skill_needed_decision(&output, &[json!({"action": "archive"})]).is_err());
+        let mut invalid = output.clone();
+        invalid["decision"]["reason"] = json!("  ");
+        assert!(no_skill_needed_decision(&invalid, &[]).is_err());
+        invalid["decision"]["reason"] = json!("observed");
+        invalid["decision"]["remedy"] = json!("create_skill");
+        assert!(no_skill_needed_decision(&invalid, &[]).is_err());
+        assert!(
+            no_skill_needed_decision(&json!({"skills": []}), &[])
+                .unwrap()
+                .is_none()
+        );
     }
 }

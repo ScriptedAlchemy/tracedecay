@@ -21,20 +21,6 @@
       "tracedecay_callees",
       "tracedecay_callers",
       "Read"
-    ],
-    "forbidden_first": [
-      "Grep",
-      "Glob"
-    ],
-    "forbidden_bash": [
-      "grep",
-      "rg ",
-      "rg\t",
-      "find ",
-      "cat ",
-      "sed ",
-      "awk ",
-      "ack "
     ]
   },
   "ground_truth": [
@@ -43,5 +29,10 @@
     "compute_total"
   ],
   "max_tool_calls": 7,
-  "notes": "Flow question; graph traversal (context/callees) beats file scanning."
+  "notes": "Flow question; graph traversal (context/callees) beats file scanning.",
+  "expected_skill": "exploring-code",
+  "allowed_skills": [
+    "exploring-code"
+  ],
+  "max_tracedecay_calls": 7
 }

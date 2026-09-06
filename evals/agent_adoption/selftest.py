@@ -464,7 +464,65 @@ def test_hint_signature_drift():
         print("[skip] hints: real source tree absent (published package)")
 
 
+def test_skill_routing():
+    scn = {"id": "routing", "category": "routing", "expected_skill": "tracing-functions",
+           "allowed_skills": ["tracing-functions"], "ground_truth": ["place_order"],
+           "max_tracedecay_calls": 1}
+    good = transcript([claude_tool("Skill", {"skill": "tracedecay:tracing-functions"}),
+                       claude_tool(TD, {"query": "compute_total"}), claude_result("place_order")])
+    wrong = transcript([claude_tool("Skill", {"skill": "tracedecay:exploring-code"}),
+                        claude_result("place_order")])
+    a = grade.score_scenario(scn, good, {}, {})
+    b = grade.score_scenario(scn, wrong, {}, {})
+    check("routing: expected skill observed", not a["details"]["skill_routing"]["missed"])
+    check("routing: neighbor is a false trigger", b["details"]["skill_routing"]["unexpected"] == ["exploring-code"])
+    check("routing: outcome independent of wrong skill", b["subscores"]["outcome"] == 1)
+    empty_answer = grade.score_scenario(scn, transcript([claude_tool("Skill", {"skill": "tracedecay:tracing-functions"})]), {}, {})
+    check("routing: invocation cannot fabricate outcome", empty_answer["subscores"]["outcome"] == 0)
+    neg = {"id": "negative", "category": "routing", "allowed_skills": [],
+           "ground_truth": ["which behavior"], "max_tracedecay_calls": 0}
+    c = grade.score_scenario(neg, transcript([claude_result("Which behavior should change?")]), {}, {})
+    check("routing: clarification needs no calls", c["details"]["skill_routing"]["invoked"] == [] and c["subscores"]["outcome"] == 1)
+    d = grade.score_scenario(neg, good, {}, {})
+    check("routing: unnecessary graph call loses efficiency", d["subscores"]["efficiency"] == 0)
+    agg = grade.aggregate([a,b,c,d])["claude"]
+    check("routing: per-skill missed and correct counts", agg["skill_routing"]["tracing-functions"] == {"tp":1,"fn":1,"fp":1})
+    check("routing: no-skill overtrigger counted", agg["no_skill_cases"] == 2 and agg["no_skill_overtrigger"] == 1)
+    for condition in ("no-skills", "bare"):
+        absent = transcript([claude_result("place_order")])
+        ablated = grade.score_scenario(scn, absent, {}, {"channel_condition": condition})
+        routing = ablated["details"]["skill_routing"]
+        check(f"routing: {condition} absence is not an available-skill miss",
+              routing["measured"] is False and routing["missed"] is None and
+              routing["unmeasured_reason"] == "skills_unavailable_in_condition")
+        check(f"routing: {condition} task outcome remains measured",
+              ablated["subscores"]["outcome"] == 1 and ablated["subscores"]["efficiency"] == 1)
+        mixed = grade.aggregate([a, b, ablated])["claude"]
+        check(f"routing: {condition} excluded from mixed miss denominator",
+              mixed["skill_routing"]["tracing-functions"] == {"tp": 1, "fn": 1, "fp": 0}
+              and mixed["unmeasured_skill_cases"] == 1)
+        no_skill = grade.score_scenario(neg, absent, {}, {"channel_condition": condition})
+        counts = grade.aggregate([no_skill])["claude"]
+        check(f"routing: {condition} excluded from no-skill denominator",
+              counts["no_skill_cases"] == 0 and counts["unmeasured_skill_cases"] == 1)
+    codex = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
+        "type": "command_execution", "command": "cat /tmp/plugin/skills/tracing-functions/SKILL.md",
+        "aggregated_output": "# Tracing functions", "exit_code": 0}})], "codex")
+    unmeasured = grade.score_scenario(scn, codex, {}, {})
+    routing = unmeasured["details"]["skill_routing"]
+    check("routing: Codex native skill read is unmeasured, not missed",
+          routing["measured"] is False and routing["missed"] is None and routing["invoked"] is None)
+    codex_agg = grade.aggregate([unmeasured])["codex"]
+    check("routing: unsupported host excluded from routing denominator",
+          codex_agg["skill_routing"] == {} and codex_agg["unmeasured_skill_cases"] == 1)
+    prose = transcript([claude_result("Consider tracedecay:tracing-functions")])
+    check("routing: prose is not invocation", grade.invoked_skills(prose) == [])
+
+
 def main() -> int:
+    test_skill_routing()
+    check("lint: generated scenario id cannot escape artifacts",
+          bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))
     test_lint()
     test_channels()
     test_normalize()
