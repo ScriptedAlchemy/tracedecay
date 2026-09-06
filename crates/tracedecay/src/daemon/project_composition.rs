@@ -503,7 +503,6 @@ async fn production_project_server_inner(
         cancellation: route_cancellation.clone(),
         graph_runtime: Arc::clone(&graph_runtime),
         graph_publication_database: Arc::new(cg.db().clone()),
-        configuration_runtime: Arc::clone(cg.configuration_runtime()),
         profile_id: cg.store_runtime_registry().profile_id().clone(),
     });
     let code_index_hint_sink = code_index_activation_hint_sink(
@@ -737,6 +736,15 @@ async fn production_project_server_inner(
                 message: "code-index activation scope does not match the project route".to_owned(),
             });
         }
+        Box::pin(project_open_owners::spawn_semantic_owner_registration(
+            invocation.clone(),
+            canonical_project_path.to_path_buf(),
+            Arc::clone(cg.configuration_runtime()),
+            code_search_scope.clone(),
+            Arc::clone(&route_registered),
+            route_cancellation.clone(),
+        ))
+        .await?;
         // The core's own lane never opens: only the full server reaches a Git
         // transaction authority. Its gate is kept so a rolled-back publication
         // can report a terminal failure instead of warming forever.
@@ -993,6 +1001,7 @@ async fn production_project_server_inner(
                 invocation.code_index_schedulers.clone(),
                 Arc::clone(&diagnostic_broker),
                 invocation.feedback_runtime_registrar(),
+                invocation.semantic_owner_runtime_registrar(),
                 store_telemetry_sampling,
                 Arc::clone(cg.configuration_runtime()),
             );
