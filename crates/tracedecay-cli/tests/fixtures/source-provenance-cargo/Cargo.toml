@@ -1,0 +1,9 @@
+[package]
+name = "identity-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[build-dependencies]
+serde_json = "=1.0.151"
