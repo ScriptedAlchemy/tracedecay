@@ -417,7 +417,10 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
             receipt: receipt.clone(),
         }),
         deadline,
-        &DaemonDeliveryReceiptPort::new(project.path()),
+        &DaemonDeliveryReceiptPort::new(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+        ),
     )
     .await
     .unwrap();
@@ -432,7 +435,10 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
         rollback,
         Some(commit.clone()),
         deadline,
-        &DaemonContextScoutFeedbackPort::new(project.path()),
+        &DaemonContextScoutFeedbackPort::new(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+        ),
     )
     .await
     .unwrap();
@@ -447,7 +453,10 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
         rollback,
         Some(notice.clone()),
         deadline,
-        &DaemonFeedbackNoticeDeliveryPort::new(project.path()),
+        &DaemonFeedbackNoticeDeliveryPort::new(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+        ),
     )
     .await
     .unwrap();
@@ -499,8 +508,23 @@ async fn scout_receipt_and_feedback_helpers_delegate_to_daemon_ports() {
         serde_json::json!({ "status": "duplicate" }),
     ]);
 
-    assert!(record_context_scout_delivery(project.path(), &receipt).await);
-    assert!(commit_context_scout_feedback(project.path(), &receipt, feedback).await);
+    assert!(
+        record_context_scout_delivery(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+            &receipt
+        )
+        .await
+    );
+    assert!(
+        commit_context_scout_feedback(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+            &receipt,
+            feedback
+        )
+        .await
+    );
 
     let calls = guard.calls();
     assert_eq!(calls.len(), 2);
@@ -553,7 +577,13 @@ async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
         "status": "accepted",
     })]);
 
-    let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
+    let dispatch = dispatch_opencode_lsp_updated(
+        &crate::ports::hook_runtime::crate_test_runtime(),
+        &event_json,
+        project.path(),
+        None,
+    )
+    .await;
 
     assert!(matches!(
         dispatch,
@@ -578,7 +608,13 @@ async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
         "status": "rejected",
     })]);
 
-    let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
+    let dispatch = dispatch_opencode_lsp_updated(
+        &crate::ports::hook_runtime::crate_test_runtime(),
+        &event_json,
+        project.path(),
+        None,
+    )
+    .await;
     assert!(matches!(
         dispatch,
         HookDispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
@@ -602,7 +638,8 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         receipt_id: [3; 16],
         ..receipt.clone()
     };
-    let port = DaemonDeliveryReceiptPort::new(project.path());
+    let runtime = crate::ports::hook_runtime::crate_test_runtime();
+    let port = DaemonDeliveryReceiptPort::new(&runtime, project.path());
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
         route: HookFeedbackDeliveryRouteV1::HookV2,

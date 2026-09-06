@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::config::PinnedUserDataDir;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
@@ -13,8 +14,8 @@ pub(super) fn git(root: &Path, args: &[&str]) {
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
     )
-    .current_dir(root)
-    .args(args)
+    .current_dir(plain_host_path(root))
+    .args(plain_git_args(args))
     .output()
     .expect("git runs");
     assert!(
@@ -22,19 +23,6 @@ pub(super) fn git(root: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-/// Spells a fixture path for [`git`]'s argument list or for a gitfile Git will
-/// read back.
-///
-/// Fixture roots come from [`canonical_temp_root`], which on Windows is the
-/// `\\?\` verbatim form Git rejects as an argument (`//?/D:/...`). The
-/// spelling changes at this boundary only; the fixture keeps the verbatim
-/// `PathBuf` as the root identity it hands to the server and asserts against.
-pub(super) fn git_path_argument(path: &Path) -> String {
-    tracedecay_runtime_core::git::git_path_argument(path)
-        .to_string_lossy()
-        .into_owned()
 }
 
 pub(crate) struct WriterTestFixtureAuthority {
