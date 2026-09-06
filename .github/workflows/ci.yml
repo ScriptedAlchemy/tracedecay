@@ -429,6 +429,18 @@ jobs:
         shell: pwsh
         run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
 
+      # `runtime_acceptance_suite::search_eval_cli_test` and
+      # `product_surface_suite::packaged_semantic_evaluator` execute the
+      # ordinary `tracedecay-search-eval` binaries out of the profile directory,
+      # and `cargo nextest archive` never links them (the package has no test
+      # target). Build them with the archive's exact package and feature
+      # selection so Cargo reuses the artifacts and the evaluator keeps the
+      # default language tiers; `archive.include` in `.config/nextest.toml`
+      # then carries them to every shard.
+      - name: Build workspace binaries for the Windows test lane
+        shell: pwsh
+        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified on the Linux test lane only. Building them here would put a
       # second, feature-on resolution of the search-eval dependency graph
