@@ -282,6 +282,58 @@ pub use unix::{
 #[cfg(not(any(unix, windows)))]
 compile_error!("TraceDecay private filesystem authority requires Unix or Windows");
 
+/// Native non-blocking exclusive-lock contention.
+///
+/// Unix `flock`/`fcntl` reports a held lock as [`io::ErrorKind::WouldBlock`].
+/// Windows `LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` reports
+/// `ERROR_LOCK_VIOLATION` (33) instead, often with a kind other than
+/// `WouldBlock`. Sharing violations (`ERROR_SHARING_VIOLATION`, 32) and
+/// `AccessDenied` (`ERROR_ACCESS_DENIED`, 5) are different operations — an
+/// open/ACL problem is not proof that another authority holds the lock.
+pub fn is_lock_contended(error: &io::Error) -> bool {
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::is_lock_contended;
+
+    #[test]
+    fn would_block_is_typed_contention() {
+        assert!(is_lock_contended(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+    }
+
+    #[test]
+    fn windows_lock_violation_is_typed_contention() {
+        assert!(
+            is_lock_contended(&std::io::Error::from_raw_os_error(33)),
+            "ERROR_LOCK_VIOLATION (33) is the Windows non-blocking lock conflict"
+        );
+    }
+
+    #[test]
+    fn access_denied_is_not_lock_contention() {
+        assert!(!is_lock_contended(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(
+            !is_lock_contended(&std::io::Error::from_raw_os_error(5)),
+            "ERROR_ACCESS_DENIED (5) is an ACL problem, not a held lock"
+        );
+    }
+
+    #[test]
+    fn sharing_violation_is_not_lock_contention() {
+        assert!(
+            !is_lock_contended(&std::io::Error::from_raw_os_error(32)),
+            "ERROR_SHARING_VIOLATION (32) is an open/share conflict, not LockFileEx contention"
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
