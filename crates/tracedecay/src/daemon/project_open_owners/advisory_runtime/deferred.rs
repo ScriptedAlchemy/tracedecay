@@ -35,6 +35,19 @@ pub(super) fn spawn(
             let mut publications = invocation
                 .code_index_schedulers
                 .subscribe_generation_publications();
+            // A publication is announced before its generation is seated in
+            // the slot `try_mount` reads, and a retained `Noop` restore seats
+            // without announcing at all. On a cold project the first
+            // generation therefore becomes exact with no publication left to
+            // wake this owner: it slept forever and the project served
+            // indefinitely with the typed-unavailable feedback cycle. Poll
+            // beside the subscription — the same backstop
+            // `spawn_query_authority_when_generation_ready` keeps for the same
+            // transition. The task dies with its project server.
+            // ponytail: fixed 1s poll; make it a seating signal if the
+            // scheduler ever announces the serving swap itself.
+            let mut retry = tokio::time::interval(std::time::Duration::from_secs(1));
+            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut partial_publication_retried = false;
             loop {
                 match try_mount(&invocation, &project_root, &mut state).await {
@@ -49,12 +62,27 @@ pub(super) fn spawn(
                 }
                 break;
             }
+            log_deferred_attempt(
+                &project_root,
+                "generation_unavailable",
+                "await_next_publication",
+            );
             loop {
-                match publications.recv().await {
-                    Ok(publication) if publication.project_root == project_root => {}
-                    Ok(_) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                tokio::select! {
+                    publication = publications.recv() => match publication {
+                        Ok(publication) if publication.project_root == project_root => {}
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            log_deferred_attempt(
+                                &project_root,
+                                "publications_closed",
+                                "terminal",
+                            );
+                            return;
+                        }
+                    },
+                    _ = retry.tick() => {}
                 }
                 match try_mount(&invocation, &project_root, &mut state).await {
                     Attempt::Terminal => return,
@@ -136,12 +164,10 @@ async fn try_mount(
             }
         },
     };
+    // Deliberately unlogged: the poll in `spawn` re-enters here once a second
+    // while a cold project indexes, and one event per second per warming
+    // project is noise, not evidence. `spawn` records the wait once instead.
     let Some(indexed) = indexed else {
-        log_deferred_attempt(
-            project_root,
-            "generation_unavailable",
-            "await_next_publication",
-        );
         return Attempt::AwaitNextPublication;
     };
     let mut indexed_files = indexed
@@ -191,6 +217,7 @@ async fn try_mount(
                 reason = %error,
                 "deferred advisory LSP grant is unavailable"
             );
+            log_deferred_attempt(project_root, "lsp_scope_grant_failed", &error.to_string());
             return Attempt::Terminal;
         }
     };
@@ -215,6 +242,7 @@ async fn try_mount(
                 reason = %error,
                 "deferred advisory LSP owner could not mount"
             );
+            log_deferred_attempt(project_root, "lsp_owner_failed", &error.to_string());
             return Attempt::Terminal;
         }
     };
@@ -257,7 +285,7 @@ async fn classify_failure(
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
 ) -> Attempt {
-    if invocation
+    let attempt = if invocation
         .service
         .feedback_cycle(Some(project_root))
         .await
@@ -277,6 +305,20 @@ async fn classify_failure(
     {
         Attempt::AwaitNextPublication
     } else {
+        // A serving generation exists and no feedback cycle was published, so
+        // the composition itself is missing rather than early. Nothing retries
+        // this owner after it returns, so name that terminal state here rather
+        // than leave a project serving without a cycle and no evidence why.
         Attempt::Terminal
-    }
+    };
+    log_deferred_attempt(
+        project_root,
+        "classified_failure",
+        match attempt {
+            Attempt::Terminal => "terminal",
+            Attempt::AwaitNextPublication => "await_next_publication",
+            Attempt::RetryPartialPublication => "retry_partial_publication",
+        },
+    );
+    attempt
 }
