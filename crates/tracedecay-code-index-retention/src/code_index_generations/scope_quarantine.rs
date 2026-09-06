@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_private_fs::capability_dir::{
     remove_open_dir_all_nofollow, rename_noreplace, sync_directory,
 };
+#[cfg(windows)]
+use tracedecay_private_fs::windows_file;
 
 use super::{
     CodeGenerationRetentionErrorV1, SCOPE_RETENTION_QUARANTINE_DIRECTORY, StrandedCodeIndexScopeV1,
@@ -24,8 +26,9 @@ use super::{
 };
 
 /// Rename-stable identity for one scope root. This mirrors the orphan-store
-/// retirement fence: inode/device are authoritative on Unix, while other
-/// platforms retain the strongest portable creation and modification stamps.
+/// retirement fence: device/inode are authoritative on Unix, and by-handle
+/// volume serial number/file index are authoritative on Windows. Timestamps
+/// supplement those stable identifiers.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ScopeDirectoryIdentityV1 {
@@ -37,6 +40,10 @@ pub(super) struct ScopeDirectoryIdentityV1 {
     inode: u64,
     #[cfg(windows)]
     created_100ns: u64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
 }
 
 /// Already-open authority for the store root and its exact quarantine tree.
@@ -397,6 +404,8 @@ fn open_child_directory(
 
 fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
     let metadata = directory.metadata(".")?;
+    #[cfg(windows)]
+    let information = windows_file::information(directory)?;
     #[cfg(unix)]
     let (modified_secs, modified_nanos) = {
         (
@@ -427,6 +436,10 @@ fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
         inode: metadata.ino(),
         #[cfg(windows)]
         created_100ns: metadata.creation_time(),
+        #[cfg(windows)]
+        volume_serial_number: information.volume_serial_number,
+        #[cfg(windows)]
+        file_index: information.file_index,
     })
 }
 
