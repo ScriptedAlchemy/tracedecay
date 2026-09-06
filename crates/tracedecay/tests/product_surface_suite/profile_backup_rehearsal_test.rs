@@ -36,6 +36,12 @@ fn write_profile_identity(profile: &Path, brain_id: &str, profile_id: &str) {
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     }
+    // Windows analogue of the mode above. Profile backup refuses an identity
+    // record whose DACL is not the protected single-ACE current-user one, and
+    // a file just created under a temporary directory inherits that
+    // directory's ACEs.
+    #[cfg(windows)]
+    drop(tracedecay_private_fs::windows::make_private_file(&path).unwrap());
 }
 
 fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {

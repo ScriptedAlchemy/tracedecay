@@ -54,6 +54,14 @@ fn remote_tls_fixture(
         std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600))
             .expect("restrict TLS key fixture");
     }
+    // Windows analogue of the mode above. Startup refuses a TLS key whose
+    // DACL is not the protected single-ACE current-user one, and a file just
+    // created under a temporary directory inherits that directory's ACEs.
+    #[cfg(windows)]
+    drop(
+        tracedecay_private_fs::windows::make_private_file(&private_key)
+            .expect("restrict TLS key fixture"),
+    );
     let config = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
         Some("127.0.0.1:0".parse().expect("ephemeral TLS listener")),
         Some(certificate.clone()),

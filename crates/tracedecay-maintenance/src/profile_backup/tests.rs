@@ -31,7 +31,16 @@ fn restrict_file(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-#[cfg(not(unix))]
+/// Windows analogue of the mode above. Profile backup refuses an identity
+/// record whose DACL is not the protected single-ACE current-user one, and a
+/// file just created under a temporary directory inherits that directory's
+/// ACEs.
+#[cfg(windows)]
+fn restrict_file(path: &Path) {
+    drop(tracedecay_private_fs::windows::make_private_file(path).unwrap());
+}
+
+#[cfg(not(any(unix, windows)))]
 fn restrict_file(_path: &Path) {}
 
 fn released_profile(root: &Path) {
