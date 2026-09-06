@@ -598,10 +598,19 @@ fn map_semantic_configuration_error(
     match error {
         SemanticActivationCoordinationErrorV1::Unavailable => ConfigurationError::Unavailable,
         SemanticActivationCoordinationErrorV1::Conflict => ConfigurationError::RevisionConflict,
-        SemanticActivationCoordinationErrorV1::Rejected
-        | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
-        | SemanticActivationCoordinationErrorV1::Runtime(_) => {
+        // The coordinator builds `RejectedDetail` by chaining the context of
+        // each refusing stage (see `SemanticActivationCoordinationErrorV1`
+        // context wrapping in `semantic_runtime::configuration_operation`).
+        // Collapsing every arm onto the bare sentence discarded that chain, so
+        // a refused transition told the operator only that something refused.
+        SemanticActivationCoordinationErrorV1::Rejected => {
             ConfigurationError::validation_message("semantic configuration transition rejected")
+        }
+        SemanticActivationCoordinationErrorV1::RejectedDetail(detail)
+        | SemanticActivationCoordinationErrorV1::Runtime(detail) => {
+            ConfigurationError::validation_message(format!(
+                "semantic configuration transition rejected: {detail}"
+            ))
         }
     }
 }
@@ -1037,6 +1046,39 @@ impl DaemonSemanticRuntimeRegistrar {
 #[cfg(test)]
 mod terminal_problem_tests {
     use super::*;
+
+    #[test]
+    fn refused_semantic_transitions_keep_the_stage_that_refused() {
+        let bare =
+            map_semantic_configuration_error(SemanticActivationCoordinationErrorV1::Rejected);
+        assert_eq!(
+            bare,
+            ConfigurationError::validation_message("semantic configuration transition rejected")
+        );
+
+        let detailed = map_semantic_configuration_error(
+            SemanticActivationCoordinationErrorV1::RejectedDetail(
+                "stage_and_rollback: no rollback profile is staged".to_owned(),
+            ),
+        );
+        assert_eq!(
+            detailed,
+            ConfigurationError::validation_message(
+                "semantic configuration transition rejected: stage_and_rollback: no rollback \
+                 profile is staged"
+            )
+        );
+
+        let runtime = map_semantic_configuration_error(
+            SemanticActivationCoordinationErrorV1::Runtime("artifact is not installed".to_owned()),
+        );
+        assert_eq!(
+            runtime,
+            ConfigurationError::validation_message(
+                "semantic configuration transition rejected: artifact is not installed"
+            )
+        );
+    }
 
     #[test]
     fn configuration_reset_preserves_its_terminal_category() {
