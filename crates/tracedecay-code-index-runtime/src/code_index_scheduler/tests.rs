@@ -16006,7 +16006,13 @@ async fn graph_decode_does_not_block_text_freshness() {
             .expect("enable graph activation on the retained owner"),
         "same-root policy update must retain the mounted owner"
     );
-    assert!(registry.notify_hook_overflow(fixture.path()).await);
+    // The retained policy update posts its own worker wake and claims it as
+    // that pass's arrival, so the pass which parks on the decode barrier below
+    // is provably the one this update started. A second `notify_hook_overflow`
+    // here posted an arrival that raced the graph seat gate: when it landed
+    // after the gate it stayed unclaimed for the whole parked-decode window,
+    // and the freshness witness reported that outstanding authoritative rescan
+    // -- not the decode -- as the reason the text owner was not current.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if held_decode.waiter_count() > 0 {
