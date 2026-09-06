@@ -514,8 +514,6 @@ impl ProductionSemanticRuntimeV1 {
             self.resources,
             self.document_composition,
         )?;
-        let source_manifest_digest =
-            semantic_source_manifest_digest(generation.projection().request());
         let active = store
             .generation(required_generation, Arc::clone(&cancellation))
             .await
@@ -523,20 +521,13 @@ impl ProductionSemanticRuntimeV1 {
         let Some(active) = active else {
             return Ok(None);
         };
-        let replay_digest = semantic_projection_request(generation, &projection, None)?
-            .changes
-            .manifest_digest;
         // Restore binds the runtime pointer to the generation queries will
-        // actually pin: the supplied (serving) publication. The vectors may
-        // name an older publication identifier when the tree republished
-        // without a source change; the sealed-corpus proof admits exactly that
-        // case and nothing weaker.
-        let exact_source = active.source_generation() == &generation.manifest().generation_id
-            && (active.source_manifest_digest() == source_manifest_digest
-                || active.source_manifest_digest() == &replay_digest);
+        // actually pin: the supplied (serving) publication. Whether these
+        // vectors may attach to it is `semantic_source_coherence`'s question
+        // alone, on either arm.
         if active.generation_id() != required_generation
             || active.embedding_key() != &projection
-            || !(exact_source || semantic_source_content_coherent(&active, generation))
+            || !semantic_source_content_coherent(&active, generation)
         {
             return Ok(None);
         }
@@ -2328,8 +2319,6 @@ impl ProductionSemanticRuntimeV1 {
     where
         C: SemanticExecutionControl + Sync,
     {
-        let source_manifest_digest =
-            semantic_source_manifest_digest(code_generation.projection().request());
         if request.code_generation == code_generation.manifest().generation_id
             && request.capability_manifest_digest == code_generation.capability().manifest_digest
             && let Some(vectors) = retained_vector_read_port(
@@ -2407,23 +2396,17 @@ impl ProductionSemanticRuntimeV1 {
                 fallback,
             );
         };
-        let replay_digest = semantic_projection_request(code_generation, request.projection, None)
-            .map_err(|_| SemanticQueryServiceError::InvalidFallback)?
-            .changes
-            .manifest_digest;
-        // The served generation identity is the current publication: either the
-        // exact source the vectors were projected from, or a publication whose
-        // sealed chunk corpus is proven byte-identical (an unrelated
-        // republication of the same source truth must not refuse a valid
-        // semantic generation). Model/profile identity stays exact through the
-        // embedding-key pin; anything unproven fails closed below.
+        // The served generation identity is the current publication, and
+        // `semantic_source_coherence` is the only authority on whether these
+        // vectors may attach to it: the exact source they were projected from,
+        // or a publication whose sealed chunk corpus is proven byte-identical
+        // (an unrelated republication of the same source truth must not refuse
+        // a valid semantic generation). Model/profile identity stays exact
+        // through the embedding-key pin; anything unproven fails closed below.
         let generation_id = &code_generation.manifest().generation_id;
-        let exact_source = active.source_generation() == generation_id
-            && (active.source_manifest_digest() == source_manifest_digest
-                || active.source_manifest_digest() == &replay_digest);
         if active.embedding_key() != request.projection
             || request.code_generation != *generation_id
-            || !(exact_source || semantic_source_content_coherent(&active, code_generation))
+            || !semantic_source_content_coherent(&active, code_generation)
         {
             return execute_calibrated_semantic_query(
                 &NeverCalledSemanticLane,
@@ -2815,10 +2798,6 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
     }
 }
 
-fn semantic_source_manifest_digest(request: &ProjectionBatchRequestV1) -> &ManifestDigest {
-    &request.changes.manifest_digest
-}
-
 #[derive(Clone, Copy)]
 struct InstalledArtifactMemberBytesV1 {
     model: u64,
@@ -3168,14 +3147,20 @@ pub fn semantic_source_coherence(
     vectors: &PublishedVectorGenerationV1,
     code: &CodeIndexPublishedGenerationV1,
 ) -> SemanticSourceCoherenceOutcomeV1 {
-    if vectors.source_generation() == &code.manifest().generation_id {
-        return SemanticSourceCoherenceOutcomeV1::Coherent(
-            SemanticSourceCoherenceV1::ExactGeneration,
-        );
-    }
+    // The bijection is the proof on both arms. A shared generation identifier
+    // is only the label: it says the vectors name this publication, never that
+    // the corpus they projected is the corpus it sealed, and a caller that
+    // short-circuits on it re-derives its own weaker rule.
+    // ponytail: O(sealed corpus) per call; if query latency shows it, cache the
+    // verdict keyed by (vector generation, code generation) rather than
+    // reintroducing an identifier-only fast path.
     if semantic_vector_rows_cover_chunk_corpus(vectors.vectors(), code.chunks().chunks()) {
         return SemanticSourceCoherenceOutcomeV1::Coherent(
-            SemanticSourceCoherenceV1::ProvenSourceContent,
+            if vectors.source_generation() == &code.manifest().generation_id {
+                SemanticSourceCoherenceV1::ExactGeneration
+            } else {
+                SemanticSourceCoherenceV1::ProvenSourceContent
+            },
         );
     }
     SemanticSourceCoherenceOutcomeV1::Mismatch(SemanticSourceMismatchV1 {
@@ -3430,22 +3415,22 @@ impl PublishedSemanticVectorReadPortV1 {
     }
 
     /// Serve `vectors` for the exact code generation they were projected from.
+    ///
+    /// Naming that generation is not proof of it, so admission still runs the
+    /// one coherence verdict and refuses any other arm.
     fn new(
         vectors: PublishedVectorGenerationV1,
         search_index_key: SemanticSearchIndexKeyV1,
         code: &CodeIndexPublishedGenerationV1,
         ann: Option<SemanticAnnServingIndexV1>,
     ) -> Result<Self, RetrievalPortError> {
-        if vectors.source_generation() != &code.manifest().generation_id {
+        let SemanticSourceCoherenceOutcomeV1::Coherent(
+            coherence @ SemanticSourceCoherenceV1::ExactGeneration,
+        ) = semantic_source_coherence(&vectors, code)
+        else {
             return Err(RetrievalPortError::GenerationMismatch);
-        }
-        Self::bind(
-            vectors,
-            search_index_key,
-            code,
-            ann,
-            SemanticSourceCoherenceV1::ExactGeneration,
-        )
+        };
+        Self::bind(vectors, search_index_key, code, ann, coherence)
     }
 
     /// Serve `vectors` for `code` when it is either their exact source
@@ -3461,11 +3446,9 @@ impl PublishedSemanticVectorReadPortV1 {
         code: &CodeIndexPublishedGenerationV1,
         ann: Option<SemanticAnnServingIndexV1>,
     ) -> Result<Self, RetrievalPortError> {
-        let coherence = if vectors.source_generation() == &code.manifest().generation_id {
-            SemanticSourceCoherenceV1::ExactGeneration
-        } else if semantic_source_content_coherent(&vectors, code) {
-            SemanticSourceCoherenceV1::ProvenSourceContent
-        } else {
+        let SemanticSourceCoherenceOutcomeV1::Coherent(coherence) =
+            semantic_source_coherence(&vectors, code)
+        else {
             return Err(RetrievalPortError::GenerationMismatch);
         };
         Self::bind(vectors, search_index_key, code, ann, coherence)
@@ -5275,21 +5258,6 @@ mod tests {
             source_occurrence,
             SourceOccurrenceId::new(format!("code-chunk:{}", chunk.id.as_str()))
                 .expect("source occurrence")
-        );
-    }
-
-    #[test]
-    fn compatible_generation_uses_projection_change_manifest_digest() {
-        let request = projection_request('m');
-
-        assert_eq!(
-            semantic_source_manifest_digest(&request),
-            &request.changes.manifest_digest
-        );
-        assert_ne!(
-            semantic_source_manifest_digest(&request),
-            &request.request_digest,
-            "the projection request receipt is not the source manifest identity"
         );
     }
 
