@@ -82,6 +82,27 @@ async fn restore_schema_triggers(db_path: &Path, triggers: &[String]) {
     }
 }
 
+async fn table_trigger_sql(conn: &Connection, table: &str) -> Vec<String> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND tbl_name = ?1 AND sql IS NOT NULL ORDER BY name",
+            params![table],
+        )
+        .await
+        .unwrap();
+    let mut triggers = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        triggers.push(row.get::<String>(0).unwrap());
+    }
+    triggers
+}
+
+/// Rebuilds the two tables the v4 migration widened from their exact beta.37
+/// definitions. Recreating them costs two statement parses; the equivalent
+/// `DROP COLUMN` sequence reparses the whole 700-object schema several times
+/// per column, which under a full parallel test run exceeded the exact-SQL
+/// statement budget.
 async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
     let raw_db = TestConnection::open(db_path);
     let conn = (*raw_db).clone();
@@ -108,20 +129,27 @@ async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
                                 + receipt.assertion_count";
     assert_eq!(current_guard.matches(current_accounting).count(), 1);
     let released_guard = current_guard.replacen(current_accounting, released_accounting, 1);
+    // Dropping the table drops its triggers; their text is identical in v3.
+    let projection_receipt_triggers =
+        table_trigger_sql(&conn, "session_temporal_projection_receipts").await;
+    assert_eq!(projection_receipt_triggers.len(), 3);
 
     conn.execute_batch(
         "DROP TRIGGER session_refresh_progress_insert_guard_v1;
-         DROP INDEX idx_session_relation_receipts_recovery_due;
-         ALTER TABLE session_temporal_projection_receipts DROP COLUMN batch_item_count;
-         ALTER TABLE session_temporal_projection_receipts DROP COLUMN committed_item_count;
-         ALTER TABLE session_temporal_projection_receipts DROP COLUMN committed_copy_count;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_state;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_failure_code;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_failure_count;
-         ALTER TABLE session_relation_receipts DROP COLUMN recovery_next_attempt_at;",
+         DROP TABLE session_temporal_projection_receipts;
+         DROP TABLE session_relation_receipts;",
     )
     .await
     .unwrap();
+    conn.execute_batch(SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3_DDL)
+        .await
+        .unwrap();
+    conn.execute_batch(SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DDL)
+        .await
+        .unwrap();
+    for trigger in &projection_receipt_triggers {
+        conn.execute_batch(trigger).await.unwrap();
+    }
     conn.execute_batch(&released_guard).await.unwrap();
     conn.execute(
         "UPDATE session_temporal_schema_migrations
@@ -131,6 +159,148 @@ async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
     )
     .await
     .unwrap();
+}
+
+/// `session_temporal_projection_receipts` exactly as published in beta.37.
+const SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3_DDL: &str = "
+    CREATE TABLE session_temporal_projection_receipts (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        batch_ordinal INTEGER NOT NULL CHECK(batch_ordinal >= 0),
+        batch_digest TEXT NOT NULL,
+        frozen_watermarks_json TEXT NOT NULL CHECK(json_valid(frozen_watermarks_json)),
+        source_through INTEGER NOT NULL CHECK(source_through >= 0),
+        projection_through INTEGER NOT NULL CHECK(projection_through >= 0),
+        occurrence_count INTEGER NOT NULL CHECK(occurrence_count >= 0),
+        occurrence_digest TEXT NOT NULL,
+        dimension_count INTEGER NOT NULL CHECK(dimension_count >= 0),
+        dimension_digest TEXT NOT NULL,
+        copy_count INTEGER NOT NULL CHECK(copy_count >= 0),
+        copy_digest TEXT NOT NULL,
+        assertion_count INTEGER NOT NULL CHECK(assertion_count >= 0),
+        assertion_digest TEXT NOT NULL,
+        supersession_count INTEGER NOT NULL CHECK(supersession_count >= 0),
+        supersession_digest TEXT NOT NULL,
+        current_count INTEGER NOT NULL CHECK(current_count >= 0),
+        current_digest TEXT NOT NULL,
+        fts_count INTEGER NOT NULL CHECK(fts_count >= 0),
+        fts_digest TEXT NOT NULL,
+        committed_at INTEGER NOT NULL,
+        PRIMARY KEY(session_id, generation, batch_ordinal),
+        UNIQUE(session_id, generation, batch_digest),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
+    );";
+
+/// `session_relation_receipts` exactly as persisted by v4 stores before
+/// receipt recovery (byte-identical to the beta.37 published definition).
+const SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DDL: &str = "
+    CREATE TABLE session_relation_receipts (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        scope_kind TEXT NOT NULL
+            CHECK(scope_kind IN ('project_sessions', 'profile_sessions')),
+        scope_id TEXT NOT NULL,
+        expected_graph_watermark TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'applied')),
+        graph_watermark TEXT,
+        created_at INTEGER NOT NULL,
+        applied_at INTEGER,
+        PRIMARY KEY(session_id, generation),
+        CHECK(
+            (state = 'pending' AND graph_watermark IS NULL AND applied_at IS NULL)
+            OR (state = 'applied' AND graph_watermark = expected_graph_watermark
+                AND applied_at IS NOT NULL)
+        ),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_session_relation_receipts_pending
+        ON session_relation_receipts(state, created_at, session_id, generation);";
+
+const SESSION_RELATION_RECEIPT_COLUMNS_WITHOUT_RECOVERY: [&str; 9] = [
+    "session_id",
+    "generation",
+    "scope_kind",
+    "scope_id",
+    "expected_graph_watermark",
+    "state",
+    "graph_watermark",
+    "created_at",
+    "applied_at",
+];
+
+/// Rebuilds a final store's `session_relation_receipts` from the exact
+/// pre-recovery DDL and retains one pending and one applied receipt plus the
+/// applied receipt's effect journal row.
+async fn convert_final_temporal_schema_to_v4_without_receipt_recovery(db_path: &Path) {
+    let raw_db = TestConnection::open(db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch("DROP TABLE session_relation_receipts;")
+        .await
+        .unwrap();
+    conn.execute_batch(SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DDL)
+        .await
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO session_temporal_generations (
+            session_id, generation, state, frozen_watermarks_json, created_at
+         ) VALUES ('retained-v4', 1, 'building', '{}', 100),
+                  ('retained-v4', 2, 'building', '{}', 200);
+         INSERT INTO session_relation_receipts (
+            session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+            state, graph_watermark, created_at, applied_at
+         ) VALUES
+            ('retained-v4', 1, 'project_sessions', 'project-a', 'watermark-1',
+             'applied', 'watermark-1', 101, 102),
+            ('retained-v4', 2, 'profile_sessions', 'profile-b', 'watermark-2',
+             'pending', NULL, 201, NULL);
+         INSERT INTO session_relation_effect_journal (
+            session_id, generation, projection_json, created_at
+         ) VALUES ('retained-v4', 1, '{\"effects\":1}', 102);",
+    )
+    .await
+    .unwrap();
+}
+
+async fn retained_relation_receipts(db_path: &Path) -> Vec<(String, i64, String, String)> {
+    let raw_db = TestConnection::open(db_path);
+    let conn = (*raw_db).clone();
+    let mut rows = conn
+        .query(
+            "SELECT session_id, generation, scope_id, state
+             FROM session_relation_receipts ORDER BY generation",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut receipts = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        receipts.push((
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+            row.get(3).unwrap(),
+        ));
+    }
+    receipts
+}
+
+fn expected_retained_relation_receipts() -> Vec<(String, i64, String, String)> {
+    vec![
+        (
+            "retained-v4".to_string(),
+            1,
+            "project-a".to_string(),
+            "applied".to_string(),
+        ),
+        (
+            "retained-v4".to_string(),
+            2,
+            "profile-b".to_string(),
+            "pending".to_string(),
+        ),
+    ]
 }
 
 async fn insert_released_v3_projection_receipts(db_path: &Path, second_counts: (i64, i64, i64)) {
@@ -454,6 +624,235 @@ async fn released_v3_temporal_receipts_migrate_to_v4_with_exact_progress_counts(
         )
         .await,
         "migration must restore projection receipt immutability before commit"
+    );
+}
+
+#[tokio::test]
+async fn v4_receipts_without_recovery_columns_migrate_in_place_and_reopen() {
+    let tmp = TempDir::new().unwrap();
+    let fresh_path = tmp.path().join(".tracedecay").join("fresh.db");
+    let db = open_global_db(&fresh_path)
+        .await
+        .expect("fresh initialization should install the final temporal schema");
+    drop(db);
+    let fresh_catalog = temporal_schema_object_catalog(&fresh_path).await;
+
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path).await.unwrap();
+    drop(db);
+    convert_final_temporal_schema_to_v4_without_receipt_recovery(&db_path).await;
+    assert_eq!(
+        persisted_column_names(&db_path, "session_relation_receipts").await,
+        SESSION_RELATION_RECEIPT_COLUMNS_WITHOUT_RECOVERY
+    );
+    assert_eq!(temporal_schema_version(&db_path).await, 4);
+
+    let reopened = open_global_db(&db_path)
+        .await
+        .expect("the exact pre-recovery v4 receipt shape should migrate in place");
+    drop(reopened);
+
+    assert_eq!(temporal_schema_version(&db_path).await, 4);
+    assert_eq!(
+        persisted_column_names(&db_path, "session_relation_receipts").await,
+        [
+            "session_id",
+            "generation",
+            "scope_kind",
+            "scope_id",
+            "expected_graph_watermark",
+            "state",
+            "graph_watermark",
+            "created_at",
+            "applied_at",
+            "recovery_state",
+            "recovery_failure_code",
+            "recovery_failure_count",
+            "recovery_next_attempt_at",
+        ]
+    );
+    assert_eq!(
+        temporal_schema_object_catalog(&db_path).await,
+        fresh_catalog,
+        "a migrated store must carry exactly the fresh store's temporal objects"
+    );
+    assert_eq!(
+        retained_relation_receipts(&db_path).await,
+        expected_retained_relation_receipts()
+    );
+    assert_eq!(
+        row_count(&db_path, "session_relation_effect_journal").await,
+        1
+    );
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    let mut rows = conn
+        .query(
+            "SELECT generation, recovery_state, recovery_failure_code,
+                    recovery_failure_count, recovery_next_attempt_at
+             FROM session_relation_receipts ORDER BY generation",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut recovery = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        recovery.push((
+            row.get::<i64>(0).unwrap(),
+            row.get::<String>(1).unwrap(),
+            row.get::<Option<String>>(2).unwrap(),
+            row.get::<i64>(3).unwrap(),
+            row.get::<i64>(4).unwrap(),
+        ));
+    }
+    drop(rows);
+    drop(conn);
+    drop(raw_db);
+    assert_eq!(
+        recovery,
+        [
+            (1, "pending".to_string(), None, 0, 0),
+            (2, "pending".to_string(), None, 0, 0),
+        ],
+        "retained receipts must take the contract's recovery defaults"
+    );
+
+    let migrated_catalog = temporal_schema_object_catalog(&db_path).await;
+    let restart_path = tmp.path().join(".tracedecay").join("restart.db");
+    copy_database_for_temporal_restart(&db_path, &restart_path).await;
+    let reopened = open_global_db(&restart_path)
+        .await
+        .expect("a migrated store must reopen as exactly current");
+    drop(reopened);
+    assert_eq!(temporal_schema_version(&restart_path).await, 4);
+    assert_eq!(
+        temporal_schema_object_catalog(&restart_path).await,
+        migrated_catalog
+    );
+    assert_eq!(
+        retained_relation_receipts(&restart_path).await,
+        expected_retained_relation_receipts()
+    );
+}
+
+#[tokio::test]
+async fn v4_receipts_with_partial_recovery_columns_are_refused_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path).await.unwrap();
+    drop(db);
+    convert_final_temporal_schema_to_v4_without_receipt_recovery(&db_path).await;
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "ALTER TABLE session_relation_receipts
+         ADD COLUMN recovery_state TEXT NOT NULL DEFAULT 'pending';",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+    let before_sql = schema_object_sql(&db_path, "table", "session_relation_receipts").await;
+    let before_catalog = temporal_schema_object_catalog(&db_path).await;
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a partially added recovery column set must be refused"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("a partial recovery shape must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("session_relation_receipts"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(temporal_schema_version(&db_path).await, 4);
+    assert_eq!(
+        schema_object_sql(&db_path, "table", "session_relation_receipts").await,
+        before_sql,
+        "typed refusal must leave the partial shape byte-unchanged"
+    );
+    assert_eq!(
+        temporal_schema_object_catalog(&db_path).await,
+        before_catalog
+    );
+    assert!(
+        !schema_object_exists(
+            &db_path,
+            "index",
+            "idx_session_relation_receipts_recovery_due"
+        )
+        .await
+    );
+    assert_eq!(
+        retained_relation_receipts(&db_path).await,
+        expected_retained_relation_receipts()
+    );
+}
+
+#[tokio::test]
+async fn v4_receipts_with_retyped_column_are_refused_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path).await.unwrap();
+    drop(db);
+    convert_final_temporal_schema_to_v4_without_receipt_recovery(&db_path).await;
+    let retyped_ddl = SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DDL.replacen(
+        "applied_at INTEGER,",
+        "applied_at TEXT,",
+        1,
+    );
+    assert_ne!(retyped_ddl, SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DDL);
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "CREATE TEMP TABLE retained AS SELECT * FROM session_relation_receipts;
+         DROP TABLE session_relation_receipts;",
+    )
+    .await
+    .unwrap();
+    conn.execute_batch(&retyped_ddl).await.unwrap();
+    conn.execute_batch(
+        "INSERT INTO session_relation_receipts SELECT * FROM retained;
+         DROP TABLE retained;",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+    assert_eq!(
+        persisted_column_names(&db_path, "session_relation_receipts").await,
+        SESSION_RELATION_RECEIPT_COLUMNS_WITHOUT_RECOVERY
+    );
+    let before_sql = schema_object_sql(&db_path, "table", "session_relation_receipts").await;
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a pre-recovery column set with a retyped column must be refused"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("a retyped pre-recovery column must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("session_relation_receipts"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(temporal_schema_version(&db_path).await, 4);
+    assert_eq!(
+        schema_object_sql(&db_path, "table", "session_relation_receipts").await,
+        before_sql,
+        "typed refusal must not migrate or rewrite the retyped table"
+    );
+    assert_eq!(
+        persisted_column_names(&db_path, "session_relation_receipts").await,
+        SESSION_RELATION_RECEIPT_COLUMNS_WITHOUT_RECOVERY
+    );
+    assert_eq!(
+        retained_relation_receipts(&db_path).await,
+        expected_retained_relation_receipts()
     );
 }
 

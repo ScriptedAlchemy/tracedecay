@@ -166,33 +166,120 @@ pub struct SemanticRetrievalRequestV1<'a> {
     pub budget: RetrievalBudget,
 }
 
+/// Which `SemanticRetrievalRequestV1::validate` predicate refused a request.
+///
+/// The query call site collapses every refusal into one public abstention
+/// (`IndexIncompatible`), so without a typed predicate the only observable
+/// symptom of a mis-built request is a silently unaugmented answer.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRequestPredicateV1 {
+    BaseBudget,
+    LaneBudget,
+    QueryDigest,
+    CodeGeneration,
+    CapabilityManifestDigest,
+    VectorGeneration,
+    EmbeddingKey,
+    SearchIndexKey,
+    /// Query scope, authenticated query digest, and admitted projection did
+    /// not share one privacy domain and key epoch.
+    PrivacyAdmission,
+}
+
+impl SemanticRequestPredicateV1 {
+    #[hotpath::skip]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BaseBudget => "base_budget",
+            Self::LaneBudget => "lane_budget",
+            Self::QueryDigest => "query_digest",
+            Self::CodeGeneration => "code_generation",
+            Self::CapabilityManifestDigest => "capability_manifest_digest",
+            Self::VectorGeneration => "vector_generation",
+            Self::EmbeddingKey => "embedding_key",
+            Self::SearchIndexKey => "search_index_key",
+            Self::PrivacyAdmission => "privacy_admission",
+        }
+    }
+}
+
+/// One named refusal of a semantic lane request: which predicate failed and
+/// the contract error it produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticRequestRefusalV1 {
+    pub predicate: SemanticRequestPredicateV1,
+    pub error: RetrievalPortError,
+}
+
+impl std::fmt::Display for SemanticRequestRefusalV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "semantic request predicate {} refused: {}",
+            self.predicate.as_str(),
+            self.error
+        )
+    }
+}
+
+impl From<SemanticRequestRefusalV1> for RetrievalPortError {
+    fn from(refusal: SemanticRequestRefusalV1) -> Self {
+        refusal.error
+    }
+}
+
 impl SemanticRetrievalRequestV1<'_> {
-    pub fn validate(&self) -> Result<(), RetrievalPortError> {
-        self.base.budget.validate().map_err(contract_error)?;
-        self.budget.validate().map_err(contract_error)?;
-        self.query_digest.validate().map_err(contract_error)?;
-        self.code_generation.validate().map_err(contract_error)?;
+    pub fn validate(&self) -> Result<(), SemanticRequestRefusalV1> {
+        fn named<E: std::fmt::Display>(
+            predicate: SemanticRequestPredicateV1,
+        ) -> impl FnOnce(E) -> SemanticRequestRefusalV1 {
+            move |error| SemanticRequestRefusalV1 {
+                predicate,
+                error: contract_error(error),
+            }
+        }
+        use SemanticRequestPredicateV1 as Predicate;
+
+        self.base
+            .budget
+            .validate()
+            .map_err(named(Predicate::BaseBudget))?;
+        self.budget
+            .validate()
+            .map_err(named(Predicate::LaneBudget))?;
+        self.query_digest
+            .validate()
+            .map_err(named(Predicate::QueryDigest))?;
+        self.code_generation
+            .validate()
+            .map_err(named(Predicate::CodeGeneration))?;
         self.capability_manifest_digest
             .validate()
-            .map_err(contract_error)?;
+            .map_err(named(Predicate::CapabilityManifestDigest))?;
         self.vector_generation
             .as_digest()
             .validate()
-            .map_err(contract_error)?;
+            .map_err(named(Predicate::VectorGeneration))?;
         self.projection
             .embedding_key()
             .validate()
-            .map_err(contract_error)?;
-        self.search_index_key.validate().map_err(contract_error)?;
+            .map_err(named(Predicate::EmbeddingKey))?;
+        self.search_index_key
+            .validate()
+            .map_err(named(Predicate::SearchIndexKey))?;
 
         if self.base.scope.privacy_domain != *self.projection.privacy_domain()
             || self.query_digest.privacy_domain != *self.projection.privacy_domain()
             || self.query_digest.key_epoch != self.projection.privacy_key_epoch()
         {
-            return Err(RetrievalPortError::Contract(
-                "semantic request scope, query digest, and admitted projection must share one privacy domain and key epoch"
-                    .to_owned(),
-            ));
+            return Err(SemanticRequestRefusalV1 {
+                predicate: Predicate::PrivacyAdmission,
+                error: RetrievalPortError::Contract(
+                    "semantic request scope, query digest, and admitted projection must share one privacy domain and key epoch"
+                        .to_owned(),
+                ),
+            });
         }
         Ok(())
     }
@@ -942,8 +1029,9 @@ where
         &self,
         request: &SemanticRetrievalRequestV1<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>, RetrievalPortError> {
-        request.validate().inspect_err(|error| {
-            observe_semantic_lane_failure("request_validation", port_error_class(error));
+        request.validate().map_err(|refusal| {
+            observe_semantic_lane_failure("request_validation", refusal.predicate.as_str());
+            refusal.error
         })?;
         if self.control.is_cancelled() {
             hotpath::gauge!("query.cancel.count").inc(1u32);
