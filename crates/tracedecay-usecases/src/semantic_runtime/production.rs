@@ -2819,27 +2819,6 @@ fn semantic_source_manifest_digest(request: &ProjectionBatchRequestV1) -> &Manif
     &request.changes.manifest_digest
 }
 
-/// Whether published vectors are still usable for the generation being served.
-///
-/// Semantic readiness is source compatibility, not generation identity: a
-/// vector generation serves exactly the corpus its projection digested, so the
-/// canonical comparison is the projected source manifest digest against the
-/// serving generation's. Comparing generation ids instead accepts (or rejects)
-/// on an implementation identity that says nothing about the corpus.
-pub fn vectors_serve_source(
-    vectors: &PublishedVectorGenerationV1,
-    serving: &CodeIndexPublishedGenerationV1,
-) -> bool {
-    let recorded = vectors.source_manifest_digest();
-    // Either digest identifies the same corpus: the one the code index carried
-    // on its own projection request, or the one a full replay recomputes for
-    // it. `prepare_restore_current` accepts exactly this pair, so a readiness
-    // gate that accepted only one of them would refuse compatible vectors.
-    recorded == semantic_source_manifest_digest(serving.projection().request())
-        || semantic_projection_request(serving, vectors.embedding_key(), None)
-            .is_ok_and(|replay| recorded == &replay.changes.manifest_digest)
-}
-
 #[derive(Clone, Copy)]
 struct InstalledArtifactMemberBytesV1 {
     model: u64,

@@ -26,9 +26,9 @@ use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::{
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_usecases::semantic_runtime::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
-    RetrievalProfileActivationObserverV1, SemanticRuntimeFuture,
+    RetrievalProfileActivationObserverV1, SemanticRuntimeFuture, SemanticSourceCoherenceOutcomeV1,
     prepare_project_semantic_redundancy_authority, project_semantic_production_runtime,
-    project_semantic_retained_code_generation,
+    project_semantic_retained_code_generation, semantic_source_coherence,
 };
 
 /// Observation step that refuses a committed activation the serving
@@ -322,20 +322,24 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         .ok_or(("active_vector_generation", ObserverError::Unavailable))?;
                     // Readiness is source compatibility, not generation
                     // identity. Reinstalling a committed activation whose
-                    // vectors digested a superseded corpus un-seats the
-                    // projection that does serve the live generation, and
+                    // vectors were projected from a superseded corpus un-seats
+                    // the projection that does serve the live generation, and
                     // then reports Ready for vectors no query can use. Refuse
                     // instead: the activation stays committed and the runtime
                     // keeps the newer pointer until the operator activates it.
-                    if !tracedecay_usecases::semantic_runtime::vectors_serve_source(
-                        &vectors, &generation,
-                    ) {
+                    // `semantic_source_coherence` is the one authority on that
+                    // question; this gate never re-derives its own.
+                    if let SemanticSourceCoherenceOutcomeV1::Mismatch(mismatch) =
+                        semantic_source_coherence(&vectors, &generation)
+                    {
                         tracing::warn!(
                             event = "semantic_query_activation",
                             step = SUPERSEDED_COMMITTED_ACTIVATION,
                             project_root = %project_root.display(),
-                            serving_generation = %generation.manifest().generation_id,
-                            vector_source_generation = %vectors.source_generation(),
+                            serving_generation = %mismatch.serving_generation,
+                            serving_content_identity = %mismatch.serving_content_identity,
+                            vector_source_generation = %mismatch.vector_source_generation,
+                            vector_source_manifest_digest = %mismatch.vector_source_manifest_digest,
                             vector_generation = ?pins.vector_generation_id,
                             "the committed activation projected a superseded source; it is not \
                              reinstalled over the generation now being served"
