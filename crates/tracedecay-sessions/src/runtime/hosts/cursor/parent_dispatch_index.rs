@@ -661,7 +661,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DispatchScanReceipt, parent_dispatch_model_for_subagent_with_receipt,
+        ANCHOR_WINDOW_BYTES, DispatchScanReceipt, parent_dispatch_model_for_subagent_with_receipt,
         uncached_dispatch_model_for_agent,
     };
     use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
@@ -837,17 +837,24 @@ mod tests {
     #[test]
     fn inode_replacement_rescans_from_zero_and_drops_stale_models() {
         let layout = layout();
-        write_lines(
-            &layout.candidate_two,
-            &[dispatch_record("agent_id", "old-agent", "old-model")],
-        );
+        let old = dispatch_record("agent_id", "old-agent", "old-model");
+        let new = dispatch_record("agent_id", "new-agent", "new-model");
+        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
+        write_lines(&layout.candidate_two, &[old]);
+        let original_metadata = fs::metadata(&layout.candidate_two).unwrap();
+        let original_len = original_metadata.len();
+        let original_mtime =
+            filetime::FileTime::from_last_modification_time(&original_metadata);
         assert_eq!(lookup(&layout, "old-agent").0.as_deref(), Some("old-model"));
 
         let replacement = layout.candidate_two.with_extension("jsonl.replacement");
-        write_lines(
-            &replacement,
-            &[dispatch_record("agent_id", "new-agent", "new-model")],
+        write_lines(&replacement, &[new]);
+        assert_eq!(
+            fs::metadata(&replacement).unwrap().len(),
+            original_len,
+            "replacement fixture must preserve file length"
         );
+        restore_exact_mtime(&replacement, original_mtime);
         fs::rename(&replacement, &layout.candidate_two).unwrap();
 
         let (stale, receipt) = lookup(&layout, "old-agent");
@@ -868,23 +875,17 @@ mod tests {
         file.flush().unwrap();
     }
 
-    fn bump_mtime_nanos_same_second(path: &std::path::Path, original: filetime::FileTime) {
-        let nanos = original.nanoseconds();
-        let bumped = if nanos < 999_999_999 { nanos + 1 } else { 0 };
-        filetime::set_file_mtime(
-            path,
-            filetime::FileTime::from_unix_time(original.unix_seconds(), bumped),
-        )
-        .unwrap();
+    fn restore_exact_mtime(path: &std::path::Path, original: filetime::FileTime) {
+        filetime::set_file_mtime(path, original).unwrap();
     }
 
     #[test]
     fn same_length_in_place_rewrite_rescans_from_zero() {
         let layout = layout();
-        write_lines(
-            &layout.candidate_two,
-            &[dispatch_record("agent_id", "rewrite-agent", "old-model")],
-        );
+        let old = dispatch_record("agent_id", "rewrite-agent", "old-model");
+        let new = dispatch_record("agent_id", "rewrite-agent", "new-model");
+        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
+        write_lines(&layout.candidate_two, &[old]);
         assert_eq!(
             lookup(&layout, "rewrite-agent").0.as_deref(),
             Some("old-model")
@@ -893,11 +894,8 @@ mod tests {
             &fs::metadata(&layout.candidate_two).unwrap(),
         );
 
-        rewrite_in_place(
-            &layout.candidate_two,
-            &[dispatch_record("agent_id", "rewrite-agent", "new-model")],
-        );
-        bump_mtime_nanos_same_second(&layout.candidate_two, original_mtime);
+        rewrite_in_place(&layout.candidate_two, &[new]);
+        restore_exact_mtime(&layout.candidate_two, original_mtime);
 
         let (model, receipt) = lookup(&layout, "rewrite-agent");
         assert_eq!(
@@ -909,6 +907,41 @@ mod tests {
             receipt.rescanned_from_zero,
             "same-length rewrite must invalidate the verified cursor"
         );
+    }
+
+    #[test]
+    fn exact_mtime_rewrite_with_unchanged_trailing_anchor_rescans_from_zero() {
+        let layout = layout();
+        let old = dispatch_record("agent_id", "rewrite-agent", "old-model");
+        let new = dispatch_record("agent_id", "rewrite-agent", "new-model");
+        let unchanged_tail = ordinary_record(&"x".repeat(ANCHOR_WINDOW_BYTES as usize));
+        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
+        assert!(
+            unchanged_tail.len() > ANCHOR_WINDOW_BYTES as usize,
+            "fixture tail must contain the complete anchor window"
+        );
+
+        write_lines(&layout.candidate_two, &[old, unchanged_tail.clone()]);
+        assert_eq!(
+            lookup(&layout, "rewrite-agent").0.as_deref(),
+            Some("old-model")
+        );
+        let original_metadata = fs::metadata(&layout.candidate_two).unwrap();
+        let original_len = original_metadata.len();
+        let original_mtime =
+            filetime::FileTime::from_last_modification_time(&original_metadata);
+
+        rewrite_in_place(&layout.candidate_two, &[new, unchanged_tail]);
+        assert_eq!(
+            fs::metadata(&layout.candidate_two).unwrap().len(),
+            original_len,
+            "rewrite fixture must preserve file length"
+        );
+        restore_exact_mtime(&layout.candidate_two, original_mtime);
+
+        let (model, receipt) = lookup(&layout, "rewrite-agent");
+        assert_eq!(model.as_deref(), Some("new-model"));
+        assert!(receipt.rescanned_from_zero);
     }
 
     #[cfg(unix)]
