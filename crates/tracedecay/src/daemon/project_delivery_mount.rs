@@ -29,7 +29,6 @@ pub(super) async fn ensure_project_delivery_settlement(
             session_db,
             scope.project_id.clone(),
             access.configuration_digest.clone(),
-            access.configuration_provenance_digest.clone(),
             configuration_policy_digest.clone(),
         )
         .await

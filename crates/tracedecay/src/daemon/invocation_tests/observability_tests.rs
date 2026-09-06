@@ -29,13 +29,10 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 /// A registry mount request whose store-authority fields match `identity`,
-/// stamping that identity's policy revision for the mounting root.
-fn store_mount(
-    configuration_provenance_revision: &ManifestDigest,
-    identity: &ObservabilityProducerIdentityV1,
-) -> StoreObservabilityMountV1 {
+/// stamping that identity's configuration and policy revisions for the
+/// mounting root.
+fn store_mount(identity: &ObservabilityProducerIdentityV1) -> StoreObservabilityMountV1 {
     StoreObservabilityMountV1::new(
-        configuration_provenance_revision.clone(),
         identity.authorized_scope_ref.clone(),
         identity.producer_revision.clone(),
         identity.configuration_revision.clone(),
@@ -122,7 +119,6 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
             database.clone(),
             project_id.clone(),
             digest('a'),
-            digest('0'),
             digest('b'),
         )
         .await
@@ -133,7 +129,6 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
             database.clone(),
             project_id.clone(),
             digest('a'),
-            digest('0'),
             digest('b'),
         )
         .await
@@ -182,7 +177,6 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
             database.clone(),
             project_id.clone(),
             digest('c'),
-            digest('0'),
             digest('d'),
         )
         .await
@@ -196,7 +190,6 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
             database.clone(),
             project_id.clone(),
             digest('c'),
-            digest('0'),
             digest('d'),
         )
         .await
@@ -276,7 +269,6 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             configuration_revision.clone(),
-            configuration_provenance_revision.clone(),
             root_policy_revision.clone(),
         )
         .await
@@ -287,7 +279,6 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             configuration_revision.clone(),
-            configuration_provenance_revision.clone(),
             root_policy_revision.clone(),
         )
         .await
@@ -303,7 +294,6 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             linked_database.clone(),
             project_id.clone(),
             configuration_revision.clone(),
-            configuration_provenance_revision.clone(),
             linked_policy_revision.clone(),
         )
         .await
@@ -331,7 +321,6 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
                 .expect("fresh reconciled linked-root database client"),
             project_id.clone(),
             configuration_revision.clone(),
-            configuration_provenance_revision.clone(),
             linked_policy_revision.clone(),
         )
         .await
@@ -374,51 +363,63 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
     // last-alias shutdown below and block the restart from reopening it.
     drop(first_recorder);
     drop(linked_recorder);
-    // A root presenting different revisions for the same registered store is
-    // refused, not given a second store owner and not silently aliased.
+    // The store's canonical configuration advances while these roots stay
+    // mounted, so a later root of the same store legitimately resolves a newer
+    // revision. It aliases the incumbent owners — one producer, one boot
+    // stream — and stamps its own configuration and policy provenance instead
+    // of being refused for the life of the daemon.
+    let advanced_configuration_revision = digest('9');
+    let advanced_policy_revision = canonical_sha256(&(
+        "tracedecay.daemon.configuration-policy.v1",
+        &linked_scope.scope_digest,
+        &advanced_configuration_revision,
+        &configuration_provenance_revision,
+    ))
+    .expect("advanced configuration policy");
+    let advanced = first_service
+        .mount_observability_producer(
+            PathBuf::from("/project/observability-store-alias-advanced"),
+            database.clone(),
+            project_id.clone(),
+            advanced_configuration_revision.clone(),
+            advanced_policy_revision.clone(),
+        )
+        .await
+        .expect("a newer store configuration must alias the incumbent owners");
+    assert!(!Arc::ptr_eq(&first, &advanced));
+    assert_eq!(
+        first.identity().process_boot_id,
+        advanced.identity().process_boot_id,
+        "an advanced-configuration alias must join the incumbent boot stream"
+    );
+    assert_eq!(
+        advanced.identity().configuration_revision,
+        advanced_configuration_revision.as_str()
+    );
+    assert_eq!(
+        advanced.identity().policy_revision,
+        advanced_policy_revision.as_str()
+    );
+    // A mount for a different authorized scope is still refused: that is store
+    // authority, not provenance, and it must never be silently aliased.
+    let foreign_project_id =
+        ProjectId::new("project.observability-store-alias-foreign").expect("foreign project id");
     let refused = match first_service
         .mount_observability_producer(
             PathBuf::from("/project/observability-store-alias-foreign"),
             database.clone(),
-            project_id.clone(),
-            digest('9'),
-            configuration_provenance_revision.clone(),
+            foreign_project_id,
+            configuration_revision.clone(),
             root_policy_revision.clone(),
         )
         .await
     {
-        Ok(_) => panic!("mismatched revisions must not mount a second store producer"),
+        Ok(_) => panic!("a foreign authorized scope must not alias the store producer"),
         Err(error) => error,
     };
     assert!(
         refused.to_string().contains("already mounted"),
         "unexpected refusal: {refused}"
-    );
-    let foreign_provenance_revision = digest('8');
-    let foreign_policy_revision = canonical_sha256(&(
-        "tracedecay.daemon.configuration-policy.v1",
-        &linked_scope.scope_digest,
-        &configuration_revision,
-        &foreign_provenance_revision,
-    ))
-    .expect("foreign-provenance configuration policy");
-    let refused = match first_service
-        .mount_observability_producer(
-            PathBuf::from("/project/observability-store-alias-foreign-provenance"),
-            database.clone(),
-            project_id.clone(),
-            configuration_revision.clone(),
-            foreign_provenance_revision,
-            foreign_policy_revision,
-        )
-        .await
-    {
-        Ok(_) => panic!("foreign provenance must not alias the store producer"),
-        Err(error) => error,
-    };
-    assert!(
-        refused.to_string().contains("already mounted"),
-        "unexpected provenance refusal: {refused}"
     );
     first
         .try_emit(envelope(&project_id, "alias:first"))
@@ -456,7 +457,6 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             configuration_revision.clone(),
-            configuration_provenance_revision.clone(),
             root_policy_revision.clone(),
         )
         .await
@@ -486,7 +486,6 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
             database.clone(),
             project_id.clone(),
             configuration_revision.clone(),
-            configuration_provenance_revision.clone(),
             root_policy_revision.clone(),
         )
         .await
@@ -656,7 +655,6 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
             database_a.clone(),
             project_id.clone(),
             digest('1'),
-            digest('0'),
             digest('2'),
         )
         .await
@@ -667,7 +665,6 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
             database_a,
             project_id.clone(),
             digest('1'),
-            digest('0'),
             digest('2'),
         )
         .await
@@ -693,7 +690,6 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
             database_b,
             project_id.clone(),
             digest('3'),
-            digest('0'),
             digest('4'),
         )
         .await
@@ -743,7 +739,6 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
             database.clone(),
             project_id.clone(),
             digest('3'),
-            digest('0'),
             digest('4'),
         )
         .await
@@ -796,7 +791,6 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
             database.clone(),
             project_id.clone(),
             digest('3'),
-            digest('0'),
             digest('5'),
         )
         .await
@@ -819,14 +813,7 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
         .expect("clean project quiescence");
     drop(quiescence);
     service
-        .mount_observability_producer(
-            linked_root,
-            database,
-            project_id,
-            digest('3'),
-            digest('0'),
-            digest('5'),
-        )
+        .mount_observability_producer(linked_root, database, project_id, digest('3'), digest('5'))
         .await
         .expect("one replacement mounts after retirement");
     service.expire_all().await;
@@ -838,7 +825,6 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
     let (_project, project_id, database, _runtime) =
         runtime("observability-retiring-two-aliases").await;
     let registry = StoreObservabilityRegistryV1::default();
-    let configuration_provenance_revision = digest('0');
     let identity = ObservabilityProducerIdentityV1 {
         authorized_scope_ref: project_id.as_str().to_owned(),
         process_boot_id: "daemon:retiring-two-aliases".to_owned(),
@@ -849,26 +835,18 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
     let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
         .expect("producer");
     let first = registry
-        .acquire_or_start(
-            &database,
-            &store_mount(&configuration_provenance_revision, &identity),
-            || Ok(producer),
-        )
+        .acquire_or_start(&database, &store_mount(&identity), || Ok(producer))
         .expect("first alias");
     let linked_identity = ObservabilityProducerIdentityV1 {
         policy_revision: digest('8').as_str().to_owned(),
         ..identity.clone()
     };
     let linked = registry
-        .acquire_or_start(
-            &database,
-            &store_mount(&configuration_provenance_revision, &linked_identity),
-            || {
-                Err(StoreObservabilityMountErrorV1::Unavailable(
-                    "must not start a second producer",
-                ))
-            },
-        )
+        .acquire_or_start(&database, &store_mount(&linked_identity), || {
+            Err(StoreObservabilityMountErrorV1::Unavailable(
+                "must not start a second producer",
+            ))
+        })
         .expect("linked alias");
     let first_producer = first.producer();
     let producer = linked.producer();
@@ -916,11 +894,9 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
     .await
     .expect("concurrent last release reaches the producer");
 
-    let retiring = registry.acquire_or_start(
-        &database,
-        &store_mount(&configuration_provenance_revision, &identity),
-        || panic!("retiring store must not start an overlapping producer"),
-    );
+    let retiring = registry.acquire_or_start(&database, &store_mount(&identity), || {
+        panic!("retiring store must not start an overlapping producer")
+    });
     assert!(matches!(
         retiring,
         Err(StoreObservabilityMountErrorV1::Retiring)
@@ -943,7 +919,7 @@ async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finis
         process_boot_id: "daemon:retiring-two-aliases-replacement".to_owned(),
         ..identity.clone()
     };
-    let replacement_mount = store_mount(&configuration_provenance_revision, &replacement_identity);
+    let replacement_mount = store_mount(&replacement_identity);
     let replacement = registry
         .acquire_or_start(&database, &replacement_mount, || {
             BoundedObservabilityProducerV1::start(database.clone(), replacement_identity, 1)
@@ -963,7 +939,6 @@ async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() 
         .await
         .expect("hold registered writer");
     let registry = StoreObservabilityRegistryV1::default();
-    let configuration_provenance_revision = digest('0');
     let policy_a = digest('a');
     let policy_b = digest('b');
     let identity = ObservabilityProducerIdentityV1 {
@@ -976,26 +951,18 @@ async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() 
     let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
         .expect("producer");
     let first = registry
-        .acquire_or_start(
-            &database,
-            &store_mount(&configuration_provenance_revision, &identity),
-            || Ok(producer),
-        )
+        .acquire_or_start(&database, &store_mount(&identity), || Ok(producer))
         .expect("first alias");
     let linked_identity = ObservabilityProducerIdentityV1 {
         policy_revision: policy_b.as_str().to_owned(),
         ..identity.clone()
     };
     let linked = registry
-        .acquire_or_start(
-            &database,
-            &store_mount(&configuration_provenance_revision, &linked_identity),
-            || {
-                Err(StoreObservabilityMountErrorV1::Unavailable(
-                    "must not start a second producer",
-                ))
-            },
-        )
+        .acquire_or_start(&database, &store_mount(&linked_identity), || {
+            Err(StoreObservabilityMountErrorV1::Unavailable(
+                "must not start a second producer",
+            ))
+        })
         .expect("linked alias");
     let first_producer = first.producer();
     let linked_producer = linked.producer();
@@ -1083,9 +1050,7 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
     let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
         .expect("producer");
     let registered = registry
-        .acquire_or_start(&database, &store_mount(&digest('0'), &identity), || {
-            Ok(producer)
-        })
+        .acquire_or_start(&database, &store_mount(&identity), || Ok(producer))
         .expect("registered observability producer");
     let blocker = database
         .begin_write_transaction()
@@ -1101,7 +1066,7 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
         process_boot_id: "daemon:retiring-drop-overlap".to_owned(),
         ..identity.clone()
     };
-    let overlap_mount = store_mount(&digest('0'), &overlap_identity);
+    let overlap_mount = store_mount(&overlap_identity);
     let retiring = registry.acquire_or_start(&database, &overlap_mount, || {
         BoundedObservabilityProducerV1::start(database.clone(), overlap_identity.clone(), 1)
             .map_err(StoreObservabilityMountErrorV1::Unavailable)
@@ -1116,7 +1081,7 @@ async fn dropped_last_alias_keeps_the_store_retiring_until_owners_release() {
         process_boot_id: "daemon:retiring-drop-replacement".to_owned(),
         ..identity.clone()
     };
-    let replacement_mount = store_mount(&digest('0'), &replacement_identity);
+    let replacement_mount = store_mount(&replacement_identity);
     let replacement = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let attempt = registry.acquire_or_start(&database, &replacement_mount, || {
@@ -1155,9 +1120,7 @@ async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_co
     let producer = BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 8)
         .expect("producer");
     let registered = registry
-        .acquire_or_start(&database, &store_mount(&digest('0'), &identity), || {
-            Ok(producer)
-        })
+        .acquire_or_start(&database, &store_mount(&identity), || Ok(producer))
         .expect("registered observability producer");
     // Owners that record through the mounted producer retain frontends past
     // the alias handle's lifetime; this one keeps the shared core open.
@@ -1178,7 +1141,7 @@ async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_co
         process_boot_id: "daemon:runtimeless-drop-overlap".to_owned(),
         ..identity.clone()
     };
-    let overlap_mount = store_mount(&digest('0'), &overlap_identity);
+    let overlap_mount = store_mount(&overlap_identity);
     let refused = registry.acquire_or_start(&database, &overlap_mount, || {
         panic!("a runtimeless drop must not vacate the store entry into a duplicate producer")
     });
@@ -1193,7 +1156,7 @@ async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_co
         process_boot_id: "daemon:runtimeless-drop-replacement".to_owned(),
         ..identity.clone()
     };
-    let replacement_mount = store_mount(&digest('0'), &replacement_identity);
+    let replacement_mount = store_mount(&replacement_identity);
     let replacement = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let attempt = registry.acquire_or_start(&database, &replacement_mount, || {
@@ -1246,9 +1209,7 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
     .expect("producer");
     let registry = StoreObservabilityRegistryV1::default();
     let registered = registry
-        .acquire_or_start(&database, &store_mount(&digest('0'), &identity), || {
-            Ok(producer)
-        })
+        .acquire_or_start(&database, &store_mount(&identity), || Ok(producer))
         .expect("registered observability producer");
     let blocker = database
         .begin_write_transaction()
@@ -1277,7 +1238,7 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         process_boot_id: "daemon:shutdown-failure-replacement".to_owned(),
         ..identity.clone()
     };
-    let replacement_mount = store_mount(&digest('0'), &replacement_identity);
+    let replacement_mount = store_mount(&replacement_identity);
     let failed = registry.acquire_or_start(&database, &replacement_mount, || {
         observed_start.store(true, Ordering::Release);
         BoundedObservabilityProducerV1::start(database.clone(), replacement_identity.clone(), 1)

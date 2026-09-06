@@ -62,14 +62,17 @@ impl ObservabilityProducerIdentityV1 {
         Ok(())
     }
 
-    /// The one store-owner alias gate: a policy-stamping frontend must match
-    /// its owner on every store-authority field. Only the policy revision a
-    /// linked root selects for its own emissions may differ.
+    /// The one store-owner alias gate: a provenance-stamping frontend must
+    /// match its owner on every store-authority field — the authorized scope,
+    /// the boot stream, and the producer revision. The configuration and
+    /// policy revisions are the mounting root's own at its own open time: the
+    /// store's canonical configuration advances while the owner stays
+    /// mounted, so a later linked root resolves a newer revision and stamps it
+    /// on its own emissions rather than being refused.
     pub(super) fn is_policy_alias_of(&self, owner: &Self) -> bool {
         self.authorized_scope_ref == owner.authorized_scope_ref
             && self.process_boot_id == owner.process_boot_id
             && self.producer_revision == owner.producer_revision
-            && self.configuration_revision == owner.configuration_revision
     }
 }
 
@@ -182,7 +185,7 @@ struct ObservabilityProducerCoreV1 {
     db: RegisteredGlobalDbLeaseV1,
     /// The founding owner identity. Every alias must match it on the
     /// store-authority fields (`is_policy_alias_of`); frontends stamp their
-    /// own policy revision at admission.
+    /// own configuration and policy revisions at admission.
     identity: ObservabilityProducerIdentityV1,
     data: mpsc::Sender<QueuedObservation>,
     control: mpsc::Sender<ProducerControl>,
@@ -277,8 +280,9 @@ impl BoundedObservabilityProducerV1 {
     /// core: one queue, sequence, lifecycle, and worker.
     ///
     /// Linked worktrees share one registered project-session store owner but
-    /// retain distinct policy provenance. Every store-authority field must
-    /// match the owner; only the policy stamped at admission may differ.
+    /// retain distinct configuration and policy provenance. Every
+    /// store-authority field must match the owner; the provenance stamped at
+    /// admission is the mounting root's own.
     pub fn alias_with_policy_identity(
         &self,
         identity: ObservabilityProducerIdentityV1,

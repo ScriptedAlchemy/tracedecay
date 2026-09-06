@@ -2,7 +2,6 @@ use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tracedecay_application::ApplicationContractError;
-use tracedecay_domain::ManifestDigest;
 use tracedecay_usecases::observability::{
     BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
@@ -16,10 +15,6 @@ use tracedecay_usecases::observability::{
 /// project roots (linked worktrees) mount observability for that store.
 struct StoreObservabilityCoreV1 {
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    // Canonical configuration resolution provenance is store-wide. Exact
-    // digest equality proves that linked-root policy differences come only
-    // from their scopes; a different provenance must not reuse this owner.
-    configuration_provenance_revision: ManifestDigest,
     producer: Arc<BoundedObservabilityProducerV1>,
     delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
     delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
@@ -29,7 +24,6 @@ struct StoreObservabilityCoreV1 {
 impl StoreObservabilityCoreV1 {
     fn start(
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-        configuration_provenance_revision: ManifestDigest,
         producer: BoundedObservabilityProducerV1,
         delivery_capacity: usize,
     ) -> Result<Self, &'static str> {
@@ -52,7 +46,6 @@ impl StoreObservabilityCoreV1 {
         )?);
         Ok(Self {
             database,
-            configuration_provenance_revision,
             producer,
             delivery_settlement_authority,
             delivery_settlements,
@@ -131,12 +124,15 @@ struct StoreObservabilityEntryV1 {
 }
 
 /// One project root's request to mount observability for an exact registered
-/// store. An incumbent owner must carry the same configuration provenance and
-/// match every store-authority identity field; `policy_revision` is this
-/// root's own provenance, stamped by the resulting alias frontend rather than
-/// compared against the incumbent.
+/// store. An incumbent owner must answer to the same store authority — the
+/// authorized scope and the producer revision. `configuration_revision` and
+/// `policy_revision` are this root's own provenance at its own open time,
+/// stamped by the resulting alias frontend rather than compared against the
+/// incumbent: the store's canonical configuration advances while earlier roots
+/// stay mounted, so a later linked root legitimately resolves a newer revision
+/// for the same store and every emission still carries the exact provenance of
+/// the alias that made it.
 pub struct StoreObservabilityMountV1 {
-    pub(crate) configuration_provenance_revision: ManifestDigest,
     pub(crate) authorized_scope_ref: String,
     pub(crate) producer_revision: String,
     pub(crate) configuration_revision: String,
@@ -147,7 +143,6 @@ pub struct StoreObservabilityMountV1 {
 impl StoreObservabilityMountV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(
-        configuration_provenance_revision: ManifestDigest,
         authorized_scope_ref: String,
         producer_revision: String,
         configuration_revision: String,
@@ -155,7 +150,6 @@ impl StoreObservabilityMountV1 {
         delivery_capacity: usize,
     ) -> Self {
         Self {
-            configuration_provenance_revision,
             authorized_scope_ref,
             producer_revision,
             configuration_revision,
@@ -168,8 +162,8 @@ impl StoreObservabilityMountV1 {
 /// Why observability could not be mounted for a registered store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreObservabilityMountErrorV1 {
-    /// A live owner for this exact store carries a different configuration
-    /// provenance or identity. The mount is refused rather than silently
+    /// A live owner for this exact store answers to a different authorized
+    /// scope or producer revision. The mount is refused rather than silently
     /// aliased or given a second store owner.
     Busy,
     /// The last alias is draining. Replacement owners are refused until the
@@ -236,16 +230,19 @@ impl StoreObservabilityRegistryV1 {
             return match &mut entry.state {
                 StoreObservabilityStateV1::Active { core, aliases } => {
                     let incumbent = core.producer.identity();
-                    if core.configuration_provenance_revision
-                        != mount.configuration_provenance_revision
-                        || incumbent.authorized_scope_ref != mount.authorized_scope_ref
+                    // Only store authority is compared. An incumbent's
+                    // configuration and policy revisions are frozen at its own
+                    // mount time and the store's canonical configuration keeps
+                    // advancing underneath it, so comparing them refused every
+                    // later root of a store whose configuration had been
+                    // written once — permanently, for the daemon's life.
+                    if incumbent.authorized_scope_ref != mount.authorized_scope_ref
                         || incumbent.producer_revision != mount.producer_revision
-                        || incumbent.configuration_revision != mount.configuration_revision
                     {
                         return Err(StoreObservabilityMountErrorV1::Busy);
                     }
                     // The alias joins the incumbent's boot stream and stamps
-                    // this root's own policy provenance.
+                    // this root's own configuration and policy provenance.
                     let emission_identity = ObservabilityProducerIdentityV1 {
                         authorized_scope_ref: mount.authorized_scope_ref.clone(),
                         process_boot_id: incumbent.process_boot_id.clone(),
@@ -292,13 +289,8 @@ impl StoreObservabilityRegistryV1 {
         }
         let producer = start_producer()?;
         let core = Arc::new(
-            StoreObservabilityCoreV1::start(
-                database.clone(),
-                mount.configuration_provenance_revision.clone(),
-                producer,
-                mount.delivery_capacity,
-            )
-            .map_err(StoreObservabilityMountErrorV1::Unavailable)?,
+            StoreObservabilityCoreV1::start(database.clone(), producer, mount.delivery_capacity)
+                .map_err(StoreObservabilityMountErrorV1::Unavailable)?,
         );
         let registered = RegisteredObservabilityProducerV1::alias(
             self.clone(),
@@ -476,15 +468,20 @@ impl RegisteredObservabilityProducerV1 {
         Arc::clone(&self.delivery_settlements)
     }
 
+    /// Whether this alias already answers for the same store authority: the
+    /// exact registered store, the same authorized scope, and the same
+    /// producer revision. Configuration and policy provenance belong to the
+    /// mounting root at its own open time, so they are never owner identity.
     pub(crate) fn matches(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-        configuration_provenance_revision: &ManifestDigest,
-        identity: &ObservabilityProducerIdentityV1,
+        authorized_scope_ref: &str,
+        producer_revision: &str,
     ) -> bool {
+        let identity = self.producer.identity();
         same_registered_store_authority(&self.core.database, database)
-            && self.core.configuration_provenance_revision == *configuration_provenance_revision
-            && *self.producer.identity() == *identity
+            && identity.authorized_scope_ref == authorized_scope_ref
+            && identity.producer_revision == producer_revision
     }
 
     /// Releases this alias; the last release drains and closes the store

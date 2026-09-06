@@ -110,7 +110,6 @@ pub(super) async fn mount_test_work_observability(
             database,
             scope.project_id.clone(),
             configuration_digest.clone(),
-            configuration_provenance_digest,
             policy_digest.clone(),
         )
         .await
