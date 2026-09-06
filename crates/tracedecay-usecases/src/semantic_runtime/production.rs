@@ -360,7 +360,7 @@ pub struct PreparedProductionSemanticRuntimeCommitV1 {
 
 enum PreparedProductionSemanticRuntimeActionV1 {
     Observation {
-        prepared: PreparedSemanticRuntimeObservationV1,
+        prepared: Box<PreparedSemanticRuntimeObservationV1>,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     },
     Restore {
@@ -375,7 +375,7 @@ impl PreparedProductionSemanticRuntimeCommitV1 {
             PreparedProductionSemanticRuntimeActionV1::Observation {
                 prepared,
                 lifecycle,
-            } => commit_current_observation_and_then(&self.handle, prepared, || {
+            } => commit_current_observation_and_then(&self.handle, *prepared, || {
                 let _ = lifecycle.mark_ready();
             }),
             PreparedProductionSemanticRuntimeActionV1::Restore {
@@ -582,7 +582,7 @@ impl ProductionSemanticRuntimeV1 {
         Some(PreparedProductionSemanticRuntimeCommitV1 {
             handle: self.handle.clone(),
             prepared: PreparedProductionSemanticRuntimeActionV1::Observation {
-                prepared,
+                prepared: Box::new(prepared),
                 lifecycle: Arc::clone(&self.lifecycle),
             },
         })
