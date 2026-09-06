@@ -993,6 +993,27 @@ impl tracedecay_configuration::config::RuntimeConfigurationAuthorityPort
     }
 }
 
+/// Dashboard read port over the daemon's PR-autotrack state sidecar.
+struct DaemonPrAutoTrackReadPort;
+
+impl tracedecay_dashboard_api::DashboardPrAutoTrackReadPort for DaemonPrAutoTrackReadPort {
+    fn managed_summary(
+        &self,
+        store_root: &Path,
+    ) -> Vec<tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1> {
+        crate::daemon::pr_autotrack::managed_summary(store_root)
+            .into_iter()
+            .map(
+                |entry| tracedecay_dashboard_api::DashboardPrAutoTrackEntryV1 {
+                    branch: entry.branch,
+                    pr: entry.pr,
+                    head_branch: entry.head_branch,
+                },
+            )
+            .collect()
+    }
+}
+
 pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
     static INSTALLATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
         tracedecay_configuration::config::install_runtime_configuration_authority(Arc::new(
@@ -1003,7 +1024,11 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
             RootPinnedRuntimeConfigurationCache,
         ))
         .map_err(|error| error.to_string())?;
-        install_dashboard_configuration_read_port().map_err(|error| error.to_string())
+        install_dashboard_configuration_read_port().map_err(|error| error.to_string())?;
+        tracedecay_dashboard_api::install_dashboard_pr_autotrack_read_port(Arc::new(
+            DaemonPrAutoTrackReadPort,
+        ))
+        .map_err(|_| "dashboard PR autotrack read port was already installed".to_string())
     });
     INSTALLATION
         .as_ref()
