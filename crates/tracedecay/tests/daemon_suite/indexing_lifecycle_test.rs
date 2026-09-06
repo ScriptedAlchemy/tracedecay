@@ -1106,7 +1106,12 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     let exit = daemon
         .wait_for_exit(RECEIPT_TIMEOUT)
         .expect("wait for cancelled daemon")
-        .expect("daemon must exit after SIGTERM");
+        .unwrap_or_else(|| {
+            panic!(
+                "daemon must exit after SIGTERM; daemon_log={}",
+                daemon_log_for_failure()
+            )
+        });
     assert!(
         exit.success(),
         "daemon cancellation was not graceful: {exit}"
