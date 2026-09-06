@@ -143,6 +143,16 @@ impl ScopeQuarantineAuthority {
                     {
                         return Err(identity_changed(&scope.scope_hash, "before quarantine"));
                     }
+                    drop(source);
+                    let held_source =
+                        self.source_handles
+                            .remove(&scope.scope_hash)
+                            .ok_or_else(|| {
+                                unsafe_state(
+                                    "scope quarantine lost its pre-rename source capability",
+                                )
+                            })?;
+                    drop(held_source);
                     rename_noreplace(
                         &self.store,
                         OsStr::new(&scope.scope_hash),
@@ -205,6 +215,7 @@ impl ScopeQuarantineAuthority {
                     if directory_identity(&staged).map_err(storage)? != expected {
                         return Err(identity_changed(&scope.scope_hash, "before rollback"));
                     }
+                    drop(staged);
                     let stage = self.stage.as_ref().ok_or_else(|| {
                         unsafe_state("scope rollback lost its quarantine capability")
                     })?;

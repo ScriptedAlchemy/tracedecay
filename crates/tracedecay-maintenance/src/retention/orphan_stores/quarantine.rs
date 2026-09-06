@@ -222,6 +222,10 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     write_journal(&capability.parent, &journal_name, &journal)
         .map_err(|_| CollectionFailureKind::RemoveFailed)?;
 
+    // cap_std does not open directories with FILE_SHARE_DELETE on Windows, so
+    // release our leaf handle before rename. The moved bytes are reopened and
+    // revalidated against the expected identity after the rename.
+    drop(capability.root);
     if rename_noreplace(
         &capability.parent,
         &capability.leaf_name,
@@ -236,7 +240,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     if sync_directory(&capability.parent).is_err() {
         return Ok(recover_original_name(
             capability.parent,
-            capability.root,
             capability.leaf_name,
             quarantine_name,
             quarantine_path,
@@ -244,7 +247,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         ));
     }
     if write_empty_marker(&capability.parent, &renamed_marker_name(&journal_name)).is_err() {
-        drop(capability.root);
         return Ok(QuarantineStoreOutcome::Interrupted { quarantine_path });
     }
     let moved_root = match capability.parent.open_dir_nofollow(&quarantine_name) {
@@ -252,7 +254,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         Err(_) => {
             return Ok(recover_original_name(
                 capability.parent,
-                capability.root,
                 capability.leaf_name,
                 quarantine_name,
                 quarantine_path,
@@ -279,7 +280,6 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
             drop(moved_root);
             Ok(recover_original_name(
                 capability.parent,
-                capability.root,
                 capability.leaf_name,
                 quarantine_name,
                 quarantine_path,
@@ -313,13 +313,11 @@ pub(super) fn quarantine_store_for_verified_collection(
 
 fn recover_original_name(
     parent: Dir,
-    root: Dir,
     original_name: OsString,
     quarantine_name: String,
     quarantine_path: PathBuf,
     journal_name: Option<String>,
 ) -> QuarantineStoreOutcome {
-    drop(root);
     if rename_noreplace(
         &parent,
         OsStr::new(&quarantine_name),
