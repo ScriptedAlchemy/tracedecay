@@ -5,9 +5,12 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use crate::configuration::FreshConfigurationStoreEvidence;
 use crate::schema_contract::{
-    invariant_trigger_names_for_tables, released_v3_invariant_triggers_intact,
-    starts_with_ignore_ascii_case, validate_released_v3_temporal_projection_receipt_contract,
-    validate_session_graph_publication_schema_contract, validate_session_temporal_schema_contract,
+    SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS, invariant_trigger_names_for_tables,
+    released_v3_invariant_triggers_intact, starts_with_ignore_ascii_case,
+    validate_released_v3_temporal_projection_receipt_contract,
+    validate_session_graph_publication_schema_contract,
+    validate_session_relation_receipts_without_recovery_contract,
+    validate_session_temporal_schema_contract,
 };
 use crate::{global_db_operation_error, global_db_operation_message};
 
@@ -29,6 +32,13 @@ const TEMPORAL_FTS_SHADOW_TABLES: &[&str] = &[
     "session_summary_nodes_fts_docsize",
     "session_summary_nodes_fts_idx",
 ];
+
+const SESSION_RELATION_RECEIPTS_TABLE: &str = "session_relation_receipts";
+
+// `session_relation_receipts` as published in beta.37 and carried unchanged
+// into the v4 stores persisted before receipt recovery added its columns.
+const SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DIGEST: &str =
+    "867dc83c80264f4b13aeab7f1ac51572a88ee5d614739a701ebddbb8dcb84a80";
 
 // Exact normalized CREATE TABLE authority published in v0.1.0-beta.37. The
 // structural PRAGMA contract cannot observe CHECK expressions, so released-v3
@@ -95,8 +105,8 @@ const RELEASED_V3_TEMPORAL_TABLE_DIGESTS: &[(&str, &str)] = &[
         "73e372d47f338bae3e25d461c76f14e8b9b7a1606184993450fbe6a9965c7e12",
     ),
     (
-        "session_relation_receipts",
-        "867dc83c80264f4b13aeab7f1ac51572a88ee5d614739a701ebddbb8dcb84a80",
+        SESSION_RELATION_RECEIPTS_TABLE,
+        SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DIGEST,
     ),
     (
         "session_summary_availability",
@@ -141,6 +151,10 @@ const RELEASED_V3_TEMPORAL_TABLE_DIGESTS: &[(&str, &str)] = &[
 pub(crate) enum SessionTemporalSchemaAdmission {
     /// The persisted schema and its objects exactly match the final contract.
     Current,
+    /// The store carries the final marker and contract except that
+    /// `session_relation_receipts` still has the exact shape persisted before
+    /// receipt recovery added its columns and index.
+    WithoutReceiptRecovery,
     /// The store carries the exact schema shipped through beta.37.
     ReleasedV3,
     /// The registered store is proven empty and may receive the final contract.
@@ -158,6 +172,10 @@ pub(crate) async fn require_admissible_session_temporal_schema(
         .map_err(|error| session_temporal_reset_required(error.to_string()))?;
     match version {
         Some(SESSION_TEMPORAL_SCHEMA_VERSION) => {
+            if session_relation_receipts_lack_recovery_columns(conn).await? {
+                validate_without_receipt_recovery_session_temporal_schema(conn).await?;
+                return Ok(SessionTemporalSchemaAdmission::WithoutReceiptRecovery);
+            }
             validate_current_session_temporal_schema(conn).await?;
             Ok(SessionTemporalSchemaAdmission::Current)
         }
@@ -186,6 +204,76 @@ pub(super) async fn validate_current_session_temporal_schema(
     validate_session_temporal_schema_contract(conn, &tables)
         .await
         .map_err(|error| session_temporal_reset_required(error.to_string()))?;
+    validate_temporal_namespace_and_fts(conn).await
+}
+
+/// True only when the persisted `session_relation_receipts` column list is
+/// exactly the final list minus its trailing recovery columns. Every other
+/// shape — including a partially added recovery set — is left for the final
+/// contract to refuse with its precise typed reason.
+async fn session_relation_receipts_lack_recovery_columns(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<bool> {
+    let Some(expected) = TEMPORAL_TABLE_COLUMNS
+        .iter()
+        .find(|(table, _)| *table == SESSION_RELATION_RECEIPTS_TABLE)
+        .and_then(|(_, columns)| columns.strip_suffix(SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS))
+    else {
+        return Err(global_db_operation_message(
+            OPERATION,
+            "session relation receipt recovery columns are not the trailing contract columns",
+        ));
+    };
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_info(?1) ORDER BY cid",
+            params![SESSION_RELATION_RECEIPTS_TABLE],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut actual = Vec::with_capacity(expected.len());
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        actual.push(
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        );
+    }
+    Ok(actual
+        .iter()
+        .map(String::as_str)
+        .eq(expected.iter().copied()))
+}
+
+pub(super) async fn validate_without_receipt_recovery_session_temporal_schema(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<()> {
+    let tables = TEMPORAL_TABLE_COLUMNS
+        .iter()
+        .map(|(table, _)| *table)
+        .filter(|table| !table.ends_with("_fts") && *table != SESSION_RELATION_RECEIPTS_TABLE)
+        .collect::<Vec<_>>();
+    validate_session_temporal_schema_contract(conn, &tables)
+        .await
+        .map_err(|error| session_temporal_reset_required(error.to_string()))?;
+    validate_session_relation_receipts_without_recovery_contract(conn)
+        .await
+        .map_err(|error| session_temporal_reset_required(error.to_string()))?;
+    validate_temporal_table_definition_digest(
+        conn,
+        SESSION_RELATION_RECEIPTS_TABLE,
+        SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY_DIGEST,
+    )
+    .await?;
+    validate_temporal_namespace_and_fts(conn).await
+}
+
+async fn validate_temporal_namespace_and_fts(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<()> {
     validate_temporal_namespace_tables(conn)
         .await
         .map_err(|error| session_temporal_reset_required(error.to_string()))?;
@@ -228,18 +316,7 @@ pub(super) async fn validate_released_v3_session_temporal_schema(
         ));
     }
     validate_released_v3_temporal_trigger_inventory(conn).await?;
-    validate_temporal_namespace_tables(conn)
-        .await
-        .map_err(|error| session_temporal_reset_required(error.to_string()))?;
-    validate_session_graph_publication_schema_contract(conn)
-        .await
-        .map_err(|error| session_temporal_reset_required(error.to_string()))?;
-    validate_temporal_fts_contracts(conn)
-        .await
-        .map_err(|error| session_temporal_reset_required(error.to_string()))?;
-    validate_temporal_fts_match(conn)
-        .await
-        .map_err(|error| session_temporal_reset_required(error.to_string()))
+    validate_temporal_namespace_and_fts(conn).await
 }
 
 async fn validate_released_v3_temporal_table_definitions(
@@ -261,31 +338,42 @@ async fn validate_released_v3_temporal_table_definitions(
         ));
     }
     for (table, expected_digest) in RELEASED_V3_TEMPORAL_TABLE_DIGESTS {
-        let mut rows = conn
-            .query(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                params![*table],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        else {
-            return Err(session_temporal_reset_required(format!(
-                "released v3 table '{table}' is missing"
-            )));
-        };
-        let sql = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let digest = hex::encode(Sha256::digest(normalize_schema_sql(&sql).as_bytes()));
-        if digest != *expected_digest {
-            return Err(session_temporal_reset_required(format!(
-                "released v3 table '{table}' has an incompatible CREATE TABLE contract"
-            )));
-        }
+        validate_temporal_table_definition_digest(conn, table, expected_digest).await?;
+    }
+    Ok(())
+}
+
+/// Pins a persisted CREATE TABLE definition by normalized digest so CHECK
+/// expressions, which the PRAGMA contract cannot observe, are admitted exactly.
+async fn validate_temporal_table_definition_digest(
+    conn: &impl QueryExecutor,
+    table: &str,
+    expected_digest: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    else {
+        return Err(session_temporal_reset_required(format!(
+            "temporal table '{table}' is missing"
+        )));
+    };
+    let sql = row
+        .get::<String>(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let digest = hex::encode(Sha256::digest(normalize_schema_sql(&sql).as_bytes()));
+    if digest != expected_digest {
+        return Err(session_temporal_reset_required(format!(
+            "temporal table '{table}' has an incompatible CREATE TABLE contract"
+        )));
     }
     Ok(())
 }
