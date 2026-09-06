@@ -701,16 +701,35 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("settled restart graph read");
     assert_eq!(settled_read.freshness(), CodeGraphReadFreshnessV1::Current);
-    let settled_census = census().await;
     if corrupt_graph || dirty_before_restart {
-        assert!(matches!(
-            settled_census,
-            GenerationCensusSnapshot::Observed {
-                freshness: GenerationCensusServingFreshness::Current,
-                ..
+        // A decoded census is a strictly later state than the text-serving
+        // head this case already settled on: `latest_complete_ready_decoded_*`
+        // abstains — returning no decoded owner at all — while a reconcile
+        // pass is in flight or the scheduler mutex is momentarily held, and
+        // that abstention reads back as a statistics-free projection. Sampling
+        // once therefore observes a non-terminal state on any host where the
+        // rebuilt successor decodes after its text head starts serving.
+        let census_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let settled_census = census().await;
+            if matches!(
+                settled_census,
+                GenerationCensusSnapshot::Observed {
+                    freshness: GenerationCensusServingFreshness::Current,
+                    ..
+                }
+            ) {
+                break;
             }
-        ));
+            assert!(
+                std::time::Instant::now() <= census_deadline,
+                "the rebuilt successor never published a current decoded census: \
+                 {settled_census:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     } else {
+        let settled_census = census().await;
         assert!(matches!(
             settled_census,
             GenerationCensusSnapshot::Unavailable {
