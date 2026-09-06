@@ -2,12 +2,12 @@ use std::fmt;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(test)]
-use serde::de::DeserializeOwned;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
+
+use crate::parallelism;
 
 use super::lexical_page_source::scan_layout;
 use super::*;
@@ -238,12 +238,15 @@ pub(super) fn assemble_published_generation(
     )?;
     let (ignored_source_roster, chunks, symbols, imports, edges, edge_abstentions, projection) =
         hotpath::measure_block!("code_index.sealed_decode.authority_restore", {
-            let ignored_source_roster = IgnoredSourceRosterV1::restore(
-                &snapshot,
-                &repository_parse_identity,
-                ignored_source_admissions,
-                ignored_source_admissions_digest,
-            )?;
+            let ignored_source_roster =
+                hotpath::measure_block!("code_index.sealed_decode.ignored_roster", {
+                    IgnoredSourceRosterV1::restore(
+                        &snapshot,
+                        &repository_parse_identity,
+                        ignored_source_admissions,
+                        ignored_source_admissions_digest,
+                    )
+                })?;
             // Persist pages moved into `files` exactly once, and chunk/symbol
             // rows are `Arc`-shared between those pages and the generation
             // aggregates: this flatten clones row pointers and per-file
@@ -256,15 +259,31 @@ pub(super) fn assemble_published_generation(
                 .iter()
                 .flat_map(|file| file.artifacts.symbols.iter().cloned())
                 .collect::<Vec<_>>();
-            let chunks = GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
-                .map_err(CodeIndexProductionErrorV1::Increment)?;
-            let symbols = GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
-                .map_err(CodeIndexProductionErrorV1::Lineage)?;
-            let imports = derive_import_evidence(&files);
-            let (edges, edge_abstentions) = collect_edge_evidence(&files);
+            let chunks = hotpath::measure_block!("code_index.sealed_decode.chunk_manifest", {
+                // Aggregate validation fans out over chunks too. Keep it on
+                // the same admitted pool as file restoration instead of
+                // entering Rayon's unrelated global worker pool.
+                parallelism::install(|| {
+                    GenerationChunkManifestV1::new(manifest.generation_id.clone(), chunk_rows)
+                })
+            })?
+            .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let symbols = hotpath::measure_block!("code_index.sealed_decode.symbol_index", {
+                GenerationSymbolIndexV1::new(manifest.generation_id.clone(), symbol_rows)
+            })
+            .map_err(CodeIndexProductionErrorV1::Lineage)?;
+            let imports = hotpath::measure_block!("code_index.sealed_decode.import_evidence", {
+                derive_import_evidence(&files)
+            });
+            let (edges, edge_abstentions) =
+                hotpath::measure_block!("code_index.sealed_decode.edge_evidence", {
+                    collect_edge_evidence(&files)
+                });
             let projection =
-                ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
-                    .map_err(CodeIndexProductionErrorV1::Projection)?;
+                hotpath::measure_block!("code_index.sealed_decode.projection_handoff", {
+                    ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
+                })
+                .map_err(CodeIndexProductionErrorV1::Projection)?;
             Ok::<_, CodeIndexProductionErrorV1>((
                 ignored_source_roster,
                 chunks,
@@ -428,38 +447,6 @@ fn classify_unaccepted_envelope(
         }
         _ => Ok(None),
     }
-}
-
-#[cfg(test)]
-fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
-    reader: R,
-    admitted_len: u64,
-) -> Result<T, CodeIndexProductionErrorV1> {
-    let bytes = read_admitted_bytes(reader, admitted_len)?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
-    })
-}
-
-fn read_admitted_bytes<R: std::io::Read>(
-    reader: R,
-    admitted_len: u64,
-) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-    admit_sealed_generation_len(admitted_len)?;
-    let read_limit = admitted_len.checked_add(1).ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract("sealed generation length overflowed".to_owned())
-    })?;
-    let mut reader = reader.take(read_limit);
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
-    })?;
-    if read_limit - reader.limit() != admitted_len {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation length does not match its admitted length".to_owned(),
-        ));
-    }
-    Ok(bytes)
 }
 
 fn admit_sealed_generation_bytes(
@@ -812,28 +799,6 @@ impl CodeIndexPublishedGenerationV1 {
         Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)
     }
 
-    pub fn decode_sealed_reader<R: std::io::Read>(
-        reader: R,
-        admitted_len: u64,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let bytes = hotpath::measure_block!(
-            "code_index.sealed_decode.admitted_read",
-            read_admitted_bytes(reader, admitted_len)
-        )?;
-        Self::decode_admitted_sealed_bytes(&bytes, admitted_len)
-    }
-
-    fn decode_admitted_sealed_bytes(
-        bytes: &[u8],
-        admitted_len: u64,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)?.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is incompatible".to_owned(),
-            )
-        })
-    }
-
     fn decode_admitted_sealed_bytes_if_compatible(
         bytes: &[u8],
         admitted_len: u64,
@@ -1119,9 +1084,9 @@ mod tests {
     }
 
     #[test]
-    fn admitted_json_rejects_extra_and_missing_bytes() {
-        let extra = decode_admitted_json::<serde_json::Value, _>(std::io::Cursor::new(b"{} "), 2);
-        let missing = decode_admitted_json::<serde_json::Value, _>(std::io::Cursor::new(b"{}"), 3);
+    fn admitted_bytes_reject_extra_and_missing_bytes() {
+        let extra = admit_sealed_generation_bytes(b"{} ", 2);
+        let missing = admit_sealed_generation_bytes(b"{}", 3);
 
         assert!(matches!(
             extra,

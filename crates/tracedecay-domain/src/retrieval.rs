@@ -1234,15 +1234,6 @@ pub enum SanitizedStageFailure {
     Internal,
 }
 
-/// Semantic/rerank outcome reported outside the query fallback subpayload.
-/// It may never change the subpayload, its digest, or cursor identity.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticRerankOutcome {
-    pub semantic: OptionalStagePublicStatus,
-    pub rerank: OptionalStagePublicStatus,
-}
-
 /// The typed, independently hashed query fallback subpayload. Canonical-encoded
 /// and hashed with
 /// [`QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
@@ -1398,25 +1389,6 @@ fn compute_query_fallback_subpayload_digest(
     let digest = canonical_sha256(&input)
         .map_err(|error| RetrievalContractError::CanonicalSerialization(error.to_string()))?;
     FallbackSubpayloadDigest::new(digest.as_str())
-}
-
-/// The assembled retrieval result.
-/// `internal_lane_outcomes` is sealed server-side audit data: excluded from
-/// fallback bytes/digest, cursors, public coverage, and cache keys.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RetrievalResult {
-    pub snapshot: RetrievalSnapshot,
-    pub profile_id: FusionProfileId,
-    pub query_fallback: QueryFallbackSubpayload,
-    pub ordered_candidates: Vec<RankedCandidate>,
-    #[serde(skip)]
-    pub internal_lane_outcomes: BTreeMap<RetrieverKind, RetrieverOutcome<()>>,
-    pub public_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
-    pub freshness: Vec<SourceFreshness>,
-    pub semantic_rerank_outcome: SemanticRerankOutcome,
-    pub hydration_receipts: Vec<HydrationReceipt>,
-    pub cursor: Option<RetrievalCursor>,
 }
 
 #[cfg(test)]

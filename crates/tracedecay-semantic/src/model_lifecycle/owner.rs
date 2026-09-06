@@ -503,33 +503,6 @@ impl SemanticModelLifecycleOwnerV1 {
         self.publish_explicit_import(model, record, now_unix)
     }
 
-    /// Explicitly import or resume from a configured immutable HTTPS source.
-    /// The typed transport is supplied by the user-action boundary and is not
-    /// retained by startup, query, or runtime paths.
-    pub fn import_configured_https_artifact(
-        &self,
-        model_id: &str,
-        manifest: &ModelArtifactManifestV1,
-        source: &ConfiguredHttpsArtifactSourceV1,
-        transport: &dyn ExplicitHttpsArtifactTransportV1,
-        resume_staging_id: Option<&str>,
-        now_unix: u64,
-    ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let model = self
-            .catalog
-            .get(model_id)
-            .ok_or(CatalogErrorV1::UnknownModel)?;
-        verify_catalog_manifest(model, manifest)?;
-        let record = self.artifact_store.import_configured_https(
-            manifest,
-            source,
-            transport,
-            resume_staging_id,
-            now_unix,
-        )?;
-        self.publish_explicit_import(model, record, now_unix)
-    }
-
     fn publish_explicit_import(
         &self,
         model: &CatalogedFastEmbedModelV1,

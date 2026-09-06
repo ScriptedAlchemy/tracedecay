@@ -102,13 +102,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn registered_project_paths_for_test(&self) -> Result<Vec<PathBuf>> {
-        self.profile_database
-            .try_list_code_project_paths(usize::MAX)
-            .await
-    }
-
-    #[doc(hidden)]
     pub async fn project_ledger_paths_for_test(&self) -> Result<Vec<PathBuf>> {
         self.profile_database.try_list_project_paths().await
     }

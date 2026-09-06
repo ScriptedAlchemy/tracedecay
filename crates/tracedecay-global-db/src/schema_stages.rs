@@ -2,7 +2,6 @@ use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
     ensure_authority_invariant_schema, ensure_authority_invariants,
     ensure_fresh_authority_invariants, require_foreign_key_audit,
-    restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
     validate_authority_rows_exhaustive, validate_authority_schema_contract,
     validate_registry_schema_contract, validate_remote_deletion_schema_contract,
 };
@@ -717,6 +716,9 @@ async fn install_registered_schema_stages(
             session_temporal_schema::migrate_released_v3_session_temporal_schema(transaction)
                 .await?;
         }
+        session_temporal_schema::SessionTemporalSchemaAdmission::WithoutReceiptRecovery => {
+            session_temporal_schema::migrate_session_relation_receipt_recovery(transaction).await?;
+        }
         session_temporal_schema::SessionTemporalSchemaAdmission::Current => {}
     }
     observation::ensure_observation_schema(transaction).await?;
@@ -1074,18 +1076,6 @@ pub async fn validate_observation_authority_connection(
 ) -> tracedecay_domain::errors::Result<()> {
     validate_authority_schema_contract(conn).await?;
     validate_authority_rows_exhaustive(conn).await
-}
-
-pub async fn begin_observation_authority_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_domain::errors::Result<()> {
-    suspend_immutability_for_canonical_repair(conn).await
-}
-
-pub async fn finish_observation_authority_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_domain::errors::Result<()> {
-    restore_immutability_after_canonical_repair(conn).await
 }
 
 #[cfg(test)]

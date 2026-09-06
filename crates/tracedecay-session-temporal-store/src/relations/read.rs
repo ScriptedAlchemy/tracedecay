@@ -1,21 +1,19 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tracedecay_domain::{AgentInstanceId, MessageOccurrenceIdV1, RetrievalAnchorId, ThreadId};
+use tracedecay_domain::{MessageOccurrenceIdV1, RetrievalAnchorId};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntityId, GraphProjectionTelemetryRequest, GraphProperty,
-    GraphPropertyName, GraphRelation, GraphRelationKind,
+    GraphCancellation, GraphProjectionTelemetryRequest, GraphProperty, GraphPropertyName,
+    GraphRelation, GraphRelationKind,
 };
 
 use super::{
-    AGENT_CHILD_OF_KIND, AGENT_KIND, AGENT_PARENT_KIND, COPY_PROOF_PROPERTY, KNOWLEDGE_AT_PROPERTY,
-    LOGICAL_COPY_KIND, OCCURRENCE_KIND, ORDINAL_PROPERTY, SESSION_KIND, SESSION_PARENT_KIND,
-    SUMMARY_ANCHOR_SOURCE_KIND, SUMMARY_KIND, SUMMARY_PREDECESSOR_KIND, SUMMARY_SOURCE_KIND,
-    SUMMARY_SUCCESSOR_KIND, SessionRelationError, SessionRelationGraphStore, SummarySourceRef,
-    THREAD_CHILD_OF_KIND, THREAD_KIND, THREAD_PARENT_KIND, VALID_TIME_PROPERTY,
-    WORKFLOW_AGENT_ENTITY_KIND, WORKFLOW_AGENT_KIND, agent_entity_id, map_graph_error, namespace,
-    occurrence_entity_id, parse_entity_id, projection, relation_ordinal, session_entity_id,
-    summary_entity_id, thread_entity_id,
+    COPY_PROOF_PROPERTY, KNOWLEDGE_AT_PROPERTY, LOGICAL_COPY_KIND, OCCURRENCE_KIND,
+    ORDINAL_PROPERTY, SESSION_KIND, SESSION_PARENT_KIND, SUMMARY_ANCHOR_SOURCE_KIND, SUMMARY_KIND,
+    SUMMARY_PREDECESSOR_KIND, SUMMARY_SOURCE_KIND, SUMMARY_SUCCESSOR_KIND, SessionRelationError,
+    SessionRelationGraphStore, SummarySourceRef, VALID_TIME_PROPERTY, WORKFLOW_AGENT_ENTITY_KIND,
+    WORKFLOW_AGENT_KIND, map_graph_error, namespace, occurrence_entity_id, parse_entity_id,
+    projection, relation_ordinal, session_entity_id, summary_entity_id,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,143 +251,6 @@ impl SessionRelationGraphStore {
                             knowledge_at,
                             valid_time,
                         })
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
-    pub fn thread_relations(
-        &self,
-        scope: &super::SessionRelationScope,
-        session_id: &tracedecay_domain::SessionId,
-        generation: u64,
-        thread_ids: &[ThreadId],
-        max_relations: usize,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<Vec<super::ThreadHierarchyRelation>>, SessionRelationError> {
-        let starts = thread_ids
-            .iter()
-            .map(|thread_id| thread_entity_id(session_id, generation, thread_id))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.hierarchy_relations(
-            scope,
-            session_id,
-            generation,
-            &starts,
-            &[THREAD_PARENT_KIND, THREAD_CHILD_OF_KIND],
-            max_relations,
-            cancellation,
-            |relation, ordinal| {
-                let (parent, child) = if relation.kind.as_str() == THREAD_PARENT_KIND {
-                    (&relation.from, &relation.to)
-                } else {
-                    (&relation.to, &relation.from)
-                };
-                Ok(super::ThreadHierarchyRelation {
-                    parent_thread_id: ThreadId::new(parse_entity_id(
-                        parent.as_str(),
-                        session_id,
-                        generation,
-                        THREAD_KIND,
-                    )?)
-                    .map_err(|_| SessionRelationError::Corrupt)?,
-                    child_thread_id: ThreadId::new(parse_entity_id(
-                        child.as_str(),
-                        session_id,
-                        generation,
-                        THREAD_KIND,
-                    )?)
-                    .map_err(|_| SessionRelationError::Corrupt)?,
-                    ordinal,
-                })
-            },
-        )
-    }
-
-    pub fn agent_relations(
-        &self,
-        scope: &super::SessionRelationScope,
-        session_id: &tracedecay_domain::SessionId,
-        generation: u64,
-        agent_ids: &[AgentInstanceId],
-        max_relations: usize,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<Vec<super::AgentHierarchyRelation>>, SessionRelationError> {
-        let starts = agent_ids
-            .iter()
-            .map(|agent_id| agent_entity_id(session_id, generation, agent_id))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.hierarchy_relations(
-            scope,
-            session_id,
-            generation,
-            &starts,
-            &[AGENT_PARENT_KIND, AGENT_CHILD_OF_KIND],
-            max_relations,
-            cancellation,
-            |relation, ordinal| {
-                let (parent, child) = if relation.kind.as_str() == AGENT_PARENT_KIND {
-                    (&relation.from, &relation.to)
-                } else {
-                    (&relation.to, &relation.from)
-                };
-                Ok(super::AgentHierarchyRelation {
-                    parent_agent_id: AgentInstanceId::new(parse_entity_id(
-                        parent.as_str(),
-                        session_id,
-                        generation,
-                        AGENT_KIND,
-                    )?)
-                    .map_err(|_| SessionRelationError::Corrupt)?,
-                    child_agent_id: AgentInstanceId::new(parse_entity_id(
-                        child.as_str(),
-                        session_id,
-                        generation,
-                        AGENT_KIND,
-                    )?)
-                    .map_err(|_| SessionRelationError::Corrupt)?,
-                    ordinal,
-                })
-            },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn hierarchy_relations<T>(
-        &self,
-        scope: &super::SessionRelationScope,
-        session_id: &tracedecay_domain::SessionId,
-        generation: u64,
-        starts: &[GraphEntityId],
-        kind_names: &[&str],
-        max_relations: usize,
-        cancellation: Arc<dyn GraphCancellation>,
-        decode: impl Fn(&GraphRelation, u32) -> Result<T, SessionRelationError>,
-    ) -> Result<Vec<Vec<T>>, SessionRelationError> {
-        require_budget(max_relations)?;
-        self.require_projection(scope, session_id, generation, Arc::clone(&cancellation))?;
-        let batches = self
-            .database
-            .outgoing_relations(
-                &namespace(scope)?,
-                starts,
-                &relation_kinds(kind_names)?,
-                max_relations,
-                cancellation,
-            )
-            .map_err(map_graph_error)?;
-        let ordinal_property = GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
-        batches
-            .into_iter()
-            .map(|relations| {
-                relations
-                    .iter()
-                    .map(|relation| {
-                        let ordinal = relation_ordinal(relation, &ordinal_property)
-                            .and_then(|value| u32::try_from(value).ok())
-                            .ok_or(SessionRelationError::Corrupt)?;
-                        decode(relation, ordinal)
                     })
                     .collect()
             })

@@ -4,7 +4,7 @@
 //! dir.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::BranchGraphPublicationEpochV1;
@@ -542,13 +542,6 @@ fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock:
     }
     meta.touch_synced(branch);
     let _ = save_branch_meta(tracedecay_dir, &meta);
-}
-
-/// Returns the path to the `branches/` subdirectory, creating it if needed.
-pub fn ensure_branches_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
-    let dir = data_dir.join("branches");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 fn now_unix_str() -> String {

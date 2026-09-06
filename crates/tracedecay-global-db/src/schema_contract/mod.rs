@@ -18,9 +18,9 @@ fn normalize_trigger_sql(sql: &str) -> String {
         .to_ascii_lowercase()
 }
 
+pub(crate) use definitions::SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS;
 pub(crate) use invariants::{
     authority_invariant_triggers_intact, released_v3_invariant_triggers_intact,
-    restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
     validate_authority_rows_exhaustive,
 };
 pub use invariants::{
@@ -35,5 +35,6 @@ pub use validation::validate_registry_schema_contract;
 pub(crate) use validation::{
     validate_authority_schema_contract, validate_released_v3_temporal_projection_receipt_contract,
     validate_remote_deletion_schema_contract, validate_session_graph_publication_schema_contract,
+    validate_session_relation_receipts_without_recovery_contract,
     validate_session_temporal_schema_contract,
 };

@@ -1,41 +1,8 @@
-use tracedecay_domain::{
-    CredentialRevocationReceiptV1, CredentialRotationReceiptV1, EnrollmentCredentialRecordV1,
-};
+use tracedecay_domain::{CredentialRevocationReceiptV1, EnrollmentCredentialRecordV1};
 
 use super::*;
 
 impl RemoteSqliteStorageV1 {
-    pub fn rotate_enrollment(
-        &self,
-        expected: &EnrollmentCredentialRecordV1,
-        replacement: &EnrollmentCredentialRecordV1,
-        receipt: &CredentialRotationReceiptV1,
-    ) -> Result<(), RemoteSqliteStorageErrorV1> {
-        expected
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        replacement
-            .validate()
-            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
-        if receipt.enrollment_id != expected.enrollment_id
-            || receipt.node_id != expected.node_id
-            || receipt.prior_revision != expected.revision
-            || receipt.current_revision != replacement.revision
-            || receipt.rotated_at != replacement.issued_at
-            || receipt.expires_at != replacement.expires_at
-            || replacement.revision != expected.revision.checked_add(1).unwrap_or(0)
-            || replacement.enrollment_id != expected.enrollment_id
-            || replacement.brain_id != expected.brain_id
-            || replacement.node_id != expected.node_id
-            || replacement.scope != expected.scope
-            || replacement.capabilities != expected.capabilities
-            || replacement.revoked_at.is_some()
-        {
-            return Err(RemoteSqliteStorageErrorV1::Corruption);
-        }
-        replace_enrollment(self, expected, replacement)
-    }
-
     pub fn revoke_enrollment(
         &self,
         expected: &EnrollmentCredentialRecordV1,

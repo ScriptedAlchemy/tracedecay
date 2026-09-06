@@ -137,12 +137,6 @@ impl WorkflowOperation {
         )
     }
 
-    pub fn from_cli_name(name: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|operation| {
-            operation.operation_key() == name || operation.route_segment() == name
-        })
-    }
-
     pub const fn route_segment(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register-definition",

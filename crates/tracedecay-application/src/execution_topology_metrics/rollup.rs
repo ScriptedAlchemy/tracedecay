@@ -207,19 +207,6 @@ impl ExecutionTopologyRollupFragmentV1 {
         self.observed_at_micros
     }
 
-    /// A replacement decision belongs to the persistence authority because a
-    /// watermark is opaque here. That authority must only replace this exact
-    /// day for a newer source watermark, or for a changed projector at the
-    /// same source watermark.
-    #[must_use]
-    pub fn can_replace(&self, existing: &Self, source_watermark_is_newer: bool) -> bool {
-        self.authorized_scope_ref == existing.authorized_scope_ref
-            && self.horizon == existing.horizon
-            && (source_watermark_is_newer
-                || (self.source_watermark == existing.source_watermark
-                    && self.projector_revision != existing.projector_revision))
-    }
-
     fn canonical_bytes(&self) -> Result<Vec<u8>, ExecutionTopologyRollupErrorV1> {
         canonical_execution_topology_rollup_fragment_bytes(self)
     }
