@@ -357,7 +357,6 @@ fn platform_replace_with_rollback(
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
-    const REPLACEFILE_WRITE_THROUGH: u32 = 0x1;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn ReplaceFileW(
@@ -383,7 +382,7 @@ fn platform_replace_with_rollback(
             replaced.as_ptr(),
             replacement.as_ptr(),
             backup.as_ptr(),
-            REPLACEFILE_WRITE_THROUGH,
+            0,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
@@ -418,39 +417,22 @@ pub(super) fn replace_file_atomically(
     path: &Path,
     record_name: &str,
 ) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
-    }
-
-    let existing = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let replacement = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    crate::storage::retry_transient_file_op(|| {
-        let replaced = unsafe {
-            MoveFileExW(
-                existing.as_ptr(),
-                replacement.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if replaced == 0 {
-            return Err(std::io::Error::last_os_error());
+    let mut published = None;
+    let result = crate::storage::retry_transient_file_op(|| {
+        if published.is_none() {
+            published = Some(tracedecay_private_fs::replace_file_atomically(
+                temporary, path,
+            )?);
         }
-        Ok(())
-    })
-    .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
+        let Some(published) = published.as_ref() else {
+            return Err(std::io::Error::other(
+                "published Windows replacement handle was not retained",
+            ));
+        };
+        published.sync_all()
+    });
+    drop(published);
+    result.map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
 
 pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()> {
