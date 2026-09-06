@@ -2,16 +2,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
+use super::shared_client::SharedAnalyzerClient;
 use super::{CodeDiagnostic, EngineState};
+use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
     pub(crate) workspace_root: PathBuf,
     pub(crate) documents: Vec<LspDocument>,
-    pub(crate) client: Arc<Mutex<Option<StdioLspClient>>>,
+    pub(crate) client: Arc<SharedAnalyzerClient>,
 }
 
 /// Each analyzer may wait behind at most this many independent workspace-root
@@ -200,26 +202,98 @@ async fn collect_refresh_batch(
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
-    let mut client_slot = batch.client.lock().await;
-    let mut client = match client_slot.take() {
-        Some(client) => client,
-        None => {
-            StdioLspClient::start_with_timeouts(&command, &args, &batch.workspace_root, timeouts)
-                .await
-                .map_err(|error| RefreshFailure::crashed(&error))?
+    let shared = batch.client;
+    let mut client_slot = shared.client().lock().await;
+    let (use_of_analyzer, mut client) = if let Some(client) = client_slot.take() {
+        (
+            RefreshUseOfAnalyzer::new(&shared, shared.current_attempt()),
+            client,
+        )
+    } else {
+        // Restart exhaustion is a stable health state
+        // (`MAX_ANALYZER_RESTARTS`), not an invitation for this lane to
+        // start the analyzer the semantic lane was just refused.
+        let Some(attempt) = shared.begin_start() else {
+            return Err(RefreshFailure::crashed_message(format!(
+                "analyzer '{command}' is retired: restart budget exhausted"
+            )));
+        };
+        let use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, attempt);
+        let client = match StdioLspClient::start_with_timeouts(
+            &command,
+            &args,
+            &batch.workspace_root,
+            timeouts,
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                use_of_analyzer.conclude(AnalyzerEvent::StartupFailed);
+                return Err(RefreshFailure::crashed(&error));
+            }
+        };
+        if shared.mark_ready(attempt).is_none() {
+            // Superseded while holding the client lock cannot happen; if it
+            // ever does, this client is not the session's analyzer.
+            return Err(RefreshFailure::crashed_message(format!(
+                "analyzer '{command}' start was superseded"
+            )));
         }
+        (use_of_analyzer, client)
     };
     match client
         .collect_document_diagnostics(&project_root, batch.documents, timeouts)
         .await
     {
         Ok(diagnostics) => {
+            use_of_analyzer.conclude(AnalyzerEvent::Ready);
             *client_slot = Some(client);
             Ok((ordinal, diagnostics))
         }
         Err(error) => {
-            *client_slot = None;
+            // The client is dropped here, which stops the process: a refresh
+            // that ended without a publication may have left the stream
+            // mid-frame, and the lane cannot tell a silent analyzer from a dead
+            // one at this boundary.
+            use_of_analyzer.conclude(AnalyzerEvent::Retired);
+            drop(client);
             Err(RefreshFailure::crashed(&error))
+        }
+    }
+}
+
+/// One refresh's use of the shared analyzer, concluded exactly once.
+///
+/// A refresh task can be aborted at any await while it holds the client out of
+/// the slot, which drops the process with it. Without this guard the supervisor
+/// would keep describing that incarnation as live, and the next caller would
+/// serve its replacement on the retired attempt.
+struct RefreshUseOfAnalyzer<'a> {
+    shared: &'a SharedAnalyzerClient,
+    attempt: u32,
+    concluded: bool,
+}
+
+impl<'a> RefreshUseOfAnalyzer<'a> {
+    fn new(shared: &'a SharedAnalyzerClient, attempt: u32) -> Self {
+        Self {
+            shared,
+            attempt,
+            concluded: false,
+        }
+    }
+
+    fn conclude(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+    }
+}
+
+impl Drop for RefreshUseOfAnalyzer<'_> {
+    fn drop(&mut self) {
+        if !self.concluded {
+            self.shared.record(self.attempt, AnalyzerEvent::Retired);
         }
     }
 }

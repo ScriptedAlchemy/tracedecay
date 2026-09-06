@@ -1114,7 +1114,7 @@ fn frame_write_error(error: AsyncContentLengthError) -> TraceDecayError {
     TraceDecayError::Config { message }
 }
 
-fn file_uri(path: &Path) -> String {
+pub(crate) fn file_uri(path: &Path) -> String {
     let absolute = if path.is_absolute() {
         PathBuf::from(path)
     } else {
