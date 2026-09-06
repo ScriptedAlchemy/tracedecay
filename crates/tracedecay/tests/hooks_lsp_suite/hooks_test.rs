@@ -660,7 +660,7 @@ fn test_codex_workspace_status_detects_initialized_trace_decay_project() {
 fn test_build_cursor_session_context_lists_skills_and_tokens_saved() {
     let context = build_cursor_session_context(true, None, Some(12_345));
     assert!(context.contains("Workflow skills: tracedecay:"));
-    assert!(context.contains("using-tracedecay"));
+    assert!(context.contains("discovering-tracedecay"));
     assert!(context.contains("exploring-code"));
     assert!(context.contains("managing-session-context"));
     assert!(context.contains("12345"));

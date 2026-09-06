@@ -23,8 +23,8 @@ use super::{
 };
 
 const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay MCP tools subagent context: this looks \
-like a new/no-history subagent or code-research subagent. Use `tracedecay:using-tracedecay` \
-and the matching TraceDecay workflow before broad file reads: `tracedecay:exploring-code` with \
+like a new/no-history subagent or code-research subagent. Use the matching TraceDecay \
+workflow before broad file reads: `tracedecay:exploring-code` with \
 `tracedecay_context` for code exploration, `tracedecay_grep` for literal/regex code search, \
 `tracedecay_search` for symbol names, `tracedecay_outline` or `tracedecay_body` before \
 whole-file reads, `tracedecay:tracing-functions` with `tracedecay_find_exact_symbol`, \
