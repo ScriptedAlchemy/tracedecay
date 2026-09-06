@@ -420,35 +420,51 @@ pub(super) fn replace_file_atomically(
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
-    }
+    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH, ReplaceFileW,
+    };
 
-    let existing = temporary
+    let temporary = temporary
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let replacement = path
+    let destination = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     crate::storage::retry_transient_file_op(|| {
         let replaced = unsafe {
-            MoveFileExW(
-                existing.as_ptr(),
-                replacement.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            ReplaceFileW(
+                destination.as_ptr(),
+                temporary.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                std::ptr::null(),
+                std::ptr::null(),
             )
         };
-        if replaced == 0 {
-            return Err(std::io::Error::last_os_error());
+        if replaced != 0 {
+            return Ok(());
         }
-        Ok(())
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_FILE_NOT_FOUND as i32) {
+            return Err(error);
+        }
+        let moved = unsafe {
+            MoveFileExW(
+                temporary.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     })
     .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
