@@ -1,40 +1,24 @@
 ---
-description: Use tracedecay MCP tools and workflow skills before native search, broad reads, editing, and recall
+description: Preserve TraceDecay scope, coverage, and mutation authority when using its operations
 alwaysApply: true
 ---
 
-# Use tracedecay before native code tools
+# TraceDecay operational boundaries
 
-If there is even a 1% chance this workspace has a TraceDecay index, the graph, memory store, and session archive are the first stop — before the first Grep, Glob, Read, `gh pr diff`, test run, or memory-file write. Graph before grep. Facts before files. Invoke `tracedecay:using-tracedecay` and follow its moment table. For project/store identity use `tracedecay_active_project` / `tracedecay_storage_status` (the resolved active project store), never repo-local DB probing.
+Use TraceDecay when its graph, durable memory, or session evidence answers the
+task. Known-file reads, ordinary local edits, nonindexed material, and questions
+requiring clarification can use the appropriate native workflow directly.
 
-## Moment to mandatory action
+Read freshness and coverage with results; an empty index result does not prove
+absence. Preserve exact project/worktree selectors and opaque continuation or
+mutation identities. Cross-project operations must use the selected registered
+store, not whichever project is active.
 
-| The moment you are in | Do this instead |
-|---|---|
-| Grep/rg a literal string, regex, or config key | `tracedecay_grep` — `tracedecay:exploring-code` |
-| Search a symbol/concept, or open a source file | `tracedecay_search` / `tracedecay_context` (known identifiers → `lexical_anchors`; symbol-naming questions → `prefer_symbol`), then outline→body→read — `tracedecay:exploring-code` |
-| Wondering whether results are current | Read the `freshness:` line that opens every search/context response; no `tracedecay_status` preflight — `tracedecay:exploring-code` |
-| "Who calls X" / "what does X call" / "trace this" | `tracedecay:tracing-functions` |
-| What breaks / which tests to run | `tracedecay:assessing-impact` |
-| `gh pr diff` or read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline) — `tracedecay:reviewing-changes` |
-| Write a helper, rename, or mass-edit | `tracedecay:editing-safely` |
-| Build/type errors, or run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
-| Write MEMORY.md/CLAUDE.md, or a past decision | `tracedecay:project-memory` (`fact_store`) |
-| Architecture, tech debt, index/project status | `tracedecay:code-health` |
-| MCP transport failed but the daemon is available | `tracedecay:using-the-cli` — `tracedecay tool <name>`; preserve a missing, unavailable, or intentionally held daemon |
+MCP and CLI share daemon authority. A transport failure may use the equivalent
+CLI operation when the daemon remains available. Preserve an unavailable or
+intentionally held daemon and report the limitation. Private database reads are
+not a supported fallback.
 
-## Red flags — these thoughts mean STOP, you are rationalizing
-
-- "Grep is faster" — `tracedecay_grep` runs the same match and returns the enclosing symbol.
-- "I'll just read the whole file" — `outline`/`body` answer at a fraction of the tokens.
-- "This repo probably isn't indexed" — check `tracedecay_status`; guessing is the rationalization.
-- "I'll use gh for the PR diff" — `pr_context` computes changed symbols offline; gh is for comments/CI only.
-- "I'll jot this in MEMORY.md" — durable facts go to `fact_store` (add); MEMORY.md is not memory.
-- "The index might be stale, sync first" — hooks auto-sync; never run manual sync.
-- "The MCP call failed, so I should retry until it works or start the daemon" — the CLI uses the same daemon and can also be unavailable. Report the state and preserve an intentional hold.
-
-If MCP transport errors or times out while the daemon remains available, use
-`tracedecay tool <name> --args '<json>'` with the same JSON arguments object
-(see `tracedecay:using-the-cli`). If the daemon is missing, unavailable, or
-intentionally held, do not retry or run a lifecycle command: report the state
-and use scoped native reads. Never query `.tracedecay` databases directly.
+Preview and read results do not grant mutation authority. Apply, cancellation,
+and rollback consume their returned identities and typed state; reconcile
+committed effects before retrying an interrupted operation.

@@ -716,6 +716,9 @@ async fn install_registered_schema_stages(
             session_temporal_schema::migrate_released_v3_session_temporal_schema(transaction)
                 .await?;
         }
+        session_temporal_schema::SessionTemporalSchemaAdmission::WithoutReceiptRecovery => {
+            session_temporal_schema::migrate_session_relation_receipt_recovery(transaction).await?;
+        }
         session_temporal_schema::SessionTemporalSchemaAdmission::Current => {}
     }
     observation::ensure_observation_schema(transaction).await?;
