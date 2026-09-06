@@ -166,6 +166,101 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
 }
 
 #[tokio::test]
+async fn a_same_root_remount_stamps_the_configuration_it_resolved() {
+    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+    let (_project, project_id, database, _runtime) = runtime("observability-remount").await;
+    let root = PathBuf::from("/project/observability-remount");
+    let service = DaemonInvocationService::default();
+    let under_a = service
+        .mount_observability_producer(
+            root.clone(),
+            database.clone(),
+            project_id.clone(),
+            digest('a'),
+            digest('b'),
+        )
+        .await
+        .expect("mount under configuration A");
+    assert_eq!(
+        under_a
+            .try_emit(envelope(&project_id, "remount:under-a"))
+            .expect("configuration A emission"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    // The store's canonical configuration advances and this same root opens
+    // again, resolving the newer revision. The mount must hand back a frontend
+    // that stamps it rather than the revision frozen at the first mount.
+    let under_b = service
+        .mount_observability_producer(
+            root.clone(),
+            database.clone(),
+            project_id.clone(),
+            digest('c'),
+            digest('d'),
+        )
+        .await
+        .expect("remount under configuration B");
+    assert!(!Arc::ptr_eq(&under_a, &under_b));
+    assert_eq!(
+        under_b.identity().configuration_revision,
+        digest('c').as_str()
+    );
+    assert_eq!(under_b.identity().policy_revision, digest('d').as_str());
+    // One owner: the remount joins the incumbent boot stream rather than
+    // starting a second producer for the same store.
+    assert_eq!(
+        under_a.identity().process_boot_id,
+        under_b.identity().process_boot_id
+    );
+    assert_eq!(
+        under_b
+            .try_emit(envelope(&project_id, "remount:under-b"))
+            .expect("configuration B emission"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    service.expire_all().await;
+
+    let page = RegisteredObservabilityPortV1::new(&database)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            event_kinds: vec!["retrieval.query.completed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: 100,
+            },
+            after_watermark: None,
+            limit: 8,
+        })
+        .await
+        .expect("query both remount streams");
+    let stamped: BTreeMap<&str, (&str, &str, u64)> = page
+        .events
+        .iter()
+        .map(|event| {
+            (
+                event.event_id.as_str(),
+                (
+                    event.configuration_revision.as_str(),
+                    event.policy_revision.as_str(),
+                    event.producer_sequence,
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stamped.get("remount:under-a").copied(),
+        Some((digest('a').as_str(), digest('b').as_str(), 1)),
+        "an observation admitted under configuration A keeps A's provenance"
+    );
+    assert_eq!(
+        stamped.get("remount:under-b").copied(),
+        Some((digest('c').as_str(), digest('d').as_str(), 2)),
+        "an observation admitted after the remount carries configuration B, \
+         from the one sequence the store owner allocates"
+    );
+}
+
+#[tokio::test]
 async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, project_id, database, _runtime) = runtime("observability-restart").await;
