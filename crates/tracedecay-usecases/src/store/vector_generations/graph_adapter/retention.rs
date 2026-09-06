@@ -31,11 +31,10 @@ impl GraphVectorGenerationStoreStateV1 {
     fn reserve_one_generation_records(
         &self,
         after: Option<SemanticVectorStageCensusCursor>,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<SemanticVectorRetentionStep, VectorGenerationStoreErrorV1> {
-        let authority = operation_authority(cancellation);
         self.runtime
-            .reserve_one_generation(after, &authority)
+            .reserve_one_generation(after, authority)
             .map_err(map_graph_error)
     }
 
@@ -43,11 +42,10 @@ impl GraphVectorGenerationStoreStateV1 {
         &self,
         reservation: SemanticVectorRetirementReservation,
         authorization: &SemanticVectorRetentionAuthorizationV1,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<SemanticVectorRetentionAction, VectorGenerationStoreErrorV1> {
-        let authority = operation_authority(cancellation);
         self.runtime
-            .finalize_reserved_generation(reservation, authorization, &authority)
+            .finalize_reserved_generation(reservation, authorization, authority)
             .map_err(map_graph_error)
     }
 
@@ -64,11 +62,10 @@ impl GraphVectorGenerationStoreStateV1 {
         &self,
         generation: &SemanticVectorSourceGenerationId,
         expected_revision: SemanticVectorStageCensusRevision,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
-        let authority = operation_authority(cancellation);
         self.runtime
-            .source_generation_has_live_reference(generation, expected_revision, &authority)
+            .source_generation_has_live_reference(generation, expected_revision, authority)
             .map_err(map_graph_error)
     }
 
@@ -76,11 +73,10 @@ impl GraphVectorGenerationStoreStateV1 {
         &self,
         source_scope: &StoreShardIdV1,
         expected_revision: SemanticVectorStageCensusRevision,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
-        let authority = operation_authority(cancellation);
         self.runtime
-            .source_scope_has_live_reference(source_scope, expected_revision, &authority)
+            .source_scope_has_live_reference(source_scope, expected_revision, authority)
             .map_err(map_graph_error)
     }
 
@@ -88,23 +84,21 @@ impl GraphVectorGenerationStoreStateV1 {
         &self,
         generation: &VectorGenerationIdV1,
         expected_revision: SemanticVectorStageCensusRevision,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<SemanticVectorPublishedGenerationDependencyLookup, VectorGenerationStoreErrorV1>
     {
-        let authority = operation_authority(cancellation);
         self.runtime
-            .published_generation_dependency(generation, expected_revision, &authority)
+            .published_generation_dependency(generation, expected_revision, authority)
             .map_err(map_graph_error)
     }
 
     fn validate_project_census_revision_records(
         &self,
         expected_revision: SemanticVectorStageCensusRevision,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
-        let authority = operation_authority(cancellation);
         self.runtime
-            .validate_project_census_revision(expected_revision, &authority)
+            .validate_project_census_revision(expected_revision, authority)
             .map_err(map_graph_error)
     }
 
@@ -112,11 +106,10 @@ impl GraphVectorGenerationStoreStateV1 {
         &self,
         code_scope_hash: &SemanticVectorCodeScopeHash,
         expected_revision: SemanticVectorStageCensusRevision,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<SemanticVectorSourceScopeBindingLookup, VectorGenerationStoreErrorV1> {
-        let authority = operation_authority(cancellation);
         self.runtime
-            .source_scope_binding(code_scope_hash, expected_revision, &authority)
+            .source_scope_binding(code_scope_hash, expected_revision, authority)
             .map_err(map_graph_error)
     }
 
@@ -125,15 +118,14 @@ impl GraphVectorGenerationStoreStateV1 {
         code_scope_hash: &SemanticVectorCodeScopeHash,
         source_scope: &StoreShardIdV1,
         expected_revision: SemanticVectorStageCensusRevision,
-        cancellation: Arc<dyn GraphCancellation>,
+        authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
-        let authority = operation_authority(cancellation);
         self.runtime
             .remove_source_scope_binding(
                 code_scope_hash,
                 source_scope,
                 expected_revision,
-                &authority,
+                authority,
             )
             .map_err(map_graph_error)
     }
@@ -146,7 +138,8 @@ impl GraphVectorGenerationStoreV1 {
         after: Option<SemanticVectorStageCensusCursor>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<SemanticVectorRetentionStep, VectorGenerationStoreErrorV1> {
-        self.dispatch(move |state| state.reserve_one_generation_records(after, cancellation))
+        let authority = operation_authority(cancellation);
+        self.dispatch(move |state| state.reserve_one_generation_records(after, &authority))
             .await
     }
 
@@ -158,8 +151,9 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<SemanticVectorRetentionAction, VectorGenerationStoreErrorV1> {
         let authorization = authorization.clone();
+        let authority = operation_authority(cancellation);
         self.dispatch(move |state| {
-            state.finalize_reserved_generation_records(reservation, &authorization, cancellation)
+            state.finalize_reserved_generation_records(reservation, &authorization, &authority)
         })
         .await
     }
@@ -180,8 +174,9 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
         let generation = generation.clone();
+        let authority = operation_authority(cancellation);
         self.dispatch(move |state| {
-            state.source_generation_is_live_records(&generation, expected_revision, cancellation)
+            state.source_generation_is_live_records(&generation, expected_revision, &authority)
         })
         .await
     }
@@ -193,8 +188,9 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
         let source_scope = source_scope.clone();
+        let authority = operation_authority(cancellation);
         self.dispatch(move |state| {
-            state.source_scope_is_live_records(&source_scope, expected_revision, cancellation)
+            state.source_scope_is_live_records(&source_scope, expected_revision, &authority)
         })
         .await
     }
@@ -207,11 +203,12 @@ impl GraphVectorGenerationStoreV1 {
     ) -> Result<SemanticVectorPublishedGenerationDependencyLookup, VectorGenerationStoreErrorV1>
     {
         let generation = generation.clone();
+        let authority = operation_authority(cancellation);
         self.dispatch(move |state| {
             state.published_generation_dependency_records(
                 &generation,
                 expected_revision,
-                cancellation,
+                &authority,
             )
         })
         .await
@@ -222,8 +219,9 @@ impl GraphVectorGenerationStoreV1 {
         expected_revision: SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
+        let authority = operation_authority(cancellation);
         self.dispatch(move |state| {
-            state.validate_project_census_revision_records(expected_revision, cancellation)
+            state.validate_project_census_revision_records(expected_revision, &authority)
         })
         .await
     }
@@ -235,8 +233,9 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<SemanticVectorSourceScopeBindingLookup, VectorGenerationStoreErrorV1> {
         let code_scope_hash = code_scope_hash.clone();
+        let authority = operation_authority(cancellation);
         self.dispatch(move |state| {
-            state.source_scope_binding_records(&code_scope_hash, expected_revision, cancellation)
+            state.source_scope_binding_records(&code_scope_hash, expected_revision, &authority)
         })
         .await
     }
@@ -250,12 +249,13 @@ impl GraphVectorGenerationStoreV1 {
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
         let code_scope_hash = code_scope_hash.clone();
         let source_scope = source_scope.clone();
+        let authority = operation_authority(cancellation);
         self.dispatch(move |state| {
             state.remove_source_scope_binding_records(
                 &code_scope_hash,
                 &source_scope,
                 expected_revision,
-                cancellation,
+                &authority,
             )
         })
         .await
