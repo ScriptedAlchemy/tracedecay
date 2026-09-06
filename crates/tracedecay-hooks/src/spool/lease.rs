@@ -60,8 +60,22 @@ pub(super) fn write_lease_file(
     })
 }
 
+/// Acquires the single-writer lease, waiting out a sibling hook that holds it.
+/// See [`crate::contention`] for why a contended lease must not fail the
+/// callback.
 #[hotpath::measure(label = "hooks.spool.acquire_lease")]
 pub(super) fn acquire_lease(
+    root: &Path,
+    lease_duration_micros: i64,
+    now: UtcMicros,
+) -> Result<(HookSpoolWriterLeaseV1, File), HookSpoolError> {
+    crate::contention::wait_out_contention(
+        || try_acquire_lease(root, lease_duration_micros, now),
+        |error| matches!(error, HookSpoolError::WriterLeaseHeld),
+    )
+}
+
+fn try_acquire_lease(
     root: &Path,
     lease_duration_micros: i64,
     now: UtcMicros,
