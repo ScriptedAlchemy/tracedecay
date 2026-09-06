@@ -5,6 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
 
+use crate::ports::hook_runtime::HookRuntimeV1;
+
 /// Whether a write event that named no in-project path is still worth sending.
 ///
 /// Codex `PostToolUse` carries nothing but the paths, so an empty list is not
@@ -25,6 +27,7 @@ pub(super) enum EmptyPathPolicy {
 /// several path-shaped keys) and because it must not run for a project with no
 /// store, exactly as before.
 pub(super) async fn notify_edited_paths(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     parsed: &Value,
     rel_paths: impl FnOnce() -> Vec<String>,
@@ -32,7 +35,7 @@ pub(super) async fn notify_edited_paths(
     empty_paths: EmptyPathPolicy,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) {
-    if !crate::ports::hook_runtime::is_project_initialized(project_root) {
+    if !runtime.is_project_initialized(project_root) {
         return;
     }
     let rels = rel_paths();
@@ -40,6 +43,7 @@ pub(super) async fn notify_edited_paths(
         return;
     }
     super::notify_hook_event_with_optional_telemetry(
+        runtime,
         project_root,
         build_event(rels).with_route(Some(super::hook_route_metadata_from_parsed(
             parsed,
