@@ -164,13 +164,28 @@ fn admit_source_scope_binding(
             text(source_scope.clone()),
         ],
     )?;
+    // The binding is bijective: one code scope names exactly one source scope
+    // and the reverse. A refusal here is only actionable if it says which half
+    // disagreed, because the requested pair looks correct from the caller.
     if rows.rows.as_slice().len() != 1
         || text_at(&rows.rows[0], 0)? != plan.code_scope_hash.as_str()
         || text_at(&rows.rows[0], 1)? != source_scope
     {
-        return Err(corrupt(
-            "semantic vector code scope has a conflicting durable source binding",
-        ));
+        let mut observed = Vec::with_capacity(rows.rows.as_slice().len());
+        for row in rows.rows.as_slice() {
+            observed.push(format!(
+                "(code_scope_hash={}, source_scope={})",
+                text_at(row, 0)?,
+                text_at(row, 1)?
+            ));
+        }
+        return Err(corrupt(format!(
+            "semantic vector code scope has a conflicting durable source binding: requested \
+             (code_scope_hash={}, source_scope={}) matched {}",
+            plan.code_scope_hash.as_str(),
+            source_scope,
+            observed.join(" ")
+        )));
     }
     Ok(())
 }
