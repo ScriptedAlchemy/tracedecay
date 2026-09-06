@@ -1014,3 +1014,136 @@ fn publish_empty_stage_with_storage(
             if record.state == SemanticVectorStageState::Published
     ));
 }
+
+/// A store written before `4e57f2831` bound its semantic source scope to the
+/// branch-labelled code shard. The producer now derives the checkout-scoped
+/// shard, so the durable bijection sees the same code scope naming a different
+/// source scope. That store must be told which pair it holds and which one was
+/// asked for — an explicit rebuild path — never silently rebound onto the new
+/// tuple.
+#[test]
+fn a_branch_bound_source_scope_refuses_the_checkout_scope_and_names_both_tuples() {
+    let fixture = Fixture::new();
+    let branch_scope = StoreShardIdV1::code(
+        BrainId::new("brain.fixture").unwrap(),
+        UserProfileId::new("profile.fixture").unwrap(),
+        ProjectId::new("project.fixture").unwrap(),
+        RepositoryId::new("repository.fixture").unwrap(),
+        CodeShardScopeV1::Branch {
+            worktree_id: WorktreeId::new("worktree.fixture").unwrap(),
+            ref_id: tracedecay_domain::RefId::new("refs/heads/main").unwrap(),
+        },
+    );
+    let legacy = plan_with_source_scope(
+        &fixture,
+        "branch-bound-legacy",
+        chunk_manifest("chunk.branch-bound-legacy"),
+        branch_scope.clone(),
+    );
+    let (control, probe) = operation("branch-bound.legacy-begin");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        fixture.storage().begin_stage(&legacy, &context).unwrap(),
+        SemanticVectorStageBeginOutcome::Begun(_)
+    ));
+
+    // The producer after `4e57f2831` derives the worktree-scoped shard for the
+    // same code scope hash. `plan` already uses `CodeShardScopeV1::Worktree`.
+    let checkout = plan(
+        &fixture,
+        "branch-bound-checkout",
+        chunk_manifest("chunk.branch-bound-checkout"),
+    );
+    assert_eq!(
+        checkout.code_scope_hash, legacy.code_scope_hash,
+        "this case only proves anything while both plans name one code scope"
+    );
+    assert_ne!(
+        checkout.source_scope, legacy.source_scope,
+        "the checkout-scoped source scope must differ from the branch-bound one"
+    );
+    let (control, probe) = operation("branch-bound.checkout-begin");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let refusal = fixture
+        .storage()
+        .begin_stage(&checkout, &context)
+        .expect_err("a branch-bound durable binding must refuse the checkout scope");
+    let SemanticVectorStagingStoreError::Corrupt(message) = refusal else {
+        panic!("the conflicting binding must be typed corruption: {refusal:?}");
+    };
+    assert!(
+        message.contains("conflicting durable source binding"),
+        "{message}"
+    );
+    assert!(
+        message.contains(checkout.code_scope_hash.as_str()),
+        "the refusal must name the code scope both tuples share: {message}"
+    );
+    assert!(
+        message.contains(serde_json::to_string(&checkout.source_scope).unwrap().as_str()),
+        "the refusal must name the requested checkout source scope: {message}"
+    );
+    assert!(
+        message.contains(serde_json::to_string(&branch_scope).unwrap().as_str()),
+        "the refusal must name the retained branch-bound source scope: {message}"
+    );
+
+    // No silent rebinding: the durable row still names the branch scope.
+    let (control, probe) = operation("branch-bound.census");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let receipt = fixture
+        .storage()
+        .stage_census(
+            &SemanticVectorStageCensusRequest::for_shard(
+                fixture.binding.shard_id.clone(),
+                None,
+                256,
+            )
+            .unwrap(),
+            &context,
+        )
+        .unwrap()
+        .complete_receipt
+        .expect("bounded census is complete");
+    let (control, probe) = operation("branch-bound.lookup");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        fixture
+            .storage()
+            .source_scope_binding(
+                &fixture.binding.shard_id,
+                &legacy.code_scope_hash,
+                receipt.revision,
+                &context,
+            )
+            .unwrap(),
+        SemanticVectorSourceScopeBindingLookup::Exact(branch_scope),
+        "the refused begin must not have rebound the durable row"
+    );
+}
+
+fn plan_with_source_scope(
+    fixture: &Fixture,
+    name: &str,
+    manifest: SemanticVectorChunkManifestDigest,
+    source_scope: StoreShardIdV1,
+) -> SemanticVectorStagePlan {
+    let base = plan(fixture, name, manifest);
+    SemanticVectorStagePlan::new(
+        base.key.projection.clone(),
+        base.key.build_id.clone(),
+        base.semantic_generation_id.clone(),
+        base.base_generation.clone(),
+        base.publication_key.clone(),
+        source_scope,
+        base.code_scope_hash.clone(),
+        base.source_generation.clone(),
+        base.source_dependency.clone(),
+        base.recipe.clone(),
+        base.expected_chunk_count,
+        base.expected_prior_verified_head.clone(),
+        base.initial_checkpoint_digest.clone(),
+        base.writer_fence.clone(),
+    )
+    .unwrap()
+}
