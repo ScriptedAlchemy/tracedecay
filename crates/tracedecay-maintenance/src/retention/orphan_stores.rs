@@ -154,16 +154,6 @@ pub struct OrphanStoreFinding {
     pub graph_scope_relpaths: Vec<PathBuf>,
 }
 
-impl OrphanStoreFinding {
-    pub fn is_orphaned(&self) -> bool {
-        matches!(self.disposition, StoreDisposition::Orphaned)
-    }
-
-    pub fn is_relinkable(&self) -> bool {
-        matches!(self.disposition, StoreDisposition::Relinkable { .. })
-    }
-}
-
 /// Every root that can keep this store's identity alive: the registry roots,
 /// the git common directory shared with linked worktrees, and every registered
 /// alias path. Collecting a store because one checkout vanished, while another

@@ -608,12 +608,6 @@ impl<T> DashboardEnvelopeV1<T> {
             payload: map(self.payload),
         }
     }
-
-    #[must_use]
-    pub fn with_valid_time(mut self, valid_time_micros: i64) -> Self {
-        self.time.valid_time_micros = Some(valid_time_micros);
-        self
-    }
 }
 
 /// Current wall-clock time in microseconds since the Unix epoch.

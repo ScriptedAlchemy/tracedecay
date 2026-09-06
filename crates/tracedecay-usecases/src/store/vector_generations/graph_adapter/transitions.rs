@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
     ManifestDigest, ProjectionOperationV1, VectorGenerationIdV1, canonical_sha256,
@@ -44,12 +44,12 @@ use super::native_records::{
 use super::persistence::{map_graph_error, storage_error};
 use super::stage_identity::next_stage_attempt;
 use super::{
-    GRAPH_BACKGROUND_OPERATION_BUDGET, GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreV1,
-    VectorGenerationBeginOutcomeV1,
+    GRAPH_BACKGROUND_OPERATION_BUDGET, GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreStateV1,
+    VectorGenerationBeginOutcomeV1, VectorPublicationPhaseV1,
 };
 use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
 
-impl GraphVectorGenerationStoreV1 {
+impl GraphVectorGenerationStoreStateV1 {
     pub(super) fn semantic_stage_plan(
         &self,
         plan: &VectorGenerationPlanV1,
@@ -210,6 +210,7 @@ impl GraphVectorGenerationStoreV1 {
                 &mut generations,
                 plan.base_generation.as_ref(),
                 Arc::clone(&cancellation),
+                GRAPH_BACKGROUND_OPERATION_BUDGET,
             )?;
             let mut after = transition_state(existing.as_ref(), generations.iter())?;
             let result = if rebuild {
@@ -760,15 +761,22 @@ impl GraphVectorGenerationStoreV1 {
                     .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?,
             )
         };
+        let chunks = stage.recorded_chunk_count;
+        let prepare_started = Instant::now();
         let prepare_authority = SemanticGraphExecutionAuthorityV1::new(
             Arc::clone(&cancellation),
-            Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET,
+            prepare_started + GRAPH_BACKGROUND_OPERATION_BUDGET,
         );
-        match self
+        let prepared = self
             .runtime
             .prepare_publication_from_staged_native(&stage.plan.key, &prepare_authority)
-            .map_err(map_graph_error)?
-        {
+            .map_err(map_graph_error)?;
+        crate::hotpath_observe::vector_publication_phase(
+            VectorPublicationPhaseV1::Verify,
+            chunks,
+            prepare_started.elapsed(),
+        );
+        match prepared {
             SemanticVectorStagePublicationPrepareOutcome::ReadyToPublish(_)
             | SemanticVectorStagePublicationPrepareOutcome::ExactReplay(_) => {}
             SemanticVectorStagePublicationPrepareOutcome::Incomplete(_) => {
@@ -788,14 +796,25 @@ impl GraphVectorGenerationStoreV1 {
                 )));
             }
         }
+        // A fresh authority, not the remainder of the verify pass: the two are
+        // independently corpus-scaled, so a whole-generation digest that ran
+        // for minutes must not leave the install with what is left of one
+        // budget. This is the #837 failure, which spent one 30s authority on
+        // both.
+        let publish_started = Instant::now();
         let publish_authority = SemanticGraphExecutionAuthorityV1::new(
             Arc::clone(&cancellation),
-            Instant::now() + GRAPH_BACKGROUND_OPERATION_BUDGET,
+            publish_started + GRAPH_BACKGROUND_OPERATION_BUDGET,
         );
         let snapshot = self
             .runtime
             .publish_ready_stage(&stage.plan.key, &publish_authority)
             .map_err(map_graph_error)?;
+        crate::hotpath_observe::vector_publication_phase(
+            VectorPublicationPhaseV1::Publish,
+            chunks,
+            publish_started.elapsed(),
+        );
         let verified_head = snapshot.verified_head().clone();
         if verified_head.key != stage.plan.publication_key {
             return Err(VectorGenerationStoreErrorV1::ResetRequired(
@@ -1096,12 +1115,16 @@ pub(super) fn transition_state<'a>(
     Ok(state)
 }
 
-impl GraphVectorGenerationStoreV1 {
+impl GraphVectorGenerationStoreStateV1 {
+    /// Hydrating the base generation of a restart re-proves a whole published
+    /// generation, so it runs under the background budget its calling phase
+    /// declares rather than the interactive graph deadline.
     fn push_required_generation(
         &self,
         generations: &mut Vec<ScopedGenerationRecordsV1>,
         generation_id: Option<&VectorGenerationIdV1>,
         cancellation: Arc<dyn GraphCancellation>,
+        recovery_budget: Duration,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
         let Some(generation_id) = generation_id else {
             return Ok(());
@@ -1113,7 +1136,7 @@ impl GraphVectorGenerationStoreV1 {
             return Ok(());
         }
         let records = self
-            .read_cataloged_hydrating_published_bases(generation_id, cancellation)?
+            .read_cataloged_hydrating_published_bases(generation_id, cancellation, recovery_budget)?
             .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                 BaseGenerationIncompatibilityV1::MissingSnapshot,
             ))?;

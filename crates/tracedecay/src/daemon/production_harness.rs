@@ -912,69 +912,6 @@ impl ProductionProjectCompositionHarnessV1 {
         .await
     }
 
-    #[hotpath::measure(label = "daemon.harness.sync_worktree_branch", future = true)]
-    pub async fn sync_tracked_worktree_branch(
-        &self,
-        project_root: impl AsRef<Path>,
-        worktree_root: impl AsRef<Path>,
-        branch: &str,
-        query: &str,
-    ) -> Result<(Option<String>, Option<String>, bool, bool)> {
-        self.track_worktree_branch(project_root.as_ref(), worktree_root.as_ref(), branch)
-            .await?;
-        let canonical_project_root =
-            std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.as_ref().display()
-                    ),
-                }
-            })?;
-        let canonical_worktree_root =
-            std::fs::canonicalize(worktree_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize branch worktree '{}': {error}",
-                        worktree_root.as_ref().display()
-                    ),
-                }
-            })?;
-        let graph = self.server(&canonical_project_root)?.cg().await;
-        let resources = self
-            .resources
-            .as_ref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "production-composition harness is shut down".to_owned(),
-            })?;
-        let source = super::branch_add::capture_exact_branch_source(
-            &graph,
-            &resources.invocation.code_index_schedulers,
-            &canonical_project_root,
-            &canonical_worktree_root,
-            branch,
-        )
-        .await?;
-        let generation = super::branch_add::await_exact_branch_generation(
-            &resources.invocation.code_index_schedulers,
-            &canonical_worktree_root,
-            &source,
-        )
-        .await?;
-        let contains_query = generation.symbols().symbols.iter().any(|symbol| {
-            symbol.simple_name.contains(query) || symbol.qualified_name.contains(query)
-        });
-        Ok((
-            tracedecay_runtime_core::branch::current_branch(&canonical_worktree_root),
-            source
-                .reference
-                .strip_prefix("refs/heads/")
-                .map(str::to_owned),
-            false,
-            contains_query,
-        ))
-    }
-
     #[hotpath::measure(label = "daemon.harness.call_tool", future = true)]
     pub async fn call_tool(
         &self,

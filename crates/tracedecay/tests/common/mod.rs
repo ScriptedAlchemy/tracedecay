@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code)] // shared test support: each suite binary compiles this module and uses a subset
 
 pub mod fixture;
 pub mod repository_layout;
@@ -26,7 +26,6 @@ use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_domain::code_intelligence::{Node, NodeKind, Visibility};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
@@ -45,9 +44,6 @@ pub fn repository_path(relative: impl AsRef<Path>) -> PathBuf {
 /// generated guidance, so every suite must read the same authority; keeping the
 /// `include_str!` sites here means one edit repoints them all after a move.
 pub mod host_sources {
-    pub const HERMES_PLUGIN_INIT_PY: &str = include_str!(
-        "../../../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
-    );
     pub const HERMES_SKILL_MD: &str = include_str!(
         "../../../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md"
     );
@@ -104,14 +100,6 @@ pub async fn open_test_database(
     register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await
-}
-
-pub async fn open_test_database_read_only(
-    path: &Path,
-) -> tracedecay_domain::errors::Result<(Database, bool)> {
-    register_test_schema_installer();
-    let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
-    Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::ReadOnly).await
 }
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
@@ -363,10 +351,6 @@ impl TraceDecayStorageEnvGuard {
     }
 }
 
-pub fn isolated_tracedecay_storage(tmp: &TempDir) -> TraceDecayStorageEnvGuard {
-    TraceDecayStorageEnvGuard::for_tempdir(tmp)
-}
-
 /// Serializes in-process agent install/uninstall tests and pins
 /// [`USER_DATA_DIR_ENV`] to that test's home.
 ///
@@ -526,34 +510,6 @@ if not errorlevel 1 (\r\n\
 py -3 \"%~dp0{script_name}\" %*\r\n\
 exit /b %ERRORLEVEL%\r\n"
     )
-}
-
-pub fn sample_node(id: &str, name: &str, file_path: &str) -> Node {
-    Node {
-        id: id.to_string(),
-        kind: NodeKind::Function,
-        name: name.to_string(),
-        qualified_name: format!("crate::{name}"),
-        file_path: file_path.to_string(),
-        start_line: 1,
-        attrs_start_line: 1,
-        end_line: 3,
-        start_column: 0,
-        end_column: 1,
-        signature: Some(format!("fn {name}()")),
-        docstring: None,
-        visibility: Visibility::Pub,
-        is_async: false,
-        branches: 0,
-        loops: 0,
-        returns: 0,
-        max_nesting: 0,
-        unsafe_blocks: 0,
-        unchecked_calls: 0,
-        assertions: 0,
-        updated_at: 1_800_000_000,
-        parent_id: None,
-    }
 }
 
 /// Small multi-thread runtime for `#[test]`-driven async dashboard fixtures.
@@ -1231,10 +1187,6 @@ pub fn isolated_lcm_db_path(tmp: &TempDir) -> std::path::PathBuf {
     tracedecay_sessions::runtime::user_sessions_db_path(&tmp.path().join(".tracedecay"))
 }
 
-pub fn isolated_global_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tmp.path().join(".tracedecay").join("global.db")
-}
-
 /// Opaque retained profile-session runtime for integration fixtures.
 ///
 /// Callers get typed operations only; the registered database handle and
@@ -1841,145 +1793,6 @@ pub fn global_message(
     .with_source(Some("/tmp/project/transcript.jsonl"), Some(42))
     .with_metadata(Some(r#"{"finish_reason":"stop"}"#))
     .build()
-}
-
-/// Minimal PyYAML stand-in covering only the YAML subset the generated
-/// Hermes configs use: nested block mappings, block lists of scalars, and
-/// plain/quoted scalars. Hermes itself always ships PyYAML; CI's system
-/// python3 on macOS/Windows has no third-party packages, so checks that
-/// exercise the plugin's config.yaml paths get this shim via PYTHONPATH.
-pub const PYYAML_SHIM: &str = r##""""Minimal PyYAML stand-in for tracedecay agent tests.
-
-Implements safe_load/dump for the simple block-style YAML the generated
-Hermes config files use. Only used when the system python3 lacks PyYAML.
-"""
-
-import json
-import re
-
-_PLAIN_SCALAR = re.compile(r"^[A-Za-z0-9_./~+-]+$")
-
-
-def safe_load(stream):
-    text = stream if isinstance(stream, str) else stream.read()
-    items = []
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        items.append((len(raw) - len(raw.lstrip(" ")), stripped))
-    if not items:
-        return None
-    value, index = _parse_block(items, 0, items[0][0])
-    if index != len(items):
-        raise ValueError(f"unsupported yaml structure near: {items[index][1]!r}")
-    return value
-
-
-def _parse_scalar(token):
-    if token in ("", "null", "~"):
-        return None
-    if token == "true":
-        return True
-    if token == "false":
-        return False
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
-        return token[1:-1]
-    for parse in (int, float):
-        try:
-            return parse(token)
-        except ValueError:
-            pass
-    return token
-
-
-def _parse_block(items, index, indent):
-    if items[index][1].startswith("- "):
-        result = []
-        while index < len(items) and items[index][0] == indent and items[index][1].startswith("- "):
-            result.append(_parse_scalar(items[index][1][2:].strip()))
-            index += 1
-        return result, index
-    mapping = {}
-    while index < len(items) and items[index][0] == indent and not items[index][1].startswith("- "):
-        line = items[index][1]
-        if ":" not in line:
-            raise ValueError(f"unsupported yaml line: {line!r}")
-        key, _, rest = line.partition(":")
-        index += 1
-        rest = rest.strip()
-        if rest:
-            mapping[_parse_scalar(key.strip())] = _parse_scalar(rest)
-            continue
-        child = None
-        if index < len(items) and items[index][0] > indent:
-            child, index = _parse_block(items, index, items[index][0])
-        elif index < len(items) and items[index][0] == indent and items[index][1].startswith("- "):
-            child, index = _parse_block(items, index, indent)
-        mapping[_parse_scalar(key.strip())] = child
-    return mapping, index
-
-
-def _dump_scalar(value):
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value)
-    return text if _PLAIN_SCALAR.match(text) else json.dumps(text)
-
-
-def _dump_lines(value, indent, lines):
-    pad = " " * indent
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if isinstance(child, (dict, list)) and child:
-                lines.append(f"{pad}{_dump_scalar(key)}:")
-                _dump_lines(child, indent + 2, lines)
-            else:
-                child_repr = "{}" if child == {} else "[]" if child == [] else _dump_scalar(child)
-                lines.append(f"{pad}{_dump_scalar(key)}: {child_repr}")
-    elif isinstance(value, list):
-        for item in value:
-            lines.append(f"{pad}- {_dump_scalar(item)}")
-    else:
-        lines.append(f"{pad}{_dump_scalar(value)}")
-
-
-def dump(data, stream=None, default_flow_style=False, **kwargs):
-    lines = []
-    _dump_lines(data, 0, lines)
-    text = "\n".join(lines) + "\n"
-    if stream is None:
-        return text
-    stream.write(text)
-    return None
-"##;
-
-/// Python prelude that falls back to the bundled PyYAML shim (argv[2]) only
-/// when the interpreter has no importable `yaml`, so config.yaml-dependent
-/// checks run on bare CI runners without a separate `python3 -c "import
-/// yaml"` probe process. Appending to sys.path keeps the precedence
-/// identical: a real PyYAML always wins.
-pub const PYYAML_FALLBACK_PRELUDE: &str = r#"
-import importlib.util as _yaml_probe_util
-import sys as _yaml_probe_sys
-
-if _yaml_probe_util.find_spec("yaml") is None:
-    _yaml_probe_sys.path.append(_yaml_probe_sys.argv[2])
-"#;
-
-/// Writes the PyYAML test shim next to the test home and returns its
-/// directory, for scripts using [`PYYAML_FALLBACK_PRELUDE`].
-pub fn write_pyyaml_shim(scratch: &Path) -> PathBuf {
-    let shim_dir = scratch.join("pyyaml-shim");
-    std::fs::create_dir_all(&shim_dir).unwrap();
-    std::fs::write(shim_dir.join("yaml.py"), PYYAML_SHIM).unwrap();
-    shim_dir
 }
 
 /// Serializes tests that mutate process-wide environment variables (HOME,

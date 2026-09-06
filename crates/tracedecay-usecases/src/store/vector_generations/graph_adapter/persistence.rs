@@ -5,10 +5,6 @@ use tracedecay_graph_db::{
 
 use super::super::VectorGenerationStoreErrorV1;
 
-pub(super) fn resident_size_overflow() -> VectorGenerationStoreErrorV1 {
-    VectorGenerationStoreErrorV1::Corrupt("semantic resident vector size exceeds u64".to_owned())
-}
-
 pub(super) fn generation_label(
     generation: &VectorGenerationIdV1,
 ) -> Result<GraphLabel, VectorGenerationStoreErrorV1> {
