@@ -102,7 +102,7 @@ pub use production::{
     project_semantic_production_runtime, project_semantic_source_generation,
     register_project_semantic_runtime, resolve_project_semantic_runtime_status,
     resolve_semantic_application_status, unbind_project_semantic_cache_if_current,
-    unregister_project_semantic_runtime,
+    unregister_project_semantic_runtime, vectors_serve_source,
 };
 pub use publish_failure_memo::{
     DEFAULT_PUBLISH_FAILURE_BACKOFF_BASE, DEFAULT_PUBLISH_FAILURE_BACKOFF_CEILING,
