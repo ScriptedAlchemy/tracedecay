@@ -1,6 +1,5 @@
 //! Windows file-handle identity read via `GetFileInformationByHandle`.
 
-use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::windows::io::AsRawHandle;
@@ -16,7 +15,10 @@ pub struct FileInformation {
     pub number_of_links: u32,
 }
 
-pub fn information(file: &File) -> io::Result<FileInformation> {
+/// Reads by-handle identity from any open Windows handle: `std::fs::File`,
+/// and the `cap_std` `Dir`/`File` capabilities whose `Metadata` only exposes
+/// the volume serial number and file index on nightly.
+pub fn information<H: AsRawHandle>(file: &H) -> io::Result<FileInformation> {
     let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: `file` owns a valid Windows file handle, and `information` points
     // to writable memory sized for the API's complete output structure.
