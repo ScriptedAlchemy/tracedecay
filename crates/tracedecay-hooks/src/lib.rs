@@ -11,6 +11,7 @@
 pub mod admission_ledger;
 pub mod capture;
 pub mod config;
+mod contention;
 pub mod core_events;
 pub mod delivery_spool;
 pub mod native;

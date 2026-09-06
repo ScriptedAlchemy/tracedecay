@@ -10,9 +10,9 @@ use tracedecay_domain::UtcMicros;
 
 use crate::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookHostV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1, NativeEnvelopeMaterialV1,
-    NativeHookDecodeError, OpenCodePluginSurfaceV1, decode_native_hook_event,
-    decode_opencode_plugin_event, hook_configuration_path,
+    HookEventEnvelopeV2, HookHostV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError,
+    HookSpoolV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, OpenCodePluginSurfaceV1,
+    decode_native_hook_event, decode_opencode_plugin_event, hook_configuration_path,
 };
 
 /// The real host surface that supplied native hook bytes.
@@ -115,10 +115,43 @@ fn capture_native_event_for_replay_inner(
         }
         Err(_) => return NativeHookCaptureOutcomeV1::Unavailable,
     };
+    let envelope = redelivered_envelope(&mut spool, &snapshot.binding, envelope);
     match spool.append(envelope, &snapshot.binding, now) {
         Ok(_) => NativeHookCaptureOutcomeV1::Captured,
         Err(HookSpoolError::SpoolFull) => NativeHookCaptureOutcomeV1::Full,
         Err(HookSpoolError::ResetRequired { .. }) => NativeHookCaptureOutcomeV1::ResetRequired,
         Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
+    }
+}
+
+/// Reuses the queued envelope when this callback is a redelivery of an event
+/// the spool already holds.
+///
+/// The event ID is derived from the host's own identity fields, so one host
+/// event delivered twice — a retried callback, or sibling hooks firing
+/// concurrently for the same edit — produces two envelopes that differ only in
+/// the instant each process observed it. `HookSpoolV1::append` is idempotent
+/// for an identical envelope but reports `EventIdConflict` for that timestamp
+/// difference, which the capture lane surfaced as a failed hook exit even
+/// though the event was already durable. Normalise the observation instant the
+/// way the response path's `replay_envelope_if_pending` does; anything else
+/// that differs stays a genuine conflict.
+fn redelivered_envelope(
+    spool: &mut HookSpoolV1,
+    binding: &HookScopeBindingV1,
+    envelope: HookEventEnvelopeV2,
+) -> HookEventEnvelopeV2 {
+    let Ok(Some(queued)) = spool.pending_envelope(envelope.event_id) else {
+        return envelope;
+    };
+    if queued.validate(binding).is_err() {
+        return envelope;
+    }
+    let mut candidate = envelope.clone();
+    candidate.observed_at = queued.observed_at;
+    if queued == candidate {
+        queued
+    } else {
+        envelope
     }
 }

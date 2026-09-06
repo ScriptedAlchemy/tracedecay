@@ -116,9 +116,19 @@ pub struct HookDeliveryReceiptSpoolV1 {
 }
 
 impl HookDeliveryReceiptSpoolV1 {
+    /// Opens the spool, waiting out a sibling hook that holds the writer lock.
+    /// See [`crate::contention`] for why a contended lock must not fail the
+    /// callback.
     #[hotpath::measure(label = "hooks.delivery.open")]
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, HookDeliverySpoolError> {
         let root = root.into();
+        crate::contention::wait_out_contention(
+            || Self::try_open(root.clone()),
+            |error| matches!(error, HookDeliverySpoolError::Busy),
+        )
+    }
+
+    fn try_open(root: PathBuf) -> Result<Self, HookDeliverySpoolError> {
         ensure_root(&root)?;
         let lock_path = root.join(LOCK_FILE);
         validate_regular_or_missing(&lock_path).map_err(|_| HookDeliverySpoolError::UnsafePath)?;

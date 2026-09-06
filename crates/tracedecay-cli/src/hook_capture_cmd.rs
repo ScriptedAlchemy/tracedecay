@@ -229,7 +229,10 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
 pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,
-        Err(()) => return 1,
+        Err(()) => {
+            eprintln!("tracedecay hook: stdin was unreadable or exceeded the payload bound");
+            return 1;
+        }
     };
     let mut delivery_writer = None;
     let mut delivery_open_error = None;
@@ -312,19 +315,26 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
             return 1;
         };
         let (Some(material), Some(delivered_at)) = (delivery_material, current_time()) else {
+            eprintln!("tracedecay hook: delivery receipt material unavailable");
             return 1;
         };
         let Some(settlement) = native_hook_delivery_settlement(source, material, delivered_at)
         else {
+            eprintln!("tracedecay hook: delivery settlement identity could not be derived");
             return 1;
         };
         let Ok(receipt) = tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) else {
+            eprintln!("tracedecay hook: delivery receipt is invalid");
             return 1;
         };
-        if writer.append(&receipt).is_err() {
+        if let Err(error) = writer.append(&receipt) {
+            eprintln!("tracedecay hook: delivery receipt could not be retained: {error}");
             return 1;
         }
     }
+    // A non-zero capture exit is the host's only signal that the callback did
+    // not land, and the host shows it to the user. Name the outcome so the
+    // failure is diagnosable instead of a bare exit code.
     match outcome {
         NativeHookCaptureOutcomeV1::Captured
         | NativeHookCaptureOutcomeV1::Unsupported
@@ -332,7 +342,10 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         NativeHookCaptureOutcomeV1::Rejected
         | NativeHookCaptureOutcomeV1::Full
         | NativeHookCaptureOutcomeV1::ResetRequired
-        | NativeHookCaptureOutcomeV1::Unavailable => 1,
+        | NativeHookCaptureOutcomeV1::Unavailable => {
+            eprintln!("tracedecay hook: native capture did not land: {outcome:?}");
+            1
+        }
     }
 }
 
