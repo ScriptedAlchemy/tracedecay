@@ -45,7 +45,10 @@ pub(crate) use quarantine::read_pending_quarantine_receipts;
 use quarantine::{
     QuarantineFinalizeOutcome, QuarantineKindV1, QuarantineRecoveryOutcome,
     QuarantineRegistryFenceV1, QuarantineStoreOutcome, QuarantinedStore,
-    quarantine_store_for_verified_collection_controlled, recover_existing_store_quarantine,
+    RegisteredQuarantineDecisionV1, RegisteredQuarantineIntentV1, RegisteredQuarantineInventoryV1,
+    quarantine_store_for_verified_collection_controlled,
+    read_registered_quarantine_intents_controlled, recover_existing_store_quarantine,
+    recover_registered_quarantine_intent_controlled,
 };
 pub use unregistered_page::UnregisteredSweepCompletionV1;
 pub use unregistered_page::{
@@ -504,7 +507,7 @@ impl<'a> CollectionControl<'a> {
     }
 }
 
-fn unbounded_collection_control() -> CollectionControl<'static> {
+pub(super) fn unbounded_collection_control() -> CollectionControl<'static> {
     static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
     CollectionControl::new(
         CANCELLATION.get_or_init(CancellationToken::new),
@@ -774,9 +777,11 @@ fn finalize_verified_quarantine(
 }
 
 /// Reconcile a durable interrupted quarantine before applying a fresh plan for
-/// this exact live-name. Recovery never resumes the old deletion decision: a
-/// restored or retained quarantine is an owner-visible receipt and forces a
-/// later census/confirmation pass.
+/// this exact live-name. Unregistered journals use their durable retirement
+/// marker; registered journals remain pending unless the global-registry
+/// inventory pass supplied an exact database decision. A restored or retained
+/// quarantine forces a later census/confirmation pass, and recovery never
+/// fabricates the old plan's byte count.
 fn reconcile_existing_quarantine(
     profile_root: &Path,
     data_root: &Path,
@@ -786,28 +791,48 @@ fn reconcile_existing_quarantine(
     match recover_existing_store_quarantine(profile_root, data_root) {
         Ok(recoveries) if recoveries.is_empty() => true,
         Ok(recoveries) => {
+            let mut retained_or_restored = false;
             for recovery in recoveries {
-                let (quarantine_path, actual_path, action, failure) = match recovery {
+                let recovery_receipt = match recovery {
+                    QuarantineRecoveryOutcome::Removed {
+                        journal_failure, ..
+                    } => {
+                        if let Some(failure) = journal_failure {
+                            outcome.errors.push(CollectionFailure {
+                                store_id: store_id.to_owned(),
+                                kind: CollectionFailureKind::RemoveFailed(failure),
+                            });
+                        }
+                        None
+                    }
                     QuarantineRecoveryOutcome::Restored {
                         restored_path,
                         failure,
                     } => {
+                        retained_or_restored = true;
                         let action = if failure.is_some() {
                             CollectionRecoveryAction::RetainedForRecovery
                         } else {
                             CollectionRecoveryAction::Restored
                         };
-                        (data_root.to_path_buf(), restored_path, action, failure)
+                        Some((data_root.to_path_buf(), restored_path, action, failure))
                     }
                     QuarantineRecoveryOutcome::Retained {
                         quarantine_path,
+                        actual_path,
                         failure,
-                    } => (
-                        quarantine_path.clone(),
-                        quarantine_path,
-                        CollectionRecoveryAction::RetainedForRecovery,
-                        failure,
-                    ),
+                    } => {
+                        retained_or_restored = true;
+                        Some((
+                            quarantine_path.clone(),
+                            actual_path,
+                            CollectionRecoveryAction::RetainedForRecovery,
+                            failure,
+                        ))
+                    }
+                };
+                let Some((quarantine_path, actual_path, action, failure)) = recovery_receipt else {
+                    continue;
                 };
                 outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                     store_id: store_id.to_owned(),
@@ -823,10 +848,12 @@ fn reconcile_existing_quarantine(
                     });
                 }
             }
-            outcome.errors.push(CollectionFailure {
-                store_id: store_id.to_owned(),
-                kind: CollectionFailureKind::PayloadChanged,
-            });
+            if retained_or_restored {
+                outcome.errors.push(CollectionFailure {
+                    store_id: store_id.to_owned(),
+                    kind: CollectionFailureKind::PayloadChanged,
+                });
+            }
             false
         }
         Err(kind) => {
@@ -837,6 +864,250 @@ fn reconcile_existing_quarantine(
             false
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisteredQuarantineRegistryStateV1 {
+    Exact,
+    Absent,
+    Changed,
+}
+
+async fn registered_quarantine_registry_state(
+    db: &RegisteredGlobalDb,
+    intent: &RegisteredQuarantineIntentV1,
+    control: CollectionControl<'_>,
+) -> tracedecay_domain::errors::Result<
+    Result<RegisteredQuarantineRegistryStateV1, CollectionCompletionV1>,
+> {
+    let snapshot = match control.race(db.read_snapshot()).await {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(error)) => return Err(error),
+        Err(completion) => return Ok(Err(completion)),
+    };
+    let mut rows = match control
+        .race(snapshot.query(
+            "SELECT project_id, store_relpath, created_at, last_write_at
+             FROM store_instances
+             WHERE store_id = ?1",
+            tracedecay_runtime_core::db::engine::params![intent.store_id.as_str()],
+        ))
+        .await
+    {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => {
+            return Err(orphan_db_error(
+                "classify registered quarantine registry row",
+                error,
+            ));
+        }
+        Err(completion) => return Ok(Err(completion)),
+    };
+    let first = match control.race(rows.next()).await {
+        Ok(Ok(row)) => row,
+        Ok(Err(error)) => {
+            return Err(orphan_db_error(
+                "read registered quarantine registry row",
+                error,
+            ));
+        }
+        Err(completion) => return Ok(Err(completion)),
+    };
+    let Some(row) = first else {
+        return Ok(Ok(RegisteredQuarantineRegistryStateV1::Absent));
+    };
+    let current = (
+        row.get::<String>(0)
+            .map_err(|error| orphan_db_error("decode registered quarantine project id", error))?,
+        row.get::<String>(1).map_err(|error| {
+            orphan_db_error("decode registered quarantine store relpath", error)
+        })?,
+        row.get::<i64>(2)
+            .map_err(|error| orphan_db_error("decode registered quarantine created time", error))?,
+        row.get::<Option<i64>>(3)
+            .map_err(|error| orphan_db_error("decode registered quarantine last write", error))?,
+    );
+    let ambiguous = match control.race(rows.next()).await {
+        Ok(Ok(row)) => row.is_some(),
+        Ok(Err(error)) => {
+            return Err(orphan_db_error(
+                "confirm registered quarantine registry uniqueness",
+                error,
+            ));
+        }
+        Err(completion) => return Ok(Err(completion)),
+    };
+    if ambiguous {
+        return Ok(Ok(RegisteredQuarantineRegistryStateV1::Changed));
+    }
+    let expected = (
+        intent.project_id.clone(),
+        intent.registry_fence.store_relpath.clone(),
+        intent.registry_fence.created_at,
+        intent.registry_fence.last_write_at,
+    );
+    Ok(Ok(if current == expected {
+        RegisteredQuarantineRegistryStateV1::Exact
+    } else {
+        RegisteredQuarantineRegistryStateV1::Changed
+    }))
+}
+
+fn record_registered_quarantine_recovery(
+    intent: &RegisteredQuarantineIntentV1,
+    recovery: Option<QuarantineRecoveryOutcome>,
+    registry_changed: bool,
+    outcome: &mut CollectionOutcome,
+) {
+    if registry_changed {
+        outcome.errors.push(CollectionFailure {
+            store_id: intent.store_id.clone(),
+            kind: CollectionFailureKind::RegistryChanged,
+        });
+    }
+    let Some(recovery) = recovery else {
+        return;
+    };
+    match recovery {
+        QuarantineRecoveryOutcome::Removed {
+            journal_failure, ..
+        } => {
+            if let Some(failure) = journal_failure {
+                outcome.errors.push(CollectionFailure {
+                    store_id: intent.store_id.clone(),
+                    kind: CollectionFailureKind::RemoveFailed(failure),
+                });
+            }
+        }
+        QuarantineRecoveryOutcome::Restored {
+            restored_path,
+            failure,
+        } => {
+            let action = if failure.is_some() {
+                CollectionRecoveryAction::RetainedForRecovery
+            } else {
+                CollectionRecoveryAction::Restored
+            };
+            outcome.recovery_receipts.push(CollectionRecoveryReceipt {
+                store_id: intent.store_id.clone(),
+                original_path: intent.original_path.clone(),
+                quarantine_path: intent.quarantine_path.clone(),
+                actual_path: restored_path,
+                action,
+            });
+            if let Some(failure) = failure {
+                outcome.errors.push(CollectionFailure {
+                    store_id: intent.store_id.clone(),
+                    kind: CollectionFailureKind::RemoveFailed(failure),
+                });
+            }
+        }
+        QuarantineRecoveryOutcome::Retained {
+            quarantine_path,
+            actual_path,
+            failure,
+        } => {
+            outcome.recovery_receipts.push(CollectionRecoveryReceipt {
+                store_id: intent.store_id.clone(),
+                original_path: intent.original_path.clone(),
+                quarantine_path,
+                actual_path,
+                action: CollectionRecoveryAction::RetainedForRecovery,
+            });
+            if let Some(failure) = failure {
+                outcome.errors.push(CollectionFailure {
+                    store_id: intent.store_id.clone(),
+                    kind: CollectionFailureKind::RemoveFailed(failure),
+                });
+            }
+        }
+    }
+}
+
+async fn reconcile_registered_quarantine_inventory(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    control: CollectionControl<'_>,
+    outcome: &mut CollectionOutcome,
+) -> tracedecay_domain::errors::Result<()> {
+    let intents = match read_registered_quarantine_intents_controlled(profile_root, control) {
+        Ok(RegisteredQuarantineInventoryV1::Complete(intents)) => intents,
+        Ok(RegisteredQuarantineInventoryV1::Interrupted) => {
+            outcome.completion = control
+                .completion()
+                .unwrap_or(CollectionCompletionV1::Cancelled);
+            return Ok(());
+        }
+        Err(CollectionFailureKind::Cancelled) => {
+            outcome.completion = control
+                .completion()
+                .unwrap_or(CollectionCompletionV1::Cancelled);
+            return Ok(());
+        }
+        Err(kind) => {
+            outcome.errors.push(CollectionFailure {
+                store_id: "registered-quarantine-inventory".to_owned(),
+                kind,
+            });
+            return Ok(());
+        }
+    };
+    for intent in intents {
+        if let Some(completion) = control.completion() {
+            outcome.completion = completion;
+            break;
+        }
+        let registry_state =
+            match registered_quarantine_registry_state(db, &intent, control).await? {
+                Ok(state) => state,
+                Err(completion) => {
+                    outcome.completion = completion;
+                    break;
+                }
+            };
+        let (decision, registry_changed) = match registry_state {
+            RegisteredQuarantineRegistryStateV1::Exact => {
+                (RegisteredQuarantineDecisionV1::Restore, false)
+            }
+            RegisteredQuarantineRegistryStateV1::Absent => {
+                (RegisteredQuarantineDecisionV1::Remove, false)
+            }
+            RegisteredQuarantineRegistryStateV1::Changed => {
+                (RegisteredQuarantineDecisionV1::Retain, true)
+            }
+        };
+        if let Some(completion) = control.completion() {
+            outcome.completion = completion;
+            break;
+        }
+        let recovery = match recover_registered_quarantine_intent_controlled(
+            profile_root,
+            &intent,
+            decision,
+            control,
+        ) {
+            Ok(recovery) => recovery,
+            Err(CollectionFailureKind::Cancelled) => {
+                outcome.completion = control
+                    .completion()
+                    .unwrap_or(CollectionCompletionV1::Cancelled);
+                break;
+            }
+            Err(kind) => {
+                outcome.errors.push(CollectionFailure {
+                    store_id: intent.store_id.clone(),
+                    kind,
+                });
+                continue;
+            }
+        };
+        record_registered_quarantine_recovery(&intent, recovery, registry_changed, outcome);
+        if let Some(completion) = control.completion() {
+            outcome.completion = completion;
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Executes registered collection in two phases: expensive inspection and a
@@ -860,6 +1131,10 @@ pub(crate) async fn execute_registered_collection_controlled(
 ) -> tracedecay_domain::errors::Result<(CollectionOutcome, usize)> {
     let mut outcome = CollectionOutcome::default();
     let mut retired = 0usize;
+    reconcile_registered_quarantine_inventory(db, profile_root, control, &mut outcome).await?;
+    if outcome.completion != CollectionCompletionV1::Complete {
+        return Ok((outcome, retired));
+    }
     for finding in &plan.collect {
         if let Some(completion) = control.completion() {
             outcome.completion = completion;
