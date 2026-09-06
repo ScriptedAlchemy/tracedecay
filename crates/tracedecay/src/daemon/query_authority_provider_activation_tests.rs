@@ -801,6 +801,103 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     registry.shutdown().await;
 }
 
+/// #753 restart authority: project open restores a committed activation
+/// before the demand-driven code-index mount. With no worktree there is no
+/// serving state to bind yet, which the registrar must report as
+/// `Unavailable` (deferred, retried once the index seats), never as a
+/// conflicting committed state that fails the whole capability upgrade.
+#[tokio::test]
+async fn committed_restore_before_the_worktree_mount_defers_instead_of_conflicting() {
+    let project = TempDir::new_in(
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
+    )
+    .expect("project root");
+    git(project.path(), &["init", "-q", "-b", "main"]);
+    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        project.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+        .expect("source file");
+    git(project.path(), &["add", "."]);
+    git(project.path(), &["commit", "-qm", "fixture"]);
+
+    let project_id = ProjectId::new("project.query-restore-before-mount").expect("project id");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
+            .expect("resolved scope");
+    let registry =
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    let cursor_store = TempDir::new().expect("cursor store");
+    let profile_root = cursor_store.path().join("profile");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-restore-before-mount",
+    )
+    .expect("database scope");
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session registry");
+    let session_db = session_registry
+        .profile_sessions()
+        .await
+        .expect("session database");
+    let registrar = DaemonQueryActivationRegistrarV1::new(
+        DaemonQueryAuthorityProviderV1::default(),
+        registry.clone(),
+        project.path().to_path_buf(),
+        session_db,
+    );
+    let semantic = semantic_committed_state(scope.clone());
+
+    assert!(
+        !registry.is_worktree_mounted(project.path()).await,
+        "the fixture restores before any code-index mount"
+    );
+    assert_eq!(
+        registrar.activation_committed(semantic.clone()).await,
+        Err(RetrievalProfileActivationObserverErrorV1::Unavailable),
+        "a committed restore ahead of the worktree mount is deferred, not a stale committed state"
+    );
+
+    // Deferral reserves nothing: the later mount begins with a clean fence,
+    // so neither a stale attempt token nor a phantom revision can refuse the
+    // core lanes or the reconciler's exact retry.
+    registry
+        .mount_worktree(
+            project_id,
+            project.path(),
+            TempDir::new().expect("store root").keep(),
+            None,
+        )
+        .await
+        .expect("mount code index after the deferred restore");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((false, false, None)),
+        "a deferred pre-mount restore must leave no fence behind"
+    );
+    registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("the reconciler's exact retry reserves the fence on the mounted worktree");
+    registry.shutdown().await;
+}
+
 fn restart_request(profile: &tracedecay_domain::FusionProfile) -> RetrievalRequest {
     RetrievalRequest {
         principal: PrincipalId::new("principal.query-restart").expect("principal"),
