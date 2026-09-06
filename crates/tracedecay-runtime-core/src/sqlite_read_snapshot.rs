@@ -34,7 +34,7 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
         .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
 }
 
-/// Online backup of a possibly-live SQLite family. This is the supported
+/// Online backup of a possibly-live `SQLite` family. This is the supported
 /// consistent-copy authority; callers must not `fs::copy` a locked Windows
 /// store instead (issue #933).
 fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
