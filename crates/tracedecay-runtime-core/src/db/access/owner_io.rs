@@ -1,11 +1,15 @@
 #[cfg(not(windows))]
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::errors::Result;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW};
 
 use super::{PROCESS_STARTED_EPOCH_MS, TOKEN_NONCE, WriterOwner, access_error, access_io_error};
 
@@ -357,7 +361,6 @@ fn platform_replace_with_rollback(
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
-    const REPLACEFILE_WRITE_THROUGH: u32 = 0x1;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn ReplaceFileW(
@@ -383,7 +386,7 @@ fn platform_replace_with_rollback(
             replaced.as_ptr(),
             replacement.as_ptr(),
             backup.as_ptr(),
-            REPLACEFILE_WRITE_THROUGH,
+            0,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
@@ -413,57 +416,230 @@ fn platform_replace_with_rollback(
 }
 
 #[cfg(windows)]
+type WindowsFileIdentity = (u32, u64);
+
+#[cfg(windows)]
+enum WindowsPublishNamespace {
+    Published(std::fs::File),
+    NamesRetained,
+    Occupied,
+    MoveReady,
+    Contradictory,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum WindowsPublishStep {
+    Replace,
+    MoveNoReplace,
+    Inspect(bool, Option<i32>),
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &std::fs::File) -> std::io::Result<WindowsFileIdentity> {
+    tracedecay_private_fs::windows_file::information(file)
+        .map(|information| (information.volume_serial_number, information.file_index))
+}
+
+#[cfg(windows)]
+fn open_windows_identity(
+    path: &Path,
+) -> std::io::Result<Option<(std::fs::File, WindowsFileIdentity)>> {
+    match crate::windows_security::open_private_file(path) {
+        Ok(file) => {
+            let identity = windows_file_identity(&file)?;
+            Ok(Some((file, identity)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn inspect_windows_publish_namespace(
+    temporary: &Path,
+    destination: &Path,
+    intended: WindowsFileIdentity,
+) -> std::io::Result<WindowsPublishNamespace> {
+    let destination = open_windows_identity(destination)?;
+    let temporary = open_windows_identity(temporary)?;
+    Ok(match (destination, temporary) {
+        (Some((file, identity)), None) if identity == intended => {
+            WindowsPublishNamespace::Published(file)
+        }
+        (Some((_, destination)), Some((_, temporary)))
+            if destination != intended && temporary == intended =>
+        {
+            WindowsPublishNamespace::NamesRetained
+        }
+        (Some((_, identity)), _) if identity != intended => WindowsPublishNamespace::Occupied,
+        (None, Some((_, identity))) if identity == intended => WindowsPublishNamespace::MoveReady,
+        _ => WindowsPublishNamespace::Contradictory,
+    })
+}
+
+#[cfg(windows)]
+fn windows_error_code() -> i32 {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(i32::MIN)
+}
+
+#[cfg(windows)]
+fn is_transient_windows_publish_error(code: i32) -> bool {
+    matches!(code, 5 | 32 | 33)
+}
+
+#[cfg(windows)]
+fn is_move_ready_replace_error(code: i32) -> bool {
+    matches!(code, 2 | 1176 | 1177)
+}
+
+#[cfg(windows)]
+fn required_windows_error(code: Option<i32>, message: &str) -> std::io::Result<std::io::Error> {
+    code.map(std::io::Error::from_raw_os_error)
+        .ok_or_else(|| std::io::Error::other(message.to_string()))
+}
+
+#[cfg(windows)]
+fn contextual_windows_publish_error(native_error: Option<i32>, message: &str) -> std::io::Error {
+    match native_error {
+        Some(code) => {
+            let error = std::io::Error::from_raw_os_error(code);
+            std::io::Error::new(error.kind(), format!("{error}; {message}"))
+        }
+        None => std::io::Error::other(message.to_string()),
+    }
+}
+
+#[cfg(windows)]
 pub(super) fn replace_file_atomically(
     temporary: &Path,
     path: &Path,
     record_name: &str,
 ) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+    let inspection = crate::windows_security::open_private_file(temporary).map_err(|error| {
+        access_io_error(
+            &format!("inspect {record_name} replacement"),
+            temporary,
+            &error,
+        )
+    })?;
+    let intended = windows_file_identity(&inspection).map_err(|error| {
+        access_io_error(
+            &format!("identify {record_name} replacement"),
+            temporary,
+            &error,
+        )
+    })?;
+    drop(inspection);
 
-    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH, ReplaceFileW,
-    };
-
-    let temporary = temporary
+    let temporary_wide = temporary
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let destination = path
+    let destination_wide = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
+    let mut step = WindowsPublishStep::Replace;
     crate::storage::retry_transient_file_op(|| {
-        let replaced = unsafe {
-            ReplaceFileW(
-                destination.as_ptr(),
-                temporary.as_ptr(),
-                std::ptr::null(),
-                REPLACEFILE_WRITE_THROUGH,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        if replaced != 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_FILE_NOT_FOUND as i32) {
-            return Err(error);
-        }
-        let moved = unsafe {
-            MoveFileExW(
-                temporary.as_ptr(),
-                destination.as_ptr(),
-                MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if moved != 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
+        loop {
+            match step {
+                WindowsPublishStep::Replace => {
+                    let replaced = unsafe {
+                        ReplaceFileW(
+                            destination_wide.as_ptr(),
+                            temporary_wide.as_ptr(),
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                        )
+                    };
+                    step = WindowsPublishStep::Inspect(
+                        false,
+                        (replaced == 0).then(windows_error_code),
+                    );
+                }
+                WindowsPublishStep::MoveNoReplace => {
+                    let moved = unsafe {
+                        MoveFileExW(
+                            temporary_wide.as_ptr(),
+                            destination_wide.as_ptr(),
+                            MOVEFILE_WRITE_THROUGH,
+                        )
+                    };
+                    step = WindowsPublishStep::Inspect(true, (moved == 0).then(windows_error_code));
+                }
+                WindowsPublishStep::Inspect(move_only, native_error) => {
+                    match inspect_windows_publish_namespace(temporary, path, intended)? {
+                        WindowsPublishNamespace::Published(file) => {
+                            file.sync_all()?;
+                            if windows_file_identity(&file)? == intended {
+                                return Ok(());
+                            }
+                            return Err(std::io::Error::other(
+                                "published Windows file changed identity while syncing",
+                            ));
+                        }
+                        WindowsPublishNamespace::MoveReady
+                            if !move_only
+                                && native_error.is_some_and(is_move_ready_replace_error) =>
+                        {
+                            step = WindowsPublishStep::MoveNoReplace;
+                        }
+                        WindowsPublishNamespace::NamesRetained => {
+                            let error = required_windows_error(
+                                native_error,
+                                "Windows publish reported success but retained both names",
+                            )?;
+                            if is_transient_windows_publish_error(
+                                error.raw_os_error().unwrap_or_default(),
+                            ) {
+                                step = if move_only {
+                                    WindowsPublishStep::MoveNoReplace
+                                } else {
+                                    WindowsPublishStep::Replace
+                                };
+                            }
+                            return Err(error);
+                        }
+                        WindowsPublishNamespace::Occupied => {
+                            return Err(required_windows_error(
+                                native_error,
+                                "Windows destination was occupied after reported success",
+                            )?);
+                        }
+                        WindowsPublishNamespace::MoveReady if move_only => {
+                            let error = required_windows_error(
+                                native_error,
+                                "no-replace Windows move reported success without moving",
+                            )?;
+                            if is_transient_windows_publish_error(
+                                error.raw_os_error().unwrap_or_default(),
+                            ) {
+                                step = WindowsPublishStep::MoveNoReplace;
+                            }
+                            return Err(error);
+                        }
+                        WindowsPublishNamespace::MoveReady => {
+                            return Err(contextual_windows_publish_error(
+                                native_error,
+                                "Windows replacement left only the temporary name",
+                            ));
+                        }
+                        WindowsPublishNamespace::Contradictory => {
+                            return Err(contextual_windows_publish_error(
+                                native_error,
+                                "Windows replacement produced contradictory file identities",
+                            ));
+                        }
+                    }
+                }
+            }
         }
     })
     .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
