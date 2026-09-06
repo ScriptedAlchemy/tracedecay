@@ -232,7 +232,18 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     &prepared_redundancy,
                 )
                 .await
-                .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
+                .map_err(|error| {
+                    tracing::warn!(
+                        event = "semantic_query_activation",
+                        outcome = "failed",
+                        step = "begin_committed_query_activation",
+                        error = %error,
+                        semantic_enabled,
+                        epoch = committed_epoch,
+                        "the query activation fence refused the committed activation"
+                    );
+                    RetrievalProfileActivationObserverErrorV1::Conflict
+                })?;
             type ObserverError = RetrievalProfileActivationObserverErrorV1;
             let observed = async {
                 let redundancy_ready = prepared_redundancy.has_active_authority();

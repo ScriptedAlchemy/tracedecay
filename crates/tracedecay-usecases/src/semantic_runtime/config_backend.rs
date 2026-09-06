@@ -421,12 +421,33 @@ where
         &self,
         linked: &SemanticLinkedTransitionV1,
     ) -> Option<(ActivationObservationTicketV1, bool)> {
-        let observer = self.activation_observer.as_ref()?;
-        let ticket = self.reserve_observation(
+        let Some(observer) = self.activation_observer.as_ref() else {
+            tracing::warn!(
+                event = "semantic_activation_observation",
+                step = "activation_observer",
+                outcome = "skipped",
+                epoch = linked.epoch,
+                result_revision = %linked.audit.result_revision,
+                "the backend has no activation observer, so the committed transition never \
+                 reaches the query authority"
+            );
+            return None;
+        };
+        let Some(ticket) = self.reserve_observation(
             linked.epoch,
             &linked.audit.result_revision,
             &linked.transition_digest,
-        )?;
+        ) else {
+            tracing::warn!(
+                event = "semantic_activation_observation",
+                step = "reserve_observation",
+                outcome = "skipped",
+                epoch = linked.epoch,
+                result_revision = %linked.audit.result_revision,
+                "a newer or conflicting transition already holds the observation fence"
+            );
+            return None;
+        };
         // Both skips below leave a durably committed transition uninstalled in
         // live serving, and neither carried a reason: the caller sees only that
         // nothing was observed. Name them.
@@ -467,7 +488,22 @@ where
             );
             return Some((ticket, false));
         }
-        let observed = observer.activation_committed(committed).await.is_ok();
+        let observed = match observer.activation_committed(committed).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    event = "semantic_activation_observation",
+                    step = "activation_committed",
+                    outcome = "refused",
+                    epoch = linked.epoch,
+                    result_revision = %linked.audit.result_revision,
+                    error = ?error,
+                    "the observer refused to install the committed transition as the query \
+                     authority"
+                );
+                false
+            }
+        };
         Some((ticket, observed))
     }
 }
