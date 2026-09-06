@@ -49,13 +49,16 @@ async fn files_for_session(
         .expect("files response")
 }
 
-async fn wait_for_complete_fresh_code_index(engine: &DaemonEngine, project_root: &Path) {
+async fn wait_for_exact_ready_graph_serving_generation(
+    engine: &DaemonEngine,
+    scope: &tracedecay_application::ResolvedScope,
+) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if engine
                 .invocation
                 .code_index_schedulers
-                .latest_complete_fresh(project_root)
+                .latest_complete_ready_for_scope(scope)
                 .await
                 .is_some()
             {
@@ -65,7 +68,7 @@ async fn wait_for_complete_fresh_code_index(engine: &DaemonEngine, project_root:
         }
     })
     .await
-    .expect("complete fresh code index timed out");
+    .expect("exact ready graph serving generation timed out");
 }
 
 #[cfg(unix)]
@@ -220,6 +223,15 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // writer lane it can never use, and still be resolving at reopen and
     // shutdown. Assert the admission is exact to the route — the primary
     // shares this store and stays admitted.
+    let project_id = tracedecay_domain::ProjectId::new(
+        linked_graph
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("admitted routes carry a project identity"),
+    )
+    .expect("project id");
     for (route, expected) in [
         (
             &linked,
@@ -230,15 +242,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted,
         ),
     ] {
-        let project_id = tracedecay_domain::ProjectId::new(
-            linked_graph
-                .store_layout()
-                .identity
-                .project_id
-                .clone()
-                .expect("admitted routes carry a project identity"),
-        )
-        .expect("project id");
         let scope = tracedecay_code_index_runtime::resolved_scope_for_project(route, &project_id)
             .expect("route scope");
         assert_eq!(
@@ -251,6 +254,9 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             route.display()
         );
     }
+    let primary_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&primary, &project_id)
+            .expect("primary route scope");
 
     let linked_session_id = "session.linked-worktree-follow-up";
     notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
@@ -275,9 +281,10 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // listing — with its own census, never the linked worktree's sources.
     let primary_session_id = "session.primary-route-follow-up";
     notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
-    // `project_server` may publish `code_index=warming`; require its fresh
-    // generation so this assertion tests routing rather than activation timing.
-    wait_for_complete_fresh_code_index(&engine, &primary).await;
+    // `project_server` may publish `code_index=warming`; require the exact
+    // route's ready graph-serving generation so this assertion tests routing
+    // rather than activation timing.
+    wait_for_exact_ready_graph_serving_generation(&engine, &primary_scope).await;
     let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
     assert!(
         primary_listing.error.is_none(),
