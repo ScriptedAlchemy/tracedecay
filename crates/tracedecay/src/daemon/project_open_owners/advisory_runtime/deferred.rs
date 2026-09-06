@@ -37,7 +37,9 @@ pub(super) fn spawn(
         log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
         return false;
     }
-    owner.spawn_background_task(hotpath::future!(
+    #[cfg(test)]
+    let signal_root = project_root.clone();
+    let spawned = owner.spawn_background_task(hotpath::future!(
         async move {
             let mut publications = invocation
                 .code_index_schedulers
@@ -105,7 +107,14 @@ pub(super) fn spawn(
             }
         },
         label = "daemon.project.owners.advisory_deferred"
-    ))
+    ));
+    #[cfg(test)]
+    if spawned {
+        super::super::signal_project_open_dependent_owner(
+            super::super::ProjectOpenDependentOwnerSignal::AdvisoryDeferred(signal_root),
+        );
+    }
+    spawned
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

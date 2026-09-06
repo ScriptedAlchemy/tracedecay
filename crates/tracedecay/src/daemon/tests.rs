@@ -566,32 +566,20 @@ fn scheduled_automation_patch(
 }
 
 #[cfg(unix)]
-async fn apply_project_automation_patch_via_surface(
+async fn apply_project_configuration_value_via_surface(
     engine: &DaemonEngine,
-    handshake: &DaemonHandshake,
-    patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
+    server: Arc<crate::mcp::McpServer>,
+    key: tracedecay_domain::configuration::SettingKey,
+    value: tracedecay_domain::configuration::ConfigurationValueV1,
+    idempotency_scope: &str,
 ) -> Arc<crate::mcp::McpServer> {
-    let server = engine
-        .project_server(handshake)
-        .await
-        .expect("open project server before configuring automation");
     let graph = server.cg().await;
     let current = graph
         .configuration_runtime()
         .client()
         .current()
         .await
-        .expect("read pinned automation configuration");
-    let configured =
-        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-            &current.snapshot,
-        )
-        .expect("decode pinned automation configuration");
-    let desired = tracedecay_automation_runtime::automation::config::effective_config(
-        &configured,
-        Some(&patch),
-    )
-    .expect("apply automation configuration patch");
+        .expect("read pinned project configuration");
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
@@ -629,13 +617,9 @@ async fn apply_project_automation_patch_via_surface(
     )
     .expect("surface request id");
     let idempotency_key = tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
-        format!("daemon-test-automation-{}", request_id.as_str()),
+        format!("daemon-test-{idempotency_scope}-{}", request_id.as_str()),
     )
     .expect("configuration idempotency key");
-    let key = tracedecay_domain::configuration::SettingKey::new(
-        tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
-    )
-    .expect("automation setting key");
     let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
         tracedecay_application::ConfigurationWireRequestV1::Batch(
             tracedecay_application::ConfigurationBatchRequestV1 {
@@ -645,11 +629,7 @@ async fn apply_project_automation_patch_via_surface(
                             project_id: target.project_id,
                         },
                         key,
-                        value: Box::new(
-                            tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(
-                                Box::new(desired),
-                            ),
-                        ),
+                        value: Box::new(value),
                     },
                 ],
                 expected_revision: current.revision_id,
@@ -682,8 +662,51 @@ async fn apply_project_automation_patch_via_surface(
     .await
     .expect("configuration batch application invocation")
     .result
-    .expect("automation configuration effect");
+    .expect("project configuration effect");
     server
+}
+
+#[cfg(unix)]
+async fn apply_project_automation_patch_via_surface(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
+) -> Arc<crate::mcp::McpServer> {
+    let server = engine
+        .project_server(handshake)
+        .await
+        .expect("open project server before configuring automation");
+    let graph = server.cg().await;
+    let current = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("read pinned automation configuration");
+    let configured =
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            &current.snapshot,
+        )
+        .expect("decode pinned automation configuration");
+    let desired = tracedecay_automation_runtime::automation::config::effective_config(
+        &configured,
+        Some(&patch),
+    )
+    .expect("apply automation configuration patch");
+    drop(graph);
+    apply_project_configuration_value_via_surface(
+        engine,
+        server,
+        tracedecay_domain::configuration::SettingKey::new(
+            tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
+        )
+        .expect("automation setting key"),
+        tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(Box::new(
+            desired,
+        )),
+        "automation",
+    )
+    .await
 }
 
 #[cfg(unix)]

@@ -7,10 +7,16 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use tokio::sync::broadcast;
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_GET_CAPABILITY_ID_V1,
@@ -67,6 +73,31 @@ pub(crate) use code_index_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
     project_code_index_ignored_dependency_admission_port,
 };
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ProjectOpenDependentOwnerSignal {
+    AdvisoryDeferred(PathBuf),
+    QueryAuthorityDeferred(PathBuf),
+}
+
+#[cfg(test)]
+fn project_open_dependent_owner_signals()
+-> &'static broadcast::Sender<ProjectOpenDependentOwnerSignal> {
+    static SIGNALS: OnceLock<broadcast::Sender<ProjectOpenDependentOwnerSignal>> = OnceLock::new();
+    SIGNALS.get_or_init(|| broadcast::channel(32).0)
+}
+
+#[cfg(test)]
+pub(super) fn subscribe_project_open_dependent_owner_signals()
+-> broadcast::Receiver<ProjectOpenDependentOwnerSignal> {
+    project_open_dependent_owner_signals().subscribe()
+}
+
+#[cfg(test)]
+fn signal_project_open_dependent_owner(signal: ProjectOpenDependentOwnerSignal) {
+    let _ = project_open_dependent_owner_signals().send(signal);
+}
 
 use lsp_registration::production_lsp_registration;
 use primitive_runtime::open_and_register_project_primitive_runtime;
