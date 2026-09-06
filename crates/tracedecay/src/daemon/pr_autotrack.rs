@@ -43,6 +43,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::canonical_text::sha256_hex;
 
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::git::git_path_argument;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const GIT_AUTHORITY_UNAVAILABLE: &str = "git_authority_unavailable";
@@ -1760,7 +1761,8 @@ fn remove_owned_manual_worktree(
     if !checked_path_exists(worktree)? {
         return Ok(());
     }
-    let worktree_arg = worktree.to_string_lossy();
+    let worktree_arg = git_path_argument(worktree);
+    let worktree_arg = worktree_arg.to_string_lossy();
     for arguments in [
         vec!["worktree", "remove", "--force", &worktree_arg],
         vec!["worktree", "prune"],
@@ -2242,7 +2244,8 @@ fn checkout_linked_worktree(
     }
     remove_worktree(repo_root, worktree, command_control);
 
-    let wt_str = worktree.to_string_lossy();
+    let wt_str = git_path_argument(worktree);
+    let wt_str = wt_str.to_string_lossy();
     let add = successful_git_with_control(
         repo_root,
         &[
@@ -2468,7 +2471,8 @@ fn ref_sha(
 }
 
 fn remove_worktree(repo_root: &Path, worktree: &Path, command_control: &PrCommandControl) {
-    let wt_str = worktree.to_string_lossy();
+    let wt_str = git_path_argument(worktree);
+    let wt_str = wt_str.to_string_lossy();
     let _ = successful_git_with_control(
         repo_root,
         &["worktree", "remove", "--force", &wt_str],
