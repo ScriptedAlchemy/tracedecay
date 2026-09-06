@@ -5387,7 +5387,7 @@ impl CodeIndexSchedulerErrorV1 {
             || matches!(
                 self,
                 Self::GraphProjection(CodeGraphProjectionError::BudgetExhausted { budget, .. })
-                    if budget == "resident_memory"
+                    if budget == tracedecay_graph_db::GraphBudgetKind::ResidentMemory.as_str()
             )
     }
 
