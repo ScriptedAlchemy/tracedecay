@@ -10,7 +10,7 @@ test-threads = 8
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 archive.include = [
-    { path = "controlled-workload-hotpath", relative-to = "target", depth = 1, on-missing = "error" },
+    { path = "controlled-workload-hotpath", relative-to = "target", depth = 1, on-missing = "warn" },
 ]
 
 [profile.ci.junit]
