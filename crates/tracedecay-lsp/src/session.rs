@@ -172,29 +172,8 @@ impl AuthorizedLspWorkspace {
         Ok(root)
     }
 
-    pub fn resolve_root_uri(
-        &self,
-        root_uri: &str,
-    ) -> Result<&AdmittedRoot, LspWorkspaceRouteError> {
-        let mut matches = self
-            .roots
-            .iter()
-            .filter(|root| root.matches_root_uri(root_uri));
-        let Some(root) = matches.next() else {
-            return Err(LspWorkspaceRouteError::OutsideAdmittedRoots);
-        };
-        if matches.next().is_some() {
-            return Err(LspWorkspaceRouteError::AmbiguousAdmittedRoots);
-        }
-        Ok(root)
-    }
-
     pub fn admits_exact_root_hints(&self, requested: &[String]) -> bool {
         self.matches_multi_root_hints(requested)
-    }
-
-    pub fn is_single_root(&self) -> bool {
-        self.roots.len() == 1
     }
 
     pub(crate) fn primary(&self) -> &AdmittedRoot {
