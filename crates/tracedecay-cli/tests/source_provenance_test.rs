@@ -331,10 +331,11 @@ fn workspace_rustup_toolchain() -> Option<String> {
     let contents = std::fs::read_to_string(toolchain_file).ok()?;
     for line in contents.lines() {
         let line = line.trim();
-        if let Some(channel) = line.strip_prefix("channel = \"") {
-            if let Some(channel) = channel.strip_suffix('"') {
-                return Some(channel.to_owned());
-            }
+        if let Some(channel) = line
+            .strip_prefix("channel = \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            return Some(channel.to_owned());
         }
     }
     None

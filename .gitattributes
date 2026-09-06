@@ -30,6 +30,10 @@ benchmark_data/claude-observation/** text eol=lf
 # Collapse them out of PR diffs and language stats.
 vendor/** linguist-generated=true
 crates/tracedecay-code-extraction/vendor/** linguist-generated=true
+# Vendored serde_json closure for source-provenance integration tests: Cargo
+# verifies `.cargo-checksum.json` byte-for-byte, so Git for Windows must not
+# rewrite line endings in the snapshot.
+crates/tracedecay-cli/tests/fixtures/source-provenance-cargo/vendor/** -text linguist-generated=true
 # Generated wire-contract and embedded-extension artifacts: the authoritative
 # sources are Rust schemars output (contracts) and the extension TS sources;
 # CI verifies the committed copies byte-for-byte (`contracts:check`, the
