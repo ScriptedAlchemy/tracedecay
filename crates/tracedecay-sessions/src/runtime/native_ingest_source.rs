@@ -1,8 +1,14 @@
-//! Shared native ingest source identity for admission, cursor lookup, and tests.
+//! Shared native ingest source identity for admission and cursor lookup.
 //!
 //! Each host writes one [`ObservationSourceIdentityV1`] per independently
 //! ordered stream. Cursor lookup and projection fixtures must reconstruct that
-//! same identity instead of collapsing every provider onto `for_provider`.
+//! same identity instead of collapsing every stream of a session onto
+//! `for_provider`.
+//!
+//! Providers whose committed identity is *not* the plain provider/session pair
+//! own that decision in their own host module — Codex commits under
+//! [`crate::runtime::codex::codex_observation_source_v2`] — so this stays a
+//! plain constructor with no per-provider table.
 
 use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
 
@@ -11,17 +17,14 @@ use crate::runtime::source::TranscriptIngestResult;
 /// Source identity admission writes for one native stream.
 ///
 /// `source_key` names an independently appended stream inside the session
-/// (Cline `<task>:ui_messages`). `None` keeps the session's own single-source
-/// identity. Codex always uses its v2 canonical source key; callers must not
-/// substitute the pre-v2 session-only identity when reading that cursor.
+/// (a Cline task's `<task>:ui_messages`, from
+/// [`crate::runtime::cline_like::ui_messages_source_key`]). `None` keeps the
+/// session's own single-source identity.
 pub fn native_ingest_source_identity(
     provider: &str,
     session_id: &str,
     source_key: Option<&str>,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    if provider == "codex" {
-        return crate::runtime::codex::codex_observation_source_v2(session_id);
-    }
     let provider = ProviderId::new(provider)?;
     let session_id = SessionId::new(session_id.to_string())?;
     Ok(match source_key {
@@ -34,31 +37,11 @@ pub fn native_ingest_source_identity(
     })
 }
 
-/// Reconstruct the identity a host would write for `provider`/`session_id`.
-///
-/// Prefer [`native_ingest_source_identity`] when the caller already knows the
-/// explicit stream key. This helper exists for fixtures that only have the
-/// session id and must still hit the same cursor admission wrote.
-pub fn native_ingest_session_source_identity(
-    provider: &str,
-    session_id: &str,
-) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    native_ingest_source_identity(provider, session_id, None)
-}
-
-/// Cline-family UI stream key. API history keeps the task's own identity.
-#[must_use]
-pub fn cline_like_ui_source_key(session_id: &str) -> String {
-    format!("{session_id}:ui_messages")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::shared::{
-        path_identity_eq, path_identity_key, path_identity_lookup_candidates,
-    };
-    use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
+    use crate::runtime::cline_like::ui_messages_source_key;
+    use crate::runtime::shared::path_identity_key;
 
     #[test]
     fn cline_ui_stream_stays_independent_of_the_api_session_source() {
@@ -66,7 +49,7 @@ mod tests {
         let ui = native_ingest_source_identity(
             "cline",
             "task-1",
-            Some(&cline_like_ui_source_key("task-1")),
+            Some(&ui_messages_source_key("task-1")),
         )
         .unwrap();
         assert_ne!(api, ui);
@@ -88,40 +71,27 @@ mod tests {
     }
 
     #[test]
-    fn codex_lookup_uses_the_v2_authority_not_the_legacy_session_source() {
-        let written =
-            crate::runtime::codex::codex_observation_source_v2("codex-goal-dedupe").unwrap();
-        let looked_up =
-            native_ingest_session_source_identity("codex", "codex-goal-dedupe").unwrap();
-        let legacy = ObservationSourceIdentityV1::for_provider(
-            ProviderId::new("codex").unwrap(),
-            SessionId::new("codex-goal-dedupe").unwrap(),
-        )
-        .unwrap();
-        assert_eq!(written, looked_up);
-        assert_ne!(written, legacy);
-        assert!(written.explicit_source_key().is_some());
-    }
-
-    #[test]
     fn path_identity_collapses_only_windows_display_forms() {
-        assert!(path_identity_eq(
-            r"C:\Users\agent\task\api_conversation_history.json",
-            r"c:/Users/agent/task/api_conversation_history.json",
-        ));
-        assert!(path_identity_eq(
-            r"\\?\C:\Users\agent\task\api_conversation_history.json",
-            r"C:\Users\agent\task\api_conversation_history.json",
-        ));
+        assert_eq!(
+            path_identity_key(r"C:\Users\agent\task\api_conversation_history.json"),
+            "c:/Users/agent/task/api_conversation_history.json",
+        );
         assert_eq!(
             path_identity_key(r"\\?\C:\Users\agent\task\ui_messages.json"),
             path_identity_key(r"c:/Users/agent/task/ui_messages.json"),
         );
-        assert!(!path_identity_eq("task-1", "task-1:ui_messages"));
-        assert!(
-            path_identity_lookup_candidates(r"C:\Users\agent\task\api_conversation_history.json")
-                .iter()
-                .any(|candidate| candidate.contains('/'))
+        // Case outside the drive letter is preserved: the same column carries
+        // case-sensitive opaque cursor keys.
+        assert_eq!(
+            path_identity_key("claude-cursor-unix-bytes-AB12cd"),
+            "claude-cursor-unix-bytes-AB12cd",
         );
+        assert_ne!(
+            path_identity_key("task-1"),
+            path_identity_key("task-1:ui_messages")
+        );
+        // Idempotent: normalising a stored key again is the identity.
+        let stored = path_identity_key(r"\\?\D:\Work\repo\session.jsonl");
+        assert_eq!(path_identity_key(&stored), stored);
     }
 }
