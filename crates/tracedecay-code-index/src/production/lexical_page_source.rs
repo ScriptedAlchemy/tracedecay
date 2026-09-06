@@ -3470,11 +3470,10 @@ mod lexical_page_source_tests {
         )
         .expect("eager partitioned source");
         let mut expected = Vec::new();
-        loop {
-            match eager.next_page(&ActiveControl).expect("eager source page") {
-                VerifiedSealedLexicalPageReadV1::Page(page) => expected.push(expectation(&page)),
-                VerifiedSealedLexicalPageReadV1::Complete(_) => break,
-            }
+        while let VerifiedSealedLexicalPageReadV1::Page(page) =
+            eager.next_page(&ActiveControl).expect("eager source page")
+        {
+            expected.push(expectation(&page));
         }
         source.rewind().expect("rewind lazy source");
         let mut pages = Vec::new();

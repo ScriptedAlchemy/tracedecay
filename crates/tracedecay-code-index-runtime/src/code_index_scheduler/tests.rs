@@ -3207,16 +3207,15 @@ fn saved_edit_incremental_publish() {
 #[test]
 #[ignore = "scale memory regression; run explicitly with one exact test process"]
 fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_watermark() {
-    let file_count = std::env::var("TRACEDECAY_PRESEAT_SCALE_FILES")
-        .map(|value| value.parse::<usize>().expect("positive scale file count"))
-        .unwrap_or(2_600);
-    let functions_per_file = std::env::var("TRACEDECAY_PRESEAT_FUNCTIONS_PER_FILE")
-        .map(|value| {
+    let file_count = std::env::var("TRACEDECAY_PRESEAT_SCALE_FILES").map_or(2_600, |value| {
+        value.parse::<usize>().expect("positive scale file count")
+    });
+    let functions_per_file =
+        std::env::var("TRACEDECAY_PRESEAT_FUNCTIONS_PER_FILE").map_or(64, |value| {
             value
                 .parse::<usize>()
                 .expect("positive functions-per-file count")
-        })
-        .unwrap_or(64);
+        });
     assert!(file_count > 1);
     assert!(functions_per_file > 0);
 
