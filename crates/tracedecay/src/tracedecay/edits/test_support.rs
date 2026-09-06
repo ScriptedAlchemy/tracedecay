@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::{TempDir, tempdir};
 use tracedecay_application::{
     ApplicationOperation, AuthorityReceipt, CancellationContext, CancellationSignal,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectTermination, IdempotencyKey,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectId, EffectReceipt, EffectResult,
+    EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt,
     OperationTermination, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext,
     RequestId, ResolvedScope, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
     SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
@@ -507,17 +508,60 @@ fn assert_effect_unknown_boundary(result: &SourceEditApplicationResult) {
 
 #[test]
 fn effect_unknown_boundary_failure_exposes_outcome_phase_and_receipt() {
+    let request = fixture_request();
+    let operation = source_edit_operation(request.edit.kind()).unwrap();
+    let execution = OperationReceipt {
+        started_at: request.observed_at,
+        ended_at: UtcMicros(request.observed_at.0 + 1),
+        effective_deadline: request.context.deadline().clone(),
+        cancellation: None,
+        budget: OperationBudgetUsage::default(),
+        termination: OperationTermination::Failed,
+    };
+    let receipt = EffectReceipt {
+        operation: operation.use_case_id().clone(),
+        request_id: request.context.request_id().clone(),
+        actor: request.context.actor().clone(),
+        scope: request.context.scope().clone(),
+        effect_class: tracedecay_tool_catalog::EffectClass::SourceEdit,
+        idempotency_key: request.idempotency_key.clone(),
+        input_digest: request.input_digest().unwrap(),
+        expected_state: request.expected_state.clone(),
+        policy_digest: request.proof.policy_digest.clone(),
+        configuration_digest: request.proof.configuration_digest.clone(),
+        catalog_digest: request.proof.catalog_digest.clone(),
+        privacy_digest: request.proof.privacy_digest.clone(),
+        outcome: EffectTermination::Failed,
+        committed_state: None,
+        external_proof: None,
+    };
+    let effect = EffectResult::new(
+        EffectId::new("effect.source-edit.boundary-diagnostic").unwrap(),
+        tracedecay_tool_catalog::EffectClass::SourceEdit,
+        request.idempotency_key,
+        request.authority,
+        request.expected_state.clone(),
+        execution,
+        ReconciliationState::Reconciled,
+        receipt,
+        None,
+    )
+    .unwrap();
     let result = SourceEditApplicationResult {
         outcome: SourceEditOutcome::Failed {
             message: "diagnostic sentinel".to_owned(),
         },
         dry_run: false,
-        expected_state: digest(SHA256_A),
+        expected_state: request.expected_state,
         predicted_state: None,
         verification: None,
-        effect: None,
+        effect: Some(effect),
         replayed: false,
     };
+    let effect = result.effect.as_ref().unwrap();
+    let expected_execution_phase = format!("{:#?}", Some(effect.execution.termination));
+    let expected_reconciliation_phase = format!("{:#?}", Some(effect.reconciliation));
+    let expected_receipt = format!("{:#?}", Some(&effect.receipt));
 
     let panic = std::panic::catch_unwind(|| assert_effect_unknown_boundary(&result))
         .expect_err("a pre-effect failure must not satisfy the interrupted-effect boundary");
@@ -530,7 +574,14 @@ fn effect_unknown_boundary_failure_exposes_outcome_phase_and_receipt() {
     assert!(message.contains("diagnostic sentinel"), "{message}");
     assert!(message.contains("actual outcome"), "{message}");
     assert!(message.contains("execution phase"), "{message}");
+    assert!(message.contains("reconciliation phase"), "{message}");
     assert!(message.contains("committed receipt"), "{message}");
+    assert!(message.contains(&expected_execution_phase), "{message}");
+    assert!(
+        message.contains(&expected_reconciliation_phase),
+        "{message}"
+    );
+    assert!(message.contains(&expected_receipt), "{message}");
 }
 
 const MOVE_SOURCE_PREIMAGE: &[u8] = b"pub fn keep() {}\n\npub fn moved() {}\n";
