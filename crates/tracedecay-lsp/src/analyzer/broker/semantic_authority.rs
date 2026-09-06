@@ -24,6 +24,9 @@ struct SemanticOperationKey {
 struct StdioLspSemanticAuthorityInner {
     command: String,
     args: Vec<String>,
+    /// The adapter language this analyzer serves, used verbatim as the
+    /// `languageId` when this lane has to open a document upstream.
+    language: String,
     project_root: PathBuf,
     root_uri: String,
     timeouts: LspRefreshTimeouts,
@@ -46,6 +49,7 @@ impl StdioLspSemanticAuthority {
     pub fn new(
         command: impl Into<String>,
         args: Vec<String>,
+        language: impl Into<String>,
         project_root: PathBuf,
         root_uri: impl Into<String>,
         timeouts: LspRefreshTimeouts,
@@ -53,6 +57,7 @@ impl StdioLspSemanticAuthority {
         Self::from_shared_client(
             command,
             args,
+            language,
             project_root,
             root_uri,
             timeouts,
@@ -63,6 +68,7 @@ impl StdioLspSemanticAuthority {
     pub(crate) fn from_shared_client(
         command: impl Into<String>,
         args: Vec<String>,
+        language: impl Into<String>,
         project_root: PathBuf,
         root_uri: impl Into<String>,
         timeouts: LspRefreshTimeouts,
@@ -73,6 +79,7 @@ impl StdioLspSemanticAuthority {
             inner: Arc::new(StdioLspSemanticAuthorityInner {
                 command: command.into(),
                 args,
+                language: language.into(),
                 project_root,
                 root_uri: root_uri.clone(),
                 timeouts,
@@ -143,6 +150,11 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
         request_id: LspRequestId,
         request: crate::LspSemanticRequest,
     ) -> LspRuntimeFuture<LspSemanticOperationOutcome> {
+        // Read the addressed document before the typed decode consumes the
+        // request: every `textDocument/*` method names it the same way, and a
+        // method that names none (workspace symbols) simply has nothing to
+        // open.
+        let document = semantic_request_document(&request);
         let request = match decode_semantic_request(request) {
             Ok(request) => request,
             Err(error) => {
@@ -228,6 +240,18 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     match client {
                         Ok(Some(mut client)) => {
                             mark_analyzer_ready(&inner, &analyzer_root);
+                            // The analyzer answers only for documents in its
+                            // own view, and this lane is reached for documents
+                            // the diagnostics sweep may never have opened.
+                            if let Some(document) = document.as_deref() {
+                                let _ = client
+                                    .ensure_document_open(
+                                        document,
+                                        &inner.language,
+                                        inner.timeouts,
+                                    )
+                                    .await;
+                            }
                             // Boxed: this future covers the whole semantic
                             // request dispatch, so it is the widest one held
                             // across an await in the spawned task. With
@@ -318,6 +342,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                 true
             })
     }
+}
+
+/// The local file a semantic request addresses, if it names one.
+///
+/// Every `textDocument/*` method in the closed request protocol carries
+/// `params.textDocument.uri`; `workspace/symbol` carries none and needs none.
+fn semantic_request_document(request: &crate::LspSemanticRequest) -> Option<PathBuf> {
+    let uri = request.params().get("textDocument")?.get("uri")?.as_str()?;
+    url::Url::parse(uri).ok()?.to_file_path().ok()
 }
 
 fn begin_analyzer_start(inner: &StdioLspSemanticAuthorityInner, root: &AdmittedRoot) -> bool {
@@ -428,6 +461,7 @@ mod tests {
         let authority = StdioLspSemanticAuthority::new(
             "tracedecay-must-not-spawn",
             Vec::new(),
+            "rust",
             std::env::temp_dir(),
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),

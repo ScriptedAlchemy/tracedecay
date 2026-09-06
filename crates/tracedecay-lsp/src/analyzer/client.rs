@@ -424,6 +424,55 @@ impl StdioLspClient {
         self.upstream_capabilities.clone()
     }
 
+    /// Opens `path` upstream once, so a semantic request can name it.
+    ///
+    /// The analyzer answers only for documents in its own view. Diagnostics
+    /// already open theirs (`collect_document_diagnostics`), but the semantic
+    /// lane forwarded the bare request, so a document the diagnostics sweep had
+    /// not happened to open yet came back `-32603 file not found` — surfaced to
+    /// the client as `providerUnavailable` for `documentSymbol`/`hover` on a
+    /// file it had just opened. Both lanes share one client and one
+    /// `document_versions` ledger, so this never re-opens what the other lane
+    /// already sent.
+    ///
+    /// ponytail: on-disk text, matching the diagnostics lane. Unsaved buffer
+    /// content would need the gateway's synced document plumbed down here.
+    pub(crate) async fn ensure_document_open(
+        &mut self,
+        path: &Path,
+        language_id: &str,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<()> {
+        let uri = file_uri(path);
+        if self.document_versions.contains_key(&uri) {
+            return Ok(());
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            // Unreadable here is not this lane's refusal to make: let the
+            // analyzer answer for whatever it already knows about the path.
+            return Ok(());
+        };
+        write_message_with_timeout(
+            &mut self.stdin,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": text,
+                    }
+                }
+            }),
+            timeouts.message_io,
+        )
+        .await?;
+        self.document_versions.insert(uri, 1);
+        Ok(())
+    }
+
     /// Sends one standard semantic request and returns its standard JSON
     /// result after matching the JSON-RPC correlation id. Notifications and
     /// stale responses from a cancelled request are deliberately ignored.

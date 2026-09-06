@@ -125,10 +125,20 @@ impl UpstreamCapabilityInitializationAuthority for CompositeUpstreamCapabilities
         Box::pin(async move {
             let mut capabilities = UpstreamCapabilities::default();
             for initializer in initializers {
-                let current = initializer
-                    .upstream_capabilities()
-                    .await
-                    .map_err(|_| LspRuntimeFailure::new("upstream-analyzer-initialize"))?;
+                // An analyzer that will not start is absence, not failed
+                // admission — the same state a project with no analyzer at all
+                // resolves through `UnavailableUpstreamCapabilities`. Failing
+                // the composite instead made one unstartable analyzer a
+                // permanent gateway outage: `StdioLspSemanticAuthority` records
+                // a failed start as terminal, so every later session in the
+                // daemon's life also refused, and the whole LSP surface
+                // (graph-backed projections and managed diagnostics included)
+                // answered `Unavailable`. A rustup host without the
+                // `rust-analyzer` component is exactly that shape: the proxy is
+                // on PATH, so the language routes, and only the spawn fails.
+                let Ok(current) = initializer.upstream_capabilities().await else {
+                    continue;
+                };
                 capabilities.supports_diagnostics |= current.supports_diagnostics;
                 capabilities.semantic.extend(current.semantic);
             }
