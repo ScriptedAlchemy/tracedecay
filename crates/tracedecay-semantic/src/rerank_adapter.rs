@@ -518,27 +518,9 @@ pub struct ProductionCodeRerankAuthorityV1 {
 }
 
 impl ProductionCodeRerankAuthorityV1 {
-    /// Publish only after one model session is resident. A caller that receives
-    /// this authority never pays model activation on its first rerank request.
-    pub fn from_admitted(
-        artifact: AdmittedArtifactV1,
-        pins: RerankCompatibilityPinsV1,
-    ) -> Result<Self, RerankArtifactAdmissionErrorV1> {
-        let executor = warm_reranker_executor(artifact, pins.clone())?;
-        Ok(Self::from_warmed(pins, executor))
-    }
-
     pub(super) fn from_warmed(
         pins: RerankCompatibilityPinsV1,
         executor: Arc<FastEmbedRerankExecutorV1>,
-    ) -> Self {
-        Self { pins, executor }
-    }
-
-    #[cfg(test)]
-    pub fn from_executor_for_tests(
-        pins: RerankCompatibilityPinsV1,
-        executor: Arc<dyn MountedRerankExecutorV1>,
     ) -> Self {
         Self { pins, executor }
     }
