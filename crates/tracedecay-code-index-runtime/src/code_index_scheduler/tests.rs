@@ -9935,11 +9935,14 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler handle");
-    let wake = {
+    let (wake, reconcile_in_progress) = {
         let scheduler = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(&scheduler.wake)
+        (
+            Arc::clone(&scheduler.wake),
+            Arc::clone(&scheduler.reconcile_in_progress),
+        )
     };
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -9953,7 +9956,19 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
     held_rx.recv().expect("scheduler lock acquired");
     fixture.edit("src/lib.rs", "pub fn busy() -> u32 { 2 }\n");
     wake.notify_one();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // A claimed pass, not a fixed delay, is this case's precondition: only a
+    // writer already inside a pass is waiting on the scheduler mutex this
+    // thread holds, and only that writer makes retirement report settling. A
+    // host slow enough to leave the woken worker still parked resumed here and
+    // retired an idle owner, which joins immediately.
+    let pass_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while reconcile_in_progress.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        assert!(
+            std::time::Instant::now() <= pass_deadline,
+            "the woken writer never claimed a reconcile pass"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
     let roots = [fixture.path().canonicalize().expect("canonical root")]
         .into_iter()
         .collect();
