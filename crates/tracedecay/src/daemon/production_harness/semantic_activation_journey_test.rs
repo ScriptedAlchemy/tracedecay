@@ -1089,6 +1089,40 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     let rollback_code_id =
         wait_for_restored_source_content(&harness, &project, &first_code, "G1 source content")
             .await;
+    // Returning the worktree to G1's commit seals a new code generation, and
+    // the ordinary indexing lane projects vectors for it: `AlreadyPublished`
+    // is exact-publication identity (it binds the source generation), so a
+    // checkout-minted generation legitimately misses it and publishes. That
+    // publication is the scheduler's work, not the rollback's, and it advances
+    // the shared verified head. Settle it and re-baseline here so the
+    // byte-for-byte assertion below still measures exactly what it names - the
+    // rollback - over every generation now in the projection, including this
+    // one.
+    let (settled_rollback_id, rollback_code, rollback_vector) =
+        wait_for_settled_semantic_generation(&harness, &project, Some(&second_code_id)).await;
+    assert_eq!(
+        settled_rollback_id, rollback_code_id,
+        "the settled semantic generation must be the one serving the restored source"
+    );
+    let rollback_graph = retain_graph(&harness, &project, &rollback_code).await;
+    let generations = [
+        (
+            first_code.as_ref(),
+            &first_graph,
+            first_vector.generation_id().clone(),
+        ),
+        (
+            second_code.as_ref(),
+            &second_graph,
+            second_vector.generation_id().clone(),
+        ),
+        (
+            rollback_code.as_ref(),
+            &rollback_graph,
+            rollback_vector.generation_id().clone(),
+        ),
+    ];
+    let graph_before_rollback = graph_bytes(&generations).await;
     set_semantic_profile(
         &harness,
         &project,
@@ -1108,7 +1142,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     assert_code_generation_unchanged(&harness, &project, &rollback_code_id).await;
     assert_eq!(
         graph_bytes(&generations).await,
-        graph_before_activation,
+        graph_before_rollback,
         "rollback must preserve the graph catalog, control state, and verified heads byte-for-byte"
     );
     let rolled_back_query = search(&harness, &project, true).await;
@@ -1137,6 +1171,40 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     let retry_code_id =
         wait_for_restored_source_content(&harness, &project, &second_code, "G2 source content")
             .await;
+    // Same as the rollback checkout above: this one seals its own generation
+    // and the indexing lane publishes vectors for it. Settle and re-baseline so
+    // the two assertions below measure the failed install and the exact retry
+    // rather than that publication.
+    let (settled_retry_id, retry_code, retry_vector) =
+        wait_for_settled_semantic_generation(&harness, &project, Some(&rollback_code_id)).await;
+    assert_eq!(
+        settled_retry_id, retry_code_id,
+        "the settled semantic generation must be the one serving the restored source"
+    );
+    let retry_graph = retain_graph(&harness, &project, &retry_code).await;
+    let generations = [
+        (
+            first_code.as_ref(),
+            &first_graph,
+            first_vector.generation_id().clone(),
+        ),
+        (
+            second_code.as_ref(),
+            &second_graph,
+            second_vector.generation_id().clone(),
+        ),
+        (
+            rollback_code.as_ref(),
+            &rollback_graph,
+            rollback_vector.generation_id().clone(),
+        ),
+        (
+            retry_code.as_ref(),
+            &retry_graph,
+            retry_vector.generation_id().clone(),
+        ),
+    ];
+    let graph_before_retry = graph_bytes(&generations).await;
     let core_before_failure = search(&harness, &project, false).await;
     assert_ne!(core_before_failure["semantic"]["status"], "complete");
     assert!(
@@ -1197,7 +1265,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     );
     assert_eq!(
         graph_bytes(&generations).await,
-        graph_before_activation,
+        graph_before_retry,
         "failed live install must not mutate graph publication authority"
     );
 
@@ -1226,7 +1294,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     assert_eq!(recovered["code_generation"], json!(retry_code_id));
     assert_eq!(
         graph_bytes(&generations).await,
-        graph_before_activation,
+        graph_before_retry,
         "exact retry must restore routing without graph publication"
     );
     assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;

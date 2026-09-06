@@ -243,12 +243,11 @@ where
                 .map_err(configuration_error_at("activate.prepare"))?;
             validate_activation_transition(command, &transition)
                 .map_err(contract_error_at("activate.transition"))?;
-            let result_active_semantic = transition
-                .result_active_semantic
-                .as_ref()
-                .ok_or(SemanticRuntimeBackendErrorV1::RejectedAt(
-                    SemanticRuntimeRefusalV1::at("activate.result_active_semantic"),
-                ))?;
+            let result_active_semantic = transition.result_active_semantic.as_ref().ok_or(
+                SemanticRuntimeBackendErrorV1::RejectedAt(SemanticRuntimeRefusalV1::at(
+                    "activate.result_active_semantic",
+                )),
+            )?;
             let active_lease = self
                 .verify_generation(result_active_semantic, false, "activate.active_generation")
                 .await?;
@@ -543,11 +542,9 @@ fn contract_error_at(
         | SemanticRuntimeContractErrorV1::InvalidTransition => {
             SemanticRuntimeBackendErrorV1::Conflict
         }
-        cause => {
-            SemanticRuntimeBackendErrorV1::RejectedAt(SemanticRuntimeRefusalV1::contract(
-                stage, cause,
-            ))
-        }
+        cause => SemanticRuntimeBackendErrorV1::RejectedAt(SemanticRuntimeRefusalV1::contract(
+            stage, cause,
+        )),
     }
 }
 
