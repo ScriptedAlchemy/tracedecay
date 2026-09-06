@@ -1581,12 +1581,28 @@ impl DaemonCodeIndexPublicationStoreV1 {
         expected_file_digest: &ManifestDigest,
         lifetime_lock: CodeGenerationStoreLockV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
-        let monolithic = CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
+        let monolithic = match CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
             &mut *file,
             admitted_len,
             Some(expected_file_digest),
             &UninterruptibleCodeIndexControlV1,
-        )?;
+        ) {
+            Ok(monolithic) => monolithic,
+            // A generation is a pure function of its source tree, so an
+            // envelope revision this build no longer reads is refused rather
+            // than repaired: abstain the way an incompatible generation does
+            // and let the scheduler rebuild it.
+            Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
+                tracing::warn!(
+                    target: "tracedecay::code_index",
+                    sealed_format_revision = revision,
+                    "{}",
+                    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                );
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         if monolithic.is_some() {
             return Ok(monolithic);
         }
