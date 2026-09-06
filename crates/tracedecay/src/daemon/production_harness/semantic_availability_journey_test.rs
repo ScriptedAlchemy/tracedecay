@@ -180,6 +180,9 @@ async fn wait_for_session_lane(harness: &ProductionProjectCompositionHarnessV1, 
 }
 
 /// The runtime tool renders markdown unless JSON is requested explicitly.
+///
+/// `semantic_runtime` is a `SemanticRuntimeStatusV1` (`configuration` plus
+/// `state`); the callers here reason about the tagged `state` value.
 async fn semantic_runtime_state(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
@@ -190,7 +193,7 @@ async fn semantic_runtime_state(
         "tracedecay_runtime",
         json!({"format": "json"}),
     )
-    .await["semantic_runtime"]
+    .await["semantic_runtime"]["state"]
         .clone()
 }
 

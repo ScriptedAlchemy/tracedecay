@@ -1417,4 +1417,7 @@ mod semantic_activation_journey_test;
 mod semantic_availability_journey_test;
 
 #[cfg(test)]
+mod semantic_restart_journey_test;
+
+#[cfg(test)]
 mod semantic_index_fixture_check_test;
