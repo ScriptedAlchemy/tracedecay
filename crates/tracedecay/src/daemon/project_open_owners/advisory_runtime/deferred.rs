@@ -1,13 +1,22 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::super::{project_open_lsp_scope_grant, register_production_lsp_owner};
+use super::super::{
+    install_semantic_activation_runtime_owner, project_open_lsp_scope_grant,
+    register_production_lsp_owner,
+};
 use super::{
     DaemonInvocationState, ProjectOpenDependentOwnerState, register_production_advisory_owner,
     register_production_feedback_and_advisory, register_production_feedback_cycle,
 };
 use crate::daemon::log_daemon_event;
+use tracedecay_application::doctor::{
+    SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
+};
 use tracedecay_application::now_micros;
+use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// The deferred advisory owner is a detached background task: when it gives up
 /// (or never sees a publication) nothing in the request path reports it, and a
@@ -22,6 +31,166 @@ fn log_deferred_attempt(project_root: &Path, phase: &str, attempt: &str) {
             ("attempt", attempt.to_owned()),
         ],
     );
+}
+
+fn pending_semantic_owner_state(
+    configuration_ready: bool,
+    production_runtime_ready: bool,
+) -> SemanticOwnerStateV1 {
+    let mut missing = Vec::new();
+    if !configuration_ready {
+        missing.push(SemanticOwnerPrerequisiteV1::ConfigurationRuntime);
+    }
+    if !production_runtime_ready {
+        missing.push(SemanticOwnerPrerequisiteV1::ProductionSemanticRuntime);
+    }
+    SemanticOwnerStateV1::PendingPrerequisites { missing }
+}
+
+fn cancelled_semantic_owner_state(detail: &'static str) -> SemanticOwnerStateV1 {
+    SemanticOwnerStateV1::Degraded {
+        reason: SemanticOwnerDegradedReasonV1::TaskCancelled,
+        detail: detail.to_owned(),
+    }
+}
+
+pub(in crate::daemon) async fn spawn_semantic_owner_registration(
+    invocation: DaemonInvocationState,
+    project_root: PathBuf,
+    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
+    scope: tracedecay_application::ResolvedScope,
+    route_registered: Arc<AtomicBool>,
+    route_cancellation: CancellationToken,
+) -> Result<()> {
+    let registration = invocation
+        .semantic_owner_runtime_registrar()
+        .register(&project_root)
+        .await?;
+    if tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(&project_root)
+        .is_some()
+    {
+        registration.mark_production_runtime_ready();
+    }
+    let task_signals = registration.signals();
+    let mut configuration_ready = task_signals.subscribe_configuration_ready();
+    let mut production_runtime_ready = task_signals.subscribe_production_runtime_ready();
+    let task_cancellation = task_signals.cancellation();
+    let task_project_root = project_root.clone();
+    let task_invocation = invocation.clone();
+    let spawned = registration.spawn(hotpath::future!(
+        async move {
+            loop {
+                if task_cancellation.is_cancelled() {
+                    task_signals.set_state(cancelled_semantic_owner_state(
+                        "semantic owner registration was cancelled by project shutdown",
+                    ));
+                    return;
+                }
+                if route_cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
+                    task_signals.set_state(cancelled_semantic_owner_state(
+                        "semantic owner registration was cancelled with its project route",
+                    ));
+                    return;
+                }
+                let configuration_is_ready = *configuration_ready.borrow_and_update();
+                let production_is_ready = *production_runtime_ready.borrow_and_update();
+                if configuration_is_ready && production_is_ready {
+                    match install_semantic_activation_runtime_owner(
+                        &task_invocation,
+                        &task_project_root,
+                        Arc::clone(&configuration_runtime),
+                        scope.clone(),
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            if task_cancellation.is_cancelled()
+                                || route_cancellation.is_cancelled()
+                                || !route_registered.load(Ordering::Acquire)
+                            {
+                                task_signals.set_state(cancelled_semantic_owner_state(
+                                    "semantic owner registration completed after its project route was cancelled",
+                                ));
+                                return;
+                            }
+                            task_signals.set_state(SemanticOwnerStateV1::Ready);
+                            log_daemon_event(
+                                "semantic_owner_registration",
+                                &[
+                                    ("project", task_project_root.display().to_string()),
+                                    ("outcome", "ready".to_owned()),
+                                ],
+                            );
+                            return;
+                        }
+                        Ok(false) => {
+                            task_signals.set_state(pending_semantic_owner_state(true, false));
+                        }
+                        Err(error) => {
+                            let state = error.into_state();
+                            log_daemon_event(
+                                "semantic_owner_registration",
+                                &[
+                                    ("project", task_project_root.display().to_string()),
+                                    ("outcome", "degraded".to_owned()),
+                                    ("state", format!("{state:?}")),
+                                ],
+                            );
+                            task_signals.set_state(state);
+                            return;
+                        }
+                    }
+                } else {
+                    task_signals.set_state(pending_semantic_owner_state(
+                        configuration_is_ready,
+                        production_is_ready,
+                    ));
+                }
+                tokio::select! {
+                    biased;
+                    () = task_cancellation.cancelled() => {
+                        task_signals.set_state(cancelled_semantic_owner_state(
+                            "semantic owner registration was cancelled by project shutdown",
+                        ));
+                        return;
+                    }
+                    () = route_cancellation.cancelled() => {
+                        task_signals.set_state(cancelled_semantic_owner_state(
+                            "semantic owner registration was cancelled with its project route",
+                        ));
+                        return;
+                    }
+                    changed = configuration_ready.changed() => {
+                        if changed.is_err() {
+                            task_signals.set_state(cancelled_semantic_owner_state(
+                                "semantic owner configuration readiness authority closed",
+                            ));
+                            return;
+                        }
+                    }
+                    changed = production_runtime_ready.changed() => {
+                        if changed.is_err() {
+                            task_signals.set_state(cancelled_semantic_owner_state(
+                                "semantic owner production-runtime readiness authority closed",
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+        },
+        label = "daemon.project.owners.semantic_deferred"
+    ));
+    if spawned {
+        log_daemon_event(
+            "semantic_owner_registration",
+            &[
+                ("project", project_root.display().to_string()),
+                ("outcome", "scheduled".to_owned()),
+            ],
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn spawn(

@@ -699,6 +699,97 @@ impl tracedecay_dashboard_api::feedback_api::FeedbackStatusRuntime
 }
 
 #[derive(Clone)]
+pub struct DaemonSemanticOwnerRuntimeRegistrar {
+    service: DaemonInvocationService,
+}
+
+impl DaemonSemanticOwnerRuntimeRegistrar {
+    pub fn new(service: &DaemonInvocationService) -> Self {
+        Self {
+            service: service.clone(),
+        }
+    }
+
+    #[hotpath::skip]
+    pub async fn register(
+        &self,
+        project_root: &Path,
+    ) -> Result<RegisteredSemanticOwnerTaskV1, TraceDecayError> {
+        if let Some(registered) = self.registered(project_root).await {
+            if self
+                .service
+                .project_runtimes
+                .holds::<RegisteredConfigurationRuntime>(project_root)
+                .await
+            {
+                registered.mark_configuration_runtime_ready();
+            }
+            return Ok(registered);
+        }
+        let candidate = RegisteredSemanticOwnerTaskV1::new();
+        match self
+            .service
+            .project_runtimes
+            .register(project_root.to_path_buf(), candidate)
+            .await
+        {
+            Ok(()) | Err(ProjectRuntimeRegistryError::AlreadyRegistered) => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "semantic owner task registration failed for {}: {error}",
+                        project_root.display()
+                    ),
+                });
+            }
+        }
+        let registered =
+            self.registered(project_root)
+                .await
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "semantic owner task disappeared after registration".to_owned(),
+                })?;
+        if self
+            .service
+            .project_runtimes
+            .holds::<RegisteredConfigurationRuntime>(project_root)
+            .await
+        {
+            registered.mark_configuration_runtime_ready();
+        }
+        Ok(registered)
+    }
+
+    #[hotpath::skip]
+    pub async fn registered(&self, project_root: &Path) -> Option<RegisteredSemanticOwnerTaskV1> {
+        self.service.project_runtimes.get(project_root).await
+    }
+
+    #[hotpath::skip]
+    pub async fn state(
+        &self,
+        project_root: &Path,
+    ) -> Option<tracedecay_application::doctor::SemanticOwnerStateV1> {
+        self.service
+            .project_runtimes
+            .read::<RegisteredSemanticOwnerTaskV1, _, _>(
+                project_root,
+                RegisteredSemanticOwnerTaskV1::state,
+            )
+            .await
+    }
+
+    pub fn mark_production_runtime_ready(&self, project_root: &Path) -> bool {
+        self.service
+            .project_runtimes
+            .read_now::<RegisteredSemanticOwnerTaskV1, _, _>(project_root, |registered| {
+                registered.mark_production_runtime_ready();
+            })
+            .is_some()
+    }
+}
+
+#[derive(Clone)]
 pub struct DaemonConfigurationRuntimeRegistrar {
     service: DaemonInvocationService,
 }
@@ -721,6 +812,15 @@ impl DaemonConfigurationRuntimeRegistrar {
                 message: "profile code-index worker plan was not installed during daemon bootstrap"
                     .to_owned(),
             })
+    }
+
+    fn mark_semantic_owner_configuration_ready(&self, project_root: &Path) {
+        let _marked = self
+            .service
+            .project_runtimes
+            .read_now::<RegisteredSemanticOwnerTaskV1, _, _>(project_root, |registered| {
+                registered.mark_configuration_runtime_ready();
+            });
     }
 
     /// Commit the daemon-wide worker selection through the exact retained
@@ -812,6 +912,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             .holds::<RegisteredConfigurationRuntime>(&project_root)
             .await
         {
+            self.mark_semantic_owner_configuration_ready(&project_root);
             return Ok(());
         }
         let policy_digest = AccessPolicyDigest::new(policy_manifest_digest.as_str().to_owned())
@@ -872,10 +973,30 @@ impl DaemonConfigurationRuntimeRegistrar {
             scope.project_id.clone(),
             project_root.clone(),
         );
+        #[cfg(any(test, feature = "test-helpers"))]
+        let registration_return_pause = match self
+            .service
+            .take_configuration_runtime_registration_pause(&project_root)
+            .await
+        {
+            Some(pause) => {
+                let super::ConfigurationRuntimeRegistrationPauseV1 {
+                    before_registration,
+                    allow_registration,
+                    after_registration,
+                    allow_return,
+                    ..
+                } = pause;
+                let _ = before_registration.send(());
+                let _ = allow_registration.await;
+                Some((after_registration, allow_return))
+            }
+            None => None,
+        };
         self.service
             .project_runtimes
             .publish(
-                project_root,
+                project_root.clone(),
                 RegisteredConfigurationRuntime {
                     runtime,
                     scope,
@@ -894,6 +1015,12 @@ impl DaemonConfigurationRuntimeRegistrar {
                 },
             )
             .await?;
+        self.mark_semantic_owner_configuration_ready(&project_root);
+        #[cfg(any(test, feature = "test-helpers"))]
+        if let Some((after_registration, allow_return)) = registration_return_pause {
+            let _ = after_registration.send(());
+            let _ = allow_return.await;
+        }
         Ok(())
     }
 
@@ -980,6 +1107,28 @@ impl DaemonConfigurationRuntimeRegistrar {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "semantic activation owner disappeared after registration".to_owned(),
             })
+    }
+
+    #[hotpath::skip]
+    pub async fn remove_semantic_activation_owner_if_current(
+        &self,
+        project_root: &Path,
+        expected: &Arc<
+            tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+        >,
+    ) -> bool {
+        match self
+            .service
+            .project_runtimes
+            .take_semantic_activation_owner_if_current(project_root, expected)
+        {
+            SemanticActivationOwnerWithdrawalV1::Removed(owner) => {
+                owner.reconciler.cancel_and_join().await;
+                true
+            }
+            SemanticActivationOwnerWithdrawalV1::Absent => true,
+            SemanticActivationOwnerWithdrawalV1::DifferentOwner => false,
+        }
     }
 }
 
