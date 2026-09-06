@@ -266,14 +266,22 @@ fn broker_exposes_project_scoped_readiness_without_lsp_transport() {
         .semantic_authority_if_available(
             FAKE_LANGUAGE,
             project.path().to_path_buf(),
-            root_uri.clone(),
+            root_uri,
             bounded_fake_lsp_timeouts(),
         )
         .unwrap()
         .expect("fake analyzer is executable");
     let readiness = authority.analyzer_readiness();
 
-    assert_eq!(readiness.root().uri(), root_uri);
+    // The slot is keyed by the canonical project root, so its supervisor names
+    // that root; compare by path, as the gateway admits roots.
+    assert_eq!(
+        url::Url::parse(readiness.root().uri())
+            .unwrap()
+            .to_file_path()
+            .unwrap(),
+        project.path().canonicalize().unwrap()
+    );
     assert_eq!(readiness.state(), AnalyzerState::AwaitingStart);
     assert_eq!(readiness.failure_evidence(), None);
 }

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex as SyncMutex};
+use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
@@ -10,8 +10,9 @@ use super::super::client::{
 use super::super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerRuntimeError as TraceDecayError,
 };
+use super::shared_client::SharedAnalyzerClient;
 use crate::{
-    AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
+    AdmittedRoot, AnalyzerEvent, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
     LspSemanticOperationOutcome, LspSemanticRequestAuthority, UpstreamCapabilities,
 };
 
@@ -30,9 +31,8 @@ struct StdioLspSemanticAuthorityInner {
     project_root: PathBuf,
     root_uri: String,
     timeouts: LspRefreshTimeouts,
-    client: Arc<Mutex<Option<StdioLspClient>>>,
+    shared: Arc<SharedAnalyzerClient>,
     operations: Mutex<BTreeMap<SemanticOperationKey, CancellationToken>>,
-    supervisor: SyncMutex<AnalyzerSupervisor>,
 }
 
 /// Retained analyzer authority sharing the broker's stdio client slot.
@@ -54,14 +54,15 @@ impl StdioLspSemanticAuthority {
         root_uri: impl Into<String>,
         timeouts: LspRefreshTimeouts,
     ) -> Arc<Self> {
+        let root_uri = root_uri.into();
         Self::from_shared_client(
             command,
             args,
             language,
             project_root,
-            root_uri,
+            root_uri.clone(),
             timeouts,
-            Arc::new(Mutex::new(None)),
+            SharedAnalyzerClient::new(AdmittedRoot::new(root_uri)),
         )
     }
 
@@ -72,20 +73,18 @@ impl StdioLspSemanticAuthority {
         project_root: PathBuf,
         root_uri: impl Into<String>,
         timeouts: LspRefreshTimeouts,
-        client: Arc<Mutex<Option<StdioLspClient>>>,
+        shared: Arc<SharedAnalyzerClient>,
     ) -> Arc<Self> {
-        let root_uri = root_uri.into();
         Arc::new(Self {
             inner: Arc::new(StdioLspSemanticAuthorityInner {
                 command: command.into(),
                 args,
                 language: language.into(),
                 project_root,
-                root_uri: root_uri.clone(),
+                root_uri: root_uri.into(),
                 timeouts,
-                client,
+                shared,
                 operations: Mutex::new(BTreeMap::new()),
-                supervisor: SyncMutex::new(AnalyzerSupervisor::new(AdmittedRoot::new(root_uri))),
             }),
         })
     }
@@ -93,11 +92,7 @@ impl StdioLspSemanticAuthority {
     /// Atomic project-scoped lifecycle evidence for doctor, dashboard, and
     /// other non-LSP callers. The snapshot contains no process or stderr data.
     pub fn analyzer_readiness(&self) -> AnalyzerSupervisor {
-        self.inner
-            .supervisor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.inner.shared.supervisor()
     }
 
     /// Starts the retained client once and returns the typed capabilities from
@@ -105,16 +100,15 @@ impl StdioLspSemanticAuthority {
     pub async fn upstream_capabilities(
         &self,
     ) -> std::result::Result<UpstreamCapabilities, TraceDecayError> {
-        let mut slot = self.inner.client.lock().await;
+        let mut slot = self.inner.shared.client().lock().await;
         if let Some(client) = slot.as_ref() {
             return Ok(client.upstream_capabilities());
         }
-        if analyzer_terminal_outcome(&self.inner).is_some() {
+        if self.inner.shared.is_terminal() {
             return Err(TraceDecayError::Unavailable);
         }
 
-        let root = AdmittedRoot::new(self.inner.root_uri.clone());
-        let Some(attempt) = begin_analyzer_start(&self.inner, &root) else {
+        let Some(attempt) = self.inner.shared.begin_start() else {
             return Err(TraceDecayError::Unavailable);
         };
         match StdioLspClient::start_with_timeouts(
@@ -127,21 +121,26 @@ impl StdioLspSemanticAuthority {
         {
             Ok(client) => {
                 let capabilities = client.upstream_capabilities();
-                if mark_analyzer_ready(&self.inner, &root, attempt).is_none() {
+                if self.inner.shared.mark_ready(attempt).is_none() {
                     return Err(TraceDecayError::Unavailable);
                 }
                 *slot = Some(client);
                 Ok(capabilities)
             }
             Err(error) => {
-                record_analyzer_event(&self.inner, &root, attempt, AnalyzerEvent::StartupFailed);
+                self.inner
+                    .shared
+                    .record(attempt, AnalyzerEvent::StartupFailed);
                 Err(error)
             }
         }
     }
 
     fn terminal_outcome(&self) -> Option<LspSemanticOperationOutcome> {
-        analyzer_terminal_outcome(&self.inner)
+        self.inner
+            .shared
+            .is_terminal()
+            .then_some(LspSemanticOperationOutcome::Unavailable)
     }
 }
 
@@ -204,7 +203,6 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
         }
 
         let inner = Arc::clone(&self.inner);
-        let analyzer_root = root;
         Box::pin(async move {
             let outcome = tokio::select! {
                 () = cancellation.cancelled() => {
@@ -214,10 +212,13 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                         detail: None,
                     }
                 }
-                slot = inner.client.lock() => {
+                slot = inner.shared.client().lock() => {
                     let mut slot = slot;
                     if slot.is_none()
-                        && let Some(outcome) = analyzer_terminal_outcome(&inner)
+                        && let Some(outcome) = inner
+                            .shared
+                            .is_terminal()
+                            .then_some(LspSemanticOperationOutcome::Unavailable)
                     {
                         inner.operations.lock().await.remove(&key);
                         return outcome;
@@ -229,10 +230,8 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     // this caller ends up owning fences its own late result
                     // out if it is dropped and someone takes the start over.
                     let (attempt, client) = if let Some(client) = slot.take() {
-                        (current_attempt(&inner), Ok(Some(client)))
-                    } else if let Some(attempt) =
-                        begin_analyzer_start(&inner, &analyzer_root)
-                    {
+                        (inner.shared.current_attempt(), Ok(Some(client)))
+                    } else if let Some(attempt) = inner.shared.begin_start() {
                         let started = tokio::select! {
                             () = cancellation.cancelled() => Ok(None),
                             client = StdioLspClient::start_with_timeouts(
@@ -249,9 +248,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     };
                     match client {
                         Ok(Some(mut client)) => {
-                            let Some(attempt) =
-                                mark_analyzer_ready(&inner, &analyzer_root, attempt)
-                            else {
+                            let Some(attempt) = inner.shared.mark_ready(attempt) else {
                                 // Superseded: this caller no longer owns the
                                 // start, so its client is not the session's
                                 // analyzer. Drop it rather than installing it
@@ -302,28 +299,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 | Err(LspSemanticRequestError::Remote {
                                     code: Some(-32601),
                                     ..
-                                }) => record_analyzer_event(
-                                    &inner,
-                                    &analyzer_root,
-                                    attempt,
-                                    AnalyzerEvent::Ready,
-                                ),
-                                Err(error) => record_analyzer_event(
-                                    &inner,
-                                    &analyzer_root,
-                                    attempt,
-                                    error.analyzer_event(),
-                                ),
+                                }) => inner.shared.record(attempt, AnalyzerEvent::Ready),
+                                Err(error) => {
+                                    inner.shared.record(attempt, error.analyzer_event());
+                                }
                             }
                             semantic_operation_outcome(result)
                         }
                         Ok(None) => {
-                            record_analyzer_event(
-                                &inner,
-                                &analyzer_root,
-                                attempt,
-                                AnalyzerEvent::Cancelled,
-                            );
+                            inner.shared.record(attempt, AnalyzerEvent::Cancelled);
                             analyzer_event_outcome(AnalyzerEvent::Cancelled)
                         }
                         Err(error) => {
@@ -334,12 +318,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             // steered rename candidates down the wrong branch.
                             // Callers receive only a static typed template; the
                             // daemon-local event keeps the full operational error.
-                            record_analyzer_event(
-                                &inner,
-                                &analyzer_root,
-                                attempt,
-                                AnalyzerEvent::StartupFailed,
-                            );
+                            inner.shared.record(attempt, AnalyzerEvent::StartupFailed);
                             analyzer_start_failure(&error)
                         }
                     }
@@ -374,126 +353,6 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
 fn semantic_request_document(request: &crate::LspSemanticRequest) -> Option<PathBuf> {
     let uri = request.params().get("textDocument")?.get("uri")?.as_str()?;
     url::Url::parse(uri).ok()?.to_file_path().ok()
-}
-
-/// Claims the next start attempt, returning its generation.
-///
-/// The generation is the fence: a caller that is dropped inside its start and
-/// returns late carries a generation the supervisor has moved past, so it can
-/// neither conclude nor charge the attempt that replaced it.
-fn begin_analyzer_start(
-    inner: &StdioLspSemanticAuthorityInner,
-    root: &AdmittedRoot,
-) -> Option<u32> {
-    let mut supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if supervisor.state() == AnalyzerState::Ready {
-        let _ = supervisor.apply(root, AnalyzerEvent::Crashed);
-    }
-    // `Starting` belongs here too. Only one caller can be starting at a time —
-    // the client mutex this runs under is what enforces that — so reaching
-    // here in `Starting` means the caller that owned the previous start was
-    // dropped mid-flight (its request cancelled, or its spawned operation
-    // evicted) and released the lock without concluding the transition. The
-    // analyzer is not starting any more, and no event will ever arrive to say
-    // so, so refusing left the supervisor stranded and every later semantic
-    // request answering `Unavailable` for the rest of the session. This caller
-    // takes the start over; it consumes no restart budget, and a failure from
-    // `Starting` still charges one.
-    if matches!(
-        supervisor.state(),
-        AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff | AnalyzerState::Starting
-    ) && supervisor
-        .apply(root, AnalyzerEvent::StartRequested)
-        .is_ok_and(|state| state == AnalyzerState::Starting)
-    {
-        return Some(supervisor.attempt());
-    }
-    None
-}
-
-/// The generation a caller that found a live client in the shared slot is
-/// serving on. It holds the client lock, so that generation is its own.
-fn current_attempt(inner: &StdioLspSemanticAuthorityInner) -> u32 {
-    inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .attempt()
-}
-
-fn analyzer_terminal_outcome(
-    inner: &StdioLspSemanticAuthorityInner,
-) -> Option<LspSemanticOperationOutcome> {
-    let supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match supervisor.state() {
-        AnalyzerState::Exhausted | AnalyzerState::Unavailable => {
-            Some(LspSemanticOperationOutcome::Unavailable)
-        }
-        AnalyzerState::AwaitingStart
-        | AnalyzerState::Starting
-        | AnalyzerState::Ready
-        | AnalyzerState::RestartBackoff => None,
-    }
-}
-
-/// Concludes `attempt`'s start, reporting the generation the caller now owns,
-/// or `None` when `attempt` has been superseded.
-///
-/// A superseded caller is one that was dropped inside its start and returned
-/// late; it must not mark the replacement's attempt ready, and its client must
-/// not be installed over the replacement's.
-fn mark_analyzer_ready(
-    inner: &StdioLspSemanticAuthorityInner,
-    root: &AdmittedRoot,
-    attempt: u32,
-) -> Option<u32> {
-    let mut supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if supervisor.attempt() != attempt {
-        return None;
-    }
-    if matches!(
-        supervisor.state(),
-        AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff
-    ) {
-        // A client reached the shared slot without this lane seeing a start:
-        // the diagnostics refresh lane shares that slot, and a timed-out
-        // request hands its client back while charging the budget. Claim the
-        // attempt that client belongs to — this caller holds the client lock,
-        // so the attempt it claims is its own.
-        let _ = supervisor.apply(root, AnalyzerEvent::StartRequested);
-    }
-    if supervisor.state() == AnalyzerState::Starting {
-        let _ = supervisor.apply(root, AnalyzerEvent::Ready);
-    }
-    Some(supervisor.attempt())
-}
-
-/// Records `event` against `attempt`, ignoring it when that attempt has been
-/// superseded: an abandoned start's late failure is not the replacement's, and
-/// charging it would spend a budget the live process never earned.
-fn record_analyzer_event(
-    inner: &StdioLspSemanticAuthorityInner,
-    root: &AdmittedRoot,
-    attempt: u32,
-    event: AnalyzerEvent,
-) {
-    let mut supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if supervisor.attempt() != attempt {
-        return;
-    }
-    let _ = supervisor.apply(root, event);
 }
 
 fn analyzer_event_outcome(event: AnalyzerEvent) -> LspSemanticOperationOutcome {
@@ -532,7 +391,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::MAX_ANALYZER_RESTARTS;
+    use crate::{AnalyzerState, MAX_ANALYZER_RESTARTS};
 
     #[tokio::test]
     async fn exhausted_supervisor_rejects_capability_initialization_without_respawning() {
@@ -544,15 +403,12 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         );
-        let root = AdmittedRoot::new("file:///project");
         for _ in 0..MAX_ANALYZER_RESTARTS {
-            let attempt = begin_analyzer_start(&authority.inner, &root).expect("start attempt");
-            record_analyzer_event(
-                &authority.inner,
-                &root,
-                attempt,
-                AnalyzerEvent::StartupFailed,
-            );
+            let attempt = authority.inner.shared.begin_start().expect("start attempt");
+            authority
+                .inner
+                .shared
+                .record(attempt, AnalyzerEvent::StartupFailed);
         }
         let before = authority.analyzer_readiness();
         assert_eq!(before.state(), AnalyzerState::Exhausted);
@@ -566,11 +422,15 @@ mod tests {
         assert_eq!(after.last_failure(), before.last_failure());
     }
 
-    /// A diagnostics refresh that fails clears the shared client slot
-    /// (`collect_refresh_batch`) without telling this supervisor anything. The
-    /// analyzer's semantic surface must then restart the process and report
-    /// that start's own typed outcome — never the terminal `Unavailable` the
-    /// gateway renders as `providerUnavailable` on a live project.
+    /// A `Ready` supervisor over an empty client slot is a process that left
+    /// without either lane recording it. The refresh lane used to leave exactly
+    /// this behind on every failed refresh (`collect_refresh_batch` cleared the
+    /// slot and told the supervisor nothing); it now records the retirement on
+    /// the shared supervisor, so this is the fallback for a client that
+    /// vanished. The analyzer's semantic surface must still restart the process
+    /// and report that start's own typed outcome — never the terminal
+    /// `Unavailable` the gateway renders as `providerUnavailable` on a live
+    /// project.
     ///
     /// A session addresses this authority with its *authorized* root, which
     /// carries the resolved scope digest; the supervisor is constructed with
@@ -587,13 +447,11 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         );
-        let owner_root = AdmittedRoot::new("file:///project");
-        let attempt = begin_analyzer_start(&authority.inner, &owner_root).expect("start attempt");
-        mark_analyzer_ready(&authority.inner, &owner_root, attempt).expect("ready");
+        let attempt = authority.inner.shared.begin_start().expect("start attempt");
+        authority.inner.shared.mark_ready(attempt).expect("ready");
         assert_eq!(authority.analyzer_readiness().state(), AnalyzerState::Ready);
-        // Exactly what a failed refresh leaves behind: a Ready supervisor over
-        // an empty client slot.
-        assert!(authority.inner.client.lock().await.is_none());
+        // A Ready supervisor over an empty client slot.
+        assert!(authority.inner.shared.client().lock().await.is_none());
 
         let session_root = AdmittedRoot::authorized(
             "file:///project",
@@ -642,8 +500,7 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         );
-        let owner_root = AdmittedRoot::new("file:///project");
-        assert!(begin_analyzer_start(&authority.inner, &owner_root).is_some());
+        assert!(authority.inner.shared.begin_start().is_some());
         assert_eq!(
             authority.analyzer_readiness().state(),
             AnalyzerState::Starting,
@@ -686,22 +543,19 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         );
-        let root = AdmittedRoot::new("file:///project");
-        let abandoned = begin_analyzer_start(&authority.inner, &root).expect("first attempt");
-        let replacement = begin_analyzer_start(&authority.inner, &root).expect("takeover");
+        let abandoned = authority.inner.shared.begin_start().expect("first attempt");
+        let replacement = authority.inner.shared.begin_start().expect("takeover");
         assert_ne!(abandoned, replacement, "the takeover is its own attempt");
 
         assert_eq!(
-            mark_analyzer_ready(&authority.inner, &root, abandoned),
+            authority.inner.shared.mark_ready(abandoned),
             None,
             "a superseded start cannot conclude the one that replaced it"
         );
-        record_analyzer_event(
-            &authority.inner,
-            &root,
-            abandoned,
-            AnalyzerEvent::StartupFailed,
-        );
+        authority
+            .inner
+            .shared
+            .record(abandoned, AnalyzerEvent::StartupFailed);
         let readiness = authority.analyzer_readiness();
         assert_eq!(readiness.state(), AnalyzerState::Starting);
         assert_eq!(readiness.attempt(), replacement);
@@ -709,7 +563,7 @@ mod tests {
         assert_eq!(readiness.last_failure(), None);
 
         assert_eq!(
-            mark_analyzer_ready(&authority.inner, &root, replacement),
+            authority.inner.shared.mark_ready(replacement),
             Some(replacement),
             "the attempt that owns the start still concludes it"
         );
@@ -731,12 +585,11 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         );
-        let owner_root = AdmittedRoot::new("file:///project");
         // Exactly what a live start looks like from outside: its owner holds
         // the shared client lock, and the supervisor is `Starting` on its
         // attempt.
-        let held = Arc::clone(&authority.inner.client).lock_owned().await;
-        let live = begin_analyzer_start(&authority.inner, &owner_root).expect("live attempt");
+        let held = authority.inner.shared.client().lock().await;
+        let live = authority.inner.shared.begin_start().expect("live attempt");
 
         let joining = tokio::spawn({
             let authority = Arc::clone(&authority);
