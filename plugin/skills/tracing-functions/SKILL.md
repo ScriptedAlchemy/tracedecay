@@ -1,6 +1,6 @@
 ---
 name: tracing-functions
-description: 'Trace callers, callees, dispatch targets, recursion, or a path between known symbols. Use exploration to locate code and impact to select changed consumers and tests.'
+description: 'Who calls X, what X calls, or the path between two symbols. Covers resolving names to exact symbols, trait and dynamic dispatch that text search misses, bounded depth, and reporting coverage gaps instead of "no callers". Locating a symbol is exploring-code.'
 ---
 
 # Tracing functions
