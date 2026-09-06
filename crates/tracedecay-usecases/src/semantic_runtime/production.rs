@@ -78,7 +78,7 @@ use tracedecay_query::search_quality::{
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_semantic::projector::PreparedVectorGenerationV1;
+use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
 use tracedecay_semantic::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
 };
@@ -526,17 +526,23 @@ impl ProductionSemanticRuntimeV1 {
         let replay_digest = semantic_projection_request(generation, &projection, None)?
             .changes
             .manifest_digest;
+        // Restore binds the runtime pointer to the generation queries will
+        // actually pin: the supplied (serving) publication. The vectors may
+        // name an older publication identifier when the tree republished
+        // without a source change; the sealed-corpus proof admits exactly that
+        // case and nothing weaker.
+        let exact_source = active.source_generation() == &generation.manifest().generation_id
+            && (active.source_manifest_digest() == source_manifest_digest
+                || active.source_manifest_digest() == &replay_digest);
         if active.generation_id() != required_generation
             || active.embedding_key() != &projection
-            || active.source_generation() != &generation.manifest().generation_id
-            || (active.source_manifest_digest() != source_manifest_digest
-                && active.source_manifest_digest() != &replay_digest)
+            || !(exact_source || semantic_source_content_coherent(&active, generation))
         {
             return Ok(None);
         }
         let pointer = SemanticGenerationPointerV1 {
             generation: active.generation_id().clone(),
-            source_generation: active.source_generation().clone(),
+            source_generation: generation.manifest().generation_id.clone(),
             projection_key: active.projection_key().clone(),
         };
         let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
@@ -550,7 +556,7 @@ impl ProductionSemanticRuntimeV1 {
         )
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         let port = Arc::new(
-            PublishedSemanticVectorReadPortV1::new(
+            PublishedSemanticVectorReadPortV1::new_source_coherent(
                 active,
                 search_index_key.clone(),
                 generation,
@@ -2205,13 +2211,13 @@ impl ProductionSemanticRuntimeV1 {
             active.generation_id(),
             active.projection_key(),
             &search_index_key,
-            active.source_generation(),
+            &code_generation.manifest().generation_id,
             &code_generation.capability().manifest_digest,
         ) {
             return Ok(cached);
         }
         let port = Arc::new(
-            PublishedSemanticVectorReadPortV1::new(
+            PublishedSemanticVectorReadPortV1::new_source_coherent(
                 active,
                 search_index_key.clone(),
                 code_generation,
@@ -2267,6 +2273,7 @@ impl ProductionSemanticRuntimeV1 {
                 request.capability_manifest_digest.clone(),
             )
             .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+            let source_coherence = vectors.source_coherence;
             return compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
                 handle: &self.handle,
                 request,
@@ -2276,6 +2283,7 @@ impl ProductionSemanticRuntimeV1 {
                 control,
                 mode,
                 fallback,
+                source_coherence,
             });
         }
         let Ok(retained) = self.graph.graph_for_generation(code_generation).await else {
@@ -2327,11 +2335,19 @@ impl ProductionSemanticRuntimeV1 {
             .map_err(|_| SemanticQueryServiceError::InvalidFallback)?
             .changes
             .manifest_digest;
+        // The served generation identity is the current publication: either the
+        // exact source the vectors were projected from, or a publication whose
+        // sealed chunk corpus is proven byte-identical (an unrelated
+        // republication of the same source truth must not refuse a valid
+        // semantic generation). Model/profile identity stays exact through the
+        // embedding-key pin; anything unproven fails closed below.
+        let generation_id = &code_generation.manifest().generation_id;
+        let exact_source = active.source_generation() == generation_id
+            && (active.source_manifest_digest() == source_manifest_digest
+                || active.source_manifest_digest() == &replay_digest);
         if active.embedding_key() != request.projection
-            || active.source_generation() != &code_generation.manifest().generation_id
-            || active.source_generation() != &request.code_generation
-            || (active.source_manifest_digest() != source_manifest_digest
-                && active.source_manifest_digest() != &replay_digest)
+            || request.code_generation != *generation_id
+            || !(exact_source || semantic_source_content_coherent(&active, code_generation))
         {
             return execute_calibrated_semantic_query(
                 &NeverCalledSemanticLane,
@@ -2344,7 +2360,7 @@ impl ProductionSemanticRuntimeV1 {
             active.projection_key().clone(),
             request.search_index_key.clone(),
             active.generation_id().clone(),
-            active.source_generation().clone(),
+            generation_id.clone(),
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
@@ -2370,6 +2386,7 @@ impl ProductionSemanticRuntimeV1 {
             code_generation,
             ann,
         )?;
+        let source_coherence = vectors.source_coherence;
         compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
             handle: &self.handle,
             request,
@@ -2379,6 +2396,7 @@ impl ProductionSemanticRuntimeV1 {
             control,
             mode,
             fallback,
+            source_coherence,
         })
     }
 }
@@ -3013,12 +3031,117 @@ fn elapsed_micros(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+/// How a served vector generation's source binding was admitted.
+///
+/// Code-generation identifiers are physical publication identities: an
+/// unrelated republication (a new commit sealing byte-identical trees, a
+/// restart, configuration churn) mints a new identifier over the same source
+/// truth. A semantic generation stays valid while the exact source content it
+/// was evaluated from stays valid, so serving admits either the exact
+/// publication it was projected from or a successor whose sealed chunk corpus
+/// is proven byte-identical. Anything less fails closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticSourceCoherenceV1 {
+    /// The vector generation's `source_generation` is the served code
+    /// generation.
+    ExactGeneration,
+    /// The served code generation is a different publication whose full chunk
+    /// corpus (chunk identity and content digest, one-to-one) equals the
+    /// corpus the vectors were projected from.
+    ProvenSourceContent,
+}
+
+/// The explicit answer to "may these vectors attach to this code generation":
+/// either a coherence proof, or a typed mismatch that names both source
+/// identities so the refusal is diagnosable without re-deriving either side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticSourceCoherenceOutcomeV1 {
+    Coherent(SemanticSourceCoherenceV1),
+    Mismatch(SemanticSourceMismatchV1),
+}
+
+/// A typed refusal: the identity the vectors were evaluated from and the
+/// identity the serving code generation seals, side by side. Nothing attaches
+/// silently on this arm; the caller reports both identities and keeps the
+/// semantic lane typed-unavailable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticSourceMismatchV1 {
+    /// The code generation the vectors were projected from.
+    pub vector_source_generation: CodeGenerationId,
+    /// The change-set manifest digest the vector generation recorded at
+    /// projection time (its evaluated source identity).
+    pub vector_source_manifest_digest: ManifestDigest,
+    /// The code generation currently offered for serving.
+    pub serving_generation: CodeGenerationId,
+    /// The serving generation's sealed snapshot content identity.
+    pub serving_content_identity: tracedecay_domain::ContentDigest,
+}
+
+/// Decide whether a published vector generation may serve a (possibly newer)
+/// sealed code generation, answering with the exact identities either way.
+///
+/// The coherent arm is a bijection over the sealed chunk corpus: every sealed
+/// chunk must have a vector projected from the same chunk identity and content
+/// digest, and no vector may exist outside that corpus. Generation identifiers
+/// and change-set manifest digests are deliberately not consulted for the
+/// proof — both bind the physical publication (they hash `from`/`to`
+/// generation ids), while semantic compatibility is a property of the source
+/// bytes alone. Model, profile, and artifact identity are not decided here;
+/// callers must pin them separately (embedding/projection key equality).
+pub fn semantic_source_coherence(
+    vectors: &PublishedVectorGenerationV1,
+    code: &CodeIndexPublishedGenerationV1,
+) -> SemanticSourceCoherenceOutcomeV1 {
+    if vectors.source_generation() == &code.manifest().generation_id {
+        return SemanticSourceCoherenceOutcomeV1::Coherent(
+            SemanticSourceCoherenceV1::ExactGeneration,
+        );
+    }
+    if semantic_vector_rows_cover_chunk_corpus(vectors.vectors(), code.chunks().chunks()) {
+        return SemanticSourceCoherenceOutcomeV1::Coherent(
+            SemanticSourceCoherenceV1::ProvenSourceContent,
+        );
+    }
+    SemanticSourceCoherenceOutcomeV1::Mismatch(SemanticSourceMismatchV1 {
+        vector_source_generation: vectors.source_generation().clone(),
+        vector_source_manifest_digest: vectors.source_manifest_digest().clone(),
+        serving_generation: code.manifest().generation_id.clone(),
+        serving_content_identity: code.snapshot().content_identity.clone(),
+    })
+}
+
+/// Content-only convenience over [`semantic_source_coherence`]: true exactly
+/// when the vectors' evaluated corpus is byte-identical to the sealed corpus
+/// of `code` (the exact-generation arm trivially satisfies this).
+pub fn semantic_source_content_coherent(
+    vectors: &PublishedVectorGenerationV1,
+    code: &CodeIndexPublishedGenerationV1,
+) -> bool {
+    matches!(
+        semantic_source_coherence(vectors, code),
+        SemanticSourceCoherenceOutcomeV1::Coherent(_)
+    )
+}
+
+fn semantic_vector_rows_cover_chunk_corpus(
+    vectors: &BTreeMap<tracedecay_domain::CodeSearchChunkId, ProjectedChunkVectorV1>,
+    chunks: &[Arc<CodeSearchChunkV1>],
+) -> bool {
+    vectors.len() == chunks.len()
+        && chunks.iter().all(|chunk| {
+            vectors
+                .get(&chunk.id)
+                .is_some_and(|vector| vector.chunk_digest == chunk.content_digest)
+        })
+}
+
 struct PublishedSemanticVectorReadPortV1 {
     generation: VectorGenerationIdV1,
     projection_key: tracedecay_domain::ProjectionKeyV1,
     search_index_key: SemanticSearchIndexKeyV1,
     source_generation: CodeGenerationId,
     capability_manifest_digest: ManifestDigest,
+    source_coherence: SemanticSourceCoherenceV1,
     rows: Vec<SemanticVectorRecordV1>,
     ann: PublishedSemanticAnnBindingV1,
 }
@@ -3221,6 +3344,7 @@ impl PublishedSemanticVectorReadPortV1 {
             search_index_key,
             source_generation: prepared.request.changes.to_generation.clone(),
             capability_manifest_digest: code.capability().manifest_digest.clone(),
+            source_coherence: SemanticSourceCoherenceV1::ExactGeneration,
             rows,
             // Evaluation ports read a prepared in-memory projection that was
             // never staged into the graph store, so no persisted index can
@@ -3229,6 +3353,7 @@ impl PublishedSemanticVectorReadPortV1 {
         })
     }
 
+    /// Serve `vectors` for the exact code generation they were projected from.
     fn new(
         vectors: PublishedVectorGenerationV1,
         search_index_key: SemanticSearchIndexKeyV1,
@@ -3238,6 +3363,46 @@ impl PublishedSemanticVectorReadPortV1 {
         if vectors.source_generation() != &code.manifest().generation_id {
             return Err(RetrievalPortError::GenerationMismatch);
         }
+        Self::bind(
+            vectors,
+            search_index_key,
+            code,
+            ann,
+            SemanticSourceCoherenceV1::ExactGeneration,
+        )
+    }
+
+    /// Serve `vectors` for `code` when it is either their exact source
+    /// generation or a publication whose sealed chunk corpus is proven
+    /// byte-identical to the one the vectors were projected from
+    /// ([`semantic_source_content_coherent`]). The port and its rows then bind
+    /// the served (current) generation identity, so every downstream
+    /// exact-generation check compares against the publication queries
+    /// actually pin.
+    fn new_source_coherent(
+        vectors: PublishedVectorGenerationV1,
+        search_index_key: SemanticSearchIndexKeyV1,
+        code: &CodeIndexPublishedGenerationV1,
+        ann: Option<SemanticAnnServingIndexV1>,
+    ) -> Result<Self, RetrievalPortError> {
+        let coherence = if vectors.source_generation() == &code.manifest().generation_id {
+            SemanticSourceCoherenceV1::ExactGeneration
+        } else if semantic_source_content_coherent(&vectors, code) {
+            SemanticSourceCoherenceV1::ProvenSourceContent
+        } else {
+            return Err(RetrievalPortError::GenerationMismatch);
+        };
+        Self::bind(vectors, search_index_key, code, ann, coherence)
+    }
+
+    fn bind(
+        vectors: PublishedVectorGenerationV1,
+        search_index_key: SemanticSearchIndexKeyV1,
+        code: &CodeIndexPublishedGenerationV1,
+        ann: Option<SemanticAnnServingIndexV1>,
+        source_coherence: SemanticSourceCoherenceV1,
+    ) -> Result<Self, RetrievalPortError> {
+        let source_generation = code.manifest().generation_id.clone();
         let freshness = production_code_index_freshness(
             code.manifest().seal.sealed_at,
             ComponentRevision::new("policy.semantic.daemon.v1")
@@ -3284,7 +3449,7 @@ impl PublishedSemanticVectorReadPortV1 {
             rows.push(SemanticVectorRecordV1 {
                 vector_generation: vectors.generation_id().clone(),
                 projection_key: vectors.projection_key().clone(),
-                source_generation: vectors.source_generation().clone(),
+                source_generation: source_generation.clone(),
                 chunk_id: chunk_id.clone(),
                 candidate,
                 binding: CodeCandidateBindingV1 {
@@ -3307,8 +3472,9 @@ impl PublishedSemanticVectorReadPortV1 {
             generation: vectors.generation_id().clone(),
             projection_key: vectors.projection_key().clone(),
             search_index_key,
-            source_generation: vectors.source_generation().clone(),
+            source_generation,
             capability_manifest_digest: code.capability().manifest_digest.clone(),
+            source_coherence,
             rows,
             ann,
         })
@@ -3679,6 +3845,12 @@ pub struct ApplicationSemanticSearchParametersV1<'a, V, C> {
     pub control: &'a C,
     pub mode: SemanticQueryModeV1,
     pub fallback: Arc<QueryFallbackSubpayload>,
+    /// How the served vectors' source binding was admitted. With
+    /// [`SemanticSourceCoherenceV1::ProvenSourceContent`], query-embedder
+    /// admission falls back to model identity (projection key) when the
+    /// runtime's exact pointer names a different publication of the same
+    /// source truth; the caller's corpus proof is the authority for that.
+    pub source_coherence: SemanticSourceCoherenceV1,
 }
 
 /// Application search composition: admit `SemanticCodeRetriever` only through
@@ -3704,12 +3876,24 @@ where
         control,
         mode,
         fallback,
+        source_coherence,
     } = parameters;
-    let factory = handle.query_factory(
-        &request.code_generation,
-        &request.vector_generation,
-        request.projection.projection_key(),
-    );
+    let factory = handle
+        .query_factory(
+            &request.code_generation,
+            &request.vector_generation,
+            request.projection.projection_key(),
+        )
+        .or_else(|| match source_coherence {
+            SemanticSourceCoherenceV1::ExactGeneration => None,
+            // The caller proved the served vectors carry the current source
+            // content; the runtime pointer may still name the prior
+            // publication (or a sibling projection of the same corpus). The
+            // embedder's physical identity is the projection key alone.
+            SemanticSourceCoherenceV1::ProvenSourceContent => {
+                handle.query_factory_for_projection(request.projection.projection_key())
+            }
+        });
     match factory {
         Some(factory) => {
             let embedder = factory.create(control, request.budget.deadline_micros);
@@ -4730,6 +4914,7 @@ mod tests {
             search_index_key: search_index_key().clone(),
             source_generation: source.clone(),
             capability_manifest_digest: capability.clone(),
+            source_coherence: SemanticSourceCoherenceV1::ExactGeneration,
             rows: Vec::new(),
             ann: PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Unsupported),
         });
@@ -4781,6 +4966,7 @@ mod tests {
             search_index_key: search_index_key().clone(),
             source_generation: source.clone(),
             capability_manifest_digest: capability.clone(),
+            source_coherence: SemanticSourceCoherenceV1::ExactGeneration,
             rows: Vec::new(),
             ann: PublishedSemanticAnnBindingV1::Unavailable(SemanticAnnIndexStateV1::Unsupported),
         });
@@ -5357,6 +5543,7 @@ mod tests {
             control: &control,
             mode: SemanticQueryModeV1::FallbackAllowed,
             fallback: composition_fallback(),
+            source_coherence: SemanticSourceCoherenceV1::ExactGeneration,
         })
         .expect("cancelled semantic composition");
 
@@ -5610,6 +5797,7 @@ mod tests {
             control: &IdleControl,
             mode: SemanticQueryModeV1::FallbackAllowed,
             fallback: composition_fallback(),
+            source_coherence: SemanticSourceCoherenceV1::ExactGeneration,
         })
         .expect("compose while indexing");
         assert!(matches!(
@@ -5617,5 +5805,555 @@ mod tests {
             SemanticQueryServiceOutcomeV1::Fallback { .. }
         ));
         let _ = release_tx.send(());
+    }
+
+    /// Source-identity contract for #753: semantic readiness is decided by the
+    /// exact evaluated source content identity plus model/profile pins, never
+    /// by the monotonic code-generation identifier alone. Real sealed
+    /// generations are built through the production owner so the corpus
+    /// identities under test are the ones the daemon actually seals.
+    mod source_identity_contract {
+        use std::collections::BTreeSet;
+        use std::sync::Mutex as StdMutex;
+
+        use tracedecay_code_index::chunks::content_digest as bytes_content_digest;
+        use tracedecay_code_index::production::{
+            CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
+            CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
+            CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+            CodeIndexRepositoryParseIdentityV1,
+        };
+        use tracedecay_code_index::projection::{
+            ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
+            ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
+        };
+        use tracedecay_domain::{
+            ChangedCodeChunkV1, CommitId, EmbeddingDeviceClassV1, EmbeddingMetricV1,
+            EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+            EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, LanguageId, PrivacyDomainId,
+            ProjectId, ProjectionOperationV1, ProjectionOutcomeV1, RefId, RepositoryDirtyStateV1,
+            SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+            SnapshotFileDispositionV1, TreeId, WorktreeId,
+        };
+        use tracedecay_semantic::projector::{
+            CanonicalChunkVectorEncoderV1, prepare_vector_generation,
+        };
+
+        use super::*;
+        use crate::store::vector_generations::VectorGenerationStateMachineV1;
+
+        fn fixture_id<T>(value: &str) -> T
+        where
+            T: TryFrom<String>,
+            T::Error: std::fmt::Debug,
+        {
+            T::try_from(value.to_owned()).expect("canonical fixture identity")
+        }
+
+        #[derive(Clone, Default)]
+        struct InMemoryPublicationStore {
+            active: Arc<
+                StdMutex<BTreeMap<CodeIndexGenerationScopeV1, Arc<CodeIndexPublishedGenerationV1>>>,
+            >,
+        }
+
+        impl CodeIndexAtomicPublicationPort for InMemoryPublicationStore {
+            fn load_active(
+                &self,
+                scope: &CodeIndexGenerationScopeV1,
+            ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1>
+            {
+                Ok(self
+                    .active
+                    .lock()
+                    .expect("publication lock")
+                    .get(scope)
+                    .map(|generation| generation.as_ref().clone()))
+            }
+
+            fn publish_atomically(
+                &mut self,
+                scope: &CodeIndexGenerationScopeV1,
+                expected_active_generation: Option<&CodeGenerationId>,
+                generation: Arc<CodeIndexPublishedGenerationV1>,
+            ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+                let mut active = self.active.lock().expect("publication lock");
+                if active
+                    .get(scope)
+                    .map(|current| current.manifest().generation_id.clone())
+                    .as_ref()
+                    != expected_active_generation
+                {
+                    return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+                }
+                active.insert(scope.clone(), generation);
+                Ok(())
+            }
+        }
+
+        #[derive(Default)]
+        struct ApplyingProjectionSink;
+
+        impl CodeChunkProjectionSink for ApplyingProjectionSink {
+            fn project_changed_chunks(
+                &mut self,
+                request: &ProjectionBatchRequestV1,
+                receipt_builder: ProjectionReceiptBuilderV1<'_>,
+            ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
+                let mut decisions: Vec<ChunkProjectionDecisionV1> = request
+                    .changes
+                    .added_or_changed
+                    .iter()
+                    .map(|change| ChunkProjectionDecisionV1 {
+                        chunk_id: change.chunk_id.clone(),
+                        prior_chunk_digest: change.prior_digest.clone(),
+                        current_chunk_digest: change.current_digest.clone(),
+                        operation: if change.prior_digest.is_some() {
+                            ProjectionOperationV1::Updated
+                        } else {
+                            ProjectionOperationV1::Added
+                        },
+                        outcome: ProjectionOutcomeV1::Applied,
+                        output_digest: change.current_digest.clone(),
+                    })
+                    .collect();
+                decisions.extend(request.changes.deleted.iter().map(|change| {
+                    ChunkProjectionDecisionV1 {
+                        chunk_id: change.chunk_id.clone(),
+                        prior_chunk_digest: change.prior_digest.clone(),
+                        current_chunk_digest: None,
+                        operation: ProjectionOperationV1::Deleted,
+                        outcome: ProjectionOutcomeV1::Applied,
+                        output_digest: None,
+                    }
+                }));
+                decisions.extend(request.changes.reused.iter().map(|change| {
+                    ChunkProjectionDecisionV1 {
+                        chunk_id: change.chunk_id.clone(),
+                        prior_chunk_digest: change.prior_digest.clone(),
+                        current_chunk_digest: change.current_digest.clone(),
+                        operation: ProjectionOperationV1::Reused,
+                        outcome: ProjectionOutcomeV1::Reused,
+                        output_digest: None,
+                    }
+                }));
+                receipt_builder
+                    .build(&decisions)
+                    .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
+            }
+        }
+
+        struct ActiveControl;
+
+        impl CodeIndexExecutionControlV1 for ActiveControl {
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+
+            fn is_deadline_exceeded(&self) -> bool {
+                false
+            }
+        }
+
+        fn corpus_config() -> CodeIndexProductionConfigV1 {
+            CodeIndexProductionConfigV1 {
+                project_id: fixture_id::<ProjectId>("project.source-identity"),
+                repository: fixture_id::<RepositoryId>("repository.source-identity"),
+                sanitizer_revision: fixture_id::<SanitizerRevision>("sanitizer.v1"),
+                policy_revision: fixture_id::<PolicyRevisionId>("policy.v1"),
+                chunker_revision: fixture_id::<ChunkerRevision>("chunker.v2"),
+                privacy_domain: fixture_id::<PrivacyDomainId>("privacy.source-identity"),
+                privacy_key_epoch: 7,
+                max_snapshot_age_micros: None,
+            }
+        }
+
+        fn corpus_build_request(
+            source: &str,
+            revision: &str,
+            file_occurrence: &str,
+            sealed_at: i64,
+            mark_changed: bool,
+        ) -> CodeIndexBuildRequestV1 {
+            let bytes = source.as_bytes().to_vec();
+            let file = SanitizedCodeFileV1 {
+                file_occurrence_id: fixture_id::<FileOccurrenceId>(file_occurrence),
+                logical_path: "src/lib.rs".to_owned(),
+                language: Some(fixture_id::<LanguageId>("rust")),
+                content_digest: bytes_content_digest(&bytes),
+                disposition: SnapshotFileDispositionV1::Present,
+            };
+            let mut changed_files = BTreeSet::new();
+            if mark_changed {
+                changed_files.insert("src/lib.rs".to_owned());
+            }
+            CodeIndexBuildRequestV1 {
+                snapshot: SanitizedCodeSnapshotV1 {
+                    repository: fixture_id::<RepositoryId>("repository.source-identity"),
+                    worktree: Some(fixture_id::<WorktreeId>("worktree.source-identity")),
+                    reference: Some(fixture_id::<RefId>("refs/heads/source-identity")),
+                    source_revision: Some(fixture_id::<CommitId>(revision)),
+                    sanitizer_revision: fixture_id::<SanitizerRevision>("sanitizer.v1"),
+                    sanitization_receipts: vec![fixture_id::<SanitizationReceiptId>(
+                        "receipt.source-identity",
+                    )],
+                    content_identity: bytes_content_digest(&bytes),
+                    captured_at: UtcMicros(sealed_at),
+                    files: vec![file.clone()],
+                },
+                captured_files: vec![CodeIndexCapturedFileV1 {
+                    file_occurrence_id: file.file_occurrence_id,
+                    sanitized_bytes: bytes.into(),
+                    sensitivity_level: SensitivityLevelV1::Public,
+                }],
+                changed_files,
+                invalidations: BTreeSet::new(),
+                ignored_source_admissions: Vec::new(),
+                repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                    tree: Some(fixture_id::<TreeId>(&format!("tree.{revision}"))),
+                    dirty: RepositoryDirtyStateV1::Dirty,
+                },
+                sealed_at: UtcMicros(sealed_at),
+                target_projection_key: ProjectionKeyV1 {
+                    kind: tracedecay_domain::ProjectionKindV1::Lexical,
+                    schema_revision: "lexical.source-identity.v1".to_owned(),
+                    profile_digest: test_digest('e'),
+                },
+            }
+        }
+
+        struct DeterministicEncoder;
+
+        impl CanonicalChunkVectorEncoderV1 for DeterministicEncoder {
+            fn encode(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunk: &CodeSearchChunkV1,
+            ) -> Result<Vec<f32>, String> {
+                let seed = chunk
+                    .sanitized_text
+                    .as_str()
+                    .bytes()
+                    .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(byte)));
+                Ok((0..key.dimensions as usize)
+                    .map(|index| (seed.wrapping_add(index as u32) % 101) as f32 / 101.0)
+                    .collect())
+            }
+        }
+
+        fn corpus_embedding_key(chunker_revision: ChunkerRevision) -> EmbeddingProjectionKeyV1 {
+            EmbeddingProjectionKeyV1 {
+                model_artifact_digest: test_digest('1'),
+                tokenizer_digest: test_digest('2'),
+                config_digest: test_digest('3'),
+                query_instruction_digest: None,
+                document_instruction_digest: None,
+                document_composition:
+                    tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
+                pooling: EmbeddingPoolingV1::Mean,
+                truncation_side: EmbeddingTruncationSideV1::Right,
+                truncation_length: 512,
+                inference_batch_size: 8,
+                inference_batch_bytes: 16 * 1024,
+                runtime_backend: "fastembed-ort".to_owned(),
+                runtime_build_revision: "ort-source-identity-1".to_owned(),
+                device_class: EmbeddingDeviceClassV1::Cpu,
+                dimensions: 4,
+                metric: EmbeddingMetricV1::Cosine,
+                normalization: EmbeddingNormalizationV1::L2,
+                precision: EmbeddingPrecisionV1::Fp32,
+                chunk_schema_revision: "code-search-chunk.v1".to_owned(),
+                chunker_revision,
+                privacy_domain: fixture_id::<PrivacyDomainId>("privacy.source-identity"),
+                privacy_key_epoch: 7,
+            }
+        }
+
+        /// Build the sealed publications the contract is decided against:
+        /// `first` and `republished` seal byte-identical trees under different
+        /// commits (distinct generation identifiers, one source truth), and
+        /// `edited` seals genuinely different bytes.
+        fn sealed_publications() -> (
+            Arc<CodeIndexPublishedGenerationV1>,
+            Arc<CodeIndexPublishedGenerationV1>,
+            Arc<CodeIndexPublishedGenerationV1>,
+        ) {
+            let mut owner = CodeIndexProductionOwnerV1::new(
+                corpus_config(),
+                InMemoryPublicationStore::default(),
+                ApplyingProjectionSink,
+            )
+            .expect("production owner");
+            let source = "fn semantic_probe() -> u32 { 1 }\nfn stable() -> u32 { 2 }\n";
+            let first = owner
+                .build_and_publish(
+                    corpus_build_request(source, "commit.1", "file.corpus.1", 1_000_000, false),
+                    &ActiveControl,
+                )
+                .expect("first sealed publication");
+            let republished = owner
+                .build_and_publish(
+                    corpus_build_request(source, "commit.2", "file.corpus.1", 2_000_000, true),
+                    &ActiveControl,
+                )
+                .expect("same-content republication");
+            let edited = owner
+                .build_and_publish(
+                    corpus_build_request(
+                        "fn semantic_probe() -> u32 { 99 }\nfn stable() -> u32 { 2 }\n",
+                        "commit.3",
+                        "file.corpus.3",
+                        3_000_000,
+                        true,
+                    ),
+                    &ActiveControl,
+                )
+                .expect("edited publication");
+            (first, republished, edited)
+        }
+
+        /// Project real vectors for `code` through the nominal projector and
+        /// state machine, exactly as the daemon stages them.
+        fn published_vectors_for(
+            code: &CodeIndexPublishedGenerationV1,
+        ) -> PublishedVectorGenerationV1 {
+            let chunks = code.chunks().chunks();
+            assert!(
+                !chunks.is_empty(),
+                "the sealed fixture generation must chunk its source"
+            );
+            let key = corpus_embedding_key(chunks[0].chunker_revision.clone());
+            let admitted = key.admit().expect("admitted embedding projection");
+            let mut changes = ChangedCodeChunkSetV1 {
+                from_generation: None,
+                to_generation: code.manifest().generation_id.clone(),
+                manifest_digest: test_digest('0'),
+                added_or_changed: chunks
+                    .iter()
+                    .map(|chunk| ChangedCodeChunkV1 {
+                        chunk_id: chunk.id.clone(),
+                        prior_digest: None,
+                        current_digest: Some(chunk.content_digest.clone()),
+                    })
+                    .collect(),
+                deleted: Vec::new(),
+                reused: Vec::new(),
+            };
+            changes.manifest_digest = changes.compute_digest().expect("changed-set digest");
+            let mut request = ProjectionBatchRequestV1 {
+                request_digest: test_digest('0'),
+                changes,
+                previous_projection_key: None,
+                target_projection_key: admitted.projection_key().clone(),
+                replay_reason: ProjectionReplayReasonV1::InitialProjection,
+            };
+            request.request_digest =
+                expected_request_digest(&request).expect("projection request digest");
+            let prepared =
+                prepare_vector_generation(&admitted, request, chunks, &mut DeterministicEncoder)
+                    .expect("prepared projection");
+            let mut machine = VectorGenerationStateMachineV1::new();
+            let build = machine
+                .begin_generation(VectorGenerationPlanV1 {
+                    target_projection_key: admitted.projection_key().clone(),
+                    source_generation: code.manifest().generation_id.clone(),
+                    source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
+                    expected_chunk_ids: chunks
+                        .iter()
+                        .map(|chunk| chunk.id.clone())
+                        .collect::<Vec<_>>()
+                        .into(),
+                    base_generation: None,
+                })
+                .expect("staged vector generation");
+            machine
+                .commit_batch(&build, None, prepared)
+                .expect("committed projection batch");
+            let publication = machine
+                .publish_generation(&build)
+                .expect("published vector generation");
+            machine
+                .generation(&publication.generation_id)
+                .expect("readable published vector generation")
+                .clone()
+        }
+
+        /// #753 success test 1: a republication of byte-identical source under
+        /// a new code-generation identifier must not invalidate the evaluated
+        /// semantic generation. The proof is the sealed corpus identity, not
+        /// the monotonic identifier.
+        #[test]
+        fn a_same_content_republication_keeps_the_semantic_generation_valid() {
+            let (first, republished, _) = sealed_publications();
+            assert_ne!(
+                first.manifest().generation_id,
+                republished.manifest().generation_id,
+                "the republication must mint a new physical identifier"
+            );
+            assert_eq!(
+                first.snapshot().content_identity,
+                republished.snapshot().content_identity,
+                "the republication must seal the same source truth"
+            );
+            let vectors = published_vectors_for(&first);
+            assert_eq!(vectors.source_generation(), &first.manifest().generation_id);
+
+            assert_eq!(
+                semantic_source_coherence(&vectors, &republished),
+                SemanticSourceCoherenceOutcomeV1::Coherent(
+                    SemanticSourceCoherenceV1::ProvenSourceContent
+                ),
+                "a generation-id change alone must not invalidate the semantic generation"
+            );
+
+            // Exact-generation admission stays strict: the physical identifier
+            // still refuses without the content proof.
+            let search_index_key = search_index_key().clone();
+            assert!(matches!(
+                PublishedSemanticVectorReadPortV1::new(
+                    vectors.clone(),
+                    search_index_key.clone(),
+                    &republished,
+                    None,
+                ),
+                Err(RetrievalPortError::GenerationMismatch)
+            ));
+
+            // Proven-content admission serves, rebound to the publication that
+            // queries actually pin.
+            let port = PublishedSemanticVectorReadPortV1::new_source_coherent(
+                vectors.clone(),
+                search_index_key.clone(),
+                &republished,
+                None,
+            )
+            .expect("content-proven vectors serve the republication");
+            assert_eq!(
+                port.source_coherence,
+                SemanticSourceCoherenceV1::ProvenSourceContent
+            );
+            assert_eq!(
+                port.source_generation,
+                republished.manifest().generation_id,
+                "the port binds the serving publication identity"
+            );
+            assert_eq!(port.rows.len(), republished.chunks().chunks().len());
+            assert!(
+                port.rows.iter().all(|row| row.source_generation
+                    == republished.manifest().generation_id
+                    && row.vector_generation == *vectors.generation_id()),
+                "rows carry the serving source identity and the exact physical vector identity"
+            );
+
+            // The exact source keeps serving exactly.
+            let exact = PublishedSemanticVectorReadPortV1::new_source_coherent(
+                vectors,
+                search_index_key,
+                &first,
+                None,
+            )
+            .expect("the exact source generation still serves");
+            assert_eq!(
+                exact.source_coherence,
+                SemanticSourceCoherenceV1::ExactGeneration
+            );
+        }
+
+        /// #753 success test 2: a serving generation sealing different source
+        /// content is a typed mismatch that names both identities; nothing
+        /// attaches silently.
+        #[test]
+        fn a_different_source_identity_is_a_typed_mismatch_naming_both_identities() {
+            let (first, _, edited) = sealed_publications();
+            assert_ne!(
+                first.snapshot().content_identity,
+                edited.snapshot().content_identity,
+                "the edited publication must seal different source truth"
+            );
+            let vectors = published_vectors_for(&first);
+
+            let outcome = semantic_source_coherence(&vectors, &edited);
+            let SemanticSourceCoherenceOutcomeV1::Mismatch(mismatch) = outcome else {
+                panic!("different source content must be a typed mismatch: {outcome:?}");
+            };
+            assert_eq!(
+                mismatch.vector_source_generation,
+                first.manifest().generation_id,
+                "the mismatch names the identity the vectors were evaluated from"
+            );
+            assert_eq!(
+                &mismatch.vector_source_manifest_digest,
+                vectors.source_manifest_digest(),
+                "the mismatch names the evaluated source manifest digest"
+            );
+            assert_eq!(
+                mismatch.serving_generation,
+                edited.manifest().generation_id,
+                "the mismatch names the serving publication"
+            );
+            assert_eq!(
+                mismatch.serving_content_identity,
+                edited.snapshot().content_identity,
+                "the mismatch names the serving source content identity"
+            );
+
+            // No silent attach on either admission path.
+            let search_index_key = search_index_key().clone();
+            assert!(matches!(
+                PublishedSemanticVectorReadPortV1::new(
+                    vectors.clone(),
+                    search_index_key.clone(),
+                    &edited,
+                    None,
+                ),
+                Err(RetrievalPortError::GenerationMismatch)
+            ));
+            assert!(matches!(
+                PublishedSemanticVectorReadPortV1::new_source_coherent(
+                    vectors,
+                    search_index_key,
+                    &edited,
+                    None,
+                ),
+                Err(RetrievalPortError::GenerationMismatch)
+            ));
+        }
+
+        /// The corpus bijection itself: one missing, foreign, or re-digested
+        /// chunk breaks the proof.
+        #[test]
+        fn corpus_coverage_requires_a_digest_exact_bijection() {
+            let (first, republished, _) = sealed_publications();
+            let vectors = published_vectors_for(&first);
+            assert!(semantic_vector_rows_cover_chunk_corpus(
+                vectors.vectors(),
+                republished.chunks().chunks(),
+            ));
+
+            let mut missing = vectors.vectors().clone();
+            let (removed, _) = missing
+                .pop_first()
+                .expect("the fixture corpus has at least one vector");
+            assert!(
+                !semantic_vector_rows_cover_chunk_corpus(&missing, republished.chunks().chunks()),
+                "a chunk without a vector must break the proof ({removed})"
+            );
+
+            let mut redigested = vectors.vectors().clone();
+            let (chunk_id, vector) = redigested
+                .pop_first()
+                .expect("the fixture corpus has at least one vector");
+            let mut foreign = vector.clone();
+            foreign.chunk_digest = ContentDigest::new(format!("sha256:{}", "f".repeat(64)))
+                .expect("foreign content digest");
+            redigested.insert(chunk_id, foreign);
+            assert!(
+                !semantic_vector_rows_cover_chunk_corpus(
+                    &redigested,
+                    republished.chunks().chunks()
+                ),
+                "a vector projected from different bytes must break the proof"
+            );
+        }
     }
 }

@@ -85,7 +85,10 @@ pub use ports::{
 };
 pub use production::{
     ApplicationSemanticSearchParametersV1, AuthorizedProjectSemanticSearchParametersV1,
-    ProductionProjectSemanticSearchBridgeV1, compose_project_application_semantic_search,
+    ProductionProjectSemanticSearchBridgeV1, SemanticSourceCoherenceOutcomeV1,
+    SemanticSourceCoherenceV1, SemanticSourceMismatchV1,
+    compose_project_application_semantic_search, semantic_source_coherence,
+    semantic_source_content_coherent,
 };
 pub use production::{
     PreparedProductionSemanticCacheCommitV1, PreparedSemanticEvaluationGenerationV1,

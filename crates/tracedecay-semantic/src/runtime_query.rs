@@ -125,6 +125,25 @@ where
             && authority.projection().projection_key() == projection_key)
             .then(|| Arc::clone(&self.factory))
     }
+
+    /// Query-embedder admission by model identity alone, for a caller that has
+    /// already proven exact source-content coherence between its pinned vector
+    /// generation and the code generation it serves.
+    ///
+    /// The embedder's physical identity is the projection key (model artifact,
+    /// tokenizer, and document composition digests); generation identifiers are
+    /// deliberately not compared here because the query vector a warmed runtime
+    /// produces depends only on that key, and the caller's content proof binds
+    /// the served vectors to the current corpus.
+    pub fn factory_for_projection(
+        &self,
+        projection_key: &ProjectionKeyV1,
+    ) -> Option<Arc<PooledSemanticQueryEmbedderFactory<R>>> {
+        let (_, authority, _) = self.factory.runtime().active_snapshot();
+        (self.pointer.projection_key == *projection_key
+            && authority.projection().projection_key() == projection_key)
+            .then(|| Arc::clone(&self.factory))
+    }
 }
 
 /// Request-scoped adapter that obtains one bounded warmed session and emits
@@ -308,6 +327,61 @@ mod tests {
                     authority.projection().projection_key(),
                 )
                 .is_none()
+        );
+    }
+
+    /// A caller holding a source-content proof (#753) pins only the physical
+    /// embedder identity: a republished code generation identifier admits, a
+    /// different projection key still refuses.
+    #[test]
+    fn projection_scoped_query_factory_admits_across_publication_identifiers() {
+        let authority = Arc::new(authority());
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let service = SemanticRuntimeService::new_owned(
+            Arc::clone(&authority),
+            factory,
+            config(1, std::time::Duration::from_mins(1), 1 << 20),
+        )
+        .expect("runtime service");
+        let evaluated_source =
+            CodeGenerationId::new("code-generation.g1".to_owned()).expect("evaluated source");
+        let republished_source =
+            CodeGenerationId::new("code-generation.g2".to_owned()).expect("republished source");
+        let vector_generation = VectorGenerationIdV1::new(
+            ManifestDigest::new(format!("sha256:{}", "cd".repeat(32)))
+                .expect("vector generation digest"),
+        );
+        let projection_key = authority.projection().projection_key().clone();
+        let current = CurrentSemanticQueryRuntimeV1::new(
+            SemanticGenerationPointerV1 {
+                generation: vector_generation.clone(),
+                source_generation: evaluated_source,
+                projection_key: projection_key.clone(),
+            },
+            service,
+        );
+
+        assert!(
+            current
+                .factory_for(&republished_source, &vector_generation, &projection_key)
+                .is_none(),
+            "exact-generation admission still refuses a republished identifier"
+        );
+        assert!(
+            current.factory_for_projection(&projection_key).is_some(),
+            "a content-proven caller is admitted by projection identity alone"
+        );
+
+        let mut foreign_projection = projection_key.clone();
+        foreign_projection.profile_digest =
+            ManifestDigest::new(format!("sha256:{}", "ef".repeat(32)))
+                .expect("foreign embedding profile digest");
+        assert!(
+            current
+                .factory_for_projection(&foreign_projection)
+                .is_none(),
+            "a different model identity never attaches, proof or not"
         );
     }
 
