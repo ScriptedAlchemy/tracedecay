@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use tracedecay_code_index_runtime::code_index_scheduler;
+
 use super::bootstrap::run_git;
 use super::*;
 
@@ -190,6 +192,47 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // owns no verified code graph. A graph query routed to it must therefore
     // answer the typed `code-graph-unavailable` refusal rather than silently
     // serving another worktree's listing.
+    // That refusal is the *typed terminal* both project-open deferred owners
+    // key off. A route the daemon may never index automatically publishes no
+    // generation and seats no text serving level, so the deferred advisory
+    // owner and the deferred query-authority mount have nothing to wait for:
+    // each answers this admission instead of parking a background task that
+    // would wake on every other route's serving seat, take the shared project
+    // writer lane it can never use, and still be resolving at reopen and
+    // shutdown. Assert the admission is exact to the route — the primary
+    // shares this store and stays admitted.
+    for (route, expected) in [
+        (
+            &linked,
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
+        ),
+        (
+            &primary,
+            code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted,
+        ),
+    ] {
+        let project_id = tracedecay_domain::ProjectId::new(
+            linked_graph
+                .store_layout()
+                .identity
+                .project_id
+                .clone()
+                .expect("admitted routes carry a project identity"),
+        )
+        .expect("project id");
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(route, &project_id)
+            .expect("route scope");
+        assert_eq!(
+            engine
+                .invocation
+                .code_index_schedulers
+                .automatic_admission_for_scope(&scope),
+            Some(expected),
+            "code-index admission must be exact to {}",
+            route.display()
+        );
+    }
+
     let linked_session_id = "session.linked-worktree-follow-up";
     notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
     let routed = files_for_session(primary_server.as_ref(), linked_session_id).await;
