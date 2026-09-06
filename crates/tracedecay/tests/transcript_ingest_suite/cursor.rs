@@ -293,6 +293,11 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     ];
     let project = init_project(&tmp);
     let project_id = mark_test_project(&project);
+    // Since `c24e4a62a` the hook resolves its project root through the
+    // initialized-store gate, exactly like production installs: `init` creates
+    // the project store, and only then does the daemon mount a project LCM
+    // authority. Enrollment alone leaves the route reporting `unavailable`.
+    crate::common::initialize_tracedecay_cli_project(&home, &project);
     let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
