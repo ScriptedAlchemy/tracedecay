@@ -3446,15 +3446,13 @@ impl DaemonCodeTextArtifactStoreV1 {
                 )
             })?;
         let snapshot = self.resident_memory.snapshot();
-        let observed_bytes = sampled_process_resident_bytes_v1()
-            .map(|observed| {
-                self.resident_memory
-                    .pressure()
-                    .publish_observed_resident_bytes(observed)
-                    .observed_bytes()
-                    .unwrap_or(observed)
-            })
-            .unwrap_or(0);
+        let observed_bytes = sampled_process_resident_bytes_v1().map_or(0, |observed| {
+            self.resident_memory
+                .pressure()
+                .publish_observed_resident_bytes(observed)
+                .observed_bytes()
+                .unwrap_or(observed)
+        });
         let unmodeled_live_bytes = observed_bytes.saturating_sub(snapshot.used_bytes);
         let admission_watermark = self
             .resident_memory
