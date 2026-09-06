@@ -501,6 +501,18 @@ pub(super) async fn resolve_multi_root_projects(
         .map_err(|_| DaemonInvocationProblem::Unavailable)?
         .profile_id()
         .clone();
+    // `SharedProfileStoreLocatorV1` names the one physical profile store every
+    // registered root of this profile resolves through, and an authorized
+    // scope set refuses roots that do not share it. The registry's
+    // `store_instances.store_id` is per project (`store:<project>:<mode>`), so
+    // stamping it here made every federated workspace that spans two projects
+    // — the only kind this resolver builds — fail closed on its own locator.
+    // The profile lease's verified locator is that shared store authority.
+    let profile_store_id = database
+        .verified_locator()
+        .locator_digest
+        .as_str()
+        .to_owned();
     let mut roots = Vec::with_capacity(selectors.len());
     for selector in selectors {
         let context = database
@@ -519,10 +531,8 @@ pub(super) async fn resolve_multi_root_projects(
             .stores
             .iter()
             .filter(|store| store.store.project_id == selector.project_id.as_str());
-        let Some(store) = stores.next() else {
-            return Err(DaemonInvocationProblem::Unavailable);
-        };
-        if stores.next().is_some() {
+        // Exactly one registered store instance must back this project.
+        if stores.next().is_none() || stores.next().is_some() {
             return Err(DaemonInvocationProblem::Unavailable);
         }
         let registered_root = PathBuf::from(context.project.canonical_root);
@@ -556,7 +566,7 @@ pub(super) async fn resolve_multi_root_projects(
         let locator = tracedecay_application::RegisteredRootLocatorV1::new(
             selector.project_id.clone(),
             profile_id.clone(),
-            store.store.store_id.clone(),
+            profile_store_id.clone(),
             root.clone(),
         )
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
