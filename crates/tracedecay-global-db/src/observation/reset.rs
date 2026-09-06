@@ -17,15 +17,26 @@
 //! `session_messages` projector output (classified `Recoverable`; the cleared
 //! evidence re-derives by re-ingesting provider transcripts), and preserves
 //! everything else in the store — transcripts, LCM content, configuration,
-//! registry, workflow, and the session-temporal state that is not derived
-//! from observations. The session-temporal rows that *are* keyed to the
-//! observation stream reset with it (see
-//! [`OBSERVATION_DERIVED_TEMPORAL_DELETES`]) rather than being orphaned.
+//! registry, workflow, and the session-temporal state that is not a
+//! projection of observations. The session-temporal projection *is* one, so it
+//! resets with the stream it projects (see
+//! [`OBSERVATION_DERIVED_TEMPORAL_DELETES`]) rather than being orphaned or
+//! left advertising coverage of rows that no longer exist.
 //!
 //! The derived usage (`observation_provider_usage`) and the admission cursors
 //! (`source_cursors`, `source_cursor_advances`) always reset together: leaving
 //! either behind is what would let the rebuilt authority double-count or skip
 //! the native events it re-reads.
+//!
+//! Two invariants bound the deletion. Rows the reset preserves must never be
+//! left pointing at rows it removes: [`PRESERVED_DEPENDENT_TABLES`] refuses
+//! atomically for the one such dependency that has no safe scoped treatment,
+//! and `PRAGMA foreign_key_check` proves the rest before the transaction
+//! commits (the reset suspends per-statement enforcement for its own
+//! intermediate drop states, and `PRAGMA integrity_check` does not cover
+//! foreign keys). And every step — trigger removal, deletion, temporal
+//! invalidation, trigger restoration, scheme enrollment — runs inside that one
+//! transaction, so a failure anywhere leaves the store exactly as refused.
 
 use std::collections::BTreeSet;
 
@@ -82,37 +93,90 @@ const OBSERVATION_PROJECTION_TABLES: &[&str] = &[
     "observation_projection_rebuild_workflow_facts",
 ];
 
-/// Session-temporal projection rows keyed to the observation stream, in
-/// dependency order.
+/// Derived-temporal tables whose invariant triggers would abort the deletes
+/// below. Their triggers are dropped and reinstalled from the same canonical
+/// authority inside the reset transaction, the way the observation tables are
+/// dropped and recreated: immutability guards ordinary writers, not the
+/// authority rebuild itself. Runtime immutability is unchanged — the store
+/// leaves this function carrying the same trigger set it arrived with.
 ///
-/// Every one of them is an algorithmic derivation of `observations` — the
-/// per-observation effect digest, occurrence ordinals and anchors, turn
-/// membership, span/burst evidence — carrying no user-authored content, so
-/// they reset with the authority they derive from and re-derive when the
-/// preserved transcripts are re-ingested. Refusing over them instead left the
-/// scoped reset unreachable in practice: any store that had ever ingested
-/// held these rows, so a refused authority had no way back.
-///
-/// Everything else session-temporal is left untouched — assertions and their
-/// supersession, summaries, relation receipts, refresh operations — because
-/// none of it is a pure function of the observation stream. Only the
-/// occurrence-anchored half of `session_current_entities` is cleared; its
-/// assertion-anchored rows stay with the assertions they name.
-/// Derived-temporal tables carrying immutability triggers that would abort
-/// the deletes above. Their invariant triggers are dropped and reinstalled
-/// from the same authority around the reset, the way the observation tables
-/// are dropped and recreated: immutability guards ordinary writers, not the
-/// authority rebuild itself.
-const IMMUTABLE_DERIVED_TEMPORAL_TABLES: &[&str] = &["session_temporal_observation_effects"];
+/// `session_occurrences` is deliberately absent: its triggers keep the
+/// external-content `session_occurrences_fts` index in step with the deletes,
+/// so they must stay installed while the rows go.
+const IMMUTABLE_DERIVED_TEMPORAL_TABLES: &[&str] = &[
+    "session_refresh_batch_bindings",
+    "session_refresh_bindings",
+    "session_refresh_progress",
+    "session_refresh_receipts",
+    "session_refresh_operations",
+    "session_temporal_projection_receipts",
+    "session_temporal_generations",
+    "session_temporal_observation_effects",
+];
 
+/// The whole session-temporal projection of the observation stream, in
+/// dependency order (foreign-key enforcement is suspended, so the cascades
+/// these rows normally ride do not fire; each table is named explicitly and
+/// `PRAGMA foreign_key_check` proves nothing was missed).
+///
+/// Every generation is projector output over `observations`: its occurrences
+/// and their anchors, turn/thread/agent grouping, assertions and their
+/// supersession, current entities, span and burst evidence, summary
+/// availability, and the projection receipts that certify exactly those
+/// counts and digests. Deleting occurrences while preserving the generation
+/// would leave those receipts certifying coverage that no longer exists and
+/// `validate_final_projection_receipt` recomputing a disagreement — and a
+/// retained active frontier of 100 would exclude the re-ingested effects
+/// 1..=100 from `pending_session_temporal_refresh_page_result`, suppressing
+/// the rebuild it is supposed to trigger. So the generation is invalidated
+/// outright, together with the relation receipts and refresh bindings that
+/// authorize serving or resuming against it; the operator-visible refresh
+/// history in `session_refresh_operations` goes with them because a `running`
+/// row would keep the rebuilt stream out of discovery forever.
+///
+/// Everything session-temporal that is not projector output stays: summary
+/// nodes and their FTS index, external payload manifests (see
+/// [`PRESERVED_DEPENDENT_TABLES`]), cursor keys, and the retrieval anchors the
+/// rebuilt projection re-attaches to.
 const OBSERVATION_DERIVED_TEMPORAL_DELETES: &[&str] = &[
+    "DELETE FROM session_refresh_batch_bindings",
+    "DELETE FROM session_refresh_bindings",
+    "DELETE FROM session_refresh_progress",
+    "DELETE FROM session_refresh_receipts",
+    "DELETE FROM session_refresh_operations",
     "DELETE FROM session_derived_evidence_members",
     "DELETE FROM session_derived_evidence",
-    "DELETE FROM session_current_entities WHERE entity_kind = 'occurrence_anchor'",
+    "DELETE FROM session_current_entities",
+    "DELETE FROM session_assertion_supersession",
+    "DELETE FROM session_assertions",
     "DELETE FROM session_turn_members",
+    "DELETE FROM session_summary_availability",
     "DELETE FROM session_occurrences",
+    "DELETE FROM session_turns",
+    "DELETE FROM session_threads",
+    "DELETE FROM session_agents",
+    "DELETE FROM session_temporal_projection_receipts",
+    "DELETE FROM session_relation_effect_journal",
+    "DELETE FROM session_relation_receipts",
+    "DELETE FROM session_temporal_generations",
     "DELETE FROM session_temporal_observation_effects",
 ];
+
+/// Preserved rows that would be orphaned by the reset, with the authority
+/// they would be orphaned from.
+///
+/// `session_external_payload_manifests` is LCM publication metadata — durable,
+/// immutable by trigger, and outside every deletion above — whose `receipt_id`
+/// names a `sanitization_receipts` row the reset drops with the observation
+/// authority. There is no scoped treatment that keeps both coherent: the
+/// manifests are not reconstructible from the transcripts, and deleting
+/// external-payload metadata to make the reset succeed would destroy exactly
+/// the evidence a scoped reset promises to preserve. Such a store refuses
+/// atomically and needs an LCM-side remediation first.
+const PRESERVED_DEPENDENT_TABLES: &[(&str, &str)] = &[(
+    "session_external_payload_manifests",
+    "sanitization_receipts",
+)];
 
 /// Outcome of one completed scoped reset.
 #[derive(Debug)]
@@ -217,20 +281,64 @@ fn observation_authority_refused(conn: &rusqlite::Connection) -> Result<bool, Tr
     Ok(false)
 }
 
+/// Whether any preserved row is left pointing at a row that no longer exists.
+///
+/// The reset suspends per-statement foreign-key enforcement for its own
+/// intermediate drop states, so this is what proves the committed store is
+/// referentially coherent. `PRAGMA integrity_check` does not look at foreign
+/// keys, and `foreign_key_check` reports violations whether or not
+/// enforcement is on.
+fn require_referential_integrity(conn: &rusqlite::Connection) -> Result<(), TraceDecayError> {
+    let mut statement = conn
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(reset_storage)?;
+    let mut rows = statement.query([]).map_err(reset_storage)?;
+    let Some(row) = rows.next().map_err(reset_storage)? else {
+        return Ok(());
+    };
+    let table = row.get::<_, String>(0).map_err(reset_storage)?;
+    let parent = row.get::<_, String>(2).map_err(reset_storage)?;
+    Err(TraceDecayError::Config {
+        message: format!(
+            "a scoped {OBSERVATION_AUTHORITY} reset would leave {table} row(s) referencing \
+             missing {parent} row(s); this store needs a remediation for that dependency \
+             first, so nothing was reset"
+        ),
+    })
+}
+
 /// Resets exactly the refused observation authority in one transaction.
 ///
 /// Fails closed, mutating nothing, when the authority is not actually in a
-/// refused shape, protecting healthy data from an accidental reset.
+/// refused shape (protecting healthy data from an accidental reset), when a
+/// preserved dependency has no safe scoped treatment, or when the resulting
+/// store would not be referentially coherent.
 pub fn reset_refused_observation_authority(
     conn: &mut rusqlite::Connection,
 ) -> Result<ObservationAuthorityResetV1, TraceDecayError> {
     // The reset drops the refused tables together with every table that
     // references them, so per-statement foreign-key enforcement would only
     // reject the intermediate drop states of an exclusive maintenance
-    // connection. Referential coherence is restored by the next admission
-    // recreating the authority empty.
+    // connection; `require_referential_integrity` proves the committed result
+    // instead. The setting belongs to the connection, not to this operation,
+    // so it is restored before the caller reuses it — on both paths.
+    let enforced_foreign_keys = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, bool>(0))
+        .map_err(reset_storage)?;
     conn.pragma_update(None, "foreign_keys", false)
         .map_err(reset_storage)?;
+    let outcome = reset_within_maintenance_transaction(conn);
+    let restored = conn
+        .pragma_update(None, "foreign_keys", enforced_foreign_keys)
+        .map_err(reset_storage);
+    let report = outcome?;
+    restored?;
+    Ok(report)
+}
+
+fn reset_within_maintenance_transaction(
+    conn: &mut rusqlite::Connection,
+) -> Result<ObservationAuthorityResetV1, TraceDecayError> {
     let transaction = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(reset_storage)?;
@@ -241,6 +349,21 @@ pub fn reset_refused_observation_authority(
                  nothing was reset"
             ),
         });
+    }
+    for (table, parent) in PRESERVED_DEPENDENT_TABLES {
+        if !table_exists(&transaction, table)? {
+            continue;
+        }
+        let rows = row_count(&transaction, table)?;
+        if rows > 0 {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "a scoped {OBSERVATION_AUTHORITY} reset would orphan {rows} preserved row(s) \
+                     in {table} from the {parent} the reset recreates empty; this store needs a \
+                     remediation for that dependency first, so nothing was reset"
+                ),
+            });
+        }
     }
     // The session-temporal projection derives from the observation stream, so
     // it resets with it rather than being orphaned or refused over.
@@ -342,6 +465,7 @@ pub fn reset_refused_observation_authority(
             )
             .map_err(reset_storage)?;
     }
+    require_referential_integrity(&transaction)?;
     transaction.commit().map_err(reset_storage)?;
     Ok(ObservationAuthorityResetV1 {
         reset_tables,
