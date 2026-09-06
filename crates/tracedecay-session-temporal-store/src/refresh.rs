@@ -398,6 +398,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 });
             }
         }
+        // Resolve logical replay/conflict first; wall-clock validate mutable updated_at only for
+        // genuinely new progress.
         require_progress_timestamp(&progress, authoritative_validation_time)?;
 
         seed_active_projection_in_transaction(&transaction, &batch, &execution_control).await?;
@@ -472,6 +474,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 });
             }
         }
+        // Resolve logical replay/conflict first; wall-clock validate mutable updated_at only for
+        // genuinely new progress.
         require_progress_timestamp(&progress, authoritative_validation_time)?;
         let batch_ordinal = progress.committed_batches().checked_sub(1).ok_or(
             SessionStoreError::InvalidStateTransition {
@@ -2336,20 +2340,16 @@ mod tests {
     fn progress_timestamp_uses_authoritative_validation_boundary() {
         let authoritative_validation_time = UtcMicros(1_000_000);
 
-        assert!(
-            require_progress_timestamp(
-                &progress_at(UtcMicros(authoritative_validation_time.0 - 1)),
-                authoritative_validation_time,
-            )
-            .is_ok()
-        );
-        assert!(
-            require_progress_timestamp(
-                &progress_at(authoritative_validation_time),
-                authoritative_validation_time,
-            )
-            .is_ok()
-        );
+        require_progress_timestamp(
+            &progress_at(UtcMicros(authoritative_validation_time.0 - 1)),
+            authoritative_validation_time,
+        )
+        .unwrap();
+        require_progress_timestamp(
+            &progress_at(authoritative_validation_time),
+            authoritative_validation_time,
+        )
+        .unwrap();
         assert!(matches!(
             require_progress_timestamp(
                 &progress_at(UtcMicros(authoritative_validation_time.0 + 1)),

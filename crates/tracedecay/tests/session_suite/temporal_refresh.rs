@@ -696,11 +696,51 @@ async fn progress_replay_ignores_updated_at_clock_skew() {
         first.committed_records(),
         UtcMicros(i64::MAX),
     );
+    let (batch_replayed, _) = store
+        .persist_session_refresh_projection_batch(skewed.clone(), batch_for(&recovery, 0, 0, 0))
+        .await
+        .unwrap();
+    assert_eq!(batch_replayed, first);
     let replayed = store
         .persist_session_refresh_progress(skewed)
         .await
         .unwrap();
     assert_eq!(replayed, first);
+}
+
+#[tokio::test]
+async fn future_timestamp_same_ordinal_contradiction_prefers_idempotency_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = registered_temporal_runtime(&tmp).await;
+    let store = temporal_store(&runtime);
+    let session_id = session("session.refresh.progress.future.conflict");
+    begin(&store, &session_id, frontier(0, 0)).await;
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let first = progress_for(&recovery, 0, 1);
+    store
+        .persist_session_refresh_projection_batch(first.clone(), batch_for(&recovery, 0, 0, 0))
+        .await
+        .unwrap();
+    let contradictory = SessionRefreshProgressV1::new(
+        first.operation_id().clone(),
+        first.session_id().clone(),
+        first.frontier(),
+        coverage(1),
+        first.committed_batches(),
+        1,
+        UtcMicros(i64::MAX),
+    );
+
+    assert!(matches!(
+        store.persist_session_refresh_progress(contradictory).await,
+        Err(SessionStoreError::IdempotencyConflict {
+            context: "refresh progress conflict"
+        })
+    ));
 }
 
 #[tokio::test]
