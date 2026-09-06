@@ -1952,7 +1952,6 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     );
 }
 
-
 /// The published-generation integrity gate is an amortized load-time check.
 /// Verifying once per loaded generation must reach exactly the verdict a fresh
 /// verification reaches, and must stay fail-closed for a generation that has
