@@ -694,7 +694,7 @@ async fn progress_replay_ignores_updated_at_clock_skew() {
         *first.coverage(),
         first.committed_batches(),
         first.committed_records(),
-        UtcMicros(i64::MAX),
+        UtcMicros(first.updated_at().0 + 5_000),
     );
     let (batch_replayed, _) = store
         .persist_session_refresh_projection_batch(skewed.clone(), batch_for(&recovery, 0, 0, 0))
@@ -989,7 +989,7 @@ async fn future_progress_timestamp_is_rejected() {
         coverage(0),
         1,
         0,
-        UtcMicros(i64::MAX),
+        UtcMicros(now().0 + 3_600_000_000),
     );
     assert!(matches!(
         store
