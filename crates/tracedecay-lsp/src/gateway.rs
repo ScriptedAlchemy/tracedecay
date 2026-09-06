@@ -722,6 +722,8 @@ pub enum LspSemanticOperationOutcome {
 impl LspSemanticOperationOutcome {
     pub const ANALYZER_START_FAILED_DETAIL: &'static str = "Analyzer failed to start.";
     pub const ANALYZER_CANCELLED_DETAIL: &'static str = "Analyzer request was cancelled.";
+    pub const ANALYZER_RETIRED_DETAIL: &'static str =
+        "Analyzer client was retired without a result.";
     pub const ANALYZER_TIMEOUT_DETAIL: &'static str = "Analyzer request timed out.";
     pub const ANALYZER_REMOTE_ERROR_DETAIL: &'static str =
         "Analyzer request failed with a remote error.";
@@ -2873,6 +2875,7 @@ mod tests {
         let templates = [
             LspSemanticOperationOutcome::ANALYZER_START_FAILED_DETAIL,
             LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL,
+            LspSemanticOperationOutcome::ANALYZER_RETIRED_DETAIL,
             LspSemanticOperationOutcome::ANALYZER_TIMEOUT_DETAIL,
             LspSemanticOperationOutcome::ANALYZER_REMOTE_ERROR_DETAIL,
             LspSemanticOperationOutcome::ANALYZER_TRANSPORT_FAILED_DETAIL,
