@@ -5,9 +5,9 @@ description: 'Investigate TraceDecay daemon CPU, memory, I/O, or lock cost and v
 
 # Profiling TraceDecay performance
 
-Use the checkout's maintained `scripts/efficiency-scorecard.py` for isolated
-baseline and candidate journeys. It owns fixture, home, profile, registry, store,
-socket, and readiness setup. Build before measuring; never profile the operator's
+Use the checkout's maintained `efficiency-scorecard.py` (in the repository's
+top-level `scripts` directory) for isolated baseline and candidate journeys. It
+owns fixture, home, profile, registry, store, socket, and readiness setup. Build before measuring; never profile the operator's
 process or invent another sandbox wrapper. For manual captures, isolate all of
 those authorities and attach only to the exact process you started.
 
