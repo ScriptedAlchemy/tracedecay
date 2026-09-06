@@ -50,9 +50,9 @@ impl Fixture {
                 "user.name=Fixture",
                 "-c",
                 "user.email=fixture@example.com",
-                // The nested-tree fixture is deeper than Windows' 260-byte
-                // `MAX_PATH`; Git for Windows only opens such paths with
-                // `core.longpaths`. Other Gits ignore the key.
+                // The nested-tree fixture exceeds MAX_PATH under a Windows
+                // temp root; Git for Windows refuses those paths unless told
+                // to use the extended-length form. A no-op elsewhere.
                 "-c",
                 "core.longpaths=true",
             ])
@@ -243,9 +243,13 @@ fn authority_honors_repository_included_ignore_configuration() {
     let excludes = config_dir.path().join("ignored");
     std::fs::write(&excludes, "from-included-config.txt\n").unwrap();
     let config = config_dir.path().join("gitconfig");
+    // A backslash starts an escape sequence in a git config value, so a
+    // native Windows path must be spelled with forward slashes (which git
+    // accepts on every host) or the included file fails to parse.
+    let excludes_value = excludes.to_str().unwrap().replace('\\', "/");
     std::fs::write(
         &config,
-        format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+        format!("[core]\n\texcludesFile = {excludes_value}\n"),
     )
     .unwrap();
     fixture.git(&["config", "include.path", config.to_str().unwrap()]);

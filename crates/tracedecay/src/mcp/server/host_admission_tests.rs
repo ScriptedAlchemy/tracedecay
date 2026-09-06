@@ -603,7 +603,7 @@ fn add_branch_at_payload(root: PathBuf, branch: &str) -> Vec<u8> {
 }
 
 fn linked_worktree_on(project: &std::path::Path) -> PathBuf {
-    use super::writer_test_support::{git, git_path_argument};
+    use super::writer_test_support::git;
 
     // Sibling of the unique TempDir root — never a shared /tmp fixed name.
     let worktree = project.with_file_name(format!(
@@ -613,15 +613,13 @@ fn linked_worktree_on(project: &std::path::Path) -> PathBuf {
             .and_then(|name| name.to_str())
             .unwrap_or("repo")
     ));
-    // Git receives the spelling it accepts; the returned root keeps the
-    // canonical (on Windows: verbatim) identity the payload and assertions use.
-    let worktree_arg = git_path_argument(&worktree);
+    let worktree_arg = worktree.to_string_lossy();
     git(
         project,
         &[
             "worktree",
             "add",
-            worktree_arg.as_str(),
+            worktree_arg.as_ref(),
             "-b",
             "feature/admission",
         ],
@@ -951,13 +949,9 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
     let stranger_git = stranger.join(".git").canonicalize().expect("gitdir");
     let git_pointer = worktree.join(".git");
     assert!(git_pointer.is_file());
-    // A gitfile is read back by Git, so it carries the spelling Git accepts.
     std::fs::write(
         &git_pointer,
-        format!(
-            "gitdir: {}\n",
-            super::writer_test_support::git_path_argument(&stranger_git)
-        ),
+        format!("gitdir: {}\n", stranger_git.display()),
     )
     .expect("rewrite common-dir pointer");
 
