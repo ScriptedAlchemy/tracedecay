@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -244,12 +244,14 @@ async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
         .commit_batch(&build, None, prepared, Arc::clone(&cancellation))
         .await
         .unwrap();
-    store.runtime = Arc::new(PublicationAuthorityProbeRuntime {
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
         inner: Arc::clone(&store.runtime),
         require_background_begin: false,
         prepare_deadline: Mutex::new(None),
         cancellation_to_trip: None,
+        begin_gate: Mutex::new(None),
     });
+    store.replace_runtime(probe);
 
     let publication = store
         .publish_generation(&build, cancellation)
@@ -279,12 +281,14 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
         &admitted_embedding(),
     );
     store.configure_stage(descriptor).unwrap();
-    store.runtime = Arc::new(PublicationAuthorityProbeRuntime {
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
         inner: Arc::clone(&store.runtime),
         require_background_begin: true,
         prepare_deadline: Mutex::new(None),
         cancellation_to_trip: None,
+        begin_gate: Mutex::new(None),
     });
+    store.replace_runtime(probe);
 
     let outcome = store.begin_generation(plan, cancellation).await.unwrap();
 
@@ -325,12 +329,14 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
     let (plan, _, descriptor) =
         prepared_generation(&source, "chunk.begin-cancelled", 'e', &admitted_embedding());
     store.configure_stage(descriptor).unwrap();
-    store.runtime = Arc::new(PublicationAuthorityProbeRuntime {
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
         inner: Arc::clone(&store.runtime),
         require_background_begin: false,
         prepare_deadline: Mutex::new(None),
         cancellation_to_trip: Some(cancellation_flag),
+        begin_gate: Mutex::new(None),
     });
+    store.replace_runtime(probe);
 
     assert!(matches!(
         store.begin_generation(plan, cancellation).await,
@@ -338,11 +344,93 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
     ));
 }
 
+/// Stands in for `EXACT_SQL_TRANSACTION_IDLE_LIMIT`, shrunk so the test fails
+/// in seconds instead of parking for the real abandoned-transaction lease.
+const WRITER_GATE_LEASE: Duration = Duration::from_secs(2);
+
+/// The store's durable operations acquire the project's one exclusive writer
+/// synchronously. Running that on the runtime is what starved the tasks that
+/// would commit the transaction it waits for, so the writer stayed occupied
+/// until its idle lease expired. On a single-worker runtime the contender must
+/// leave that worker free: a heartbeat keeps ticking and the transaction holder
+/// still gets polled to release the writer, well inside the idle limit.
+#[tokio::test(flavor = "current_thread")]
+async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
+    let source = CodeGenerationId::new("code-generation.writer-contention").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let (plan, _, descriptor) = prepared_generation(
+        &source,
+        "chunk.writer-contention",
+        'f',
+        &admitted_embedding(),
+    );
+    store.configure_stage(descriptor).unwrap();
+    let (release, gate) = std::sync::mpsc::channel();
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        inner: Arc::clone(&store.runtime),
+        require_background_begin: false,
+        prepare_deadline: Mutex::new(None),
+        cancellation_to_trip: None,
+        begin_gate: Mutex::new(Some(gate)),
+    });
+    store.replace_runtime(probe);
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let heartbeat_ticks = Arc::clone(&ticks);
+    let heartbeat = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let holder = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release.send(()).is_ok()
+    });
+
+    let started = Instant::now();
+    let outcome = store.begin_generation(plan, cancellation).await;
+    let elapsed = started.elapsed();
+    heartbeat.abort();
+
+    assert!(
+        matches!(
+            outcome,
+            Ok(VectorGenerationBeginOutcomeV1::ReplayFromStart { .. })
+        ),
+        "the writer must be released by the holder, never by the lease expiry: {outcome:?}"
+    );
+    assert!(
+        holder.await.unwrap(),
+        "the transaction holder must still be polled while the writer is contended"
+    );
+    assert!(
+        ticks.load(Ordering::SeqCst) > 0,
+        "the single runtime worker must keep running other tasks while the store waits"
+    );
+    assert!(
+        elapsed < WRITER_GATE_LEASE,
+        "begin must not have waited out the lease: {elapsed:?}"
+    );
+}
+
 struct PublicationAuthorityProbeRuntime {
     inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
     require_background_begin: bool,
     prepare_deadline: Mutex<Option<Instant>>,
     cancellation_to_trip: Option<Arc<AtomicBool>>,
+    /// Stands in for the project's exclusive exact-SQL writer: `begin_stage`
+    /// blocks here until the transaction holder releases it.
+    begin_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
 impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
@@ -386,6 +474,13 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         plan: &SemanticVectorStagePlan,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<VerifiedGenerationBeginV1, GraphDbError> {
+        if let Some(gate) = self.begin_gate.lock().unwrap().take() {
+            // Bounded exactly as the real writer wait is bounded: by the
+            // abandoned-transaction lease. Expiring here means the holder was
+            // never polled to release, which is the starvation this guards.
+            gate.recv_timeout(WRITER_GATE_LEASE)
+                .map_err(|_| GraphDbError::Cancelled)?;
+        }
         if self.require_background_begin {
             let remaining = authority
                 .deadline()
