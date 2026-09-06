@@ -50,6 +50,11 @@ impl Fixture {
                 "user.name=Fixture",
                 "-c",
                 "user.email=fixture@example.com",
+                // The nested-tree fixture is deeper than Windows' 260-byte
+                // `MAX_PATH`; Git for Windows only opens such paths with
+                // `core.longpaths`. Other Gits ignore the key.
+                "-c",
+                "core.longpaths=true",
             ])
             .args(args)
             .current_dir(self.path())
