@@ -293,8 +293,80 @@ pub struct CollectedStore {
     pub size_bytes: u64,
 }
 
-/// Outcome of executing a [`CollectionPlan`] against the filesystem.
+/// The exact filesystem mutation that failed during orphan-store retirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionMutationOperation {
+    ReserveQuarantineName,
+    PublishQuarantineJournal,
+    PublishQuarantineRenameMarker,
+    RenameLiveLeafToQuarantine,
+    RestoreLiveLeafFromQuarantine,
+    ClearRecoveryJournal,
+    MarkRetirementCommitted,
+    RecursiveRemove,
+    ParentSync,
+}
+
+/// Whether a mutation failure is a known external-owner deferral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionMutationFailureClassification {
+    RetryableDeferred,
+    NonRetryable,
+}
+
+/// Structured evidence for a failed orphan-store filesystem mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionMutationFailure {
+    pub operation: CollectionMutationOperation,
+    pub raw_os_error: Option<i32>,
+    pub target_path: PathBuf,
+    pub expected_root_identity: Option<StoreRootIdentity>,
+    pub classification: CollectionMutationFailureClassification,
+}
+
+impl CollectionMutationFailure {
+    pub fn retryable(&self) -> bool {
+        self.classification == CollectionMutationFailureClassification::RetryableDeferred
+    }
+
+    pub(crate) fn from_io_error(
+        operation: CollectionMutationOperation,
+        target_path: PathBuf,
+        expected_root_identity: Option<StoreRootIdentity>,
+        error: &std::io::Error,
+    ) -> Self {
+        let raw_os_error = error.raw_os_error();
+        let classification = if cfg!(windows) && matches!(raw_os_error, Some(5 | 32 | 33)) {
+            CollectionMutationFailureClassification::RetryableDeferred
+        } else {
+            CollectionMutationFailureClassification::NonRetryable
+        };
+        Self {
+            operation,
+            raw_os_error,
+            target_path,
+            expected_root_identity,
+            classification,
+        }
+    }
+
+    pub(crate) fn without_native_error(
+        operation: CollectionMutationOperation,
+        target_path: PathBuf,
+        expected_root_identity: Option<StoreRootIdentity>,
+    ) -> Self {
+        Self {
+            operation,
+            raw_os_error: None,
+            target_path,
+            expected_root_identity,
+            classification: CollectionMutationFailureClassification::NonRetryable,
+        }
+    }
+}
+
+/// Outcome of executing a [`CollectionPlan`] against the filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CollectionFailureKind {
     /// Cooperative maintenance cancellation/deadline interrupted an expensive
     /// inspection before any irreversible step. The report completion carries
@@ -302,7 +374,7 @@ pub enum CollectionFailureKind {
     Cancelled,
     OutsideProfile,
     InspectFailed,
-    RemoveFailed,
+    RemoveFailed(CollectionMutationFailure),
     RegistryChanged,
     ManifestChanged,
     PayloadChanged,
@@ -529,7 +601,10 @@ fn prepare_verified_quarantine(
         Ok(QuarantineStoreOutcome::Verified(quarantine)) => {
             QuarantinePreparation::Verified(quarantine)
         }
-        Ok(QuarantineStoreOutcome::Interrupted { quarantine_path }) => {
+        Ok(QuarantineStoreOutcome::Interrupted {
+            quarantine_path,
+            failure,
+        }) => {
             outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                 store_id: store_id.to_owned(),
                 original_path: data_root.to_path_buf(),
@@ -537,6 +612,12 @@ fn prepare_verified_quarantine(
                 quarantine_path,
                 action: CollectionRecoveryAction::RetainedForRecovery,
             });
+            if let Some(failure) = failure {
+                outcome.errors.push(CollectionFailure {
+                    store_id: store_id.to_owned(),
+                    kind: CollectionFailureKind::RemoveFailed(failure),
+                });
+            }
             if let Some(completion) = control.completion() {
                 outcome.completion = completion;
             }
@@ -544,7 +625,7 @@ fn prepare_verified_quarantine(
         }
         Ok(QuarantineStoreOutcome::Restored {
             restored_path,
-            journal_pending,
+            journal_failure,
         }) => {
             outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                 store_id: store_id.to_owned(),
@@ -557,15 +638,18 @@ fn prepare_verified_quarantine(
                 store_id: store_id.to_owned(),
                 kind: CollectionFailureKind::PayloadChanged,
             });
-            if journal_pending {
+            if let Some(failure) = journal_failure {
                 outcome.errors.push(CollectionFailure {
                     store_id: store_id.to_owned(),
-                    kind: CollectionFailureKind::RemoveFailed,
+                    kind: CollectionFailureKind::RemoveFailed(failure),
                 });
             }
             QuarantinePreparation::Failed
         }
-        Ok(QuarantineStoreOutcome::Retained { quarantine_path }) => {
+        Ok(QuarantineStoreOutcome::Retained {
+            quarantine_path,
+            failure,
+        }) => {
             outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                 store_id: store_id.to_owned(),
                 original_path: data_root.to_path_buf(),
@@ -576,6 +660,10 @@ fn prepare_verified_quarantine(
             outcome.errors.push(CollectionFailure {
                 store_id: store_id.to_owned(),
                 kind: CollectionFailureKind::PayloadChanged,
+            });
+            outcome.errors.push(CollectionFailure {
+                store_id: store_id.to_owned(),
+                kind: CollectionFailureKind::RemoveFailed(failure),
             });
             QuarantinePreparation::Failed
         }
@@ -626,7 +714,7 @@ fn finalize_verified_quarantine(
         });
         return false;
     }
-    if quarantine.mark_retirement_committed().is_err() {
+    if let Err(failure) = quarantine.mark_retirement_committed() {
         outcome.recovery_receipts.push(CollectionRecoveryReceipt {
             store_id: store_id.to_owned(),
             original_path: data_root.to_path_buf(),
@@ -636,19 +724,23 @@ fn finalize_verified_quarantine(
         });
         outcome.errors.push(CollectionFailure {
             store_id: store_id.to_owned(),
-            kind: CollectionFailureKind::RemoveFailed,
+            kind: CollectionFailureKind::RemoveFailed(failure),
         });
         return false;
     }
     match quarantine.finalize(control) {
-        QuarantineFinalizeOutcome::Removed { journal_pending } => {
-            if journal_pending {
+        QuarantineFinalizeOutcome::Removed { journal_failure } => {
+            if let Some(failure) = journal_failure {
                 outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                     store_id: store_id.to_owned(),
                     original_path: data_root.to_path_buf(),
                     quarantine_path: data_root.to_path_buf(),
                     actual_path: data_root.to_path_buf(),
                     action: CollectionRecoveryAction::DeleteUnconfirmed,
+                });
+                outcome.errors.push(CollectionFailure {
+                    store_id: store_id.to_owned(),
+                    kind: CollectionFailureKind::RemoveFailed(failure),
                 });
             }
             true
@@ -666,7 +758,10 @@ fn finalize_verified_quarantine(
             });
             false
         }
-        QuarantineFinalizeOutcome::DeleteUnconfirmed { quarantine_path } => {
+        QuarantineFinalizeOutcome::DeleteUnconfirmed {
+            quarantine_path,
+            failure,
+        } => {
             outcome.recovery_receipts.push(CollectionRecoveryReceipt {
                 store_id: store_id.to_owned(),
                 original_path: data_root.to_path_buf(),
@@ -676,7 +771,7 @@ fn finalize_verified_quarantine(
             });
             outcome.errors.push(CollectionFailure {
                 store_id: store_id.to_owned(),
-                kind: CollectionFailureKind::RemoveFailed,
+                kind: CollectionFailureKind::RemoveFailed(failure),
             });
             false
         }

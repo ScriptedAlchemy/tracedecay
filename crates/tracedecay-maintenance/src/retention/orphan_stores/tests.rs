@@ -342,10 +342,24 @@ fn execute_collection(plan: &CollectionPlan, profile_root: &Path) -> CollectionO
         match std::fs::remove_dir_all(&finding.data_root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
+            Err(error) => {
                 outcome.errors.push(CollectionFailure {
                     store_id: finding.store_id.clone(),
-                    kind: CollectionFailureKind::RemoveFailed,
+                    kind: CollectionFailureKind::RemoveFailed(
+                        CollectionMutationFailure::from_io_error(
+                            CollectionMutationOperation::RecursiveRemove,
+                            finding.data_root.clone(),
+                            match &finding.expected_content_fence {
+                                StoreContentFence::Present(inventory) => {
+                                    Some(inventory.root.clone())
+                                }
+                                StoreContentFence::Missing | StoreContentFence::Unverifiable => {
+                                    None
+                                }
+                            },
+                            &error,
+                        ),
+                    ),
                 });
                 continue;
             }
@@ -1633,6 +1647,88 @@ fn quarantine_restores_empty_directory_replacement_before_delete() {
     assert!(matches!(result, QuarantineStoreOutcome::Restored { .. }));
     assert!(data_root.is_dir(), "fresh empty replacement must survive");
     assert!(displaced.is_dir(), "inspected empty directory must survive");
+}
+
+/// A Windows directory capability denies same-parent rename because cap-std
+/// deliberately omits FILE_SHARE_DELETE. The failed retirement must remain a
+/// typed deferral over the exact censused store, then converge once that
+/// external owner releases its handle.
+#[cfg(windows)]
+#[test]
+fn quarantine_defers_held_windows_store_and_converges_after_release() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/held-capability");
+    let payload_path = data_root.join("payload.bin");
+    let payload = b"held store bytes remain authoritative";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(&payload_path, payload).unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(expected_inventory) = &expected else {
+        panic!("fixture must capture an exact present-store fence");
+    };
+    let expected_root_identity = expected_inventory.root.clone();
+    let external_owner =
+        cap_std::fs::Dir::open_ambient_dir(&data_root, cap_std::ambient_authority()).unwrap();
+
+    let failure =
+        match quarantine_store_for_verified_collection(&profile_root, &data_root, &expected) {
+            Err(failure) => failure,
+            Ok(_) => panic!("held live leaf must not enter quarantine"),
+        };
+    let CollectionFailureKind::RemoveFailed(failure) = failure else {
+        panic!("held live leaf must report a structured mutation failure");
+    };
+    assert_eq!(
+        failure.operation,
+        CollectionMutationOperation::RenameLiveLeafToQuarantine
+    );
+    assert!(
+        matches!(failure.raw_os_error, Some(5 | 32)),
+        "Windows held-directory rename must preserve access-denied/sharing violation: {failure:?}"
+    );
+    assert!(failure.retryable());
+    assert_eq!(
+        failure.classification,
+        CollectionMutationFailureClassification::RetryableDeferred
+    );
+    assert_eq!(failure.target_path, data_root);
+    assert_eq!(failure.expected_root_identity, Some(expected_root_identity));
+    assert_eq!(std::fs::read(&payload_path).unwrap(), payload);
+    assert!(
+        data_root.is_dir(),
+        "failed quarantine must not collect the store"
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty(),
+        "the failed rename's prepared journal must still be cleared"
+    );
+
+    drop(external_owner);
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("retry after releasing the external owner must verify quarantine");
+    };
+    assert_eq!(
+        std::fs::read(quarantine.quarantine_path().join("payload.bin")).unwrap(),
+        payload
+    );
+    quarantine.mark_retirement_committed().unwrap();
+    let QuarantineFinalizeOutcome::Removed { journal_failure } =
+        quarantine.finalize(unbounded_collection_control())
+    else {
+        panic!("released quarantine must complete the durable removal sequence");
+    };
+    assert_eq!(journal_failure, None);
+    assert!(!data_root.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// This simulates a process death after the registry phase was durably marked

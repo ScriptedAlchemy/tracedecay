@@ -18,7 +18,10 @@ use super::fence::{
     StoreContentFence, capture_store_content_fence_in_dir_controlled,
     open_store_directory_nofollow, open_store_parent_nofollow,
 };
-use super::{CollectionControl, CollectionFailureKind};
+use super::{
+    CollectionControl, CollectionFailureKind, CollectionMutationFailure,
+    CollectionMutationOperation, StoreRootIdentity,
+};
 
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const QUARANTINE_ATTEMPTS: usize = 32;
@@ -70,13 +73,15 @@ pub(super) enum QuarantineStoreOutcome {
     Verified(QuarantinedStore),
     Interrupted {
         quarantine_path: PathBuf,
+        failure: Option<CollectionMutationFailure>,
     },
     Restored {
         restored_path: PathBuf,
-        journal_pending: bool,
+        journal_failure: Option<CollectionMutationFailure>,
     },
     Retained {
         quarantine_path: PathBuf,
+        failure: CollectionMutationFailure,
     },
 }
 
@@ -92,9 +97,16 @@ pub(super) enum QuarantineRecoveryOutcome {
 }
 
 pub(super) enum QuarantineFinalizeOutcome {
-    Removed { journal_pending: bool },
-    Interrupted { quarantine_path: PathBuf },
-    DeleteUnconfirmed { quarantine_path: PathBuf },
+    Removed {
+        journal_failure: Option<CollectionMutationFailure>,
+    },
+    Interrupted {
+        quarantine_path: PathBuf,
+    },
+    DeleteUnconfirmed {
+        quarantine_path: PathBuf,
+        failure: CollectionMutationFailure,
+    },
 }
 
 /// A verified moved directory plus its immutable, sibling journal. The
@@ -105,6 +117,7 @@ pub(super) struct QuarantinedStore {
     root: Dir,
     quarantine_path: PathBuf,
     journal_name: String,
+    expected_root_identity: Option<StoreRootIdentity>,
 }
 
 impl QuarantinedStore {
@@ -115,8 +128,18 @@ impl QuarantinedStore {
     /// Publish the database-commit phase before removal. This marker is
     /// additive/no-replace, so a crash cannot turn a committed retirement back
     /// into an apparently prepared one by tearing an overwrite.
-    pub(super) fn mark_retirement_committed(&self) -> std::io::Result<()> {
-        write_empty_marker(&self.parent, &retired_marker_name(&self.journal_name))
+    pub(super) fn mark_retirement_committed(&self) -> Result<(), CollectionMutationFailure> {
+        let marker_name = retired_marker_name(&self.journal_name);
+        write_empty_marker(
+            &self.parent,
+            self.quarantine_path
+                .parent()
+                .map_or_else(PathBuf::new, Path::to_path_buf)
+                .as_path(),
+            &marker_name,
+            CollectionMutationOperation::MarkRetirementCommitted,
+            self.expected_root_identity.clone(),
+        )
     }
 
     /// The irreversible phase runs only after the caller's registry commit.
@@ -129,6 +152,7 @@ impl QuarantinedStore {
             root,
             quarantine_path,
             journal_name,
+            expected_root_identity,
             ..
         } = self;
         if control.completion().is_some() {
@@ -149,17 +173,48 @@ impl QuarantinedStore {
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
                 return QuarantineFinalizeOutcome::Interrupted { quarantine_path };
             }
-            Err(_) => return QuarantineFinalizeOutcome::DeleteUnconfirmed { quarantine_path },
+            Err(error) => {
+                let failure = CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::RecursiveRemove,
+                    quarantine_path.clone(),
+                    expected_root_identity,
+                    &error,
+                );
+                return QuarantineFinalizeOutcome::DeleteUnconfirmed {
+                    quarantine_path,
+                    failure,
+                };
+            }
         }
         // Once the final child disappears, synchronizing the parent is part
         // of the same irreversible operation. It must complete even if the
         // admission is cancelled concurrently; otherwise a completed delete
         // could be reported without its durability boundary.
-        if sync_directory(&parent).is_err() {
-            return QuarantineFinalizeOutcome::DeleteUnconfirmed { quarantine_path };
+        if let Err(error) = sync_directory(&parent) {
+            let failure = CollectionMutationFailure::from_io_error(
+                CollectionMutationOperation::ParentSync,
+                quarantine_path
+                    .parent()
+                    .map_or_else(PathBuf::new, Path::to_path_buf),
+                expected_root_identity,
+                &error,
+            );
+            return QuarantineFinalizeOutcome::DeleteUnconfirmed {
+                quarantine_path,
+                failure,
+            };
         }
-        let journal_pending = clear_journal(&parent, &journal_name).is_err();
-        QuarantineFinalizeOutcome::Removed { journal_pending }
+        let journal_failure = clear_journal(
+            &parent,
+            quarantine_path
+                .parent()
+                .map_or_else(PathBuf::new, Path::to_path_buf)
+                .as_path(),
+            &journal_name,
+            expected_root_identity,
+        )
+        .err();
+        QuarantineFinalizeOutcome::Removed { journal_failure }
     }
 }
 
@@ -187,6 +242,7 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     if control.completion().is_some() {
         return Ok(QuarantineStoreOutcome::Interrupted {
             quarantine_path: data_root.to_path_buf(),
+            failure: None,
         });
     }
     if *expected == StoreContentFence::Unverifiable {
@@ -195,6 +251,10 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     if *expected == StoreContentFence::Missing {
         return Ok(QuarantineStoreOutcome::Missing);
     }
+    let expected_root_identity = match expected {
+        StoreContentFence::Present(inventory) => Some(inventory.root.clone()),
+        StoreContentFence::Missing | StoreContentFence::Unverifiable => None,
+    };
     let capability = open_store_directory_nofollow(profile_root, data_root)?;
     let original_name = capability
         .leaf_name
@@ -202,7 +262,13 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
         .ok_or(CollectionFailureKind::InspectFailed)?
         .to_owned();
     let quarantine_name = reserve_quarantine_name(&capability.parent, &capability.leaf_name)
-        .ok_or(CollectionFailureKind::RemoveFailed)?;
+        .ok_or_else(|| {
+            CollectionFailureKind::RemoveFailed(CollectionMutationFailure::without_native_error(
+                CollectionMutationOperation::ReserveQuarantineName,
+                data_root.to_path_buf(),
+                expected_root_identity.clone(),
+            ))
+        })?;
     let quarantine_path = data_root
         .parent()
         .ok_or(CollectionFailureKind::OutsideProfile)?
@@ -219,23 +285,42 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
     // The journal is the intent record for the following destructive rename.
     // Publishing it first eliminates the old crash window where a synced
     // quarantine existed with no discoverable recovery authority.
-    write_journal(&capability.parent, &journal_name, &journal)
-        .map_err(|_| CollectionFailureKind::RemoveFailed)?;
+    write_journal(
+        &capability.parent,
+        quarantine_path
+            .parent()
+            .ok_or(CollectionFailureKind::OutsideProfile)?,
+        &journal_name,
+        &journal,
+        expected_root_identity.clone(),
+    )
+    .map_err(CollectionFailureKind::RemoveFailed)?;
 
     // cap_std does not open directories with FILE_SHARE_DELETE on Windows, so
     // release our leaf handle before rename. The moved bytes are reopened and
     // revalidated against the expected identity after the rename.
     drop(capability.root);
-    if rename_noreplace(
+    if let Err(error) = rename_noreplace(
         &capability.parent,
         &capability.leaf_name,
         &capability.parent,
         OsStr::new(&quarantine_name),
-    )
-    .is_err()
-    {
-        let _ = clear_journal(&capability.parent, &journal_name);
-        return Err(CollectionFailureKind::RemoveFailed);
+    ) {
+        let failure = CollectionMutationFailure::from_io_error(
+            CollectionMutationOperation::RenameLiveLeafToQuarantine,
+            data_root.to_path_buf(),
+            expected_root_identity.clone(),
+            &error,
+        );
+        let _ = clear_journal(
+            &capability.parent,
+            quarantine_path
+                .parent()
+                .ok_or(CollectionFailureKind::OutsideProfile)?,
+            &journal_name,
+            expected_root_identity,
+        );
+        return Err(CollectionFailureKind::RemoveFailed(failure));
     }
     if sync_directory(&capability.parent).is_err() {
         return Ok(recover_original_name(
@@ -244,10 +329,23 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
             quarantine_name,
             quarantine_path,
             Some(journal_name),
+            expected_root_identity,
         ));
     }
-    if write_empty_marker(&capability.parent, &renamed_marker_name(&journal_name)).is_err() {
-        return Ok(QuarantineStoreOutcome::Interrupted { quarantine_path });
+    let renamed_marker = renamed_marker_name(&journal_name);
+    if let Err(failure) = write_empty_marker(
+        &capability.parent,
+        quarantine_path
+            .parent()
+            .ok_or(CollectionFailureKind::OutsideProfile)?,
+        &renamed_marker,
+        CollectionMutationOperation::PublishQuarantineRenameMarker,
+        expected_root_identity.clone(),
+    ) {
+        return Ok(QuarantineStoreOutcome::Interrupted {
+            quarantine_path,
+            failure: Some(failure),
+        });
     }
     let moved_root = match capability.parent.open_dir_nofollow(&quarantine_name) {
         Ok(root) => root,
@@ -258,6 +356,7 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
                 quarantine_name,
                 quarantine_path,
                 Some(journal_name),
+                expected_root_identity,
             ));
         }
     };
@@ -270,11 +369,15 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
                 root: moved_root,
                 quarantine_path,
                 journal_name,
+                expected_root_identity,
             }))
         }
         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
             drop(moved_root);
-            Ok(QuarantineStoreOutcome::Interrupted { quarantine_path })
+            Ok(QuarantineStoreOutcome::Interrupted {
+                quarantine_path,
+                failure: None,
+            })
         }
         Ok(_) | Err(_) => {
             drop(moved_root);
@@ -284,6 +387,7 @@ pub(super) fn quarantine_store_for_verified_collection_controlled(
                 quarantine_name,
                 quarantine_path,
                 Some(journal_name),
+                expected_root_identity,
             ))
         }
     }
@@ -317,28 +421,52 @@ fn recover_original_name(
     quarantine_name: String,
     quarantine_path: PathBuf,
     journal_name: Option<String>,
+    expected_root_identity: Option<StoreRootIdentity>,
 ) -> QuarantineStoreOutcome {
-    if rename_noreplace(
+    match rename_noreplace(
         &parent,
         OsStr::new(&quarantine_name),
         &parent,
         &original_name,
-    )
-    .is_ok()
-    {
-        // A directory sync failure occurs after the atomic rename. Preserve
-        // any journal and return the true, restored path for that state.
-        let journal_pending = sync_directory(&parent).is_err()
-            || journal_name.is_some_and(|name| clear_journal(&parent, &name).is_err());
-        let restored_path = quarantine_path
-            .parent()
-            .map_or_else(PathBuf::new, |parent| parent.join(&original_name));
-        QuarantineStoreOutcome::Restored {
-            restored_path,
-            journal_pending,
+    ) {
+        Ok(()) => {
+            // A directory sync failure occurs after the atomic rename. Preserve
+            // any journal and return the true, restored path for that state.
+            let parent_path = quarantine_path
+                .parent()
+                .map_or_else(PathBuf::new, Path::to_path_buf);
+            let journal_failure = match sync_directory(&parent) {
+                Ok(()) => journal_name.and_then(|name| {
+                    clear_journal(&parent, &parent_path, &name, expected_root_identity.clone())
+                        .err()
+                }),
+                Err(error) => Some(CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::ParentSync,
+                    parent_path,
+                    expected_root_identity,
+                    &error,
+                )),
+            };
+            let restored_path = quarantine_path
+                .parent()
+                .map_or_else(PathBuf::new, |parent| parent.join(&original_name));
+            QuarantineStoreOutcome::Restored {
+                restored_path,
+                journal_failure,
+            }
         }
-    } else {
-        QuarantineStoreOutcome::Retained { quarantine_path }
+        Err(error) => {
+            let failure = CollectionMutationFailure::from_io_error(
+                CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+                quarantine_path.clone(),
+                expected_root_identity,
+                &error,
+            );
+            QuarantineStoreOutcome::Retained {
+                quarantine_path,
+                failure,
+            }
+        }
     }
 }
 
@@ -371,9 +499,27 @@ fn renamed_marker_name(journal_name: &str) -> String {
     format!("{journal_name}{RENAMED_SUFFIX}")
 }
 
-fn write_journal(parent: &Dir, name: &str, journal: &QuarantineJournalV1) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(journal)
-        .map_err(|error| std::io::Error::other(format!("serialize retention journal: {error}")))?;
+fn write_journal(
+    parent: &Dir,
+    parent_path: &Path,
+    name: &str,
+    journal: &QuarantineJournalV1,
+    expected_root_identity: Option<StoreRootIdentity>,
+) -> Result<(), CollectionMutationFailure> {
+    let target_path = parent_path.join(name);
+    let publish_failure = |error: &std::io::Error| {
+        CollectionMutationFailure::from_io_error(
+            CollectionMutationOperation::PublishQuarantineJournal,
+            target_path.clone(),
+            expected_root_identity.clone(),
+            error,
+        )
+    };
+    let bytes = serde_json::to_vec(journal).map_err(|error| {
+        publish_failure(&std::io::Error::other(format!(
+            "serialize retention journal: {error}"
+        )))
+    })?;
     let temporary = format!(
         ".{name}.tmp-{}-{}",
         std::process::id(),
@@ -381,43 +527,93 @@ fn write_journal(parent: &Dir, name: &str, journal: &QuarantineJournalV1) -> std
     );
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    let mut file = parent.open_with(&temporary, &options)?;
+    let mut file = parent
+        .open_with(&temporary, &options)
+        .map_err(|error| publish_failure(&error))?;
     if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
         let _ = parent.remove_file(&temporary);
-        return Err(error);
+        return Err(publish_failure(&error));
     }
     drop(file);
     if let Err(error) = rename_noreplace(parent, OsStr::new(&temporary), parent, OsStr::new(name)) {
         let _ = parent.remove_file(&temporary);
-        return Err(error);
+        return Err(publish_failure(&error));
     }
-    sync_directory(parent)
+    sync_directory(parent).map_err(|error| {
+        CollectionMutationFailure::from_io_error(
+            CollectionMutationOperation::ParentSync,
+            parent_path.to_path_buf(),
+            expected_root_identity,
+            &error,
+        )
+    })
 }
 
-fn write_empty_marker(parent: &Dir, name: &str) -> std::io::Result<()> {
+fn write_empty_marker(
+    parent: &Dir,
+    parent_path: &Path,
+    name: &str,
+    operation: CollectionMutationOperation,
+    expected_root_identity: Option<StoreRootIdentity>,
+) -> Result<(), CollectionMutationFailure> {
+    let target_path = parent_path.join(name);
+    let marker_failure = |error: &std::io::Error| {
+        CollectionMutationFailure::from_io_error(
+            operation,
+            target_path.clone(),
+            expected_root_identity.clone(),
+            error,
+        )
+    };
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     match parent.open_with(name, &options) {
         Ok(file) => {
-            file.sync_all()?;
-            sync_directory(parent)
+            file.sync_all().map_err(|error| marker_failure(&error))?;
+            sync_directory(parent).map_err(|error| {
+                CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::ParentSync,
+                    parent_path.to_path_buf(),
+                    expected_root_identity,
+                    &error,
+                )
+            })
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(error),
+        Err(error) => Err(marker_failure(&error)),
     }
 }
 
-fn clear_journal(parent: &Dir, journal_name: &str) -> std::io::Result<()> {
+fn clear_journal(
+    parent: &Dir,
+    parent_path: &Path,
+    journal_name: &str,
+    expected_root_identity: Option<StoreRootIdentity>,
+) -> Result<(), CollectionMutationFailure> {
     let renamed = renamed_marker_name(journal_name);
     let marker = retired_marker_name(journal_name);
     for name in [journal_name, renamed.as_str(), marker.as_str()] {
         match parent.remove_file(name) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(CollectionMutationFailure::from_io_error(
+                    CollectionMutationOperation::ClearRecoveryJournal,
+                    parent_path.join(name),
+                    expected_root_identity,
+                    &error,
+                ));
+            }
         }
     }
-    sync_directory(parent)
+    sync_directory(parent).map_err(|error| {
+        CollectionMutationFailure::from_io_error(
+            CollectionMutationOperation::ParentSync,
+            parent_path.to_path_buf(),
+            expected_root_identity,
+            &error,
+        )
+    })
 }
 
 /// Legacy pre-journal quarantines are restored. Journal-backed quarantines are
