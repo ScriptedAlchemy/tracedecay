@@ -418,7 +418,7 @@ async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup(
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, prepared, descriptor) = prepared_generation(
         &source,
         "chunk.retired-after-lookup",
@@ -450,7 +450,9 @@ async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup(
     let error = match GraphVectorGenerationStoreV1::read_only_generation(
         &historical,
         &publication.generation_id,
-    ) {
+    )
+    .await
+    {
         Err(error) => error,
         Ok(_) => panic!("a retired graph generation must not be served from stale mapping"),
     };
