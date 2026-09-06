@@ -852,28 +852,6 @@ impl CodeIndexPublishedGenerationV1 {
         Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)
     }
 
-    pub fn decode_sealed_reader<R: std::io::Read>(
-        reader: R,
-        admitted_len: u64,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let bytes = hotpath::measure_block!(
-            "code_index.sealed_decode.admitted_read",
-            read_admitted_bytes(reader, admitted_len)
-        )?;
-        Self::decode_admitted_sealed_bytes(&bytes, admitted_len)
-    }
-
-    fn decode_admitted_sealed_bytes(
-        bytes: &[u8],
-        admitted_len: u64,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        Self::decode_admitted_sealed_bytes_if_compatible(bytes, admitted_len)?.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is incompatible".to_owned(),
-            )
-        })
-    }
-
     fn decode_admitted_sealed_bytes_if_compatible(
         bytes: &[u8],
         admitted_len: u64,

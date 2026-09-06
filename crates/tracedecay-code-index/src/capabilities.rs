@@ -199,20 +199,6 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
             sanitization_receipts,
         }
     }
-
-    /// Override the declared exact-term kinds (must match chunker output).
-    #[must_use]
-    pub fn with_exact_term_kinds(mut self, kinds: Vec<ExactTechnicalTermKindV1>) -> Self {
-        self.exact_term_kinds = kinds;
-        self
-    }
-
-    /// Override the declared edge-authority classes.
-    #[must_use]
-    pub fn with_edge_authority_classes(mut self, classes: Vec<EdgeAuthorityV1>) -> Self {
-        self.edge_authority_classes = classes;
-        self
-    }
 }
 
 impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R> {
