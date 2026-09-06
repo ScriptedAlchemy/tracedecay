@@ -66,13 +66,13 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .active
             .lock()
             .expect("publication lock")
             .get(scope)
-            .map(|generation| generation.as_ref().clone()))
+            .map(Arc::clone))
     }
 
     fn publish_atomically(
@@ -107,13 +107,13 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .active
             .lock()
             .expect("publication lock")
             .as_ref()
-            .map(|generation| generation.as_ref().clone()))
+            .map(Arc::clone))
     }
 
     fn publish_atomically(
@@ -889,6 +889,36 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
             .admitted_chunks()
             .expect("carry-forward retains parser-backed exact authority")
             .is_empty()
+    );
+}
+
+#[test]
+fn active_generation_loads_share_the_published_allocation() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let published = owner
+        .build_and_publish(
+            request("file.production.shared-active", 1_100_000),
+            &ActiveControl,
+        )
+        .expect("generation publishes");
+    let scope = published.sealed_scope();
+
+    let first = store
+        .load_active(&scope)
+        .expect("first active read")
+        .expect("active generation");
+    let second = store
+        .load_active(&scope)
+        .expect("second active read")
+        .expect("active generation");
+
+    assert_eq!(
+        first.chunks().chunks().as_ptr(),
+        second.chunks().chunks().as_ptr(),
+        "active reads must share the immutable generation instead of cloning its complete indices"
     );
 }
 

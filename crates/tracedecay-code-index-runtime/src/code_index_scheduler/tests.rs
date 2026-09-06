@@ -82,8 +82,13 @@ use tracedecay_query::retrieval::semantic::{
     SemanticAbstentionV1, SemanticExecutionControl, SemanticQueryModeV1,
 };
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
+    sampled_process_resident_bytes_v1,
 };
+
+#[cfg(feature = "hotpath-alloc")]
+#[global_allocator]
+static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod noop_reconcile_tests;
 mod semantic_schedule_order_tests;
@@ -3194,6 +3199,175 @@ fn saved_edit_incremental_publish() {
         .expect("graph owner is activated");
 }
 
+/// Full pre-seat memory journey: a fresh scheduler decodes the retained active
+/// generation, publishes a one-file increment through the partitioned sealer,
+/// and drains that successor into the durable text artifact. The default is
+/// intentionally substantial and can be raised to the preserved operator
+/// shape without changing the exercised production path.
+#[test]
+#[ignore = "scale memory regression; run explicitly with one exact test process"]
+fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_watermark() {
+    let file_count = std::env::var("TRACEDECAY_PRESEAT_SCALE_FILES")
+        .map(|value| value.parse::<usize>().expect("positive scale file count"))
+        .unwrap_or(2_600);
+    let functions_per_file = std::env::var("TRACEDECAY_PRESEAT_FUNCTIONS_PER_FILE")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("positive functions-per-file count")
+        })
+        .unwrap_or(64);
+    assert!(file_count > 1);
+    assert!(functions_per_file > 0);
+
+    let owned_sources = (0..file_count)
+        .map(|file| {
+            let mut source = String::new();
+            for function in 0..functions_per_file {
+                writeln!(
+                    source,
+                    "pub fn scale_{file:04}_{function:04}() -> usize {{ {} }}",
+                    file + function
+                )
+                .expect("write scale source");
+            }
+            (format!("src/scale_{file:04}.rs"), source)
+        })
+        .collect::<Vec<_>>();
+    let source_bytes = owned_sources
+        .iter()
+        .map(|(_, source)| source.len())
+        .sum::<usize>();
+    let sources = owned_sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&sources);
+    let store = TempDir::new().expect("store root");
+
+    {
+        let mut seed = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(seed.reconcile_now().expect("seed retained generation"));
+    }
+
+    #[cfg(feature = "hotpath-alloc")]
+    let hotpath_output = std::env::temp_dir().join(format!(
+        "tracedecay-preseat-scale-{}.json",
+        std::process::id()
+    ));
+    #[cfg(feature = "hotpath-alloc")]
+    let hotpath_guard = hotpath::HotpathGuardBuilder::new("preseat-code-index-scale")
+        .format(hotpath::Format::Json)
+        .output_path(hotpath_output.clone())
+        .build();
+    #[cfg(target_os = "linux")]
+    std::fs::write("/proc/self/clear_refs", b"5\n").expect("reset process peak RSS");
+    let baseline_rss_bytes = sampled_process_resident_bytes_v1();
+
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert_eq!(scheduler.publication.sealed_decode_count(), 0);
+    assert!(matches!(
+        scheduler
+            .reconcile_now()
+            .expect("restore retained generation"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    assert_eq!(
+        scheduler.publication.sealed_decode_count(),
+        1,
+        "fresh activation must decode the retained generation exactly once"
+    );
+
+    let mut edited = String::new();
+    for function in 0..functions_per_file {
+        writeln!(
+            edited,
+            "pub fn scale_{:04}_{function:04}() -> usize {{ {} }}",
+            file_count - 1,
+            file_count + function
+        )
+        .expect("write edited scale source");
+    }
+    let edited_path = format!("src/scale_{:04}.rs", file_count - 1);
+    fixture.edit(&edited_path, &edited);
+    scheduler.notify_path(fixture.path().join(&edited_path));
+    let increment = published(
+        scheduler
+            .reconcile_now()
+            .expect("publish one-file incremental generation"),
+    );
+    assert_eq!(increment.reextracted_files, 1);
+    assert!(
+        scheduler
+            .publication
+            .seal_encoded_segment_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .seal_existing_segment_bytes_read
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "unchanged parent file segments must stay content-address reused"
+    );
+
+    let latest = scheduler.latest_complete().expect("incremental generation");
+    while !latest
+        .advance_text_serving(super::TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)
+        .expect("drain successor through durable text publication")
+    {}
+    assert!(latest.query_owners_are_warm());
+    let settled_rss_bytes = sampled_process_resident_bytes_v1();
+    #[cfg(target_os = "linux")]
+    let peak_rss_bytes = {
+        let status = std::fs::read_to_string("/proc/self/status").expect("read process status");
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|kib| kib.checked_mul(1_024))
+            .expect("process peak RSS")
+    };
+    #[cfg(not(target_os = "linux"))]
+    let peak_rss_bytes = settled_rss_bytes.unwrap_or(0);
+    let existing_high_watermark_bytes = 18_u64
+        .saturating_mul(1024 * 1024 * 1024)
+        .saturating_add(84_u64.saturating_mul(1024 * 1024 * 1024) / 100);
+    println!(
+        "{}",
+        serde_json::json!({
+            "files": file_count,
+            "functions_per_file": functions_per_file,
+            "source_bytes": source_bytes,
+            "active_decode_count": scheduler.publication.sealed_decode_count(),
+            "baseline_rss_bytes": baseline_rss_bytes,
+            "peak_rss_bytes": peak_rss_bytes,
+            "settled_rss_bytes": settled_rss_bytes,
+            "existing_high_watermark_bytes": existing_high_watermark_bytes,
+        })
+    );
+    assert!(
+        peak_rss_bytes < existing_high_watermark_bytes,
+        "pre-seat pipeline peak {peak_rss_bytes} exceeded the existing {existing_high_watermark_bytes}-byte high watermark"
+    );
+    #[cfg(feature = "hotpath-alloc")]
+    {
+        drop(hotpath_guard);
+        println!("hotpath_output={}", hotpath_output.display());
+    }
+}
+
 /// Committing content the dirty index already serves re-seals for provenance
 /// and recaptures the HEAD-tree delta, while byte identity still proves that
 /// every chunk can be reused.
@@ -5417,6 +5591,38 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
             tight.snapshot().used_bytes,
             0,
             "a denied reservation must not leak a charge"
+        );
+    }
+
+    // A request that fits the empty modeled ledger must still account the
+    // process's freshly measured, unmodeled live set before allocating.
+    if let Some(observed_bytes) = sampled_process_resident_bytes_v1() {
+        let build_bytes = u64::try_from(super::CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+            .expect("build ceiling fits u64");
+        let measured_limit = NonZeroU64::new(build_bytes.saturating_add(observed_bytes / 2))
+            .expect("measured test limit");
+        let measured = Arc::new(ProcessResidentMemoryV1::with_pressure(
+            measured_limit,
+            Arc::new(ResidentMemoryPressureV1::new(measured_limit)),
+        ));
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        scheduler.bind_resident_memory(Arc::clone(&measured));
+        let latest = scheduler
+            .latest_complete()
+            .expect("measured latest generation");
+        assert_eq!(
+            latest.advance_text_serving(1),
+            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+            "fresh RSS plus the requested build ceiling exceeds the process authority"
+        );
+        assert_eq!(
+            measured.snapshot().used_bytes,
+            0,
+            "a measured-baseline refusal must not leak a charge"
         );
     }
 
