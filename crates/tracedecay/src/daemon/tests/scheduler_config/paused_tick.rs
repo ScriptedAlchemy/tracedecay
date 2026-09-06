@@ -63,6 +63,17 @@ async fn paused_tick_scenario() {
         &handshake.client_identity.profile_root,
         "paused-scheduler-tick-test",
     );
+    // Save the pause before automation is enabled. Opening the project server
+    // registers this project's own automation scheduler owner, and a
+    // `every:1m` task is immediately due, so enabling first leaves a window in
+    // which the daemon's own tick reads an unpaused control and appends the
+    // run record this case then blames on the tick it invokes below.
+    save_scheduler_control(
+        &dashboard_root,
+        &AutomationSchedulerControl { paused: true },
+    )
+    .await
+    .expect("save paused scheduler control");
     let server = apply_project_automation_patch_via_surface(
         &engine,
         &handshake,
@@ -79,12 +90,6 @@ async fn paused_tick_scenario() {
     )
     .await;
     let cg = server.cg().await;
-    save_scheduler_control(
-        &dashboard_root,
-        &AutomationSchedulerControl { paused: true },
-    )
-    .await
-    .expect("save paused scheduler control");
 
     let run_control =
         tracedecay_automation_runtime::automation::AutomationRunControl::from_interrupted(
