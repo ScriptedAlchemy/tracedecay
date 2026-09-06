@@ -210,8 +210,18 @@ async fn foreign_request_context_scope_is_refused_before_scheduler_mutation() {
     fixture.registry.shutdown().await;
 }
 
+/// The bare fixture mounts the in-memory activation authority, which installs
+/// occurrence-seeded graph serving with no persistent Grafeo store (see
+/// `scope_admission_tests`, which pins the same terminal). What this binding
+/// owes its caller is therefore the seat, not the store: admission returns
+/// only after graph activation completed and the exact root and scope are
+/// serving the generation it minted. The persistent-store half of the
+/// contract - `interactive_graph_store` resolving while the derived catalog
+/// warms in the background - is proven on a real graph runtime by
+/// `tracedecay-code-index-runtime`'s
+/// `verified_type_import_indexes_only_the_resolved_ignored_entrypoint`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
+async fn writable_binding_serves_the_exact_scope_generation_it_admitted() {
     let fixture = Fixture::mount().await;
     let context = request_context(fixture.scope.clone(), "writable");
 
@@ -246,16 +256,11 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
             .any(|file| file.logical_path == "node_modules/pkg/private.d.ts"),
         "the project binding cannot widen the scheduler beyond the exact entrypoint"
     );
-    let graph = serving
-        .interactive_graph_store()
-        .expect("activated serving generation owns an interactive graph");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while graph.interactive_catalog_is_warm() != Ok(true) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("background graph catalog warm completes");
+    assert_eq!(
+        serving.code_graph_serving_readiness(),
+        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+        "admission returns only after graph activation completes for the generation it minted"
+    );
     fixture.registry.shutdown().await;
 }
 
