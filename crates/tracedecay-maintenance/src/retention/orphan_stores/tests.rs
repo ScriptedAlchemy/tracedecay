@@ -2,7 +2,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quarantine};
+#[cfg(windows)]
+use super::quarantine::classify_recovery_journal_probe;
+use super::quarantine::{
+    QuarantineRecoveryOutcome, recover_existing_store_quarantine,
+    recover_named_store_quarantine_controlled,
+};
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
@@ -2054,6 +2059,11 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
     let data_root = profile_root.join("projects/proj_retained_quarantine");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(data_root.join("payload.bin"), b"quarantined bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(inventory) = expected else {
+        panic!("fixture must capture the legacy quarantine identity");
+    };
+    let expected_root_identity = inventory.root;
     let quarantine =
         profile_root.join("projects/.tracedecay-orphan-quarantine-proj_retained_quarantine-42-7");
     std::fs::rename(&data_root, &quarantine).unwrap();
@@ -2066,7 +2076,7 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
         operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
         raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
         target_path: data_root.clone(),
-        expected_root_identity: None,
+        expected_root_identity: Some(expected_root_identity),
         classification: CollectionMutationFailureClassification::NonRetryable,
     };
     assert_eq!(
@@ -2114,6 +2124,88 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
             }],
             ..CollectionOutcome::default()
         }
+    );
+}
+
+#[test]
+fn legacy_recovery_rejects_post_rename_identity_replacement() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let projects = profile_root.join("projects");
+    let data_root = projects.join("proj_identity_race");
+    let quarantine_name = ".tracedecay-orphan-quarantine-proj_identity_race-42-7";
+    let quarantine = projects.join(quarantine_name);
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"exact quarantined bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(inventory) = expected else {
+        panic!("fixture must capture the legacy quarantine identity");
+    };
+    let expected_root_identity = inventory.root;
+    std::fs::rename(&data_root, &quarantine).unwrap();
+
+    let outcome = recover_named_store_quarantine_controlled(
+        &profile_root,
+        &data_root,
+        std::ffi::OsStr::new(quarantine_name),
+        &projects,
+        || {
+            std::fs::rename(&data_root, &quarantine).unwrap();
+            std::fs::create_dir_all(&data_root).unwrap();
+            std::fs::write(data_root.join("payload.bin"), b"replacement live bytes").unwrap();
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        Some(QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine.clone(),
+            failure: Some(CollectionMutationFailure {
+                operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+                raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
+                target_path: quarantine.clone(),
+                expected_root_identity: Some(expected_root_identity),
+                classification: CollectionMutationFailureClassification::NonRetryable,
+            }),
+        })
+    );
+    assert_eq!(
+        std::fs::read(quarantine.join("payload.bin")).unwrap(),
+        b"exact quarantined bytes"
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"replacement live bytes"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn unreadable_recovery_journal_is_a_retryable_typed_failure() {
+    let journal_path = PathBuf::from(
+        r"C:\profile\projects\.tracedecay-orphan-quarantine-proj_journal-42-7.receipt-v1.json",
+    );
+    let expected_root_identity = StoreRootIdentity {
+        device: 17,
+        inode: 23,
+    };
+
+    assert_eq!(
+        classify_recovery_journal_probe(
+            Err(std::io::Error::from_raw_os_error(32)),
+            journal_path.clone(),
+            &expected_root_identity,
+        ),
+        Err(CollectionFailureKind::RemoveFailed(
+            CollectionMutationFailure {
+                operation: CollectionMutationOperation::ProbeRecoveryJournal,
+                raw_os_error: Some(32),
+                target_path: journal_path,
+                expected_root_identity: Some(expected_root_identity),
+                classification: CollectionMutationFailureClassification::RetryableDeferred,
+            }
+        ))
     );
 }
 
@@ -2414,6 +2506,11 @@ async fn unregistered_store_sweep_reports_failed_legacy_restore() {
     std::fs::write(data_root.join("payload.bin"), b"new live bytes").unwrap();
     std::fs::create_dir_all(&quarantine).unwrap();
     std::fs::write(quarantine.join("payload.bin"), b"legacy quarantine bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &quarantine).unwrap();
+    let StoreContentFence::Present(inventory) = expected else {
+        panic!("fixture must capture the legacy quarantine identity");
+    };
+    let expected_root_identity = inventory.root;
     let (_runtime, db) = open_registered_db(&profile_root).await;
     let cancellation = CancellationToken::new();
 
@@ -2437,7 +2534,7 @@ async fn unregistered_store_sweep_reports_failed_legacy_restore() {
         operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
         raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
         target_path: data_root.clone(),
-        expected_root_identity: None,
+        expected_root_identity: Some(expected_root_identity),
         classification: CollectionMutationFailureClassification::NonRetryable,
     };
     assert_eq!(

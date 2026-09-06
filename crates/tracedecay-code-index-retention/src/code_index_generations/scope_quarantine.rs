@@ -25,25 +25,38 @@ use super::{
     is_code_index_scope_hash, storage,
 };
 
-/// Rename-stable identity for one scope root. This mirrors the orphan-store
-/// retirement fence: device/inode are authoritative on Unix, and by-handle
-/// volume serial number/file index are authoritative on Windows. Timestamps
-/// supplement those stable identifiers.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// Rename-stable identity for one scope root, stated in the same terms as the
+/// verified-marker container fence: `(device, inode)` is the durable file-id
+/// pair — the Unix device and inode, or the Windows volume serial number and
+/// by-handle file index. Timestamps only supplement it.
+///
+/// The persisted shape is platform-neutral, so one journal row means the same
+/// thing wherever it is read, and every field defaults. A `(0, 0)` pair is
+/// therefore not an identity but the absence of one: it is what a row written
+/// before this fence deserializes to, and what a filesystem that declines to
+/// report a durable id produces. Identity unknown fails closed to a full
+/// re-proof — [`super::scope_roots::validate_scope_transaction`] refuses such
+/// a row by name at the journal read, rather than letting a bare deserialize
+/// error surface as unsafe state or letting timestamps alone authorize a
+/// destructive rename.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct ScopeDirectoryIdentityV1 {
     modified_secs: i64,
     modified_nanos: u32,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(windows)]
+    /// Windows creation stamp in 100ns ticks; always `0` on other platforms.
     created_100ns: u64,
-    #[cfg(windows)]
-    volume_serial_number: u32,
-    #[cfg(windows)]
-    file_index: u64,
+    device: u64,
+    inode: u64,
+}
+
+impl ScopeDirectoryIdentityV1 {
+    /// The durable file id is the only part of this fence a same-timestamp
+    /// replacement cannot forge, so a `(0, 0)` pair is treated as no identity
+    /// at all rather than as one every unidentified directory shares.
+    pub(super) fn has_durable_file_id(&self) -> bool {
+        self.device != 0 || self.inode != 0
+    }
 }
 
 /// Already-open authority for the store root and its exact quarantine tree.
@@ -135,12 +148,6 @@ impl ScopeQuarantineAuthority {
         })?;
         for scope in scopes {
             let expected = self.expected_identity(&scope.scope_hash)?.clone();
-            let held_source = self.source_handles.get(&scope.scope_hash).ok_or_else(|| {
-                unsafe_state("scope quarantine lost its pre-rename source capability")
-            })?;
-            if directory_identity(held_source).map_err(storage)? != expected {
-                return Err(identity_changed(&scope.scope_hash, "before quarantine"));
-            }
             let source = open_child_directory(&self.store, &scope.scope_hash)?;
             let staged = open_child_directory(stage, &scope.scope_hash)?;
             match (source, staged) {
@@ -151,6 +158,16 @@ impl ScopeQuarantineAuthority {
                         return Err(identity_changed(&scope.scope_hash, "before quarantine"));
                     }
                     drop(source);
+                    // Verify through the capability opened at `prepare` — the
+                    // proof that nothing swapped this directory since the
+                    // collection decision — and only then release it. cap-std
+                    // opens directories without `FILE_SHARE_DELETE`, so Windows
+                    // refuses to rename one while the handle is live.
+                    //
+                    // The lookup belongs inside this arm, not ahead of the
+                    // match: a scope already moved to the stage has spent its
+                    // capability legitimately and must report that it is
+                    // already quarantined, not a lost-capability unsafe state.
                     let held_source =
                         self.source_handles
                             .remove(&scope.scope_hash)
@@ -159,14 +176,27 @@ impl ScopeQuarantineAuthority {
                                     "scope quarantine lost its pre-rename source capability",
                                 )
                             })?;
+                    let held_identity = directory_identity(&held_source).map_err(storage)?;
                     drop(held_source);
-                    rename_noreplace(
+                    if held_identity != expected {
+                        return Err(identity_changed(&scope.scope_hash, "before quarantine"));
+                    }
+                    if let Err(error) = rename_noreplace(
                         &self.store,
                         OsStr::new(&scope.scope_hash),
                         stage,
                         OsStr::new(&scope.scope_hash),
-                    )
-                    .map_err(storage)?;
+                    ) {
+                        // The rename is the one failure that leaves the source
+                        // in place with its capability already closed. Reopen
+                        // an equivalent one so a retry still holds a pre-rename
+                        // fence instead of refusing itself as unsafe state.
+                        if let Ok(reopened) = self.store.open_dir_nofollow(&scope.scope_hash) {
+                            self.source_handles
+                                .insert(scope.scope_hash.clone(), reopened);
+                        }
+                        return Err(storage(error));
+                    }
                     let (moved, moved_identity) = open_child_directory(stage, &scope.scope_hash)?
                         .ok_or_else(|| {
                         unsafe_state("scope quarantine rename did not publish its destination")
@@ -399,10 +429,33 @@ fn open_child_directory(
     }
 }
 
+/// The durable `(device, inode)` file-id pair for an already-open directory.
+///
+/// This is the pair the verified-marker container fence records: the Unix
+/// device and inode, or the Windows volume serial number and by-handle file
+/// index from `GetFileInformationByHandle`. `(0, 0)` means the filesystem
+/// declines to report a durable id.
+#[cfg(unix)]
+fn durable_file_id(_directory: &Dir, metadata: &cap_std::fs::Metadata) -> io::Result<(u64, u64)> {
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn durable_file_id(directory: &Dir, _metadata: &cap_std::fs::Metadata) -> io::Result<(u64, u64)> {
+    let information = windows_file::information(directory)?;
+    Ok((
+        u64::from(information.volume_serial_number),
+        information.file_index,
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn durable_file_id(_directory: &Dir, _metadata: &cap_std::fs::Metadata) -> io::Result<(u64, u64)> {
+    Ok((0, 0))
+}
+
 fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
     let metadata = directory.metadata(".")?;
-    #[cfg(windows)]
-    let information = windows_file::information(directory)?;
     #[cfg(unix)]
     let (modified_secs, modified_nanos) = {
         (
@@ -424,20 +477,26 @@ fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
             modified.subsec_nanos(),
         )
     };
-    Ok(ScopeDirectoryIdentityV1 {
+    let (device, inode) = durable_file_id(directory, &metadata)?;
+    let identity = ScopeDirectoryIdentityV1 {
         modified_secs,
         modified_nanos,
-        #[cfg(unix)]
-        device: metadata.dev(),
-        #[cfg(unix)]
-        inode: metadata.ino(),
         #[cfg(windows)]
         created_100ns: metadata.creation_time(),
-        #[cfg(windows)]
-        volume_serial_number: information.volume_serial_number,
-        #[cfg(windows)]
-        file_index: information.file_index,
-    })
+        #[cfg(not(windows))]
+        created_100ns: 0,
+        device,
+        inode,
+    };
+    // Refuse to fence a directory the filesystem cannot identify. Writing an
+    // unprovable identity into the journal would only defer the refusal to a
+    // recovery that can no longer tell the scope from a replacement.
+    if !identity.has_durable_file_id() {
+        return Err(io::Error::other(
+            "scope directory has no durable filesystem identity",
+        ));
+    }
+    Ok(identity)
 }
 
 fn validate_scope_name(scope_hash: &str) -> Result<(), CodeGenerationRetentionErrorV1> {
@@ -477,9 +536,70 @@ fn unsafe_state(message: impl Into<String>) -> CodeGenerationRetentionErrorV1 {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rename_leaves_a_source_capability_for_the_retry() {
+        let (store, scope) = fixture();
+        let mut authority = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            RECEIPT_DIGEST,
+            std::slice::from_ref(&scope),
+        )
+        .expect("open quarantine authority");
+        let stage = store
+            .path()
+            .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
+            .join(RECEIPT_DIGEST);
+        // An unwritable stage refuses the rename and leaves the source scope
+        // exactly where it was: the one failure that strands a scope whose
+        // pre-rename capability has already been released.
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o555))
+            .expect("seal the quarantine stage");
+        let error = authority
+            .stage(std::slice::from_ref(&scope))
+            .expect_err("a sealed stage must refuse the quarantine rename");
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Storage(_)));
+        assert!(store.path().join(SCOPE_HASH).is_dir());
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o755))
+            .expect("reopen the quarantine stage");
+
+        authority
+            .stage(std::slice::from_ref(&scope))
+            .expect("a retry after a transient rename failure keeps its source capability");
+
+        assert!(!store.path().join(SCOPE_HASH).exists());
+        assert_eq!(
+            std::fs::read(stage.join(SCOPE_HASH).join("payload")).expect("quarantined payload"),
+            b"owned"
+        );
+    }
+
+    #[test]
+    fn a_journal_row_without_a_durable_file_id_is_not_an_identity() {
+        // The shape of a row written before the durable file-id fence. It has
+        // to deserialize so the journal read can name its refusal, instead of
+        // failing as a bare serde error surfacing as unsafe state.
+        let legacy: ScopeDirectoryIdentityV1 =
+            serde_json::from_str(r#"{"modified_secs":7,"modified_nanos":11,"created_100ns":13}"#)
+                .expect("a row missing the durable file id still deserializes");
+        assert!(
+            !legacy.has_durable_file_id(),
+            "an absent file id must not read as an identity every unproven directory shares"
+        );
+
+        let fixture = tempfile::TempDir::new().expect("create identity fixture");
+        let directory =
+            Dir::open_ambient_dir(fixture.path(), ambient_authority()).expect("open the fixture");
+        assert!(
+            directory_identity(&directory)
+                .expect("a real directory has a durable identity")
+                .has_durable_file_id()
+        );
+    }
 
     const SCOPE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const RECEIPT_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
