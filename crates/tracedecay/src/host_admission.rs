@@ -441,16 +441,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    #[hotpath::skip]
-    pub async fn session_domain_sha256_for_test(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> Result<[u8; 32]> {
-        self.checkpoint_session_database_for_test(scope).await?;
-        canonical_session_domain_sha256(self.session_database_for_test(scope)?.db_path())
-    }
-
-    #[doc(hidden)]
     pub fn observation_store(
         &self,
         scope: HostAdmissionScope,
@@ -1223,15 +1213,6 @@ impl HostAdmissionTestRuntimeV1 {
         }
         Ok((store_layout, project_database))
     }
-}
-
-fn canonical_session_domain_sha256(path: &Path) -> Result<[u8; 32]> {
-    tracedecay_rusqlite_runtime::canonical_session_domain_content_sha256(path).map_err(|error| {
-        TraceDecayError::Database {
-            operation: error.operation.to_owned(),
-            message: error.message,
-        }
-    })
 }
 
 const fn registered_authority_unavailable_outcome() -> HostAdmissionOutcome {
