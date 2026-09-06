@@ -285,8 +285,11 @@ impl HookDeliveryReceiptSpoolV1 {
     }
 
     fn receipt_path(&self, receipt_id: [u8; 16]) -> PathBuf {
-        self.root
-            .join(format!("{}{}", encode_hex(receipt_id), RECEIPT_SUFFIX))
+        self.root.join(format!(
+            "{}{}",
+            tracedecay_domain::canonical_text::encode_lowercase_hex(&receipt_id),
+            RECEIPT_SUFFIX
+        ))
     }
 }
 
@@ -367,16 +370,6 @@ fn valid_receipt_name(name: &str) -> bool {
         && name[..32]
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn encode_hex(bytes: [u8; 16]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(32);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn decode_hex_prefix(hex: &str, output: &mut [u8; 16]) -> Result<(), HookDeliverySpoolError> {

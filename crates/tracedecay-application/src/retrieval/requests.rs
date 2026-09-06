@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, GenerationDiagnosticV1,
-    ManifestDigest, QueryFallbackSubpayload, RetrievalAnchorId, SessionId, SourceSpan,
-    SymbolOccurrenceId, TemporalModeV1, TestAttributionEvidenceClassV1, UtcMicros,
+    CodeGenerationId, FileOccurrenceId, GenerationDiagnosticV1, ManifestDigest, RetrievalAnchorId,
+    SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, TestAttributionEvidenceClassV1,
+    UtcMicros,
 };
 
 use crate::error::ApplicationContractError;
@@ -100,36 +100,6 @@ impl RetrievalRequestMeta {
     }
 }
 
-/// Concrete QUERY-backed symbol retrieval request. Its query view is
-/// receipt/sanitization-bound and intentionally non-serializable.
-#[derive(Debug)]
-pub struct SymbolSearchRequest {
-    pub query: EphemeralSanitizedQueryViewV1,
-    pub meta: RetrievalRequestMeta,
-}
-
-impl SymbolSearchRequest {
-    pub fn new(
-        query: EphemeralSanitizedQueryViewV1,
-        page: PageRequest,
-        projection: ResultProjection,
-        order: RetrievalOrder,
-    ) -> Result<Self, ApplicationContractError> {
-        Ok(Self {
-            query,
-            meta: RetrievalRequestMeta::current(page, projection, order),
-        })
-    }
-}
-
-/// The application-facing query fallback boundary. The exact/lexical/graph
-/// subpayload is preserved byte-for-byte by the owning query lane.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SymbolSearchResult {
-    pub query_fallback: QueryFallbackSubpayload,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceLinesRequest {
@@ -149,32 +119,6 @@ pub struct SourceReference {
 #[serde(deny_unknown_fields)]
 pub struct SourceLinesResult {
     pub references: Vec<SourceReference>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GraphCallersRequest {
-    pub symbol: SymbolOccurrenceId,
-    pub maximum_depth: u32,
-    pub meta: RetrievalRequestMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GraphCallersResult {
-    pub callers: Vec<SymbolOccurrenceId>,
-}
-
-/// Plan-05 graph-kernel input for one exact feedback target. The feedback
-/// layer only translates its typed address; graph traversal remains owned by
-/// the retrieval implementation behind this request.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GraphImpactRequest {
-    pub file: FileOccurrenceId,
-    pub symbol: SymbolOccurrenceId,
-    pub generation: CodeGenerationId,
-    pub meta: RetrievalRequestMeta,
 }
 
 /// Reference-only graph impact returned by the Plan-05 query kernel. The

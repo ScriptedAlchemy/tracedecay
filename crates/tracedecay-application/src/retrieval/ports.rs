@@ -10,10 +10,8 @@ use crate::handlers::ApplicationOperation;
 use crate::result::RetrievalEvidence;
 
 use super::{
-    AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest, AnchorExpandResult,
-    GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
-    HealthReadRequest, HealthReadResult, SessionLookupRequest, SessionLookupResult,
-    SourceLinesRequest, SourceLinesResult, SymbolSearchRequest, SymbolSearchResult,
+    AffectedTestsRequest, AffectedTestsResult, HealthReadRequest, HealthReadResult,
+    SessionLookupRequest, SessionLookupResult, SourceLinesRequest, SourceLinesResult,
 };
 
 /// Context supplied to exactly one named retrieval port after admission.
@@ -48,40 +46,12 @@ impl<T> RetrievalPortOutcome<T> {
     }
 }
 
-pub trait SymbolRetrievalPort {
-    fn symbol_search(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &SymbolSearchRequest,
-    ) -> RetrievalPortOutcome<SymbolSearchResult>;
-}
-
 pub trait SourceRetrievalPort {
     fn source_lines(
         &self,
         context: &RetrievalPortContext<'_>,
         request: &SourceLinesRequest,
     ) -> RetrievalPortOutcome<SourceLinesResult>;
-}
-
-pub trait GraphRetrievalPort {
-    fn graph_callers(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &GraphCallersRequest,
-    ) -> RetrievalPortOutcome<GraphCallersResult>;
-}
-
-/// Plan-05 graph-impact query boundary used by feedback orchestration.
-/// It is intentionally distinct from the legacy callers projection because a
-/// feedback result needs the query kernel's file, caller, and anchor evidence
-/// as one bounded snapshot.
-pub trait GraphImpactRetrievalPort {
-    fn graph_impact(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &GraphImpactRequest,
-    ) -> RetrievalPortOutcome<GraphImpactResult>;
 }
 
 pub trait AffectedTestsRetrievalPort {
@@ -153,14 +123,6 @@ pub trait TemporalRetrievalPort {
         context: RetrievalPortContext<'a>,
         request: &'a SessionLookupRequest,
     ) -> TemporalRetrievalFuture<'a>;
-}
-
-pub trait AnchorHydrationPort {
-    fn anchor_expand(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &AnchorExpandRequest,
-    ) -> RetrievalPortOutcome<AnchorExpandResult>;
 }
 
 pub trait OperationalRetrievalPort {

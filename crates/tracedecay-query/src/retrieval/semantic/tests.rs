@@ -13,12 +13,11 @@ use tracedecay_domain::{
     FusedCandidate, FusionProfile, LogicalEvidenceId, ManifestDigest, PrincipalId, ProjectionKeyV1,
     PublicRetrieverStatus, QueryDigest, QueryFallbackSubpayload, QueryMac,
     QueryNormalizationRevision, RankedCandidate, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    Retriever, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
-    SemanticSearchIndexKeyV1, SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness,
-    SourceNamespace, SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1,
-    VectorWatermark,
+    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
+    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SemanticSearchIndexKeyV1,
+    SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness, SourceNamespace,
+    SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 
 use super::*;
@@ -505,10 +504,9 @@ fn exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence() {
     let control = FixedExecutionControl::default();
     let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
 
-    let outcome = Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
-        &retriever, &request,
-    )
-    .expect("semantic retrieval succeeds");
+    let outcome = retriever
+        .retrieve_semantic(&request)
+        .expect("semantic retrieval succeeds");
     let RetrieverOutcome::Complete(batch) = outcome else {
         panic!("expected a complete semantic batch");
     };
@@ -573,10 +571,9 @@ fn bounded_scan_retains_the_cap_smallest_rows_by_tie_break_order() {
     let control = FixedExecutionControl::default();
     let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
 
-    let outcome = Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
-        &retriever, &request,
-    )
-    .expect("semantic retrieval succeeds");
+    let outcome = retriever
+        .retrieve_semantic(&request)
+        .expect("semantic retrieval succeeds");
     let RetrieverOutcome::Complete(batch) = outcome else {
         panic!("expected a complete semantic batch");
     };
@@ -716,12 +713,11 @@ fn retrieve_preserves_generation_mismatch_identity() {
     let control = FixedExecutionControl::default();
     let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
 
-    let error = Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
-        &retriever, &request,
-    )
-    .expect_err("foreign vector generation must fail closed");
+    let error = retriever
+        .retrieve_semantic(&request)
+        .expect_err("foreign vector generation must fail closed");
 
-    assert_eq!(error, RetrievalError::GenerationMismatch);
+    assert_eq!(error, RetrievalPortError::GenerationMismatch);
 }
 
 struct MismatchedDigestEmbedder;
@@ -2175,11 +2171,10 @@ fn ann_candidates_are_exact_rescored_into_the_flat_scans_top_k() {
     let flat_vectors = FakeVectorReadPort::new(&flat_request, ann_fixture_rows(&flat_request));
     let flat_control = FixedExecutionControl::default();
     let flat = SemanticCodeRetriever::new(&flat_embedder, &flat_vectors, &flat_control);
-    let RetrieverOutcome::Complete(flat_batch) = Retriever::<
-        SemanticRetrievalRequestV1<'_>,
-        CodeSemanticEvidenceV1,
-    >::retrieve(&flat, &flat_request)
-    .expect("flat retrieval succeeds") else {
+    let RetrieverOutcome::Complete(flat_batch) = flat
+        .retrieve_semantic(&flat_request)
+        .expect("flat retrieval succeeds")
+    else {
         panic!("expected a complete flat batch");
     };
 
@@ -2191,11 +2186,10 @@ fn ann_candidates_are_exact_rescored_into_the_flat_scans_top_k() {
     vectors.ann = Some(FakeAnnBehavior::CandidateIndices(vec![1, 3, 0, 2]));
     let control = FixedExecutionControl::default();
     let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
-    let RetrieverOutcome::Complete(batch) = Retriever::<
-        SemanticRetrievalRequestV1<'_>,
-        CodeSemanticEvidenceV1,
-    >::retrieve(&retriever, &ann_request)
-    .expect("ann retrieval succeeds") else {
+    let RetrieverOutcome::Complete(batch) = retriever
+        .retrieve_semantic(&ann_request)
+        .expect("ann retrieval succeeds")
+    else {
         panic!("expected a complete ann batch");
     };
 
@@ -2284,11 +2278,10 @@ fn ann_unavailability_falls_back_to_the_exact_flat_scan() {
         vectors.ann = Some(FakeAnnBehavior::Unavailable(state));
         let control = FixedExecutionControl::default();
         let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
-        let RetrieverOutcome::Complete(batch) = Retriever::<
-            SemanticRetrievalRequestV1<'_>,
-            CodeSemanticEvidenceV1,
-        >::retrieve(&retriever, &request)
-        .expect("fallback retrieval succeeds") else {
+        let RetrieverOutcome::Complete(batch) = retriever
+            .retrieve_semantic(&request)
+            .expect("fallback retrieval succeeds")
+        else {
             panic!("expected a complete fallback batch for {state:?}");
         };
         assert_eq!(vectors.ann_calls.get(), 1, "index consulted for {state:?}");
