@@ -307,12 +307,18 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
             "Windows replacement source and destination must differ",
         ));
     }
-    if source.file_name().is_none() || destination.file_name().is_none() {
+    if source.file_name().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Windows replacement paths must have basenames",
+            "Windows replacement source must have a basename",
         ));
     }
+    let destination_name = destination.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement destination must have a basename",
+        )
+    })?;
     let source_parent = source.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -351,11 +357,7 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     validate_file_kind(&source_file, &source, PathKind::File)?;
     source_file.sync_all()?;
 
-    let destination_name = destination
-        .file_name()
-        .expect("destination basename was validated")
-        .encode_wide()
-        .collect::<Vec<_>>();
+    let destination_name = destination_name.encode_wide().collect::<Vec<_>>();
     if destination_name.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -374,9 +376,7 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
         .max(size_of::<FILE_RENAME_INFO>())
         .try_into()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
-    let word_count = usize::try_from(buffer_size)
-        .expect("u32 fits usize")
-        .div_ceil(size_of::<usize>());
+    let word_count = (buffer_size as usize).div_ceil(size_of::<usize>());
     let mut storage = vec![0_usize; word_count];
     let rename_info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     let mut header = FILE_RENAME_INFO::default();

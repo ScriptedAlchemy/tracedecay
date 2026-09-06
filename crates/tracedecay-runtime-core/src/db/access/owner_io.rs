@@ -424,10 +424,12 @@ pub(super) fn replace_file_atomically(
                 temporary, path,
             )?);
         }
-        published
-            .as_ref()
-            .expect("published handle was retained")
-            .sync_all()
+        let Some(published) = published.as_ref() else {
+            return Err(std::io::Error::other(
+                "published Windows replacement handle was not retained",
+            ));
+        };
+        published.sync_all()
     });
     drop(published);
     result.map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
