@@ -209,7 +209,6 @@ struct DashboardContractCatalogV1 {
 }
 
 #[derive(JsonSchema)]
-#[allow(dead_code)]
 struct DashboardPayloadMarkerV1;
 
 /// Render the complete Rust dashboard wire schema as deterministic JSON.

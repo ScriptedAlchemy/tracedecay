@@ -566,17 +566,6 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         self
     }
 
-    /// Attaches the daemon-owned Delivery read adapter used by the production
-    /// route. Tests retain the same request-control and admission boundary.
-    #[must_use]
-    pub fn with_delivery_read_authority(
-        mut self,
-        delivery_read_authority: Arc<dyn DashboardDeliveryReadPortV1>,
-    ) -> Self {
-        self.delivery_read_authority = Some(delivery_read_authority);
-        self
-    }
-
     /// Attaches the exact ProfileSessions worker settings port used by the
     /// production dashboard composition. Tests keep the same separate CAS
     /// resource instead of routing this preference through project settings.
