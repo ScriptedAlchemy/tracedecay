@@ -36,6 +36,7 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     >,
     native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
+    store_telemetry_sampling: super::super::maintenance::StoreTelemetrySamplingRegistry,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,
     #[cfg(unix)]
@@ -155,6 +156,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
             ),
             native_integration_services: Arc::clone(&administration.native_integration_services),
             session_sync_service: Arc::clone(&administration.session_sync_service),
+            store_telemetry_sampling: administration.store_telemetry_sampling(),
             project_server_retirements: Arc::clone(&administration.project_server_retirements),
             #[cfg(unix)]
             automation_schedulers: Arc::clone(&administration.automation_schedulers),
@@ -228,6 +230,14 @@ impl RemoteRecoveryProjectLifecycleV1 {
                     project_id.as_str()
                 ),
             })?;
+        // Project open registers a sampling telemetry port per route store
+        // (`register_route_store_telemetry`), and that port retains a counted
+        // database client. Capacity retirement releases those handles before it
+        // retires the store; remote recovery did not, so the parked telemetry
+        // client alone refused the ProjectSessions retirement this quiescence
+        // exists to admit.
+        self.release_store_telemetry(database.db_path(), project_id.as_str())
+            .await;
         let fence = Arc::new(super::project_retirement::ProjectRetirementFenceV1::new(
             invocation,
             project_open,
@@ -267,6 +277,31 @@ impl RemoteRecoveryProjectLifecycleV1 {
                 message: format!("could not retire recovery project session sync: {error}"),
             })?;
         Ok(fence)
+    }
+
+    /// Release the sampling telemetry clients this project's stores retain.
+    /// Both the project-session store and every mounted route's graph store
+    /// are released; sibling projects and the profile stores stay sampled.
+    #[hotpath::skip]
+    async fn release_store_telemetry(&self, project_sessions_path: &Path, project_id: &str) {
+        self.store_telemetry_sampling
+            .release_retained_handle(project_sessions_path);
+        let graph_db_paths = {
+            let registry = self.project_servers.lock().await;
+            registry
+                .servers
+                .keys()
+                .filter(|key| {
+                    key.owner.profile_root == self.profile_root
+                        && key.owner.project_id.as_deref() == Some(project_id)
+                })
+                .map(|key| key.owner.graph_db_path.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        for graph_db_path in graph_db_paths {
+            self.store_telemetry_sampling
+                .release_retained_handle(&graph_db_path);
+        }
     }
 
     #[hotpath::skip]
