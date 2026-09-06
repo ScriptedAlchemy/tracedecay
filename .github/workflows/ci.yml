@@ -434,6 +434,16 @@ jobs:
       # second, feature-on resolution of the search-eval dependency graph
       # inside this job's bound (18 of its 62 minutes before it was cancelled),
       # and the parity property does not depend on the platform.
+      #
+      # Search-eval ships two binaries and has no test target, so
+      # `cargo nextest archive` never links them. Build with the same locked
+      # workspace/feature resolution as the archive; nextest `archive.include`
+      # then ships the `.exe` files to every shard via `--extract-to`.
+      # A `-p tracedecay-search-eval` build drops code-index language tiers.
+      - name: Build workspace binaries for the Windows test archive
+        shell: pwsh
+        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+
       - name: Build nextest archive
         shell: pwsh
         run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"

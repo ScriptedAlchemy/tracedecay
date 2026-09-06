@@ -11,6 +11,10 @@ slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 archive.include = [
     { path = "controlled-workload-hotpath", relative-to = "target", depth = 1, on-missing = "warn" },
+    # Windows archive only. `--extract-to` restores these beside the test
+    # profile so `search_eval_bin` finds them without env overrides.
+    { path = "debug/tracedecay-search-eval.exe", relative-to = "target", on-missing = "warn" },
+    { path = "debug/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "warn" },
 ]
 
 [profile.ci.junit]
