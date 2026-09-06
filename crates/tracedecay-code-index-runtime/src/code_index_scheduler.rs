@@ -5532,6 +5532,20 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// worker takes this flag to re-arm exactly one pass; taking it clears it,
     /// so a refusal can never spin the worker.
     ignored_roster_refusal_requires_rebuild: bool,
+    /// Admitted paths whose own admission proof no longer holds - the source
+    /// is tracked by git again, or its entrypoint now resolves outside the
+    /// package it was admitted from.
+    ///
+    /// Clearing the roster at the refusal was never enough: every reconcile
+    /// entry point re-adopts the roster from the active generation, so the
+    /// rebuild captured the identical refused paths, sealed the identical
+    /// content identity, answered `Noop`, and left the refusal to reproduce
+    /// forever against an empty serving slot. Adoption skips these paths, so
+    /// the successor is published without them and typed re-admission is the
+    /// only way back in. A path whose proof still holds is *not* listed: that
+    /// refusal is stale bytes, and its successor must re-capture it under the
+    /// same roster.
+    refused_ignored_source_paths: BTreeSet<String>,
     query_owners: ProfiledStdMutex<Option<GenerationServingCachesV1>>,
     /// Immutable generation-scoped build snapshot. The registry clones this
     /// slot at mount so dashboard reads never acquire the scheduler mutex.
@@ -5767,6 +5781,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             latest_content_identity,
             ignored_source_admissions: Vec::new(),
             ignored_roster_refusal_requires_rebuild: false,
+            refused_ignored_source_paths: BTreeSet::new(),
             query_owners: hotpath::mutex!(
                 Mutex::new(None),
                 label = "daemon.code_index.serving_caches"
@@ -6821,6 +6836,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 "decoded generation refused: ignored-source roster disagrees \
                  with the sealed generation"
             );
+            self.retire_unprovable_ignored_source_admissions(&generation);
             self.ignored_source_admissions.clear();
             // The cleared roster is the remedy, and the pass that must apply
             // it needs a wake this refused pass already consumed.

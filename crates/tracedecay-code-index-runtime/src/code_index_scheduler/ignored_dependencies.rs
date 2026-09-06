@@ -96,6 +96,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map(|entry| entry.logical_path.clone())
             .collect::<BTreeSet<_>>();
         paths.insert(admission.logical_path.clone());
+        // The proof this admission just re-ran is the one a prior refusal
+        // retired the path for, so the retirement no longer applies.
+        self.refused_ignored_source_paths
+            .remove(&admission.logical_path);
         self.ignored_source_admissions = paths
             .into_iter()
             .map(|logical_path| CodeIndexIgnoredSourceAdmissionV1 { logical_path })
@@ -278,7 +282,81 @@ impl CodeIndexWorktreeSchedulerV1 {
         &mut self,
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) {
-        self.ignored_source_admissions = generation.ignored_source_admissions().to_vec();
+        // A path whose admission proof was already refused must not come back
+        // through the sealed roster: re-adopting it rebuilds the identical
+        // refused generation, so the refusal reproduces on every pass and the
+        // serving slot never fills.
+        self.ignored_source_admissions = generation
+            .ignored_source_admissions()
+            .iter()
+            .filter(|admission| {
+                !self
+                    .refused_ignored_source_paths
+                    .contains(&admission.logical_path)
+            })
+            .cloned()
+            .collect();
+    }
+
+    /// Retire the admitted paths a refused roster can no longer prove.
+    ///
+    /// A roster mismatch has two causes and one remedy each. An entrypoint
+    /// whose bytes moved is still a legitimate admission: its successor
+    /// re-captures it under the same roster. An entrypoint that git now
+    /// tracks, or that resolves outside the package it was admitted from, has
+    /// lost the proof that admitted it - only typed re-admission may bring it
+    /// back, so it is retired here and adoption skips it from now on.
+    pub(super) fn retire_unprovable_ignored_source_admissions(
+        &mut self,
+        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    ) {
+        for admission in generation.ignored_source_admissions() {
+            if !self.admitted_source_proof_holds(&admission.logical_path) {
+                tracing::warn!(
+                    event = "code_index_ignored_source_admission_retired",
+                    logical_path = admission.logical_path.as_str(),
+                    "an admitted ignored source no longer proves its admission; the successor \
+                     generation drops it and typed re-admission is required"
+                );
+                self.refused_ignored_source_paths
+                    .insert(admission.logical_path.clone());
+            }
+        }
+    }
+
+    /// Re-run the exact admission proof for one already-admitted logical path.
+    fn admitted_source_proof_holds(&self, logical_path: &str) -> bool {
+        let Some(package_relative) = logical_path.strip_prefix("node_modules/") else {
+            return false;
+        };
+        let mut segments = package_relative.split('/');
+        let Some(first) = segments.next() else {
+            return false;
+        };
+        let module = if first.starts_with('@') {
+            let Some(second) = segments.next() else {
+                return false;
+            };
+            format!("{first}/{second}")
+        } else {
+            first.to_owned()
+        };
+        let Ok(module_path) = validated_module_path(&module) else {
+            return false;
+        };
+        let package_root = self.project_root.join("node_modules").join(module_path);
+        let Ok(canonical_package) = canonical_package_root(&self.project_root, &package_root)
+        else {
+            return false;
+        };
+        validate_admitted_source(
+            &self.project_root,
+            &canonical_package,
+            &self.project_root.join(logical_path),
+            logical_path,
+            None,
+        )
+        .is_ok()
     }
 
     /// One wall span covers the whole roster verification sweep — it re-reads
