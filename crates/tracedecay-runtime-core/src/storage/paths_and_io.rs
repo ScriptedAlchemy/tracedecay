@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -432,8 +432,24 @@ fn missing_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(missing)
 }
 
-#[cfg(unix)]
-fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
+fn durable_directory_lock_path(parent: &Path, destination_name: &OsStr) -> PathBuf {
+    let mut lock_name = OsString::from(".");
+    lock_name.push(destination_name);
+    lock_name.push(".durable-directory.lock");
+    parent.join(lock_name)
+}
+
+fn is_concurrent_durable_directory_race(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+        || (error.kind() == io::ErrorKind::InvalidInput
+            && error.to_string().contains("parent must already exist"))
+}
+
+fn create_missing_directories_locked(
+    path: &Path,
+    mut publish: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    reject_symlink_components(path, "durable private store directory")?;
     let missing = missing_directories(path)?;
     let Some(highest_missing) = missing.last() else {
         PrivateStoreIo::create_dir_all(path)?;
@@ -442,14 +458,65 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
     let existing_parent = highest_missing
         .parent()
         .ok_or_else(|| invalid_input("durable private store directory has no parent directory"))?;
+    if !existing_parent.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "durable private store directory parent disappeared during concurrent create",
+        ));
+    }
     if existing_parent.parent().is_some() {
         sync_parent_directory(existing_parent)?;
     }
     for destination in missing.iter().rev() {
-        PrivateStoreIo::create_private_directory(destination)?;
-        sync_parent_directory(destination)?;
+        let parent = destination.parent().ok_or_else(|| {
+            invalid_input("durable private store directory has no parent directory")
+        })?;
+        if !parent.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "durable private store directory parent disappeared during concurrent create",
+            ));
+        }
+        let destination_name = destination
+            .file_name()
+            .ok_or_else(|| invalid_input("durable private store directory has no file name"))?;
+        let lock_path = durable_directory_lock_path(parent, destination_name);
+        reject_symlink_components(&lock_path, "durable private store directory lock")?;
+        let _lock = acquire_lock_file_blocking(&lock_path, true)?;
+        if destination.try_exists()? {
+            tracedecay_private_fs::validate_private_directory(destination)?;
+            continue;
+        }
+        publish(destination)?;
     }
     Ok(())
+}
+
+fn create_dir_all_durable_retrying(
+    path: &Path,
+    mut publish: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    const ATTEMPTS: usize = 8;
+    let mut attempt = 0;
+    loop {
+        match create_missing_directories_locked(path, &mut publish) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt + 1 < ATTEMPTS && is_concurrent_durable_directory_race(&error) =>
+            {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
+    create_dir_all_durable_retrying(path, |destination| {
+        PrivateStoreIo::create_private_directory(destination)?;
+        sync_parent_directory(destination)
+    })
 }
 
 #[cfg(windows)]
@@ -470,10 +537,7 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
         let destination_name = destination
             .file_name()
             .ok_or_else(|| invalid_input("durable private store directory has no file name"))?;
-        let mut lock_name = OsString::from(".");
-        lock_name.push(destination_name);
-        lock_name.push(".durable-directory.lock");
-        let lock_path = parent.join(lock_name);
+        let lock_path = durable_directory_lock_path(parent, destination_name);
         reject_symlink_components(&lock_path, "durable private store directory lock")?;
         let _lock = acquire_lock_file_blocking(&lock_path, true)?;
         if destination.try_exists()? {

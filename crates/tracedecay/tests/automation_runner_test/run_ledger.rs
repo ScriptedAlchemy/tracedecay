@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use tempfile::tempdir;
 use tokio::sync::Barrier;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 use tracedecay_automation_runtime::automation::run_ledger::{
@@ -84,17 +87,21 @@ async fn run_ledger_appends_jsonl_under_dashboard_root() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_ledger_keeps_concurrent_jsonl_writes_intact() {
-    let temp = tempdir().unwrap();
-    let dashboard_root = std::sync::Arc::new(temp.path().join("dashboard"));
+    let temp = Arc::new(tempdir().unwrap());
+    let dashboard_root = Arc::new(temp.path().join("dashboard"));
+    PrivateStoreIo::create_dir_all_durable(&dashboard_root).unwrap();
     let writers = 8;
     let lines_per_writer = 50;
-    let barrier = std::sync::Arc::new(Barrier::new(writers));
+    let barrier = Arc::new(Barrier::new(writers));
     let mut handles = Vec::new();
 
     for writer in 0..writers {
-        let dashboard_root = std::sync::Arc::clone(&dashboard_root);
-        let barrier = std::sync::Arc::clone(&barrier);
+        let temp = Arc::clone(&temp);
+        let dashboard_root = Arc::clone(&dashboard_root);
+        let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
+            let retained = temp.path().to_path_buf();
+            let resolved = run_ledger_path(&dashboard_root);
             barrier.wait().await;
             for line in 0..lines_per_writer {
                 let run_id = format!("run-{writer}-{line}");
@@ -105,12 +112,29 @@ async fn run_ledger_keeps_concurrent_jsonl_writes_intact() {
                 .await
                 .unwrap();
             }
+            (retained, resolved)
         }));
     }
 
+    let mut resolved_paths = Vec::new();
     for handle in handles {
-        handle.await.unwrap();
+        let (retained, resolved) = handle.await.unwrap();
+        assert!(
+            retained.is_dir(),
+            "fixture root must outlive concurrent ledger writers"
+        );
+        assert_eq!(resolved, run_ledger_path(&dashboard_root));
+        resolved_paths.push(resolved);
     }
+
+    assert!(
+        dashboard_root.is_dir(),
+        "ledger parent must remain after concurrent writers settle"
+    );
+    assert!(
+        resolved_paths.iter().all(|path| path == &resolved_paths[0]),
+        "every writer must record the same ledger path"
+    );
 
     let raw = tokio::fs::read_to_string(run_ledger_path(&dashboard_root))
         .await
