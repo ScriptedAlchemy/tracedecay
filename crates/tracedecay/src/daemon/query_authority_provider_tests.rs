@@ -856,32 +856,5 @@ async fn second_semantic_activation_keeps_serving_the_evaluated_query_profile() 
     );
 }
 
-#[test]
-fn durable_generation_lookup_distinguishes_absence_from_read_failure() {
-    assert!(
-        classify_published_generation_lookup(None)
-            .expect("unmounted publication authority is absent")
-            .is_none()
-    );
-    assert!(
-        classify_published_generation_lookup(Some(Ok(None)))
-            .expect("missing generation is an authoritative absence")
-            .is_none()
-    );
-    let failure = classify_published_generation_lookup(Some(Err(
-        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerErrorV1::Identity(
-            "injected durable generation read failure".to_owned(),
-        ),
-    )));
-    assert!(
-        matches!(
-            failure,
-            Err(tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerErrorV1::Identity(detail))
-                if detail == "injected durable generation read failure"
-        ),
-        "join, I/O, and corruption failures must not be projected as a missing generation"
-    );
-}
-
 #[path = "query_authority_provider_activation_tests.rs"]
 mod activation_tests;

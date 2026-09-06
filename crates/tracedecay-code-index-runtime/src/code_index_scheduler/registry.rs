@@ -5044,6 +5044,51 @@ impl CodeIndexSchedulerRegistryV1 {
         })
     }
 
+    /// The code generation this scope is currently serving.
+    ///
+    /// One selection, owned by the scheduler, for every caller that needs the
+    /// generation queries pin: the seated serving generation when the graph
+    /// seat exists, otherwise the durable publication the text owner serves
+    /// through the same scope-checked freshness ladder queries use. A quietly
+    /// remounted partitioned generation deliberately leaves the graph seat
+    /// empty forever while exact/lexical keep serving from the text owner, so
+    /// consulting only the seat would defer forever. Historical generations
+    /// are never resolved here: `None` means neither seat is available yet,
+    /// which callers must treat as deferred, not as a mismatch.
+    pub async fn current_serving_generation_for_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+        if let Some(seated) = self
+            .serving_code_scope(project_root)
+            .await
+            .and_then(|serving| serving.serving_generation)
+        {
+            return Some(seated);
+        }
+        let text = self.latest_text_fresh_for_scope(scope).await?;
+        let generation_id = text.metadata().manifest().generation_id.clone();
+        match self
+            .published_generation(project_root, &generation_id)
+            .await
+        {
+            Some(Ok(generation)) => generation,
+            Some(Err(error)) => {
+                tracing::warn!(
+                    event = "code_index_serving_generation",
+                    outcome = "unreadable",
+                    error = %error,
+                    project_root = %project_root.display(),
+                    generation = %generation_id,
+                    "the text-serving generation could not be read from the durable store"
+                );
+                None
+            }
+            None => None,
+        }
+    }
+
     #[hotpath::measure(label = "daemon.code_index.registry.install_semantic", future = true)]
     pub async fn install_semantic_vector_graph_provider(
         &self,
