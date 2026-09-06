@@ -40,14 +40,13 @@ pub(super) fn spawn(
             // without announcing at all. On a cold project the first
             // generation therefore becomes exact with no publication left to
             // wake this owner: it slept forever and the project served
-            // indefinitely with the typed-unavailable feedback cycle. Poll
-            // beside the subscription — the same backstop
-            // `spawn_query_authority_when_generation_ready` keeps for the same
-            // transition. The task dies with its project server.
-            // ponytail: fixed 1s poll; make it a seating signal if the
-            // scheduler ever announces the serving swap itself.
-            let mut retry = tokio::time::interval(std::time::Duration::from_secs(1));
-            retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // indefinitely with the typed-unavailable feedback cycle. Wait on
+            // the serving-seat signal beside the subscription: every slot
+            // write records a seat, so a woken waiter reads the seated
+            // generation. Subscribe before the first attempt so a seat that
+            // lands during it is not lost. The task dies with its project
+            // server.
+            let mut seats = invocation.code_index_schedulers.subscribe_serving_seats();
             let mut partial_publication_retried = false;
             loop {
                 match try_mount(&invocation, &project_root, &mut state).await {
@@ -82,7 +81,7 @@ pub(super) fn spawn(
                             return;
                         }
                     },
-                    _ = retry.tick() => {}
+                    Ok(()) = seats.changed() => {}
                 }
                 match try_mount(&invocation, &project_root, &mut state).await {
                     Attempt::Terminal => return,
