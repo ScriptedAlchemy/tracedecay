@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tokio::time::{Duration, timeout};
 use tracedecay_application::ResolvedScope;
@@ -85,9 +85,33 @@ impl Default for GitWatchMaintenanceWakeV1 {
     }
 }
 
-/// Catalog snapshot the git-transaction owner consults for capability manifests.
-pub type ApplicationCatalogSnapshotFn =
-    fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1>;
+/// Catalog snapshot provider the git-transaction owner consults for capability
+/// manifests. Root hands one to each owner at construction; there is no ambient
+/// registration, so an owner cannot exist without a composer.
+#[derive(Clone)]
+pub struct ApplicationCatalogProviderV1 {
+    compose:
+        Arc<dyn Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> + Send + Sync>,
+}
+
+impl ApplicationCatalogProviderV1 {
+    pub fn new(
+        compose: impl Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            compose: Arc::new(compose),
+        }
+    }
+
+    /// Composes the current snapshot. Root composes lazily per call, so this is
+    /// deliberately not a captured snapshot.
+    pub fn snapshot(&self) -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> {
+        (self.compose)()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationCatalogSnapshotErrorV1 {
@@ -100,23 +124,6 @@ impl ApplicationCatalogSnapshotErrorV1 {
             message: message.into(),
         }
     }
-}
-
-static APPLICATION_CATALOG_SNAPSHOT: OnceLock<ApplicationCatalogSnapshotFn> = OnceLock::new();
-
-/// Register the root catalog composer. Idempotent: the first install wins.
-pub fn install_application_catalog_snapshot(composer: ApplicationCatalogSnapshotFn) {
-    let _ = APPLICATION_CATALOG_SNAPSHOT.set(composer);
-}
-
-pub(crate) fn build_application_catalog_snapshot()
--> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> {
-    let Some(composer) = APPLICATION_CATALOG_SNAPSHOT.get().copied() else {
-        return Err(ApplicationCatalogSnapshotErrorV1::new(
-            "application catalog snapshot composer is not installed",
-        ));
-    };
-    composer()
 }
 
 /// Connection-admission lease the scheduler parks behind on blocking work.

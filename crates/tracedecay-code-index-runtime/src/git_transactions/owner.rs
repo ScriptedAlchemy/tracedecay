@@ -27,7 +27,7 @@ use super::{
     GitIndexTransactionStoreRegistry, RepositoryMutationQueue,
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
-use crate::ports::build_application_catalog_snapshot;
+use crate::ports::ApplicationCatalogProviderV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
@@ -75,6 +75,7 @@ pub trait DaemonGitAuthoritySource: Send + Sync {
 struct ProductionDaemonGitAuthoritySource {
     access: ProjectSourceAccessSnapshot,
     configuration: OwnedGlobalDbConfigurationControlStore,
+    catalog: ApplicationCatalogProviderV1,
     runtime: tokio::runtime::Handle,
 }
 
@@ -161,7 +162,9 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         if !effective_capabilities.contains(capability_id) {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        let catalog = build_application_catalog_snapshot()
+        let catalog = self
+            .catalog
+            .snapshot()
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let manifest = catalog
             .capability(capability_id)
@@ -441,6 +444,7 @@ impl ServiceKey {
 /// worktrees share one session store actor without sharing native executors or
 /// mutation authority.
 pub struct DaemonGitIndexTransactionServiceRegistry {
+    catalog: ApplicationCatalogProviderV1,
     stores: GitIndexTransactionStoreRegistry,
     mutation_queue: Arc<RepositoryMutationQueue>,
     services: ProfiledTokioMutex<HashMap<ServiceKey, ServiceEntry>>,
@@ -449,9 +453,13 @@ pub struct DaemonGitIndexTransactionServiceRegistry {
     shutdown_receipt: ProfiledTokioMutex<Option<DaemonGitIndexShutdownReceiptV1>>,
 }
 
-impl Default for DaemonGitIndexTransactionServiceRegistry {
-    fn default() -> Self {
+impl DaemonGitIndexTransactionServiceRegistry {
+    /// Root supplies the catalog composer here: every owner this registry
+    /// mounts resolves capability manifests through it, so there is no window
+    /// in which an owner exists without one.
+    pub fn new(catalog: ApplicationCatalogProviderV1) -> Self {
         Self {
+            catalog,
             stores: GitIndexTransactionStoreRegistry::default(),
             mutation_queue: Arc::new(RepositoryMutationQueue::default()),
             services: hotpath::mutex!(
@@ -624,6 +632,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
                     OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
                         configuration_database,
                     ),
+                catalog: self.catalog.clone(),
                 runtime,
             }))?;
         Ok(())

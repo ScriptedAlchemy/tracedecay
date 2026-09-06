@@ -541,7 +541,11 @@ impl Default for StoreAdministration {
                 SessionTemporalRefreshSchedulerRegistry::default(),
             ),
             git_index_transaction_services: Arc::new(
-                DaemonGitIndexTransactionServiceRegistry::default(),
+                DaemonGitIndexTransactionServiceRegistry::new(
+                    tracedecay_code_index_runtime::ApplicationCatalogProviderV1::new(
+                        crate::runtime_ports::compose_application_catalog_snapshot,
+                    ),
+                ),
             ),
             native_integration_services: Arc::new(
                 DaemonNativeIntegrationRuntimeRegistrar::default(),
