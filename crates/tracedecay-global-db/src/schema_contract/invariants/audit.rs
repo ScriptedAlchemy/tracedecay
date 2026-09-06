@@ -2090,7 +2090,30 @@ mod tests {
         )
         .await
         .unwrap();
+        // Session-projector provenance must bind a retrieval anchor owned by
+        // the same observation and receipt; the binding triggers refuse an
+        // unbound row for every `claude-session-message-v*` projector.
+        let anchor_id = audit_anchor_id(&observation);
+        conn.execute(
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES (?1, '{\"kind\":\"audit\"}', '{\"owner\":\"audit\"}', 'projection.gen.v1')",
+            params![anchor_id.as_str()],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
+             VALUES (?1, ?2)",
+            params![observation.observation_id().as_str(), anchor_id.as_str()],
+        )
+        .await
+        .unwrap();
         observation
+    }
+
+    fn audit_anchor_id(observation: &DurableObservationV1) -> String {
+        format!("anchor.{}", observation.observation_id().as_str())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2108,7 +2131,7 @@ mod tests {
                 projector_version, observation_id, output_ordinal, receipt_id,
                 output_provider, output_message_id, output_digest, message_created,
                 retrieval_anchor_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 projector_version,
                 observation.observation_id().as_str(),
@@ -2117,7 +2140,8 @@ mod tests {
                 output_provider,
                 output_message_id,
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                message_created
+                message_created,
+                audit_anchor_id(observation)
             ],
         )
         .await
