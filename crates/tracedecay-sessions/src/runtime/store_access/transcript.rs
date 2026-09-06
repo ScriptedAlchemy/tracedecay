@@ -9,6 +9,7 @@ use super::super::git_correlation::{
     CommitSessionRecord, SpanObservation, enqueue_git_evidence_publication,
 };
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
+use super::super::shared::{path_identity_eq, path_identity_lookup_candidates};
 use super::codex_goal_reconciliation::find_preceding_codex_goal_response;
 use super::types::{TranscriptBatch, TranscriptPersistenceError};
 
@@ -128,6 +129,18 @@ pub async fn get_parse_offset(
     conn: &impl QueryExecutor,
     path: &str,
 ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
+    for candidate in path_identity_lookup_candidates(path) {
+        if let Some(offset) = get_parse_offset_exact(conn, &candidate).await? {
+            return Ok(Some(offset));
+        }
+    }
+    get_parse_offset_by_path_identity(conn, path).await
+}
+
+async fn get_parse_offset_exact(
+    conn: &impl QueryExecutor,
+    path: &str,
+) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
     match conn
         .query(
             "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
@@ -175,6 +188,36 @@ pub async fn get_parse_offset(
             error,
         )),
     }
+}
+
+async fn get_parse_offset_by_path_identity(
+    conn: &impl QueryExecutor,
+    path: &str,
+) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
+    let mut rows = conn
+        .query(
+            "SELECT file_path, byte_offset, mtime, file_id FROM parse_offsets",
+            params![],
+        )
+        .await
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("scan transcript parse offsets", error)
+        })?;
+    while let Some(row) = rows.next().await.map_err(|error| {
+        TranscriptPersistenceError::storage("read transcript parse offset identity", error)
+    })? {
+        let stored = row.get::<String>(0).map_err(|error| {
+            TranscriptPersistenceError::storage("decode transcript parse offset path", error)
+        })?;
+        if path_identity_eq(&stored, path) {
+            return Ok(Some(ParseOffset {
+                byte_offset: decode_u64(&row, 1, "decode transcript byte offset")?,
+                mtime: decode_u64(&row, 2, "decode transcript mtime")?,
+                file_id: decode_file_id(&row, 3, "decode transcript file id")?,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn sqlite_missing_column(error: &tracedecay_runtime_core::db::engine::Error, column: &str) -> bool {
