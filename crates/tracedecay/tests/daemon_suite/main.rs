@@ -18,6 +18,10 @@ mod common;
 mod advanced_workflow_journey_test;
 #[cfg(unix)]
 mod authentication_refusal_test;
+#[cfg(unix)]
+mod code_index_journey;
+#[cfg(unix)]
+mod dirty_worktree_symbol_reads_test;
 mod fixture_authority_test;
 #[cfg(feature = "test-transport")]
 mod git_watch_test;
