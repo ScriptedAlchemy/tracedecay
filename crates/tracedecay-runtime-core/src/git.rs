@@ -12,9 +12,12 @@
 //! callers use the bounded CLI fallback here for native Git writes, signing,
 //! recovery, and reads where exact porcelain semantics remain the authority.
 
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::path::{Component, Prefix};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -209,6 +212,67 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(not(any(unix, windows)))]
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
+}
+
+/// Spells a native path the way the invoked Git accepts it as a command-line
+/// argument.
+///
+/// `fs::canonicalize` returns the `\\?\` verbatim form on Windows. The Win32
+/// file APIs take that form, so `std::fs` and [`Command::current_dir`] are
+/// fine with it, but Git for Windows rewrites the separators of a path it
+/// receives as an *argument* and then fails on the resulting `//?/C:/...`
+/// (`could not create leading directories of '//?/D:/...': Invalid argument`
+/// from `git worktree add`). This drops only the verbatim prefix —
+/// `\\?\C:\x` becomes `C:\x`, `\\?\UNC\server\share\x` becomes
+/// `\\server\share\x` — and passes every other component through byte for
+/// byte, so long, spaced, and non-ASCII paths are untouched. Elsewhere the
+/// path is returned as is.
+///
+/// This is a spelling for one Git argument, not a new identity: callers keep
+/// the native path they verified as the root they key on and compare against.
+#[cfg(windows)]
+pub fn git_path_argument(path: &Path) -> Cow<'_, OsStr> {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Cow::Borrowed(path.as_os_str());
+    };
+    let mut spelled = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => PathBuf::from(format!(r"{}:\", char::from(letter))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut root = OsString::from(r"\\");
+            root.push(server);
+            root.push(r"\");
+            root.push(share);
+            root.push(r"\");
+            PathBuf::from(root)
+        }
+        // `\\?\Volume{...}`-style prefixes have no non-verbatim spelling, and
+        // the remaining prefixes are already what Git expects.
+        Prefix::Verbatim(_) | Prefix::DeviceNS(_) | Prefix::UNC(..) | Prefix::Disk(_) => {
+            return Cow::Borrowed(path.as_os_str());
+        }
+    };
+    for component in components {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => spelled.push(name),
+            // A verbatim path is not normalized by Win32, so `.`/`..` are
+            // literal names in it; the plain spelling would collapse them and
+            // name a different directory. Refuse to change the meaning.
+            Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
+                return Cow::Borrowed(path.as_os_str());
+            }
+        }
+    }
+    Cow::Owned(spelled.into_os_string())
+}
+
+/// Spells a native path the way the invoked Git accepts it as a command-line
+/// argument. Only Windows has a verbatim spelling to translate; every other
+/// host passes the path through unchanged.
+#[cfg(not(windows))]
+pub fn git_path_argument(path: &Path) -> Cow<'_, OsStr> {
+    Cow::Borrowed(path.as_os_str())
 }
 
 /// Runs `git <args>` in `repo_root` with the resolved [`try_git_program`], returning
@@ -499,6 +563,7 @@ fn git_command_at(repo_root: &Path, args: &[&str]) -> Result<Command, GitProgram
     command.env_remove("GIT_DIR");
     command.env_remove("GIT_WORK_TREE");
     command.env_remove("GIT_COMMON_DIR");
+    let repo_root: &OsStr = &git_path_argument(repo_root);
     command.arg("-C").arg(repo_root).args(args);
     Ok(command)
 }
@@ -644,6 +709,82 @@ mod tests {
                 OsString::from("--git-common-dir"),
             ]
         );
+    }
+
+    #[test]
+    fn git_path_argument_passes_a_plain_path_through_unchanged() {
+        let plain = Path::new("/problematic/project/root");
+        assert!(matches!(
+            git_path_argument(plain),
+            Cow::Borrowed(spelled) if spelled == plain.as_os_str()
+        ));
+
+        let spaced = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .join("with space/ünïcode-ß");
+        assert_eq!(&*git_path_argument(&spaced), spaced.as_os_str());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_path_argument_drops_only_the_verbatim_prefix() {
+        assert_eq!(
+            &*git_path_argument(Path::new(r"\\?\D:\a\_temp\tmp\.tmpF1zlYs-admission-wt")),
+            OsStr::new(r"D:\a\_temp\tmp\.tmpF1zlYs-admission-wt")
+        );
+        assert_eq!(
+            &*git_path_argument(Path::new(r"\\?\C:\Users\Zack\TraceDecay Data\ünïcode")),
+            OsStr::new(r"C:\Users\Zack\TraceDecay Data\ünïcode")
+        );
+        assert_eq!(
+            &*git_path_argument(Path::new(r"\\?\UNC\server\share\repo\src")),
+            OsStr::new(r"\\server\share\repo\src")
+        );
+        for unchanged in [
+            r"C:\already\plain",
+            r"\\server\share\plain",
+            r"\\?\Volume{1234}\no-plain-spelling",
+            r"\\?\C:\literal\..\dot-dot-is-a-name-here",
+        ] {
+            assert_eq!(
+                &*git_path_argument(Path::new(unchanged)),
+                OsStr::new(unchanged),
+                "{unchanged} must pass through unchanged"
+            );
+        }
+    }
+
+    /// The spelling exists so Git sees a directory it can open; the directory
+    /// itself must be the one the caller canonicalized.
+    #[test]
+    fn git_path_argument_names_the_canonical_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let canonical = temporary.path().canonicalize().unwrap();
+        let spelled = PathBuf::from(git_path_argument(&canonical).into_owned());
+        assert_eq!(spelled.canonicalize().unwrap(), canonical);
+        if cfg!(windows) {
+            assert!(
+                !spelled.to_string_lossy().starts_with(r"\\?\"),
+                "Windows canonical paths are verbatim and must be respelled: {spelled:?}"
+            );
+        } else {
+            assert_eq!(spelled, canonical);
+        }
+    }
+
+    #[test]
+    fn git_at_command_spells_the_repository_root_for_git() {
+        let temporary = tempfile::tempdir().unwrap();
+        let canonical = temporary.path().canonicalize().unwrap();
+        let command = git_command_at(&canonical, &["rev-parse", "--show-toplevel"])
+            .expect("git executable should resolve");
+        let root_argument = command
+            .get_args()
+            .nth(1)
+            .expect("-C carries the repository root")
+            .to_os_string();
+        assert_eq!(root_argument, git_path_argument(&canonical).into_owned());
     }
 
     #[test]
