@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code)] // shared test support: each suite binary compiles this module and uses a subset
 
 mod work_product_attempt_support;
 
@@ -518,19 +518,6 @@ impl WorkProductAttemptStore {
             .graph
             .as_ref()
             .map(WorkProductGraphV1::version)
-    }
-
-    pub fn attempt_evidence(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Option<WorkAttemptEvidenceRecordV1> {
-        self.inner
-            .lock()
-            .expect("fixture store lock is available")
-            .evidence
-            .get(&attempt_key(authority, identity))
-            .and_then(|payload| serde_json::from_str(payload).ok())
     }
 }
 

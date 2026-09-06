@@ -2,7 +2,6 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use crate::{global_db_operation_error, global_db_operation_message};
 
-use super::rows::authority_violation;
 use super::{OPERATION, normalize_trigger_sql};
 
 pub(in crate::schema_contract) struct Trigger {
@@ -1711,44 +1710,10 @@ async fn trigger_matches_sql(
     future = true,
     label = "global_db.schema_contract.triggers.suspend_immutability"
 )]
-pub async fn suspend_immutability_for_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_domain::errors::Result<()> {
-    for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
-        if !trigger_matches(conn, trigger).await? {
-            return Err(authority_violation(format!(
-                "cannot suspend incompatible canonical authority trigger '{}'",
-                trigger.name
-            )));
-        }
-    }
-    for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
-        conn.execute(&format!("DROP TRIGGER \"{}\"", trigger.name), ())
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    }
-    Ok(())
-}
-
 #[hotpath::measure(
     future = true,
     label = "global_db.schema_contract.triggers.restore_immutability"
 )]
-pub async fn restore_immutability_after_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_domain::errors::Result<()> {
-    for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
-        replace_trigger(conn, trigger).await?;
-        if !trigger_matches(conn, trigger).await? {
-            return Err(authority_violation(format!(
-                "canonical authority trigger '{}' was not restored",
-                trigger.name
-            )));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::tests::harness::RegisteredGlobalDbHarness;

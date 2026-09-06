@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,8 +8,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProjectionId,
-    GraphPropertyName, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
-    MAX_VECTOR_SEARCH_LIMIT, VectorMetric, VectorSearchRequest,
+    GraphPropertyName, GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT,
+    VectorMetric, VectorSearchRequest,
 };
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
@@ -42,14 +41,13 @@ pub(super) mod transitions;
 use native_records::{
     PublishedBaseRecover, ScopedGenerationRecordsV1, peek_generation_base, read_build_records,
     read_cataloged_generation_records, read_generation_catalog, read_generation_catalog_entry,
-    read_generation_metadata, read_generation_records_with_recover, read_state_metadata,
+    read_generation_records_with_recover, read_state_metadata,
 };
 
 #[cfg(test)]
 pub(crate) use native_records::encode_generation_batch_delta;
 use persistence::{
-    check_cancelled, map_graph_error, resident_size_overflow, search_vector_property,
-    storage_error, vector_metric,
+    check_cancelled, map_graph_error, search_vector_property, storage_error, vector_metric,
 };
 use snapshot::SemanticVectorVerifiedReadV1;
 
@@ -293,19 +291,6 @@ impl VerifiedGraphVectorGenerationSnapshotV1 {
     pub fn generation(&self) -> &super::PublishedVectorGenerationV1 {
         &self.generation
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VerifiedVectorResidentPlanV1 {
-    pub watermark: GraphWatermark,
-    pub generation_id: VectorGenerationIdV1,
-    pub retained_bytes: u64,
-    pub hydration_peak_bytes: u64,
-}
-
-pub struct ResidentVectorRowV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub values: Box<[f32]>,
 }
 
 /// One generation-bound persisted ANN index, retained with the verified
@@ -827,67 +812,6 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<u64, VectorGenerationStoreErrorV1> {
         read_state_metadata(&self.snapshot()?, cancellation).map(|metadata| metadata.revision)
-    }
-
-    #[hotpath::measure(label = "usecases.store.resident_plan", future = true)]
-    pub async fn verified_resident_plan(
-        &self,
-        expected_generation: &VectorGenerationIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<VerifiedVectorResidentPlanV1>, VectorGenerationStoreErrorV1> {
-        check_cancelled(cancellation.as_ref())?;
-        let snapshot = self.snapshot()?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
-        let generation =
-            read_generation_metadata(&snapshot, expected_generation, Arc::clone(&cancellation))?
-                .ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::Corrupt(
-                        "active semantic vector generation metadata is missing".to_owned(),
-                    )
-                })?;
-        let catalog = read_generation_catalog_entry(
-            &snapshot,
-            expected_generation,
-            Arc::clone(&cancellation),
-        )?
-        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
-            BaseGenerationIncompatibilityV1::MissingSnapshot,
-        ))?;
-        if &catalog.generation_id != expected_generation {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector generation catalog identity is inconsistent".to_owned(),
-            ));
-        }
-        let row_count = catalog.rows;
-        let dimensions = u64::from(generation.embedding_key.embedding_key().dimensions);
-        let vector_bytes = dimensions
-            .checked_mul(u64::try_from(size_of::<f32>()).map_err(storage_error)?)
-            .ok_or_else(resident_size_overflow)?;
-        let per_row = u64::try_from(size_of::<ResidentVectorRowV1>())
-            .map_err(storage_error)?
-            .checked_add(1_024)
-            .and_then(|bytes| bytes.checked_add(vector_bytes))
-            .ok_or_else(resident_size_overflow)?;
-        let retained_bytes = row_count
-            .checked_mul(per_row)
-            .ok_or_else(resident_size_overflow)?;
-        let hydration_peak_bytes = retained_bytes
-            .checked_mul(2)
-            .and_then(|bytes| {
-                row_count
-                    .checked_mul(4_096)
-                    .and_then(|overhead| bytes.checked_add(overhead))
-            })
-            .ok_or_else(resident_size_overflow)?;
-        drop(snapshot);
-        check_cancelled(cancellation.as_ref())?;
-        crate::hotpath_observe::vector_resident_reservation(retained_bytes, hydration_peak_bytes);
-        Ok(Some(VerifiedVectorResidentPlanV1 {
-            watermark: metadata.watermark,
-            generation_id: expected_generation.clone(),
-            retained_bytes,
-            hydration_peak_bytes,
-        }))
     }
 
     /// The persisted ANN index bound to one published generation, if the

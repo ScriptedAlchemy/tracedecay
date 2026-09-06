@@ -1123,13 +1123,6 @@ impl SourceStoreStateV1 {
         self.latest_mutations.get(native_object)
     }
 
-    pub fn projected_mutation(
-        &self,
-        native_object: &SourceNativeObjectIdV1,
-    ) -> Option<&SourceObjectMutationV1> {
-        self.projected_mutations.get(native_object)
-    }
-
     pub fn validate(&self) -> SourceStoreResult<()> {
         if self.verified.is_verified() {
             return Ok(());

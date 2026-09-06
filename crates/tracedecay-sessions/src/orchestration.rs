@@ -52,10 +52,6 @@ impl<F> ProviderRunOutcome<F> {
         self.failures.push(failure);
     }
 
-    pub fn add_stats(&mut self, stats: TranscriptIngestStats) {
-        self.stats = self.stats.merge(stats);
-    }
-
     pub fn add_deferred_units(&mut self, deferred_units: u64) {
         self.deferred_units = self.deferred_units.saturating_add(deferred_units);
     }
