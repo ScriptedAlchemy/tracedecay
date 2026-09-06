@@ -23,8 +23,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 mod fence;
@@ -874,19 +874,14 @@ enum RegisteredQuarantineRegistryStateV1 {
 }
 
 async fn registered_quarantine_registry_state(
-    db: &RegisteredGlobalDb,
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
     intent: &RegisteredQuarantineIntentV1,
     control: CollectionControl<'_>,
 ) -> tracedecay_domain::errors::Result<
     Result<RegisteredQuarantineRegistryStateV1, CollectionCompletionV1>,
 > {
-    let snapshot = match control.race(db.read_snapshot()).await {
-        Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(error)) => return Err(error),
-        Err(completion) => return Ok(Err(completion)),
-    };
     let mut rows = match control
-        .race(snapshot.query(
+        .race(transaction.query(
             "SELECT project_id, store_relpath, created_at, last_write_at
              FROM store_instances
              WHERE store_id = ?1",
@@ -951,6 +946,16 @@ async fn registered_quarantine_registry_state(
     } else {
         RegisteredQuarantineRegistryStateV1::Changed
     }))
+}
+
+async fn rollback_registered_quarantine_recovery(
+    transaction: RegisteredGlobalDbWriteTransaction<'_>,
+    operation: &'static str,
+) -> tracedecay_domain::errors::Result<()> {
+    transaction
+        .rollback()
+        .await
+        .map_err(|error| orphan_db_error(operation, error))
 }
 
 fn record_registered_quarantine_recovery(
@@ -1030,6 +1035,49 @@ async fn reconcile_registered_quarantine_inventory(
     control: CollectionControl<'_>,
     outcome: &mut CollectionOutcome,
 ) -> tracedecay_domain::errors::Result<()> {
+    reconcile_registered_quarantine_inventory_inner(
+        db,
+        profile_root,
+        control,
+        outcome,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn reconcile_registered_quarantine_inventory_with_classified_hook(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    control: CollectionControl<'_>,
+    outcome: &mut CollectionOutcome,
+    mut after_classification: impl FnMut(
+        &RegisteredQuarantineIntentV1,
+        RegisteredQuarantineRegistryStateV1,
+    ) + Send,
+) -> tracedecay_domain::errors::Result<()> {
+    reconcile_registered_quarantine_inventory_inner(
+        db,
+        profile_root,
+        control,
+        outcome,
+        Some(&mut after_classification),
+    )
+    .await
+}
+
+#[cfg(test)]
+type RegisteredQuarantineClassifiedHook<'a> =
+    dyn FnMut(&RegisteredQuarantineIntentV1, RegisteredQuarantineRegistryStateV1) + Send + 'a;
+
+async fn reconcile_registered_quarantine_inventory_inner(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    control: CollectionControl<'_>,
+    outcome: &mut CollectionOutcome,
+    #[cfg(test)] mut after_classification: Option<&mut RegisteredQuarantineClassifiedHook<'_>>,
+) -> tracedecay_domain::errors::Result<()> {
     let intents = match read_registered_quarantine_intents_controlled(profile_root, control) {
         Ok(RegisteredQuarantineInventoryV1::Complete(intents)) => intents,
         Ok(RegisteredQuarantineInventoryV1::Interrupted) => {
@@ -1057,14 +1105,40 @@ async fn reconcile_registered_quarantine_inventory(
             outcome.completion = completion;
             break;
         }
+        let transaction = match control.race(db.begin_write_transaction()).await {
+            Ok(Ok(transaction)) => transaction,
+            Ok(Err(error)) => return Err(error),
+            Err(completion) => {
+                outcome.completion = completion;
+                break;
+            }
+        };
         let registry_state =
-            match registered_quarantine_registry_state(db, &intent, control).await? {
-                Ok(state) => state,
-                Err(completion) => {
+            match registered_quarantine_registry_state(&transaction, &intent, control).await {
+                Ok(Ok(state)) => state,
+                Ok(Err(completion)) => {
+                    rollback_registered_quarantine_recovery(
+                        transaction,
+                        "rollback interrupted registered quarantine classification",
+                    )
+                    .await?;
                     outcome.completion = completion;
                     break;
                 }
+                Err(error) => {
+                    if let Err(rollback_error) = transaction.rollback().await {
+                        return Err(orphan_db_error(
+                            "rollback failed registered quarantine classification",
+                            format!("{error}; rollback failed: {rollback_error}"),
+                        ));
+                    }
+                    return Err(error);
+                }
             };
+        #[cfg(test)]
+        if let Some(after_classification) = after_classification.as_deref_mut() {
+            after_classification(&intent, registry_state);
+        }
         let (decision, registry_changed) = match registry_state {
             RegisteredQuarantineRegistryStateV1::Exact => {
                 (RegisteredQuarantineDecisionV1::Restore, false)
@@ -1077,6 +1151,11 @@ async fn reconcile_registered_quarantine_inventory(
             }
         };
         if let Some(completion) = control.completion() {
+            rollback_registered_quarantine_recovery(
+                transaction,
+                "rollback interrupted registered quarantine recovery",
+            )
+            .await?;
             outcome.completion = completion;
             break;
         }
@@ -1088,12 +1167,22 @@ async fn reconcile_registered_quarantine_inventory(
         ) {
             Ok(recovery) => recovery,
             Err(CollectionFailureKind::Cancelled) => {
+                rollback_registered_quarantine_recovery(
+                    transaction,
+                    "rollback interrupted registered quarantine recovery",
+                )
+                .await?;
                 outcome.completion = control
                     .completion()
                     .unwrap_or(CollectionCompletionV1::Cancelled);
                 break;
             }
             Err(kind) => {
+                rollback_registered_quarantine_recovery(
+                    transaction,
+                    "rollback failed registered quarantine recovery",
+                )
+                .await?;
                 outcome.errors.push(CollectionFailure {
                     store_id: intent.store_id.clone(),
                     kind,
@@ -1101,6 +1190,11 @@ async fn reconcile_registered_quarantine_inventory(
                 continue;
             }
         };
+        rollback_registered_quarantine_recovery(
+            transaction,
+            "rollback completed registered quarantine recovery",
+        )
+        .await?;
         record_registered_quarantine_recovery(&intent, recovery, registry_changed, outcome);
         if let Some(completion) = control.completion() {
             outcome.completion = completion;
