@@ -180,10 +180,7 @@ async fn cancelled_transaction_call_keeps_serialization_until_acknowledgement() 
     while let Some(result) = pending.join_next().await {
         assert_eq!(result.unwrap().unwrap(), 1);
     }
-    let transaction = match Arc::try_unwrap(transaction) {
-        Ok(transaction) => transaction,
-        Err(_) => panic!("all transaction callers completed"),
-    };
+    let transaction = Arc::into_inner(transaction).expect("all transaction callers completed");
     transaction.commit().await.unwrap();
     let mut rows = connection
         .query("SELECT COUNT(*) FROM items", ())
