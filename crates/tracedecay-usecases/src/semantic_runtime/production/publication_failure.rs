@@ -180,11 +180,32 @@ impl SemanticPublicationFailureCategoryV1 {
     }
 }
 
+/// Longest corruption reason a receipt keeps.
+///
+/// `Corrupt` carries the name of the durable invariant that failed, and that
+/// name is the whole diagnostic value of the category: without it a
+/// `begin_generation / store_corrupt` failure cannot say *which* invariant
+/// refused. The bound keeps an unbounded storage payload out of the receipt.
+const CORRUPTION_REASON_LIMIT: usize = 200;
+
+fn bounded_corruption_reason(message: &str) -> String {
+    let mut end = message.len().min(CORRUPTION_REASON_LIMIT);
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_owned()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SemanticPublicationFailureReceiptV1 {
     pub(super) stage: SemanticPublicationStageV1,
     pub(super) category: SemanticPublicationFailureCategoryV1,
     pub(super) conflict: Option<GraphConflictContextV1>,
+    /// Which durable invariant the store refused on, for
+    /// [`SemanticPublicationFailureCategoryV1::StoreCorrupt`] only. Reported
+    /// in the daemon-local failure event; deliberately absent from
+    /// [`Self::detail`], which stays free of store-private text.
+    pub(super) corruption_reason: Option<String>,
 }
 
 impl SemanticPublicationFailureReceiptV1 {
@@ -312,10 +333,17 @@ impl SemanticPublicationFailureRecorderV1 {
             VectorGenerationStoreErrorV1::ConcurrentMutation(context) => Some(context.clone()),
             _ => None,
         };
-        self.record(
+        let corruption_reason = match error {
+            VectorGenerationStoreErrorV1::Corrupt(message) => {
+                Some(bounded_corruption_reason(message))
+            }
+            _ => None,
+        };
+        self.record_parts(
             stage,
             SemanticPublicationFailureCategoryV1::from_store(error),
             conflict,
+            corruption_reason,
         )
     }
 
@@ -340,6 +368,16 @@ impl SemanticPublicationFailureRecorderV1 {
         category: SemanticPublicationFailureCategoryV1,
         conflict: Option<GraphConflictContextV1>,
     ) -> SemanticRuntimeScheduleFailureV1 {
+        self.record_parts(stage, category, conflict, None)
+    }
+
+    fn record_parts(
+        &self,
+        stage: SemanticPublicationStageV1,
+        category: SemanticPublicationFailureCategoryV1,
+        conflict: Option<GraphConflictContextV1>,
+        corruption_reason: Option<String>,
+    ) -> SemanticRuntimeScheduleFailureV1 {
         let mut first = self
             .first
             .lock()
@@ -355,6 +393,14 @@ impl SemanticPublicationFailureRecorderV1 {
                     conflict_actual = context.actual.as_deref().unwrap_or(""),
                     "semantic publication failed at a bounded production stage"
                 );
+            } else if let Some(reason) = &corruption_reason {
+                tracing::warn!(
+                    event = "semantic_publication_failure",
+                    stage = stage.as_str(),
+                    category = category.as_str(),
+                    corruption_reason = reason.as_str(),
+                    "semantic publication failed at a bounded production stage"
+                );
             } else {
                 tracing::warn!(
                     event = "semantic_publication_failure",
@@ -367,6 +413,7 @@ impl SemanticPublicationFailureRecorderV1 {
                 stage,
                 category,
                 conflict,
+                corruption_reason,
             });
         }
         SemanticRuntimeScheduleFailureV1::Publication
@@ -526,6 +573,49 @@ mod tests {
                 .expected
                 .as_deref(),
             Some("expected guard value")
+        );
+    }
+
+    #[test]
+    fn corruption_refusals_keep_the_invariant_that_refused() {
+        let recorder = SemanticPublicationFailureRecorderV1::default();
+        recorder.begin_generation(&VectorGenerationStoreErrorV1::Corrupt(
+            "semantic vector code scope has a conflicting durable source binding".to_owned(),
+        ));
+        let receipt = recorder.receipt().expect("corruption receipt");
+        assert_eq!(
+            receipt.category,
+            SemanticPublicationFailureCategoryV1::StoreCorrupt
+        );
+        assert_eq!(
+            receipt.corruption_reason.as_deref(),
+            Some("semantic vector code scope has a conflicting durable source binding")
+        );
+        // The reason names an invariant for the daemon-local event; the
+        // receipt string stays category-only.
+        assert_eq!(
+            receipt.detail(),
+            "semantic runtime publication begin_generation failed: store_corrupt"
+        );
+
+        let bounded = SemanticPublicationFailureRecorderV1::default();
+        bounded.begin_generation(&VectorGenerationStoreErrorV1::Corrupt("\u{e9}".repeat(400)));
+        let reason = bounded
+            .receipt()
+            .expect("bounded receipt")
+            .corruption_reason
+            .expect("bounded reason");
+        assert!(reason.len() <= 200, "reason must stay bounded: {reason:?}");
+        assert!(reason.chars().all(|character| character == '\u{e9}'));
+
+        let uncorrupted = SemanticPublicationFailureRecorderV1::default();
+        uncorrupted.begin_generation(&VectorGenerationStoreErrorV1::Cancelled);
+        assert_eq!(
+            uncorrupted
+                .receipt()
+                .expect("cancellation receipt")
+                .corruption_reason,
+            None
         );
     }
 
