@@ -2,8 +2,9 @@ use super::*;
 use tracedecay_application::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeNavigationSurfaceRequest,
-    CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest, RegisteredRootLocatorV1,
 };
+use tracedecay_domain::{RepositoryId, WorktreeId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn lsp_deadline() -> Deadline {
@@ -12,6 +13,38 @@ fn lsp_deadline() -> Deadline {
 
 fn lsp_cancellation() -> CancellationContext {
     CancellationContext::active("cancel.lsp.dispatch-test").expect("LSP cancellation")
+}
+
+async fn open_authorized_workspace(
+    service: &DaemonInvocationService,
+    registry: &Arc<Mutex<LspSessionRegistry>>,
+    workspace: Option<AuthorizedLspWorkspace>,
+    request_id: &str,
+    root_uris: &[String],
+    owner: &DaemonLspInvocationOwner,
+) -> DaemonInvocationResponse {
+    service
+        .open_lsp_session(
+            registry,
+            workspace,
+            request_id.to_owned(),
+            "3.17".to_owned(),
+            root_uris.first().cloned(),
+            root_uris.to_vec(),
+            0,
+            Some(owner.clone()),
+        )
+        .await
+}
+
+fn assert_lsp_authorization_refusal(response: DaemonInvocationResponse, expected_request_id: &str) {
+    assert_eq!(response.request_id, expected_request_id);
+    assert_eq!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    );
 }
 
 #[test]
@@ -628,6 +661,199 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert!(service.lsp_sessions.lock().await.is_empty());
     assert!(service.authorized_lsp_workspaces.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn federated_lsp_admission_preserves_exact_profile_factory_and_root_pairing() {
+    let service = DaemonInvocationService::default();
+    let home = tempfile::tempdir().expect("workspace roots");
+    let profile = UserProfileId::new("profile.workspace").expect("profile");
+    let registrar = DaemonLspOwnerRegistrar::new(&service);
+    let mut roots = Vec::new();
+    let mut owners = Vec::new();
+    let mut grants = Vec::new();
+    for suffix in ["a", "b"] {
+        let root = home.path().join(suffix);
+        std::fs::create_dir(&root).expect("workspace root");
+        let root = root.canonicalize().expect("canonical workspace root");
+        let scope = ResolvedScope::new(
+            ProjectId::new(format!("project.workspace-{suffix}")).expect("project"),
+            RepositoryId::new(format!("repository.workspace-{suffix}")).expect("repository"),
+            WorktreeId::new(format!("worktree.workspace-{suffix}")).expect("worktree"),
+            None,
+        )
+        .expect("scope");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!("grant.workspace-{suffix}")).expect("grant"),
+            1,
+            canonical_sha256(&("workspace grant", suffix)).expect("grant digest"),
+            ActorId::new("actor.workspace").expect("actor"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            std::collections::BTreeSet::from([
+                CapabilityId::new(LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability")
+            ]),
+            std::collections::BTreeSet::from([
+                UseCaseId::new(LSP_WORKSPACE_USE_CASE_ID_V1).expect("use case")
+            ]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("grant");
+        let owner = DaemonLspInvocationOwner::for_test_project(
+            unavailable_lsp_session_factory(),
+            profile.clone(),
+            scope.project_id.clone(),
+            root.clone(),
+        )
+        .with_scope_grant(grant.clone());
+        registrar
+            .register_lsp_owner(root.clone(), owner.clone())
+            .await
+            .expect("register owner");
+        let locator = RegisteredRootLocatorV1::new(
+            scope.project_id.clone(),
+            profile.clone(),
+            "store.workspace",
+            root.clone(),
+        )
+        .expect("registered root");
+        let uri = url::Url::from_directory_path(&root)
+            .expect("root URI")
+            .to_string();
+        roots.push((root, uri, scope, locator));
+        owners.push(owner);
+        grants.push(grant);
+    }
+    assert!(roots[0].2.project_id < roots[1].2.project_id);
+    assert!(
+        roots[0].2.scope_digest > roots[1].2.scope_digest,
+        "the fixture must exercise distinct application and LSP canonical orders"
+    );
+
+    let workspace = service
+        .authorize_lsp_workspace(roots.clone(), UtcMicros(1))
+        .await
+        .expect("authorize registered workspace");
+    let root_uris = roots
+        .iter()
+        .map(|(_, uri, _, _)| uri.clone())
+        .collect::<Vec<_>>();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let opened = open_authorized_workspace(
+        &service,
+        &registry,
+        Some(workspace.clone()),
+        "request.workspace-ordered",
+        &root_uris,
+        &owners[0],
+    )
+    .await;
+    let DaemonInvocationOutcome::LspOpened {
+        scope_set_id: Some(_),
+        scope_set_digest: Some(opened_digest),
+        ..
+    } = opened.outcome
+    else {
+        panic!("federated workspace was not admitted");
+    };
+    assert_eq!(Some(&opened_digest), workspace.scope_set_digest());
+
+    let duplicate_root = roots[0].clone();
+    let duplicate_workspace = service
+        .authorize_lsp_workspace(vec![duplicate_root.clone(), duplicate_root], UtcMicros(1))
+        .await;
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            duplicate_workspace,
+            "request.workspace-duplicate-root",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-duplicate-root",
+    );
+
+    let missing_root_workspace = AuthorizedLspWorkspace::new(
+        workspace.scope_set_digest().cloned(),
+        vec![workspace.roots()[0].clone()],
+    )
+    .expect("one-root candidate");
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            Some(missing_root_workspace),
+            "request.workspace-missing-root",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-missing-root",
+    );
+
+    registrar
+        .register_lsp_owner(
+            roots[1].0.clone(),
+            DaemonLspInvocationOwner::for_test_project(
+                owners[1].factory(),
+                UserProfileId::new("profile.foreign").expect("foreign profile"),
+                roots[1].2.project_id.clone(),
+                roots[1].0.clone(),
+            )
+            .with_scope_grant(grants[1].clone()),
+        )
+        .await
+        .expect("replace owner with foreign profile");
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            Some(workspace.clone()),
+            "request.workspace-foreign-profile",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-foreign-profile",
+    );
+
+    registrar
+        .register_lsp_owner(roots[1].0.clone(), owners[1].clone())
+        .await
+        .expect("restore exact owner");
+    let substituted_factory = owners[0].factory();
+    assert!(!Arc::ptr_eq(&substituted_factory, &owners[1].factory()));
+    registrar
+        .register_lsp_owner(
+            roots[1].0.clone(),
+            DaemonLspInvocationOwner::for_test_project(
+                substituted_factory,
+                profile,
+                roots[1].2.project_id.clone(),
+                roots[1].0.clone(),
+            )
+            .with_scope_grant(grants[1].clone()),
+        )
+        .await
+        .expect("replace owner with another root's factory");
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            Some(workspace),
+            "request.workspace-substituted-factory",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-substituted-factory",
+    );
+
+    assert_eq!(registry.lock().await.active_sessions(), 1);
+    assert_eq!(service.lsp_sessions.lock().await.len(), 1);
 }
 
 #[tokio::test]
