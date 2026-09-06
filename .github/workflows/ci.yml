@@ -209,7 +209,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      # `rust-analyzer` is a test dependency of this lane, not a convenience.
+      # `runtime_surface_acceptance::production_lsp_negotiates_and_projects_\
+      # canonical_context` asserts that a routed analyzer negotiates the
+      # standard methods the client declared, and the upstream `initialize`
+      # response is the only authority for those. Without the component the
+      # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
+      # routes the language and only the spawn fails — the test would then
+      # measure a missing component instead of the negotiation contract. This
+      # action exports `RUSTUP_TOOLCHAIN`, so the component has to be installed
+      # here rather than through `rust-toolchain.toml`, which it overrides.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
 
       - uses: ./.github/actions/setup-linux-mold
 
