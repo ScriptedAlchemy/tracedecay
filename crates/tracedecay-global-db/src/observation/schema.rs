@@ -17,6 +17,20 @@ pub const OBSERVATION_AUTHORITY: &str = "observations";
 /// it. It is recorded at creation, never by rewriting an existing table.
 pub(super) const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
 
+/// Identity of the native-source scheme the committed observations were
+/// written under. It is *content* identity, not table shape: since
+/// `ff5c895ae` a Cline/Roo/Kilo task's `ui_messages.json` is its own native
+/// source (`<task>:ui_messages`, its own generation, in-file ordinals) rather
+/// than sharing the API history's combined `<task>` source. A store holding
+/// rows written under the old scheme would re-admit every one of those native
+/// UI events a second time under the new source key and silently double-count
+/// their usage facts, so admission refuses it with
+/// [`ResetRequired`](tracedecay_domain::errors::TraceDecayError::ResetRequired)
+/// instead. The marker is recorded for any authority that holds no rows yet,
+/// so only stores carrying old-scheme rows refuse.
+pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
+    "observations-native-source-scheme-v2-cline-ui-messages";
+
 /// Canonical `observations` column set. Shared by the admission refusal below
 /// and the scoped operator reset in [`super::reset`] so the two can never
 /// disagree about what counts as a refused shape.
@@ -47,6 +61,29 @@ async fn observation_table_exists(
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observations'",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
+/// Whether the authority already carries native-source identity written under
+/// whatever scheme was current when it was committed: retained observations,
+/// or the source cursors that decide what gets re-offered. Only these stores
+/// can double-count when the scheme changes; an empty authority just enrolls.
+/// Both tables are created by [`OBSERVATION_AUTHORITY_SCHEMA_SQL`], which runs
+/// before every caller of this helper.
+async fn observation_authority_populated(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 WHERE EXISTS(SELECT 1 FROM observations)
+                        OR EXISTS(SELECT 1 FROM source_cursors)",
             (),
         )
         .await
@@ -135,6 +172,20 @@ async fn require_admitted_observation_shape(
                  that no published binary ever wrote; there is no sanctioned \
                  migration, reset the observation authority to recreate it at the \
                  canonical schema",
+        ));
+    }
+    if observation_authority_populated(conn).await?
+        && !migration_recorded(conn, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION).await?
+    {
+        return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+            OBSERVATION_AUTHORITY,
+            "these observations were committed before a Cline/Roo/Kilo task's \
+                 ui_messages.json became its own native source; re-offering that \
+                 file under the <task>:ui_messages source would admit every one of \
+                 its native UI events a second time and double-count their usage \
+                 facts. There is no sanctioned migration, reset the observation \
+                 authority so the derived usage and the admission cursors rebuild \
+                 together from the preserved transcripts",
         ));
     }
     Ok(())
@@ -275,6 +326,14 @@ pub async fn ensure_observation_schema(
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
             params![OBSERVATION_SCHEMA_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    }
+    if !observation_authority_populated(conn).await? {
+        conn.execute(
+            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+            params![OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
         )
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
