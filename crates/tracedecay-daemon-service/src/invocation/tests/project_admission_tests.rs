@@ -98,3 +98,98 @@ async fn project_quiescence_denies_semantic_and_git_cached_routes() {
 
     drop(quiescence);
 }
+
+fn retained_scope(project: &str) -> ResolvedScope {
+    ResolvedScope::new(
+        ProjectId::new(project).expect("retained project"),
+        tracedecay_domain::RepositoryId::new("repository.retained").expect("retained repository"),
+        tracedecay_domain::WorktreeId::new("worktree.retained").expect("retained worktree"),
+        None,
+    )
+    .expect("retained scope")
+}
+
+fn retained_grant(
+    scope: &ResolvedScope,
+    actor: &ActorId,
+    revision: u64,
+) -> CapabilityGrantSnapshot {
+    // The digest folds this route's own configuration revision, exactly as
+    // `project_open_retained_grant` does: it is per-route provenance, not
+    // store authority, so a second route legitimately carries another one.
+    CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!("grant.retained.test.{revision}")).expect("grant id"),
+        revision,
+        ManifestDigest::new(format!("sha256:{revision:064}")).expect("grant digest"),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        std::collections::BTreeSet::from([tracedecay_tool_catalog::CapabilityId::new(
+            "capability.retained.test",
+        )
+        .expect("capability")]),
+        std::collections::BTreeSet::from([tracedecay_tool_catalog::UseCaseId::new(
+            "use-case.retained.test",
+        )
+        .expect("use case")]),
+        DisclosureClass::Sensitive,
+    )
+    .expect("retained grant")
+}
+
+/// Two routes of one project — a linked worktree, or a reopen of a route whose
+/// ports were rebuilt — must alias one retained runtime. Keying the
+/// registration on the ports object instead refused every second route.
+#[tokio::test]
+async fn same_authority_routes_alias_one_retained_runtime() {
+    let service = DaemonInvocationService::default();
+    let registrar = DaemonRetainedRuntimeRegistrar::new(&service);
+    let project_root = PathBuf::from("/project-retained-alias");
+    let scope = retained_scope("project.retained.alias");
+    let actor = ActorId::new("actor.retained.alias").expect("retained actor");
+    let incumbent_ports =
+        Arc::new(tracedecay_application::retained_surfaces::RetainedSurfacePortsV1::default());
+    let (first, second) = tokio::join!(
+        registrar.register(
+            project_root.clone(),
+            scope.clone(),
+            actor.clone(),
+            retained_grant(&scope, &actor, 1),
+            Arc::clone(&incumbent_ports),
+        ),
+        registrar.register(
+            project_root.clone(),
+            scope.clone(),
+            actor.clone(),
+            retained_grant(&scope, &actor, 2),
+            Arc::new(tracedecay_application::retained_surfaces::RetainedSurfacePortsV1::default()),
+        ),
+    );
+    first.expect("first same-authority route must register");
+    second.expect("second same-authority route must alias the incumbent");
+    let registered = service
+        .project_runtimes
+        .get::<RegisteredRetainedRuntime>(&project_root)
+        .await
+        .expect("aliased retained runtime");
+    assert!(
+        Arc::ptr_eq(&registered.ports, &incumbent_ports),
+        "both routes must be served by the one incumbent retained runtime"
+    );
+
+    let foreign = registrar
+        .register(
+            project_root.clone(),
+            retained_scope("project.retained.foreign"),
+            actor.clone(),
+            retained_grant(&retained_scope("project.retained.foreign"), &actor, 3),
+            Arc::new(tracedecay_application::retained_surfaces::RetainedSurfacePortsV1::default()),
+        )
+        .await;
+    assert!(
+        matches!(foreign, Err(TraceDecayError::Config { ref message })
+            if message == "a different retained runtime is already registered for this project"),
+        "a foreign authorized scope must still be refused, not aliased: {foreign:?}"
+    );
+}
