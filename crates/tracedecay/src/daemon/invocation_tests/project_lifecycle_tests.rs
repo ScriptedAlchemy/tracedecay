@@ -317,10 +317,14 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
                 CancellationContext::active(format!("cancel.{suffix}")).expect("cancellation"),
             )
             .expect("request context");
+            // A profile store locator is (profile id, store id): both halves
+            // must match for the roots to share one locator. These roots are
+            // two worktrees of the same project in one profile, so they are
+            // registered under that project's one store, not a per-root store.
             let locator = RegisteredRootLocatorV1::new(
                 scope.project_id.clone(),
                 profile_id.clone(),
-                format!("store.{suffix}"),
+                "store.recovery",
                 root,
             )
             .expect("locator");
@@ -400,7 +404,15 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
         .actor
         .workspace();
     assert_eq!(workspace_after_settlement.roots().len(), 1);
-    assert_eq!(workspace_after_settlement.roots()[0].uri(), root_b_uri);
+    // The session opened with the directory URI `Url::from_directory_path`
+    // builds (trailing slash); the fixture spells the same root without one.
+    // Root identity is the folder, not that spelling, so compare it trimmed.
+    assert_eq!(
+        workspace_after_settlement.roots()[0]
+            .uri()
+            .trim_end_matches('/'),
+        root_b_uri
+    );
     drop(sessions_after_settlement);
 
     let sessions = service.lsp_sessions.lock().await;
