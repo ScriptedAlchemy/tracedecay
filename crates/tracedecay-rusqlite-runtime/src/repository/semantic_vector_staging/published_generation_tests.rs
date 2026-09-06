@@ -231,6 +231,144 @@ fn historical_published_semantic_generation_remains_lookupable_after_new_head() 
 }
 
 #[test]
+fn historical_reader_snapshot_does_not_retain_concurrently_retired_generation() {
+    let fixture = Fixture::new();
+    let first = plan_with_count(
+        &fixture,
+        "historical-snapshot.retired",
+        semantic_vector_chunk_manifest_digest(&[]).unwrap(),
+        0,
+    );
+    publish_empty_stage(&fixture, &first, "historical-snapshot.first");
+    let first_key = SemanticVectorPublishedGenerationKey {
+        projection: first.key.projection.clone(),
+        semantic_generation_id: first.semantic_generation_id.clone(),
+    };
+    let first_replay = publication_replay(&first);
+    let retirement = SemanticVectorPublishedRetirement {
+        stage: first.key.clone(),
+        semantic_generation_id: first.semantic_generation_id.clone(),
+        replay: GraphPublicationReplayRetirementV1::new(
+            first_replay.key.clone(),
+            first_replay.input_digest.clone(),
+            first_replay.dependency_generation_closure_digest.clone(),
+            first_replay.direct_dependency_generations.clone(),
+            first_replay.expected_prior_head.clone(),
+            first_replay.expected_recovered_digest.clone(),
+            first_replay.canonical_replay_source_digest.clone(),
+        )
+        .unwrap(),
+        writer_fence: first.writer_fence.clone(),
+    };
+    let (control, probe) = operation("historical-snapshot.reader");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let snapshot = super::super::support::begin_read_snapshot(
+        &fixture.handle,
+        &context,
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let historical = super::super::published::published_stage_for(&snapshot, &first_key)
+        .unwrap()
+        .expect("first publication is visible when the snapshot begins");
+    let historical_head =
+        super::super::published::published_stage_evidence_in_snapshot(&snapshot, &historical)
+            .unwrap();
+    let second = SemanticVectorStagePlan::new(
+        first.key.projection.clone(),
+        SemanticVectorBuildId::new("build.historical-snapshot.published").unwrap(),
+        VectorGenerationIdV1::new(
+            canonical_sha256(&(
+                "semantic-vector-test-generation",
+                "historical-snapshot.published",
+            ))
+            .unwrap(),
+        ),
+        None,
+        GraphPublicationKeyV1::new(
+            first.key.projection.clone(),
+            GraphGenerationIdV1::new("generation.historical-snapshot.published").unwrap(),
+            GraphPublicationIdempotencyKeyV1::new("publication.historical-snapshot.published")
+                .unwrap(),
+        ),
+        first.source_scope.clone(),
+        first.code_scope_hash.clone(),
+        first.source_generation.clone(),
+        first.source_dependency.clone(),
+        first.recipe.clone(),
+        0,
+        Some(historical_head),
+        first.initial_checkpoint_digest.clone(),
+        first.writer_fence.clone(),
+    )
+    .unwrap();
+    let second_key = SemanticVectorPublishedGenerationKey {
+        projection: second.key.projection.clone(),
+        semantic_generation_id: second.semantic_generation_id.clone(),
+    };
+    assert!(
+        super::super::published::published_stage_for(&snapshot, &second_key)
+            .unwrap()
+            .is_none()
+    );
+
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_start = std::sync::Arc::clone(&start);
+    let mut writer = fixture.storage();
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            writer_start.wait();
+            publish_empty_stage_with_storage(&mut writer, &second, "historical-snapshot.second");
+            let (control, probe) = operation("historical-snapshot.retire");
+            let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+            assert!(matches!(
+                writer
+                    .retire_published_generation(&retirement, &context)
+                    .unwrap(),
+                SemanticVectorPublishedRetirementOutcome::Retired(_)
+            ));
+        });
+        start.wait();
+        writer.join().expect("publication and retirement writer");
+    });
+
+    assert_eq!(&historical.record.plan, &first);
+    assert_eq!(
+        super::super::published::published_stage_evidence_in_snapshot(&snapshot, &historical)
+            .unwrap()
+            .key,
+        first_replay.key
+    );
+    assert!(
+        super::super::published::published_stage_for(&snapshot, &second_key)
+            .unwrap()
+            .is_none(),
+        "the reader remains a consistent historical snapshot"
+    );
+    drop(snapshot);
+
+    let (control, probe) = operation("historical-snapshot.first.after");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        fixture
+            .storage()
+            .published_semantic_generation(&first_key, &context)
+            .unwrap(),
+        SemanticVectorPublishedGenerationLookup::Missing
+    );
+    let (control, probe) = operation("historical-snapshot.second.after");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        fixture
+            .storage()
+            .published_semantic_generation(&second_key, &context)
+            .unwrap(),
+        SemanticVectorPublishedGenerationLookup::Published { record, .. }
+            if record.plan.key.projection == second_key.projection
+    ));
+}
+
+#[test]
 fn retirement_tombstone_and_relational_descendants_commit_atomically() {
     let fixture = Fixture::new();
     let empty_manifest = semantic_vector_chunk_manifest_digest(&[]).unwrap();
@@ -780,17 +918,24 @@ fn source_scope_binding_survives_stage_retirement_until_exact_scope_collection()
 }
 
 fn publish_empty_stage(fixture: &Fixture, plan: &SemanticVectorStagePlan, suffix: &str) {
+    publish_empty_stage_with_storage(&mut fixture.storage(), plan, suffix);
+}
+
+fn publish_empty_stage_with_storage(
+    storage: &mut SemanticVectorStagingExactSqlStorage,
+    plan: &SemanticVectorStagePlan,
+    suffix: &str,
+) {
     let (control, probe) = operation(&format!("{suffix}.begin"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert!(matches!(
-        fixture.storage().begin_stage(plan, &context).unwrap(),
+        storage.begin_stage(plan, &context).unwrap(),
         SemanticVectorStageBeginOutcome::Begun(_)
     ));
     let receipt = control_receipt(&plan.key);
     let (control, probe) = operation(&format!("{suffix}.append"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    fixture
-        .storage()
+    storage
         .append_stage_batch(&receipt, &plan.writer_fence, &context)
         .unwrap();
     let settlement = SemanticVectorStageSettlement {
@@ -802,8 +947,7 @@ fn publish_empty_stage(fixture: &Fixture, plan: &SemanticVectorStagePlan, suffix
     };
     let (control, probe) = operation(&format!("{suffix}.settle"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    fixture
-        .storage()
+    storage
         .settle_stage_batch(&settlement, &plan.writer_fence, &context)
         .unwrap();
     let replay = publication_replay(plan);
@@ -816,8 +960,7 @@ fn publish_empty_stage(fixture: &Fixture, plan: &SemanticVectorStagePlan, suffix
     let (control, probe) = operation(&format!("{suffix}.prepare"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert!(matches!(
-        fixture
-            .storage()
+        storage
             .prepare_stage_publication(&prepare, &plan.writer_fence, &context)
             .unwrap(),
         SemanticVectorStagePublicationPrepareOutcome::ReadyToPublish(_)
@@ -825,8 +968,7 @@ fn publish_empty_stage(fixture: &Fixture, plan: &SemanticVectorStagePlan, suffix
     let (control, probe) = operation(&format!("{suffix}.cancel-ready-race"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert!(matches!(
-        fixture
-            .storage()
+        storage
             .cancel_stage(&plan.key, &plan.writer_fence, &context)
             .unwrap(),
         SemanticVectorStageCancelOutcome::ReadyToPublish(_)
@@ -840,8 +982,7 @@ fn publish_empty_stage(fixture: &Fixture, plan: &SemanticVectorStagePlan, suffix
     };
     let (control, probe) = operation(&format!("{suffix}.head"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    let verified_head = match fixture
-        .storage()
+    let verified_head = match storage
         .compare_and_swap_verified_head(&head_request, &context)
         .unwrap()
     {
@@ -851,8 +992,7 @@ fn publish_empty_stage(fixture: &Fixture, plan: &SemanticVectorStagePlan, suffix
     let (control, probe) = operation(&format!("{suffix}.publish"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert!(matches!(
-        fixture
-            .storage()
+        storage
             .settle_published(
                 &SemanticVectorStagePublishSettlement {
                     stage: plan.key.clone(),
@@ -867,8 +1007,7 @@ fn publish_empty_stage(fixture: &Fixture, plan: &SemanticVectorStagePlan, suffix
     let (control, probe) = operation(&format!("{suffix}.cancel-published-race"));
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     assert!(matches!(
-        fixture
-            .storage()
+        storage
             .cancel_stage(&plan.key, &plan.writer_fence, &context)
             .unwrap(),
         SemanticVectorStageCancelOutcome::ReadyToPublish(record)
