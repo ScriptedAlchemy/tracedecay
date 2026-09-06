@@ -626,21 +626,15 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
     ];
 
     for message in messages {
-        // Production ingest persists every message as a canonical durable
-        // observation (which projects the session_messages row itself) plus
-        // the raw LCM payload row; the session-temporal refresh discovers
-        // sessions ONLY from the observation effects, so the fixture walks
-        // the same two writes instead of raw session_messages upserts the
-        // temporal projection would never see.
-        runtime
-            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Project, &message)
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "failed to ingest raw LCM fixture message {}: {error}",
-                    message.message_id
-                )
-            });
+        // Production ingest persists every message ONCE, as a canonical
+        // durable observation whose projection writes both the
+        // session_messages row and the raw LCM payload row; the
+        // session-temporal refresh discovers sessions only from those
+        // observation effects. The fixture must not add a separate raw ingest
+        // for the same message: the projection would then rewrite an existing
+        // raw row, which the store records as a retained raw revision, and
+        // every summary of a session with un-invalidated revisions is hidden
+        // from current-mode reads until the LCM effects loop drains them.
         runtime
             .seed_session_message_observation_for_test(
                 tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
@@ -670,6 +664,23 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
                 )
             });
     }
+    // Current-mode summary reads hide every summary of a session whose raw
+    // messages carry a retained (not yet invalidated) revision, so the
+    // published summary below is only visible if the seeded messages left no
+    // such revision behind. Check that contract here, where a violation names
+    // the seeding step instead of surfacing as a bare summary count of zero.
+    let retained_revision = runtime
+        .lcm_retained_raw_revision_for_test(
+            HostAdmissionScope::Project,
+            "cursor",
+            "sess-dashboard-1",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("read seeded LCM convergence state: {error}"));
+    assert_eq!(
+        retained_revision, None,
+        "seeded LCM messages must not leave a retained raw revision pending invalidation"
+    );
     let msg_1 = match runtime
         .lcm_raw_store_id_for_test(HostAdmissionScope::Project, "cursor", "msg-1")
         .await
