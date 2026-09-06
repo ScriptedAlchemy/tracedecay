@@ -897,6 +897,10 @@ pub use discovery::{
 pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
 pub use jsonl::try_stream_new_jsonl_raw_strict;
+pub(in crate::runtime) use jsonl::{
+    JsonlFileChangeToken, JsonlNativeFileIdentity, ResumeDigest, jsonl_file_change_token,
+    jsonl_native_file_identity, jsonl_prefix_digest,
+};
 pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
     RawJsonlFrameReader, RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason,

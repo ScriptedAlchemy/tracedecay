@@ -99,13 +99,13 @@ struct UnchangedGenerationCacheKey {
 
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct JsonlNativeFileIdentity {
+pub(in crate::runtime) struct JsonlNativeFileIdentity {
     device: u64,
     inode: u64,
 }
 
 #[cfg(unix)]
-fn jsonl_native_file_identity(
+pub(in crate::runtime) fn jsonl_native_file_identity(
     _file: &std::fs::File,
     metadata: &std::fs::Metadata,
 ) -> Option<JsonlNativeFileIdentity> {
@@ -117,13 +117,13 @@ fn jsonl_native_file_identity(
 
 #[cfg(windows)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct JsonlNativeFileIdentity {
+pub(in crate::runtime) struct JsonlNativeFileIdentity {
     volume_serial_number: u32,
     file_index: u64,
 }
 
 #[cfg(windows)]
-fn jsonl_native_file_identity(
+pub(in crate::runtime) fn jsonl_native_file_identity(
     file: &std::fs::File,
     _metadata: &std::fs::Metadata,
 ) -> Option<JsonlNativeFileIdentity> {
@@ -136,12 +136,12 @@ fn jsonl_native_file_identity(
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct JsonlNativeFileIdentity {
+pub(in crate::runtime) struct JsonlNativeFileIdentity {
     created_nanos: u128,
 }
 
 #[cfg(not(any(unix, windows)))]
-fn jsonl_native_file_identity(
+pub(in crate::runtime) fn jsonl_native_file_identity(
     _file: &std::fs::File,
     metadata: &std::fs::Metadata,
 ) -> Option<JsonlNativeFileIdentity> {
@@ -156,7 +156,7 @@ fn jsonl_native_file_identity(
 
 #[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct JsonlFileChangeToken {
+pub(in crate::runtime) struct JsonlFileChangeToken {
     mtime_seconds: i64,
     mtime_nanos: i64,
     ctime_seconds: i64,
@@ -164,7 +164,9 @@ struct JsonlFileChangeToken {
 }
 
 #[cfg(unix)]
-fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
+pub(in crate::runtime) fn jsonl_file_change_token(
+    metadata: &std::fs::Metadata,
+) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
         mtime_seconds: metadata.mtime(),
         mtime_nanos: metadata.mtime_nsec(),
@@ -189,12 +191,14 @@ impl JsonlFileChangeToken {
 
 #[cfg(windows)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct JsonlFileChangeToken {
+pub(in crate::runtime) struct JsonlFileChangeToken {
     last_write_time: u64,
 }
 
 #[cfg(windows)]
-fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
+pub(in crate::runtime) fn jsonl_file_change_token(
+    metadata: &std::fs::Metadata,
+) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
         last_write_time: metadata.last_write_time(),
     }
@@ -211,12 +215,14 @@ impl JsonlFileChangeToken {
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct JsonlFileChangeToken {
+pub(in crate::runtime) struct JsonlFileChangeToken {
     modified_nanos: Option<u128>,
 }
 
 #[cfg(not(any(unix, windows)))]
-fn jsonl_file_change_token(metadata: &std::fs::Metadata) -> JsonlFileChangeToken {
+pub(in crate::runtime) fn jsonl_file_change_token(
+    metadata: &std::fs::Metadata,
+) -> JsonlFileChangeToken {
     JsonlFileChangeToken {
         modified_nanos: metadata
             .modified()
@@ -556,12 +562,12 @@ impl RawJsonlFrame {
 }
 
 #[derive(Clone)]
-struct ResumeDigest {
+pub(in crate::runtime) struct ResumeDigest {
     hasher: Sha256,
 }
 
 impl ResumeDigest {
-    fn new() -> Self {
+    pub(in crate::runtime) fn new() -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-jsonl-resume-prefix-v2");
         Self { hasher }
@@ -582,6 +588,12 @@ impl ResumeDigest {
         hasher.update(position.to_le_bytes());
         digest_prefix_u64(hasher.finalize())
     }
+
+    pub(in crate::runtime) fn witness(&self, verified_position: u64) -> [u8; 32] {
+        let mut hasher = self.hasher.clone();
+        hasher.update(verified_position.to_le_bytes());
+        hasher.finalize().into()
+    }
 }
 
 fn digest_prefix_u64(digest: sha2::digest::Output<Sha256>) -> u64 {
@@ -599,8 +611,8 @@ fn digest_prefix_u64(digest: sha2::digest::Output<Sha256>) -> u64 {
     u64::from_be_bytes([first, second, third, fourth, fifth, sixth, seventh, eighth])
 }
 
-fn jsonl_prefix_digest(
-    file: &mut MeasuredJsonlFile<'_>,
+pub(in crate::runtime) fn jsonl_prefix_digest<R: Read + Seek>(
+    file: &mut R,
     extent: u64,
 ) -> std::io::Result<(ResumeDigest, u64)> {
     file.seek(SeekFrom::Start(0))?;
@@ -748,8 +760,12 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
         }
     }
 
-    fn seed_resume_digest(&mut self, digest: ResumeDigest) {
+    pub(in crate::runtime) fn seed_resume_digest(&mut self, digest: ResumeDigest) {
         self.resume_digest = digest;
+    }
+
+    pub(in crate::runtime) fn resume_digest(&self) -> ResumeDigest {
+        self.resume_digest.clone()
     }
 
     fn resume_fingerprint(&self, position: u64) -> u64 {
