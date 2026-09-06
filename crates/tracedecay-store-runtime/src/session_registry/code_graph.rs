@@ -514,7 +514,17 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
-    code_shard: StoreShardIdV1,
+    /// Checkout-stable source identity for semantic vector staging.
+    ///
+    /// The physical code graph shard this lease retains discriminates by
+    /// branch label, so it changes the moment HEAD detaches or switches
+    /// branches under a fixed worktree. The semantic source-scope binding is bijective with the
+    /// code-scope hash, which is derived from the checkout alone, so a
+    /// branch-labelled source scope makes an ordinary `git checkout --detach`
+    /// look like a conflicting durable binding. Branch attribution stays in the
+    /// physical shard and in the plan's own source generation and dependency
+    /// records; the semantic binding names the checkout.
+    semantic_source_scope: StoreShardIdV1,
     generation_id: CodeGenerationId,
     generations_root: std::path::PathBuf,
     replay_root: std::path::PathBuf,
@@ -1108,7 +1118,7 @@ impl RetainedCodeGraphRuntimeV1 {
     pub fn semantic_vector_staging_binding(
         &self,
     ) -> (&StoreShardIdV1, &tracedecay_store::StoreRuntimeBindingV1) {
-        (&self.code_shard, self.authority.binding())
+        (&self.semantic_source_scope, self.authority.binding())
     }
 
     #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
@@ -2532,6 +2542,15 @@ impl DaemonSessionRuntimeRegistryV1 {
             repository_id.clone(),
             code_scope,
         );
+        let semantic_source_scope = StoreShardIdV1::code(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id.clone(),
+            repository_id.clone(),
+            CodeShardScopeV1::Worktree {
+                worktree_id: worktree_id.clone(),
+            },
+        );
         let authority = self
             .registry
             .retain_code_graph_store(
@@ -2615,7 +2634,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             project_id,
             repository_id,
             worktree_id,
-            code_shard,
+            semantic_source_scope,
             generation_id,
             generations_root: replay_binding.generations_root,
             replay_root,
