@@ -17,7 +17,8 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 
 use super::fence::{
     StoreContentFence, capture_store_content_fence_in_dir_controlled,
-    open_store_directory_nofollow, open_store_parent_nofollow, store_root_identity,
+    open_store_directory_nofollow, open_store_parent_nofollow, profile_relative_store_path,
+    store_root_identity,
 };
 use super::{
     CollectionControl, CollectionFailureKind, CollectionMutationFailure,
@@ -27,6 +28,7 @@ use super::{
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const QUARANTINE_ATTEMPTS: usize = 32;
 const MAX_RECOVERY_JOURNAL_BYTES: u64 = 64 * 1024;
+const MAX_REGISTERED_QUARANTINE_INTENTS: usize = 16_384;
 const JOURNAL_SUFFIX: &str = ".receipt-v1.json";
 const RENAMED_SUFFIX: &str = ".renamed";
 const RETIRED_SUFFIX: &str = ".retired";
@@ -55,6 +57,32 @@ struct QuarantineJournalV1 {
     original_name: String,
     expected_root_identity: StoreRootIdentity,
     registry_fence: Option<QuarantineRegistryFenceV1>,
+}
+
+/// One validated registered retirement intent discovered independently of the
+/// current registry census. The registry fence is the only authority the
+/// caller may use to classify the interrupted database commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RegisteredQuarantineIntentV1 {
+    pub(super) project_id: String,
+    pub(super) store_id: String,
+    pub(super) quarantine_name: String,
+    pub(super) quarantine_path: PathBuf,
+    pub(super) original_path: PathBuf,
+    pub(super) registry_fence: QuarantineRegistryFenceV1,
+    pub(super) expected_root_identity: StoreRootIdentity,
+}
+
+pub(super) enum RegisteredQuarantineInventoryV1 {
+    Complete(Vec<RegisteredQuarantineIntentV1>),
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RegisteredQuarantineDecisionV1 {
+    Restore,
+    Remove,
+    Retain,
 }
 
 /// Test projection of a readable on-disk recovery record.
@@ -683,9 +711,10 @@ fn clear_journal(
     })
 }
 
-/// Legacy pre-journal quarantines are restored. Journal-backed quarantines use
-/// the durable retirement marker to choose exact rollback or exact removal;
-/// neither path proceeds until the opened quarantine matches the journal's
+/// Legacy pre-journal quarantines are restored. Unregistered journal recovery
+/// uses its durable retirement marker; registered journal recovery remains
+/// pending until the caller supplies a decision from the exact global row.
+/// Neither path proceeds until the opened quarantine matches the journal's
 /// root identity.
 pub(super) fn recover_existing_store_quarantine(
     profile_root: &Path,
@@ -742,6 +771,103 @@ pub(super) fn quarantine_recovery_entry(name: &str) -> Option<(String, String)> 
         .map(|project_id| (project_id, quarantine_name.to_owned()))
 }
 
+/// Inventories registered journal intents directly under `stores/`. Every
+/// journal is opened no-follow, size-bounded, and fully validated before its
+/// fields are exposed. Unregistered journals belong to the existing projects
+/// pager and are deliberately not returned here.
+pub(super) fn read_registered_quarantine_intents_controlled(
+    profile_root: &Path,
+    control: CollectionControl<'_>,
+) -> Result<RegisteredQuarantineInventoryV1, CollectionFailureKind> {
+    let stores_path = profile_root.join("stores");
+    let stores = match open_store_directory_nofollow(profile_root, &stores_path) {
+        Ok(capability) => capability.root,
+        Err(CollectionFailureKind::PayloadChanged) => {
+            return Ok(RegisteredQuarantineInventoryV1::Complete(Vec::new()));
+        }
+        Err(kind) => return Err(kind),
+    };
+    let listing = stores
+        .open_dir(Path::new("."))
+        .map_err(|_| CollectionFailureKind::InspectFailed)?;
+    let entries = listing
+        .entries()
+        .map_err(|_| CollectionFailureKind::InspectFailed)?;
+    let mut intents = Vec::new();
+    for entry in entries {
+        if control.completion().is_some() {
+            return Ok(RegisteredQuarantineInventoryV1::Interrupted);
+        }
+        let entry = entry.map_err(|_| CollectionFailureKind::InspectFailed)?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Some(quarantine_name) = name.strip_suffix(JOURNAL_SUFFIX) else {
+            continue;
+        };
+        let Some(original_name) = quarantine_original_name(quarantine_name) else {
+            return Err(CollectionFailureKind::InspectFailed);
+        };
+        let journal = read_recovery_journal(
+            &stores,
+            &stores_path,
+            &name,
+            quarantine_name,
+            OsStr::new(original_name),
+        )
+        .map_err(CollectionFailureKind::RemoveFailed)?
+        .ok_or(CollectionFailureKind::InspectFailed)?;
+        if journal.kind == QuarantineKindV1::Unregistered {
+            continue;
+        }
+        let Some(registry_fence) = journal.registry_fence else {
+            return Err(CollectionFailureKind::RemoveFailed(
+                CollectionMutationFailure::without_native_error(
+                    CollectionMutationOperation::ProbeRecoveryJournal,
+                    stores_path.join(name),
+                    Some(journal.expected_root_identity),
+                ),
+            ));
+        };
+        let original_path = stores_path.join(&journal.original_name);
+        let expected_relpath = profile_relative_store_path(profile_root, &original_path)?;
+        if tracedecay_runtime_core::storage::validate_project_id(&journal.project_id).is_err()
+            || Path::new(&registry_fence.store_relpath) != expected_relpath
+        {
+            return Err(CollectionFailureKind::RemoveFailed(
+                CollectionMutationFailure::without_native_error(
+                    CollectionMutationOperation::ProbeRecoveryJournal,
+                    stores_path.join(name),
+                    Some(journal.expected_root_identity),
+                ),
+            ));
+        }
+        if intents.len() == MAX_REGISTERED_QUARANTINE_INTENTS {
+            return Err(CollectionFailureKind::RemoveFailed(
+                CollectionMutationFailure::without_native_error(
+                    CollectionMutationOperation::ProbeRecoveryJournal,
+                    stores_path,
+                    None,
+                ),
+            ));
+        }
+        intents.push(RegisteredQuarantineIntentV1 {
+            project_id: journal.project_id,
+            store_id: journal.store_id,
+            quarantine_name: quarantine_name.to_owned(),
+            quarantine_path: stores_path.join(quarantine_name),
+            original_path,
+            registry_fence,
+            expected_root_identity: journal.expected_root_identity,
+        });
+    }
+    if control.completion().is_some() {
+        Ok(RegisteredQuarantineInventoryV1::Interrupted)
+    } else {
+        Ok(RegisteredQuarantineInventoryV1::Complete(intents))
+    }
+}
+
 fn quarantine_original_name(name: &str) -> Option<&str> {
     let rest = name.strip_prefix(".tracedecay-orphan-quarantine-")?;
     let (rest, sequence) = rest.rsplit_once('-')?;
@@ -762,6 +888,29 @@ pub(super) fn recover_named_store_quarantine(
         data_root,
         quarantine_name,
         parent_path,
+        None,
+        super::unbounded_collection_control(),
+        || {},
+    )
+}
+
+pub(super) fn recover_registered_quarantine_intent_controlled(
+    profile_root: &Path,
+    intent: &RegisteredQuarantineIntentV1,
+    decision: RegisteredQuarantineDecisionV1,
+    control: CollectionControl<'_>,
+) -> Result<Option<QuarantineRecoveryOutcome>, CollectionFailureKind> {
+    let parent_path = intent
+        .original_path
+        .parent()
+        .ok_or(CollectionFailureKind::OutsideProfile)?;
+    recover_named_store_quarantine_inner(
+        profile_root,
+        &intent.original_path,
+        OsStr::new(&intent.quarantine_name),
+        parent_path,
+        Some((intent, decision)),
+        control,
         || {},
     )
 }
@@ -779,6 +928,8 @@ pub(super) fn recover_named_store_quarantine_controlled(
         data_root,
         quarantine_name,
         parent_path,
+        None,
+        super::unbounded_collection_control(),
         after_rename,
     )
 }
@@ -788,6 +939,11 @@ fn recover_named_store_quarantine_inner(
     data_root: &Path,
     quarantine_name: &OsStr,
     parent_path: &Path,
+    registered: Option<(
+        &RegisteredQuarantineIntentV1,
+        RegisteredQuarantineDecisionV1,
+    )>,
+    control: CollectionControl<'_>,
     after_rename: impl FnOnce(),
 ) -> Result<Option<QuarantineRecoveryOutcome>, CollectionFailureKind> {
     let capability = open_store_parent_nofollow(profile_root, data_root)?;
@@ -886,6 +1042,30 @@ fn recover_named_store_quarantine_inner(
             after_rename,
         )));
     };
+    if let Some((intent, _)) = registered
+        && (journal_record.kind != QuarantineKindV1::Registered
+            || journal_record.project_id != intent.project_id
+            || journal_record.store_id != intent.store_id
+            || journal_record.original_name
+                != intent
+                    .original_path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or_default()
+            || journal_record.registry_fence.as_ref() != Some(&intent.registry_fence)
+            || journal_record.expected_root_identity != intent.expected_root_identity)
+    {
+        drop(quarantine_root);
+        return Ok(Some(QuarantineRecoveryOutcome::Retained {
+            failure: Some(CollectionMutationFailure::without_native_error(
+                CollectionMutationOperation::ProbeRecoveryJournal,
+                parent_path.join(&journal_name),
+                Some(intent.expected_root_identity.clone()),
+            )),
+            actual_path: quarantine_path.clone(),
+            quarantine_path,
+        }));
+    }
     if expected_root_identity != journal_record.expected_root_identity {
         drop(quarantine_root);
         return Ok(Some(QuarantineRecoveryOutcome::Retained {
@@ -897,6 +1077,72 @@ fn recover_named_store_quarantine_inner(
             actual_path: quarantine_path.clone(),
             quarantine_path,
         }));
+    }
+    if journal_record.kind == QuarantineKindV1::Registered {
+        let Some((_, decision)) = registered else {
+            drop(quarantine_root);
+            return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                actual_path: quarantine_path.clone(),
+                quarantine_path,
+                failure: None,
+            }));
+        };
+        match decision {
+            RegisteredQuarantineDecisionV1::Restore => {
+                drop(quarantine_root);
+                return Ok(Some(restore_quarantine_name(
+                    &capability.parent,
+                    &capability.leaf_name,
+                    quarantine_name,
+                    data_root,
+                    parent_path,
+                    &quarantine_path,
+                    &expected_root_identity,
+                    Some(&journal_name),
+                    after_rename,
+                )));
+            }
+            RegisteredQuarantineDecisionV1::Retain => {
+                drop(quarantine_root);
+                return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                    actual_path: quarantine_path.clone(),
+                    quarantine_path,
+                    failure: None,
+                }));
+            }
+            RegisteredQuarantineDecisionV1::Remove => {
+                let quarantine = QuarantinedStore {
+                    parent: capability.parent,
+                    root: quarantine_root,
+                    quarantine_path: quarantine_path.clone(),
+                    journal_name,
+                    expected_root_identity: Some(expected_root_identity),
+                };
+                return Ok(Some(match quarantine.finalize(control) {
+                    QuarantineFinalizeOutcome::Removed { journal_failure } => {
+                        QuarantineRecoveryOutcome::Removed {
+                            quarantine_path,
+                            journal_failure,
+                        }
+                    }
+                    QuarantineFinalizeOutcome::Interrupted { quarantine_path } => {
+                        QuarantineRecoveryOutcome::Retained {
+                            actual_path: quarantine_path.clone(),
+                            quarantine_path,
+                            failure: None,
+                        }
+                    }
+                    QuarantineFinalizeOutcome::DeleteUnconfirmed {
+                        quarantine_path,
+                        failure,
+                    } => QuarantineRecoveryOutcome::Retained {
+                        actual_path: quarantine_path.clone(),
+                        quarantine_path,
+                        failure: Some(failure),
+                    },
+                }));
+            }
+        }
     }
     let retired_name = retired_marker_name(&journal_name);
     let retirement_committed = match probe_regular_recovery_marker(
