@@ -136,7 +136,7 @@ def hint_signature_drift(source_text: str) -> list[str]:
 _SKILL_IDS = (
     "exploring-code", "tracing-functions", "assessing-impact", "reviewing-changes",
     "project-memory", "editing-safely", "fixing-build-and-type-errors",
-    "managing-session-context", "using-tracedecay", "using-the-cli", "code-health",
+    "managing-session-context", "using-the-cli", "code-health",
     "diagnosing-analytics", "discovering-tracedecay", "inspecting-managed-skills",
 )
 # Substrings/regexes that must never appear in a scenario prompt (case-insensitive).
