@@ -187,6 +187,28 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 .map(|pins| pins.vector_generation_id.clone());
             let prepared_redundancy = prepare_project_semantic_redundancy_authority(&committed);
             let failed_redundancy = prepared_redundancy.clone();
+            // The committed pair is fenced on the mounted worktree. Project
+            // open restores a committed activation before the demand-driven
+            // code-index mount (a daemon restart is the common case), and the
+            // reconciler may wake on the verified model before it as well.
+            // With no worktree there is no serving state to be compatible
+            // with yet: that is `Unavailable`, which the caller defers and the
+            // reconciler retries once the index seats. It is not a stale or
+            // conflicting committed state, and reporting it as one used to
+            // fail the whole full-capability upgrade, leaving the index
+            // unactivated and every lane unavailable until the next restart.
+            if !registry.is_worktree_mounted(&project_root).await {
+                tracing::info!(
+                    event = "semantic_query_activation",
+                    outcome = "deferred",
+                    step = "code_index_worktree",
+                    project_root = %project_root.display(),
+                    semantic_enabled,
+                    epoch = committed_epoch,
+                    "committed activation awaits the code-index worktree mount"
+                );
+                return Err(RetrievalProfileActivationObserverErrorV1::Unavailable);
+            }
             let attempt = registry
                 .begin_committed_query_activation(
                     &project_root,
@@ -213,9 +235,25 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 {
                     return Err(("serving_scope_mismatch", ObserverError::Rejected));
                 }
-                let generation = serving
-                    .serving_generation
-                    .ok_or(("serving_generation", ObserverError::Unavailable))?;
+                // The "serving state" semantic must be compatible with is the
+                // generation queries pin, not the graph-bearing serving slot.
+                // A quiet remount of a partitioned (revision-7) generation
+                // deliberately leaves that slot empty forever: exact/lexical
+                // serve from the text owner and the graph seats from its
+                // verified head without ever decoding the full generation.
+                // Waiting on the slot here made the restored activation retry
+                // `Unavailable` indefinitely after every restart, while every
+                // query kept pinning the text-serving generation the whole
+                // time. Resolve that generation from the durable publication
+                // it names instead; only a mount with neither seat defers.
+                let generation = match serving.serving_generation {
+                    Some(generation) => generation,
+                    None => {
+                        resolve_text_serving_generation(&registry, &project_root)
+                            .await
+                            .ok_or(("serving_generation", ObserverError::Unavailable))?
+                    }
+                };
                 let cursor_keys = Arc::new(
                     session_db
                         .load_session_cursor_key_provider_result()
@@ -267,48 +305,89 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         .await
                         .ok_or(("active_vector_generation", ObserverError::Unavailable))?;
                     let source_generation = vectors.source_generation().clone();
-                    if !runtime.cache_ready_for(pins, &source_generation) {
-                        let code = match project_semantic_retained_code_generation(
-                            &project_root,
-                            &source_generation,
-                        ) {
-                            Some(code) => code,
-                            None => match classify_published_generation_lookup(
-                                registry
-                                    .published_generation(&project_root, &source_generation)
-                                    .await,
+                    // Queries pin the serving publication, so the semantic
+                    // cache binds to it whenever the activated vectors carry
+                    // that publication's exact source content: either the
+                    // serving generation is the evaluated source itself, or it
+                    // republished the same sealed chunk corpus under a new
+                    // identifier. Only a serving tree with different content
+                    // falls back to the exact evaluated source generation,
+                    // whose queries then truthfully refuse until reprojection;
+                    // the typed mismatch below names both identities so that
+                    // refusal is diagnosable without re-deriving either side.
+                    let serving_bound = match
+                        tracedecay_usecases::semantic_runtime::semantic_source_coherence(
+                            &vectors,
+                            generation.as_ref(),
+                        )
+                    {
+                        tracedecay_usecases::semantic_runtime::SemanticSourceCoherenceOutcomeV1::Coherent(_) => true,
+                        tracedecay_usecases::semantic_runtime::SemanticSourceCoherenceOutcomeV1::Mismatch(mismatch) => {
+                            tracing::warn!(
+                                event = "semantic_query_activation",
+                                step = "source_identity_mismatch",
+                                project_root = %project_root.display(),
+                                vector_generation = ?pins.vector_generation_id,
+                                vector_source_generation = %mismatch.vector_source_generation,
+                                vector_source_manifest_digest = mismatch.vector_source_manifest_digest.as_str(),
+                                serving_generation = %mismatch.serving_generation,
+                                serving_content_identity = mismatch.serving_content_identity.as_str(),
+                                "the activated vector generation was evaluated from a different source identity than the serving code generation; semantic stays bound to its exact evaluated source"
+                            );
+                            false
+                        }
+                    };
+                    let bind_generation = if serving_bound {
+                        generation.manifest().generation_id.clone()
+                    } else {
+                        source_generation.clone()
+                    };
+                    if !runtime.cache_ready_for(pins, &bind_generation) {
+                        let code = if serving_bound {
+                            Arc::clone(&generation)
+                        } else {
+                            match project_semantic_retained_code_generation(
+                                &project_root,
+                                &source_generation,
                             ) {
-                                Ok(Some(code)) => code,
-                                Ok(None) => {
-                                    tracing::warn!(
-                                        event = "semantic_query_activation",
-                                        step = "retained_code_generation",
-                                        project_root = %project_root.display(),
-                                        source_generation = %source_generation,
-                                        vector_generation = ?pins.vector_generation_id,
-                                        "the activated vector generation cites a source code generation that is neither retained in this process nor published in its store"
-                                    );
-                                    return Err((
-                                        "retained_code_generation",
-                                        ObserverError::Unavailable,
-                                    ));
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        event = "semantic_query_activation",
-                                        step = "published_code_generation_read",
-                                        error = %error,
-                                        project_root = %project_root.display(),
-                                        source_generation = %source_generation,
-                                        vector_generation = ?pins.vector_generation_id,
-                                        "the activated vector generation's durable source code generation could not be read"
-                                    );
-                                    return Err((
-                                        "published_code_generation_read",
-                                        ObserverError::Unavailable,
-                                    ));
-                                }
-                            },
+                                Some(code) => code,
+                                None => match classify_published_generation_lookup(
+                                    registry
+                                        .published_generation(&project_root, &source_generation)
+                                        .await,
+                                ) {
+                                    Ok(Some(code)) => code,
+                                    Ok(None) => {
+                                        tracing::warn!(
+                                            event = "semantic_query_activation",
+                                            step = "retained_code_generation",
+                                            project_root = %project_root.display(),
+                                            source_generation = %source_generation,
+                                            vector_generation = ?pins.vector_generation_id,
+                                            "the activated vector generation cites a source code generation that is neither retained in this process nor published in its store"
+                                        );
+                                        return Err((
+                                            "retained_code_generation",
+                                            ObserverError::Unavailable,
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            event = "semantic_query_activation",
+                                            step = "published_code_generation_read",
+                                            error = %error,
+                                            project_root = %project_root.display(),
+                                            source_generation = %source_generation,
+                                            vector_generation = ?pins.vector_generation_id,
+                                            "the activated vector generation's durable source code generation could not be read"
+                                        );
+                                        return Err((
+                                            "published_code_generation_read",
+                                            ObserverError::Unavailable,
+                                        ));
+                                    }
+                                },
+                            }
                         };
                         Some(
                             runtime
@@ -333,7 +412,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     } else {
                         Some(
                             runtime
-                                .prepare_current_cache_observation(pins, &source_generation)
+                                .prepare_current_cache_observation(pins, &bind_generation)
                                 .ok_or((
                                     "prepare_current_cache_observation",
                                     ObserverError::Unavailable,
@@ -1005,6 +1084,46 @@ fn map_update_observer_error(
         }
         QueryAuthorityUpdateErrorV1::ScopeMismatch | QueryAuthorityUpdateErrorV1::CasConflict => {
             RetrievalProfileActivationObserverErrorV1::Conflict
+        }
+    }
+}
+
+/// The sealed generation the text-serving slot names, read from the durable
+/// publication store. This is the generation `generation_for` hands a query
+/// whose serving slot is empty, so binding semantic to it keeps activation and
+/// query admission on the same identity.
+async fn resolve_text_serving_generation(
+    registry: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    project_root: &std::path::Path,
+) -> Option<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>> {
+    let text = registry.latest_text_serving_for_root(project_root).await?;
+    let generation_id = text.metadata().manifest().generation_id.clone();
+    match classify_published_generation_lookup(
+        registry
+            .published_generation(project_root, &generation_id)
+            .await,
+    ) {
+        Ok(Some(generation)) => Some(generation),
+        Ok(None) => {
+            tracing::warn!(
+                event = "semantic_query_activation",
+                step = "text_serving_generation",
+                project_root = %project_root.display(),
+                generation = %generation_id,
+                "the text-serving generation is not published in the durable store"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                event = "semantic_query_activation",
+                step = "text_serving_generation_read",
+                error = %error,
+                project_root = %project_root.display(),
+                generation = %generation_id,
+                "the text-serving generation could not be read from the durable store"
+            );
+            None
         }
     }
 }
