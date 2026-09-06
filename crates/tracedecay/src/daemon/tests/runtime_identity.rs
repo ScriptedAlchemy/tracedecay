@@ -49,6 +49,25 @@ async fn files_for_session(
         .expect("files response")
 }
 
+async fn wait_for_complete_fresh_code_index(engine: &DaemonEngine, project_root: &Path) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if engine
+                .invocation
+                .code_index_schedulers
+                .latest_complete_fresh(project_root)
+                .await
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("complete fresh code index timed out");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bindings() {
@@ -256,6 +275,9 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // listing — with its own census, never the linked worktree's sources.
     let primary_session_id = "session.primary-route-follow-up";
     notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
+    // `project_server` may publish `code_index=warming`; require its fresh
+    // generation so this assertion tests routing rather than activation timing.
+    wait_for_complete_fresh_code_index(&engine, &primary).await;
     let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
     assert!(
         primary_listing.error.is_none(),
