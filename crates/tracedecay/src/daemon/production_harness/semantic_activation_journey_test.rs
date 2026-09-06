@@ -838,6 +838,19 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         first_vector.generation_id().clone(),
     )];
     let graph_before_first_evaluation = graph_bytes(&first_generation).await;
+
+    // The scheduler publishes a current vector generation on its own, so a
+    // fresh profile is degraded-before-activation with no receipt yet. That
+    // state must name its cause: the shipped runtime reported the cause-free
+    // `invalid_runtime_status` here, which reads as a corrupt runtime and
+    // hides the operator's actual next step.
+    let before_activation = semantic_runtime_status(&harness, &project).await;
+    assert_ne!(
+        before_activation["state"]["reason"], "invalid_runtime_status",
+        "a never-activated profile must name its pre-activation cause instead \
+         of reporting a cause-free invalid runtime status: {before_activation}"
+    );
+
     let first_profile = activate_native_profile(&harness, &project).await;
     let first_runtime = wait_for_semantic_runtime_ready(&harness, &project).await;
     assert_eq!(first_runtime["state"]["state"], "ready");
