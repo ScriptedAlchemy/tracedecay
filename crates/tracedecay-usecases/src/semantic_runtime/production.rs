@@ -493,18 +493,30 @@ impl ProductionSemanticRuntimeV1 {
         required_generation: &VectorGenerationIdV1,
     ) -> Result<Option<PreparedProductionSemanticCacheCommitV1>, SemanticRuntimeScheduleFailureV1>
     {
+        // Every step below answers a failure with the same `Publication`
+        // category, and this is the stage a rollback's activation is installed
+        // through. A bare category leaves an operator unable to tell a missing
+        // graph from a retired generation from an unreadable index, so keep the
+        // step and the store's own reason.
         let retained = self
             .graph
             .graph_for_generation(generation)
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+            .map_err(|error| {
+                SemanticRuntimeScheduleFailureV1::publication(format!(
+                    "restore.retain_graph: {error}"
+                ))
+            })?;
         let cancellation = Arc::clone(retained.cancellation());
         let store = match GraphVectorGenerationStoreV1::read_only_generation(
             &retained,
             required_generation,
         )
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
-        {
+        .map_err(|error| {
+            SemanticRuntimeScheduleFailureV1::publication(format!(
+                "restore.published_generation: {error}"
+            ))
+        })? {
             Some(store) => store,
             None => return Ok(None),
         };
@@ -517,7 +529,11 @@ impl ProductionSemanticRuntimeV1 {
         let active = store
             .generation(required_generation, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+            .map_err(|error| {
+                SemanticRuntimeScheduleFailureV1::publication(format!(
+                    "restore.cataloged_generation: {error}"
+                ))
+            })?;
         let Some(active) = active else {
             return Ok(None);
         };
@@ -545,7 +561,9 @@ impl ProductionSemanticRuntimeV1 {
             &search_index_key,
             Arc::clone(&cancellation),
         )
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        .map_err(|error| {
+            SemanticRuntimeScheduleFailureV1::publication(format!("restore.ann_index: {error}"))
+        })?;
         let port = Arc::new(
             PublishedSemanticVectorReadPortV1::new_source_coherent(
                 active,
