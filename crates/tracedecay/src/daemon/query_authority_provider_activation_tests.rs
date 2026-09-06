@@ -6,7 +6,14 @@ use tracedecay_usecases::semantic_runtime::{
 
 #[tokio::test]
 async fn committed_query_routes_install_and_rollback_as_one_revision() {
-    let project = TempDir::new().expect("project root");
+    // `install_committed_query_authorities` canonicalizes the root it keys the
+    // semantic redundancy state on, so the fixture root has to be canonical
+    // before `project.path()` can read that state back. On macOS the
+    // `/var` -> `/private/var` spelling reads an empty slot instead.
+    let project = TempDir::new_in(
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
+    )
+    .expect("project root");
     git(project.path(), &["init", "-q", "-b", "main"]);
     git(project.path(), &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -574,7 +581,10 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
 /// later installs the full pair, replacing the interim core authority.
 #[tokio::test]
 async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
-    let project = TempDir::new().expect("project root");
+    let project = TempDir::new_in(
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
+    )
+    .expect("project root");
     git(project.path(), &["init", "-q", "-b", "main"]);
     git(project.path(), &["config", "user.name", "TraceDecay Test"]);
     git(
