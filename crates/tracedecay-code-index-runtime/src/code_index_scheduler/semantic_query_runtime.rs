@@ -320,29 +320,49 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(())
     }
 
+    /// The installed semantic route for one exact admitted scope.
+    ///
+    /// Worktree isolation is `unique_mounted_for_scope`, exactly as in
+    /// `query_authority_for_scope`, and for the reason
+    /// `ResolvedScope::identifies_same_checkout` documents: the scope digest
+    /// also binds `reference`, the branch label HEAD happened to carry when
+    /// the activation was sealed, and that label moves under a fixed worktree
+    /// on every ordinary commit, branch switch, or detached checkout.
+    /// Comparing it here denied the committed semantic authority the moment
+    /// HEAD moved -- an explicit profile rollback installs coherently against
+    /// the restored source and then every strict query abstained
+    /// `CalibrationUnavailable` with nothing to point at. Serving eligibility
+    /// is checkout identity plus the per-query source-coherence gates; the
+    /// stored digest stays on the entry as the label the route was sealed
+    /// under.
     async fn semantic_query_authority_for_scope(
         &self,
         scope: &ResolvedScope,
     ) -> Option<Arc<SemanticQueryAuthorityV1>> {
-        let (project_root, scope_digest, authority) = {
-            let mounted = self.mounted.lock().await;
-            let (project_root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
-            let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
-            (
-                project_root.clone(),
-                scope_digest.clone(),
-                Arc::clone(authority),
-            )
-        };
-        let activation =
-            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(&project_root);
-        let _activation = activation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if scope_digest != scope.scope_digest {
-            return None;
-        }
-        Some(authority)
+        let mounted = self.mounted.lock().await;
+        unique_mounted_for_scope(&mounted, scope)
+            .unique()
+            .and_then(|(_root, worktree)| {
+                worktree
+                    .semantic_query_authority
+                    .as_ref()
+                    .map(|(_scope_digest, authority)| Arc::clone(authority))
+            })
+    }
+
+    /// The semantic compatibility pins a query on `scope` would serve, or
+    /// `None` when no committed semantic route is reachable from it.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn served_semantic_pins_for_scope(
+        &self,
+        scope: &ResolvedScope,
+    ) -> Option<SemanticCompatibilityPinsV1> {
+        Some(
+            self.semantic_query_authority_for_scope(scope)
+                .await?
+                .pins()
+                .clone(),
+        )
     }
 
     /// Run canonical query first, then attempt semantic influence against the
