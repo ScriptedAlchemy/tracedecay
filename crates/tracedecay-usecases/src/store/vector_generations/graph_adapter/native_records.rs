@@ -95,14 +95,6 @@ pub(super) struct NativeStateMetadataV1 {
     pub revision: u64,
 }
 
-/// Decoded generation-row metadata. Only the embedding key is consumed; the
-/// remaining persisted identity properties are validated fail-closed during
-/// decode without being retained.
-#[derive(Clone, Debug)]
-pub(super) struct NativeGenerationMetadataV1 {
-    pub embedding_key: AdmittedEmbeddingProjectionKeyV1,
-}
-
 /// Encode one bounded projector batch directly into its immutable semantic
 /// generation identity. The semantic identity is known from the admitted plan
 /// before batch zero; no staged row namespace or terminal corpus rename exists.
@@ -352,35 +344,6 @@ pub(super) fn read_optional_state_metadata(
         watermark: telemetry.watermark,
         revision: required_u64(&control, REVISION)?,
     }))
-}
-
-pub(super) fn read_generation_metadata(
-    snapshot: &SemanticVectorVerifiedRead,
-    generation_id: &VectorGenerationIdV1,
-    cancellation: Arc<dyn GraphCancellation>,
-) -> Result<Option<NativeGenerationMetadataV1>, VectorGenerationStoreErrorV1> {
-    snapshot
-        .entity(
-            &snapshot.projection().namespace,
-            &generation_entity_id(generation_id)?,
-            cancellation,
-        )
-        .map_err(map_graph_error)?
-        .map(|row| {
-            require_labels(&row, [GENERATION_LABEL])?;
-            if required_string(&row, GENERATION_ID)? != generation_id.as_digest().as_str() {
-                return Err(corrupt(
-                    "semantic vector generation identity is inconsistent",
-                ));
-            }
-            let _: ProjectionKeyV1 = required_bytes(&row, TARGET_PROJECTION)?;
-            let _: CodeGenerationId = parse_id(required_string(&row, SOURCE_GENERATION)?)?;
-            let _: ManifestDigest = digest(required_string(&row, SOURCE_MANIFEST)?)?;
-            Ok(NativeGenerationMetadataV1 {
-                embedding_key: required_bytes(&row, EMBEDDING_KEY)?,
-            })
-        })
-        .transpose()
 }
 
 #[allow(clippy::too_many_arguments)]

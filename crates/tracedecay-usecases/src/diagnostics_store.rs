@@ -1294,13 +1294,6 @@ impl DirtyDiagnosticOverlay {
         Ok(())
     }
 
-    /// Drops one client document's entries (editor closed or overlay
-    /// released by session TTL).
-    pub fn remove_document(&mut self, client_id: &str, document_uri: &str) {
-        self.entries
-            .remove(&(client_id.to_owned(), document_uri.to_owned()));
-    }
-
     /// Releases every overlay entry, as on session expiry.
     pub fn clear(&mut self) {
         self.entries.clear();

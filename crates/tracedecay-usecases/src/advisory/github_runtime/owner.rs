@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 use tracedecay_application::{RequestContext, ResolvedScope};
-use tracedecay_domain::RetrievalAnchorId;
 use tracedecay_domain::feedback::{FeedbackScopeV1, GitHubReviewReadOperationV1};
 
 use super::decoder::{
@@ -15,9 +14,8 @@ use super::network::{
 };
 use super::store::ProjectGitHubReviewStoreV1;
 use super::{
-    GitHubReadOnlyRuntimeTransportV1, GitHubReviewBodyEvidenceAuthorityV1,
-    GitHubReviewBodyReadOutcomeV1, GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1,
-    GitHubSourceAccessAuthorityV1,
+    GitHubReadOnlyRuntimeTransportV1, GitHubReviewRefreshCoordinatorV1,
+    GitHubReviewRefreshOutcomeV1, GitHubSourceAccessAuthorityV1,
 };
 use crate::advisory::{
     GitHubCurrentBranchRemapper, GitHubReadOnlyAdmissionError, GitHubReadOnlyConnector,
@@ -123,7 +121,6 @@ pub struct GitHubReviewRuntimeOwnerV1<R, A> {
         ProjectGitHubReviewStoreV1,
         Arc<dyn GitHubSourceAccessAuthorityV1>,
     >,
-    anchors: A,
     source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
     stack_client: GitHubReadOnlyClientV1,
     stack_scope: ResolvedScope,
@@ -255,19 +252,6 @@ where
     ) -> FeedbackPortFuture<'a, super::GitHubProviderLifecycleV1> {
         self.source_access.authorize(context, request)
     }
-
-    pub fn expand_retained_body<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        request: &'a GitHubReviewReadRequestV1,
-        body_anchor: &'a RetrievalAnchorId,
-    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1>
-    where
-        A: GitHubReviewBodyEvidenceAuthorityV1,
-    {
-        self.anchors
-            .read_retained_body(context, request, body_anchor, self.source_access.as_ref())
-    }
 }
 
 pub fn build_github_review_runtime_owner_v1<R, A>(
@@ -314,7 +298,6 @@ where
             store,
             Arc::clone(&source_access),
         ),
-        anchors,
         source_access,
         stack_client,
         stack_scope,

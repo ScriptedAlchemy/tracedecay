@@ -99,13 +99,6 @@ pub(crate) fn vector_candidates(candidates: usize) {
 }
 
 #[inline]
-pub(crate) fn vector_resident_reservation(retained_bytes: u64, hydration_peak_bytes: u64) {
-    hotpath::gauge!("usecases.vector.resident_retained_bytes").set(retained_bytes as f64);
-    hotpath::gauge!("usecases.vector.resident_hydration_peak_bytes")
-        .set(hydration_peak_bytes as f64);
-}
-
-#[inline]
 pub(crate) fn vector_cancelled() {
     hotpath::gauge!("usecases.vector.cancellation_checkpoints").inc(1.0);
 }
