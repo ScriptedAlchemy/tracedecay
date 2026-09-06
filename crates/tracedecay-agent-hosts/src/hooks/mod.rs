@@ -11,6 +11,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookRouteMetadata};
 
+use crate::ports::hook_runtime::HookRuntimeV1;
+
 mod analytics;
 mod claude;
 mod codex;
@@ -97,6 +99,7 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
 /// event name (Claude's `TOOL_INPUT`-driven `preToolUse`).
 #[hotpath::measure(label = "agent_hosts.hooks.record_native_capture")]
 pub fn record_native_capture_invoked(
+    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
     host: tracedecay_hooks::HookHostV1,
     hook_name: Option<&str>,
@@ -114,10 +117,17 @@ pub fn record_native_capture_invoked(
         .unwrap_or("nativeCallback");
     match native_capture_agent(host) {
         Some(agent) => {
-            record_hook_invoked_parsed(project_root, agent, hook_name, event_json, &parsed);
+            record_hook_invoked_parsed(
+                runtime,
+                project_root,
+                agent,
+                hook_name,
+                event_json,
+                &parsed,
+            );
         }
         None => {
-            record_other_hook_invoked(project_root, hook_name, event_json);
+            record_other_hook_invoked(runtime, project_root, hook_name, event_json);
         }
     }
 }
@@ -146,9 +156,15 @@ use tool_hints::{HintAgent, ToolHint};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_kimi_event")]
-pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "kimi_event", event_json);
+pub async fn dispatch_kimi_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+) -> Option<String> {
+    let telemetry =
+        record_other_hook_invoked(runtime, Some(project_root), "kimi_event", event_json);
     dispatch::dispatch(
+        runtime,
         tracedecay_hooks::HookHostV1::KimiCode,
         event_json,
         project_root,
@@ -160,12 +176,19 @@ pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Optio
 }
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_event")]
-pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "opencode_event", event_json);
+pub async fn dispatch_opencode_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+) -> Option<String> {
+    let telemetry =
+        record_other_hook_invoked(runtime, Some(project_root), "opencode_event", event_json);
     let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
-        dispatch::dispatch_opencode_lsp_updated(event_json, project_root, Some(&telemetry)).await
+        dispatch::dispatch_opencode_lsp_updated(runtime, event_json, project_root, Some(&telemetry))
+            .await
     } else {
         dispatch::dispatch(
+            runtime,
             tracedecay_hooks::HookHostV1::OpenCode,
             event_json,
             project_root,
@@ -180,10 +203,18 @@ pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> O
     future = true,
     label = "agent_hosts.hooks.dispatch_opencode_tool_after"
 )]
-pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry =
-        record_other_hook_invoked(Some(project_root), "opencode_tool_after", event_json);
-    dispatch::dispatch_opencode_tool_after(event_json, project_root, Some(&telemetry))
+pub async fn dispatch_opencode_tool_after(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+) -> Option<String> {
+    let telemetry = record_other_hook_invoked(
+        runtime,
+        Some(project_root),
+        "opencode_tool_after",
+        event_json,
+    );
+    dispatch::dispatch_opencode_tool_after(runtime, event_json, project_root, Some(&telemetry))
         .await
         .into_recorded_guidance(&telemetry)
         .flatten()
@@ -191,6 +222,7 @@ pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path)
 
 #[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
 pub(crate) async fn write_hook_output(
+    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
     host: tracedecay_hooks::HookHostV1,
     event_json: &str,
@@ -303,6 +335,7 @@ pub(crate) async fn write_hook_output(
     let settlement = receipt.settlement;
     drop(delivery_writer);
     if let Err(error) = daemon_hook_action(
+        runtime,
         Some(project_root),
         serde_json::json!({
             "action": "delivery_settlement",
@@ -360,15 +393,16 @@ pub(crate) use read_hook_event;
 /// Shared native-event handler body: read the bounded event, resolve the
 /// project root, dispatch, and deliver any guidance for `host`.
 async fn hook_native_event(
+    runtime: &HookRuntimeV1,
     host: tracedecay_hooks::HookHostV1,
-    dispatch: impl AsyncFnOnce(&str, &Path) -> Option<String>,
+    dispatch: impl AsyncFnOnce(&HookRuntimeV1, &str, &Path) -> Option<String>,
 ) -> i32 {
     let event = read_hook_event!();
-    let Some(root) = native_event_project_root(&event).await else {
+    let Some(root) = native_event_project_root(runtime, &event).await else {
         return 0;
     };
-    if let Some(guidance) = dispatch(&event, &root).await
-        && !write_hook_output(Some(&root), host, &event, &guidance, None).await
+    if let Some(guidance) = dispatch(runtime, &event, &root).await
+        && !write_hook_output(runtime, Some(&root), host, &event, &guidance, None).await
     {
         return 1;
     }
@@ -376,13 +410,19 @@ async fn hook_native_event(
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.kimi_event")]
-pub async fn hook_kimi_event() -> i32 {
-    hook_native_event(tracedecay_hooks::HookHostV1::KimiCode, dispatch_kimi_event).await
+pub async fn hook_kimi_event(runtime: &HookRuntimeV1) -> i32 {
+    hook_native_event(
+        runtime,
+        tracedecay_hooks::HookHostV1::KimiCode,
+        dispatch_kimi_event,
+    )
+    .await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode_event")]
-pub async fn hook_opencode_event() -> i32 {
+pub async fn hook_opencode_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
+        runtime,
         tracedecay_hooks::HookHostV1::OpenCode,
         dispatch_opencode_event,
     )
@@ -390,8 +430,9 @@ pub async fn hook_opencode_event() -> i32 {
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode_tool_after")]
-pub async fn hook_opencode_tool_after() -> i32 {
+pub async fn hook_opencode_tool_after(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
+        runtime,
         tracedecay_hooks::HookHostV1::OpenCode,
         dispatch_opencode_tool_after,
     )
@@ -399,7 +440,7 @@ pub async fn hook_opencode_tool_after() -> i32 {
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.native_resolve_root")]
-async fn native_event_project_root(event: &str) -> Option<PathBuf> {
+async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Option<PathBuf> {
     let parsed = serde_json::from_str::<Value>(event).ok();
     let start = parsed
         .as_ref()
@@ -407,19 +448,23 @@ async fn native_event_project_root(event: &str) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    crate::ports::hook_runtime::resolve_project_root_with_identity(&start).await
+    runtime.resolve_project_root_with_identity(&start).await
 }
 
 pub(crate) async fn daemon_tool_json(
+    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
     tool_name: &str,
     arguments: Value,
 ) -> crate::errors::Result<Value> {
-    crate::ports::hook_runtime::daemon_tool_json(project_root, tool_name, arguments, false).await
+    runtime
+        .daemon_tool_json(project_root, tool_name, arguments, false)
+        .await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
 pub(crate) async fn daemon_hook_action(
+    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
     mut arguments: Value,
     telemetry: Option<&analytics::HookTimingSpan>,
@@ -434,13 +479,14 @@ pub(crate) async fn daemon_hook_action(
         return result;
     }
     let started = std::time::Instant::now();
-    let result = crate::ports::hook_runtime::daemon_tool_json(
-        project_root,
-        "tracedecay_hook_runtime",
-        arguments,
-        project_root.is_some(),
-    )
-    .await;
+    let result = runtime
+        .daemon_tool_json(
+            project_root,
+            "tracedecay_hook_runtime",
+            arguments,
+            project_root.is_some(),
+        )
+        .await;
     if let Some(telemetry) = telemetry {
         telemetry.note_completed_daemon_call(
             payload_bytes,
@@ -453,6 +499,7 @@ pub(crate) async fn daemon_hook_action(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.ingest_user_session")]
 pub(crate) async fn ingest_user_session(
+    runtime: &HookRuntimeV1,
     provider: &str,
     session_id: Option<String>,
     telemetry: Option<&analytics::HookTimingSpan>,
@@ -461,6 +508,7 @@ pub(crate) async fn ingest_user_session(
         return false;
     }
     match daemon_hook_action(
+        runtime,
         None,
         serde_json::json!({
             "action": "ingest_transcript",
@@ -563,6 +611,7 @@ pub(crate) async fn await_within_stop_budget<T>(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.ingest_transcript")]
 pub(crate) async fn ingest_transcript_for_event(
+    runtime: &HookRuntimeV1,
     provider: &str,
     event_json: &str,
     project_root: Option<&Path>,
@@ -582,7 +631,7 @@ pub(crate) async fn ingest_transcript_for_event(
     args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
     match await_within_stop_budget(
         async {
-            match daemon_hook_action(project_root, args, telemetry).await {
+            match daemon_hook_action(runtime, project_root, args, telemetry).await {
                 Ok(result) => IngestAttempt::Succeeded(result),
                 Err(error) => {
                     tracing::warn!(provider, %error, "transcript ingest daemon call failed");
@@ -606,10 +655,12 @@ pub(crate) async fn ingest_transcript_for_event(
 }
 
 pub(crate) async fn reset_counter_for_project(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) {
     if let Err(error) = daemon_hook_action(
+        runtime,
         Some(project_root),
         serde_json::json!({ "action": "reset_counter" }),
         telemetry,
@@ -653,32 +704,34 @@ pub(crate) fn compact_daemon_args(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.notify_event")]
 pub(crate) async fn notify_hook_event_with_telemetry(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     event: DaemonHookEvent,
     telemetry: &analytics::HookTimingSpan,
 ) {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
-    crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
+    runtime.notify_hook_event(project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
 }
 
 pub(crate) async fn notify_hook_event_with_optional_telemetry(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     event: DaemonHookEvent,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) {
     match telemetry {
         Some(telemetry) => {
-            notify_hook_event_with_telemetry(project_root, event, telemetry).await;
+            notify_hook_event_with_telemetry(runtime, project_root, event, telemetry).await;
         }
         None => {
-            crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
+            runtime.notify_hook_event(project_root, event).await;
         }
     }
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
-pub async fn hook_hermes_terminal_receipt() -> i32 {
+pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
     let event_json = read_hook_event!();
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event_json) else {
         return 0;
@@ -698,10 +751,9 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         });
     let project_root = match cwd {
         Some(cwd) => {
-            crate::ports::hook_runtime::resolve_project_root_with_identity(std::path::Path::new(
-                &cwd,
-            ))
-            .await
+            runtime
+                .resolve_project_root_with_identity(std::path::Path::new(&cwd))
+                .await
         }
         None => None,
     };
@@ -711,12 +763,14 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("nativeCallback");
     let hook_telemetry = record_hook_invoked(
+        runtime,
         project_root.as_deref(),
         HintAgent::Hermes,
         hook_name,
         &event_json,
     );
     let guidance = dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         project_root.as_deref(),
@@ -735,8 +789,9 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         && event.receipt.is_some()
     {
         if let Some(project_root) = project_root.as_ref() {
-            notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
+            notify_hook_event_with_telemetry(runtime, project_root, event, &hook_telemetry).await;
         } else if let Err(error) = daemon_hook_action(
+            runtime,
             None,
             serde_json::json!({ "action": "hermes_receipt", "event": event }),
             Some(&hook_telemetry),
@@ -751,6 +806,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
     );
     if !write_hook_output(
+        runtime,
         project_root.as_deref(),
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
@@ -764,8 +820,13 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     0
 }
 
-pub async fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
+pub async fn schedule_user_session_review(
+    runtime: &HookRuntimeV1,
+    provider: &str,
+    session_id: Option<&str>,
+) {
     let hint = daemon_hook_action(
+        runtime,
         None,
         serde_json::json!({
             "action": "user_review",
@@ -940,9 +1001,9 @@ pub(crate) fn hook_route_metadata_from_parsed(
 ) -> HookRouteMetadata {
     let cwd = event_cwd_from_parsed(parsed);
     let route_root = cwd.as_deref().unwrap_or(project_root);
-    let worktree = crate::worktree::git_worktree_root(route_root)
+    let worktree = tracedecay_runtime_core::worktree::git_worktree_root(route_root)
         .unwrap_or_else(|| project_root.to_path_buf());
-    let branch = crate::branch::current_branch(&worktree);
+    let branch = tracedecay_runtime_core::branch::current_branch(&worktree);
     HookRouteMetadata {
         session_id: hook_route_session_id(parsed),
         thread_id: text_field(
@@ -1025,7 +1086,7 @@ fn deduped_project_hint_with_id(
 }
 
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
-    if let Some(root) = crate::worktree::git_worktree_root(start) {
+    if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
         return Some(root);
     }
     let mut dir = start.to_path_buf();
@@ -1150,9 +1211,12 @@ fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
 /// global-store-only checkout still resolves. Shared by every host whose session
 /// events carry `cwd`.
 #[hotpath::measure(future = true, label = "hosts.hooks.resolve_root")]
-async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
+async fn event_project_root_with_identity(
+    runtime: &HookRuntimeV1,
+    parsed: &Value,
+) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    crate::ports::hook_runtime::resolve_project_root_with_identity(&cwd).await
+    runtime.resolve_project_root_with_identity(&cwd).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {

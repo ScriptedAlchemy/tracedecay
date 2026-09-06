@@ -133,15 +133,13 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(
                 "candidate-output publication lock is poisoned".to_owned(),
             )
         })?;
-        Ok(active
-            .get(scope)
-            .map(|generation| generation.as_ref().clone()))
+        Ok(active.get(scope).map(Arc::clone))
     }
 
     fn publish_atomically(
