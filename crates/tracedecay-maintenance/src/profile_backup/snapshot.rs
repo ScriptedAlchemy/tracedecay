@@ -80,7 +80,7 @@ pub(super) fn snapshot_artifact(
     )? {
         snapshot_sqlite(source, destination)?;
     } else {
-        super::copy_private_artifact(source, destination)?;
+        super::copy_private_file(source, destination)?;
     }
     super::sync_directory(parent)
 }

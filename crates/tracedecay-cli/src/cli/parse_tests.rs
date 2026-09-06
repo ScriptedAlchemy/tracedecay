@@ -1334,6 +1334,8 @@ fn automation_skills_commands_parse_lifecycle_flags() {
         "Repository hygiene",
         "--summary",
         "Keep checks focused",
+        "--routing-description",
+        "Use when selecting focused repository checks.",
         "--category",
         "maintenance",
         "--body",
@@ -1351,6 +1353,7 @@ fn automation_skills_commands_parse_lifecycle_flags() {
                             id,
                             title,
                             summary,
+                            routing_description,
                             category,
                             body,
                             pinned,
@@ -1359,6 +1362,7 @@ fn automation_skills_commands_parse_lifecycle_flags() {
         }) if id == "repo-hygiene"
             && title == "Repository hygiene"
             && summary == "Keep checks focused"
+            && routing_description == "Use when selecting focused repository checks."
             && category == "maintenance"
             && body == "Run focused tests."
             && pinned
@@ -1372,6 +1376,8 @@ fn automation_skills_commands_parse_lifecycle_flags() {
         "repo-hygiene",
         "--summary",
         "Updated",
+        "--routing-description",
+        "Use when reviewing focused check selection.",
         "--pinned",
         "false",
     ])
@@ -1385,12 +1391,14 @@ fn automation_skills_commands_parse_lifecycle_flags() {
                         AutomationSkillsAction::Update {
                             id,
                             summary,
+                            routing_description,
                             pinned,
                             ..
                         }
                 }
         }) if id == "repo-hygiene"
             && summary.as_deref() == Some("Updated")
+            && routing_description.as_deref() == Some("Use when reviewing focused check selection.")
             && pinned == Some(false)
     ));
 
