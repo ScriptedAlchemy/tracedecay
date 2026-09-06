@@ -9,7 +9,6 @@ use super::id::{
     ScopeResolutionId,
 };
 use super::retrieval::{PayloadAccessState, PrivacyDomainBoundLocatorDigest};
-use super::subjects::CatalogSnapshotRefV1;
 use super::watermark::VectorWatermark;
 
 /// Deterministic relationship between an observed store state and the state
@@ -87,29 +86,6 @@ impl ResolutionAuthorizationV1 {
     }
 }
 
-/// Stable, payload-free result metadata emitted after resolving an immutable
-/// retrieval anchor at its frozen watermark.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AuthorizedAnchorResolutionV1 {
-    pub anchor_id: RetrievalAnchorId,
-    pub catalog_snapshot: CatalogSnapshotRefV1,
-    pub authorization: ResolutionAuthorizationV1,
-    pub watermark: FrozenWatermarkResolutionV1,
-    pub payload_access: PayloadAccessState,
-    pub resolved_record_digest: ManifestDigest,
-}
-
-impl AuthorizedAnchorResolutionV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.anchor_id.validate()?;
-        self.catalog_snapshot.validate()?;
-        self.authorization.validate()?;
-        self.watermark.validate()?;
-        self.resolved_record_digest.validate()
-    }
-}
-
 /// Outcome of resolving a V2 anchor. This describes identity resolution and
 /// freshness, while [`PayloadAccessState`] independently describes whether the
 /// retained payload may be accessed.
@@ -183,11 +159,11 @@ impl AnchorResolutionStateV2 {
     }
 }
 
-/// Payload-free V2 resolution metadata with explicit coverage and a state that
+/// Payload-free resolution metadata with explicit coverage and a state that
 /// cannot be confused with payload retention/access policy.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct AuthorizedAnchorResolutionV2 {
+pub struct AuthorizedAnchorResolution {
     anchor_id: RetrievalAnchorId,
     authorization: ResolutionAuthorizationV1,
     watermark: FrozenWatermarkResolutionV1,
@@ -197,7 +173,7 @@ pub struct AuthorizedAnchorResolutionV2 {
     resolved_record_digest: ManifestDigest,
 }
 
-impl AuthorizedAnchorResolutionV2 {
+impl AuthorizedAnchorResolution {
     pub fn new(
         anchor_id: RetrievalAnchorId,
         authorization: ResolutionAuthorizationV1,
@@ -258,7 +234,7 @@ impl AuthorizedAnchorResolutionV2 {
     }
 }
 
-impl<'de> Deserialize<'de> for AuthorizedAnchorResolutionV2 {
+impl<'de> Deserialize<'de> for AuthorizedAnchorResolution {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -361,38 +337,6 @@ mod tests {
         assert!(serde_json::from_value::<FrozenWatermarkResolutionV1>(value).is_err());
     }
 
-    #[test]
-    fn authorized_resolution_is_valid_and_payload_free() {
-        let resolution = AuthorizedAnchorResolutionV1 {
-            anchor_id: RetrievalAnchorId::new("anchor.fixture").unwrap(),
-            catalog_snapshot: CatalogSnapshotRefV1 {
-                generation: crate::research::CatalogGenerationId::new("catalog.fixture").unwrap(),
-                digest: ManifestDigest::new(SHA256_FIXTURE).unwrap(),
-            },
-            authorization: ResolutionAuthorizationV1 {
-                resolved_scope_id: ScopeResolutionId::new("scope.fixture").unwrap(),
-                privacy_domain_id: PrivacyDomainId::new("privacy.fixture").unwrap(),
-                access_policy_digest: AccessPolicyDigest::new(SHA256_FIXTURE).unwrap(),
-                capability_id: CapabilityId::new("capability.fixture").unwrap(),
-                canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(SHA256_FIXTURE)
-                    .unwrap(),
-            },
-            watermark: FrozenWatermarkResolutionV1::new(
-                watermark(&[("a", 3)]),
-                watermark(&[("a", 4)]),
-            ),
-            payload_access: PayloadAccessState::Eligible,
-            resolved_record_digest: ManifestDigest::new(SHA256_FIXTURE).unwrap(),
-        };
-
-        resolution.validate().unwrap();
-        let wire = serde_json::to_value(resolution).unwrap();
-        let object = wire.as_object().unwrap();
-        assert!(!object.contains_key("payload"));
-        assert!(!object.contains_key("query"));
-        assert!(!object.contains_key("source_locator"));
-    }
-
     fn authorization() -> ResolutionAuthorizationV1 {
         ResolutionAuthorizationV1 {
             resolved_scope_id: ScopeResolutionId::new("scope.fixture").unwrap(),
@@ -406,8 +350,8 @@ mod tests {
     fn v2_resolution(
         state: AnchorResolutionStateV2,
         payload_access: PayloadAccessState,
-    ) -> AuthorizedAnchorResolutionV2 {
-        AuthorizedAnchorResolutionV2::new(
+    ) -> AuthorizedAnchorResolution {
+        AuthorizedAnchorResolution::new(
             RetrievalAnchorId::new("anchor.fixture").unwrap(),
             authorization(),
             FrozenWatermarkResolutionV1::new(watermark(&[("a", 3)]), watermark(&[("a", 3)])),
@@ -449,7 +393,7 @@ mod tests {
         .unwrap();
         wire["payload_access"] = json!("eligible");
 
-        assert!(serde_json::from_value::<AuthorizedAnchorResolutionV2>(wire).is_err());
+        assert!(serde_json::from_value::<AuthorizedAnchorResolution>(wire).is_err());
     }
 
     #[test]
@@ -485,7 +429,7 @@ mod tests {
                         watermark(&[("a", 4), ("b", 2)]),
                     ),
                 };
-                let resolution = AuthorizedAnchorResolutionV2::new(
+                let resolution = AuthorizedAnchorResolution::new(
                     RetrievalAnchorId::new("anchor.fixture").unwrap(),
                     authorization(),
                     FrozenWatermarkResolutionV1::new(frozen, observed),

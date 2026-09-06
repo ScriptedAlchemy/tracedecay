@@ -13,7 +13,7 @@ use std::future::Future;
 
 use serde::Serialize;
 use tracedecay_domain::{
-    AnchorResolutionStateV2, AuthorizedAnchorResolutionV2, CoverageReportV1, DomainError,
+    AnchorResolutionStateV2, AuthorizedAnchorResolution, CoverageReportV1, DomainError,
     FactOwnerV1, FrozenWatermarkResolutionV1, PayloadAccessState, ResolutionAuthorizationV1,
     RetrievalAnchorId, RetrievalAnchorRecordV2, VectorWatermark, canonical_sha256,
 };
@@ -34,13 +34,13 @@ struct UnresolvedAnchorDigestV1<'a> {
 }
 
 /// Typed outcome of resolving one evidence anchor through the daemon
-/// authority. The [`AuthorizedAnchorResolutionV2`] metadata is validated by
+/// authority. The [`AuthorizedAnchorResolution`] metadata is validated by
 /// the domain contract; the retained record is present exactly when the store
 /// resolved a single authoritative record, whatever its declared payload
 /// access.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvidenceAnchorResolutionReport {
-    resolution: AuthorizedAnchorResolutionV2,
+    resolution: AuthorizedAnchorResolution,
     record: Option<RetrievalAnchorRecordV2>,
 }
 
@@ -72,7 +72,7 @@ impl EvidenceAnchorResolutionReport {
                 );
                 let state =
                     AnchorResolutionStateV2::classify(record.payload_access(), watermark.drift);
-                let resolution = AuthorizedAnchorResolutionV2::new(
+                let resolution = AuthorizedAnchorResolution::new(
                     anchor_id,
                     record.authorization().clone(),
                     watermark,
@@ -117,7 +117,7 @@ impl EvidenceAnchorResolutionReport {
             anchor_id: &anchor_id,
             state,
         })?;
-        let resolution = AuthorizedAnchorResolutionV2::new(
+        let resolution = AuthorizedAnchorResolution::new(
             anchor_id,
             authorization,
             watermark,
@@ -134,7 +134,7 @@ impl EvidenceAnchorResolutionReport {
 
     /// Validated payload-free resolution metadata: state, coverage, watermark
     /// drift, and the bounding authorization.
-    pub fn resolution(&self) -> &AuthorizedAnchorResolutionV2 {
+    pub fn resolution(&self) -> &AuthorizedAnchorResolution {
         &self.resolution
     }
 
