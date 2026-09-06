@@ -404,6 +404,18 @@ async fn populated_temporal_generation_is_invalidated_and_replay_rediscovered() 
             "{table} must not survive the reset advertising coverage of deleted rows"
         );
     }
+    assert_eq!(
+        raw.query_row(
+            "SELECT next_generation
+             FROM session_temporal_generation_floors
+             WHERE session_id = 'session.fixture'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        2,
+        "the non-derived allocation floor must advance past the deleted generation"
+    );
     assert!(
         foreign_key_violations(&raw).is_empty(),
         "the committed reset must be referentially coherent"
@@ -600,6 +612,11 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
     assert_eq!(count(&reopened, "session_temporal_generations"), 1);
     assert_eq!(count(&reopened, "session_occurrences"), 1);
     assert_eq!(count(&reopened, "session_refresh_operations"), 1);
+    assert_eq!(
+        count(&reopened, "session_temporal_generation_floors"),
+        0,
+        "a rolled-back reset must not retain an advanced generation floor"
+    );
     assert!(
         !scheme_migration_recorded(&reopened),
         "a rolled-back reset must not enroll the new native-source scheme"

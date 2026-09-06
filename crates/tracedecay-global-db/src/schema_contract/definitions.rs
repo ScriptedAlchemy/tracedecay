@@ -1225,6 +1225,15 @@ pub(super) const TABLES: &[Table] = &[
         []
     ),
     table!(
+        "session_temporal_generation_floors",
+        [
+            column("session_id", "TEXT", false, None, 1),
+            column("next_generation", "INTEGER", true, None, 0),
+            column("reset_at", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
         "session_temporal_generations",
         [
             column("session_id", "TEXT", true, None, 1),

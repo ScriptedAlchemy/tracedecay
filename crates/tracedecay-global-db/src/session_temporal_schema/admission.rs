@@ -210,6 +210,7 @@ pub(super) async fn validate_released_v3_session_temporal_schema(
             !table.ends_with("_fts")
                 && *table != "session_temporal_projection_receipts"
                 && *table != "session_relation_receipts"
+                && *table != "session_temporal_generation_floors"
         })
         .collect::<Vec<_>>();
     validate_session_temporal_schema_contract(conn, &tables)
@@ -248,7 +249,7 @@ async fn validate_released_v3_temporal_table_definitions(
     let expected_tables = TEMPORAL_TABLE_COLUMNS
         .iter()
         .map(|(table, _)| *table)
-        .filter(|table| !table.ends_with("_fts"))
+        .filter(|table| !table.ends_with("_fts") && *table != "session_temporal_generation_floors")
         .collect::<BTreeSet<_>>();
     let contract_tables = RELEASED_V3_TEMPORAL_TABLE_DIGESTS
         .iter()

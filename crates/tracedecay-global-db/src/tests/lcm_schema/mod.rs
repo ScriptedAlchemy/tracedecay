@@ -293,6 +293,7 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "session_summary_availability"),
     ("table", "session_summary_nodes"),
     ("table", "session_summary_nodes_fts"),
+    ("table", "session_temporal_generation_floors"),
     ("table", "session_temporal_generations"),
     ("table", "session_temporal_observation_effects"),
     ("table", "session_temporal_projection_receipts"),

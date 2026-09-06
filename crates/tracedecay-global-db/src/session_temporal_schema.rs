@@ -28,6 +28,20 @@ const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Monotonic identity retained across scoped observation resets.
+///
+/// Temporal generations themselves are projector output and reset with the
+/// observation stream. This floor is allocation state, not projection state:
+/// it prevents a rebuilt generation from aliasing a pre-reset cursor or a
+/// retained native relation-graph projection with the same numeric identity.
+const TEMPORAL_GENERATION_FLOOR_DDL: &str = r"
+    CREATE TABLE IF NOT EXISTS session_temporal_generation_floors (
+        session_id TEXT PRIMARY KEY,
+        next_generation INTEGER NOT NULL CHECK(next_generation > 0),
+        reset_at INTEGER NOT NULL
+    );
+";
+
 const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE TABLE IF NOT EXISTS session_temporal_schema_migrations (
         name TEXT PRIMARY KEY,
@@ -589,6 +603,9 @@ pub(crate) async fn migrate_released_v3_session_temporal_schema(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
     admission::validate_released_v3_session_temporal_schema(conn).await?;
+    conn.execute_batch(TEMPORAL_GENERATION_FLOOR_DDL)
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
     conn.execute_batch(
         "DROP TRIGGER session_temporal_projection_receipts_immutable_update_v1;
          ALTER TABLE session_temporal_projection_receipts
@@ -789,6 +806,9 @@ pub(crate) async fn install_session_temporal_schema(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    conn.execute_batch(TEMPORAL_GENERATION_FLOOR_DDL)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
