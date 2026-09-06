@@ -44,16 +44,14 @@ type ResolveOnPath = fn(&str, Option<&OsStr>) -> Result<Option<PathBuf>>;
 type CodexAgentFiles = fn() -> &'static [PluginFile];
 type WithWriteIntents = fn(PathBuf, &mut dyn FnMut());
 
-static EXPORT_TO_AGENTS: OnceLock<ExportToAgents> = OnceLock::new();
-static EXPORT_TO_AGENT_HOSTS: OnceLock<ExportToAgentHosts> = OnceLock::new();
-static WRITE_TEXT: OnceLock<WriteText> = OnceLock::new();
-static WRITE_JSON: OnceLock<WriteJson> = OnceLock::new();
-static REMOVE_HOST_FILE: OnceLock<RemoveHostFile> = OnceLock::new();
-static RESOLVE_ON_PATH: OnceLock<ResolveOnPath> = OnceLock::new();
-static CODEX_AGENT_FILES: OnceLock<CodexAgentFiles> = OnceLock::new();
-static WITH_WRITE_INTENTS: OnceLock<WithWriteIntents> = OnceLock::new();
+static HOST_IO: OnceLock<HostIoRegistration> = OnceLock::new();
 
 /// Registered host-install implementations. First registration wins.
+///
+/// This is one capability value, not eight independent slots: the whole
+/// bundle is installed under a single [`OnceLock`], so a later or concurrent
+/// registration can never replace part of an earlier one. Every reader below
+/// therefore sees callbacks from exactly one registration.
 pub struct HostIoRegistration {
     pub export_to_agents: ExportToAgents,
     pub export_to_agent_hosts: ExportToAgentHosts,
@@ -65,16 +63,16 @@ pub struct HostIoRegistration {
     pub with_write_intents: WithWriteIntents,
 }
 
-/// Installs the agent-hosts host-install surface. Idempotent.
+/// Installs the agent-hosts host-install surface. Idempotent and atomic:
+/// the first complete bundle wins and no later registration is mixed into it.
 pub fn register(registration: HostIoRegistration) {
-    let _ = EXPORT_TO_AGENTS.set(registration.export_to_agents);
-    let _ = EXPORT_TO_AGENT_HOSTS.set(registration.export_to_agent_hosts);
-    let _ = WRITE_TEXT.set(registration.write_text);
-    let _ = WRITE_JSON.set(registration.write_json);
-    let _ = REMOVE_HOST_FILE.set(registration.remove_host_file);
-    let _ = RESOLVE_ON_PATH.set(registration.resolve_on_path);
-    let _ = CODEX_AGENT_FILES.set(registration.codex_agent_files);
-    let _ = WITH_WRITE_INTENTS.set(registration.with_write_intents);
+    let _ = HOST_IO.set(registration);
+}
+
+/// The one registered bundle, or `None` when no root ever registered.
+#[must_use]
+pub fn registered() -> Option<&'static HostIoRegistration> {
+    HOST_IO.get()
 }
 
 /// Returns the user's home directory, cross-platform.
@@ -96,7 +94,7 @@ pub fn export_managed_skills_to_agents(
     home: &Path,
     profile_root: &Path,
 ) -> Result<Vec<ManagedSkillExportReport>> {
-    match EXPORT_TO_AGENTS.get() {
+    match registered().map(|io| io.export_to_agents) {
         Some(export) => Ok(export(home, profile_root)),
         None => Err(unregistered("export_managed_skills_to_agents")),
     }
@@ -108,28 +106,28 @@ pub fn export_managed_skills_to_agent_hosts(
     project_root: &Path,
     profile_root: &Path,
 ) -> Result<Vec<ManagedSkillExportReport>> {
-    match EXPORT_TO_AGENT_HOSTS.get() {
+    match registered().map(|io| io.export_to_agent_hosts) {
         Some(export) => Ok(export(home, project_root, profile_root)),
         None => Err(unregistered("export_managed_skills_to_agent_hosts")),
     }
 }
 
 pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
-    match WRITE_TEXT.get() {
+    match registered().map(|io| io.write_text) {
         Some(write) => write(path, contents, backup),
         None => Err(unregistered("safe_write_text_file")),
     }
 }
 
 pub fn safe_write_json_file(path: &Path, value: &Value, backup: Option<&Path>) -> Result<()> {
-    match WRITE_JSON.get() {
+    match registered().map(|io| io.write_json) {
         Some(write) => write(path, value, backup),
         None => Err(unregistered("safe_write_json_file")),
     }
 }
 
 pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
-    match REMOVE_HOST_FILE.get() {
+    match registered().map(|io| io.remove_host_file) {
         Some(remove) => remove(path),
         None => Err(std::io::Error::other(
             "host-config write surface is unavailable: no host I/O is registered",
@@ -138,21 +136,21 @@ pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
 }
 
 pub fn resolve_on_path(program: &str, path_var: Option<&OsStr>) -> Result<Option<PathBuf>> {
-    match RESOLVE_ON_PATH.get() {
+    match registered().map(|io| io.resolve_on_path) {
         Some(resolve) => resolve(program, path_var),
         None => Err(unregistered("resolve_on_path")),
     }
 }
 
 pub fn codex_agent_files() -> Result<&'static [PluginFile]> {
-    match CODEX_AGENT_FILES.get() {
+    match registered().map(|io| io.codex_agent_files) {
         Some(files) => Ok(files()),
         None => Err(unregistered("codex_agent_files")),
     }
 }
 
 pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() -> T) -> Result<T> {
-    let Some(with_intents) = WITH_WRITE_INTENTS.get() else {
+    let Some(with_intents) = registered().map(|io| io.with_write_intents) else {
         return Err(unregistered("with_host_config_write_intents"));
     };
     let mut effect = Some(effect);
@@ -173,5 +171,72 @@ pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() ->
 fn unregistered(name: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("host-config write surface is unavailable: {name} is not registered"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn export_agents(_: &Path, _: &Path) -> Vec<ManagedSkillExportReport> {
+        Vec::new()
+    }
+
+    fn export_hosts(_: &Path, _: &Path, _: &Path) -> Vec<ManagedSkillExportReport> {
+        Vec::new()
+    }
+
+    fn write_text(_: &Path, _: &str, _: Option<&Path>) -> Result<()> {
+        Ok(())
+    }
+
+    fn write_json(_: &Path, _: &Value, _: Option<&Path>) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_file(_: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn resolve(_: &str, _: Option<&OsStr>) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
+
+    fn files() -> &'static [PluginFile] {
+        &[]
+    }
+
+    fn intents(_: PathBuf, effect: &mut dyn FnMut()) {
+        effect();
+    }
+
+    fn bundle() -> HostIoRegistration {
+        HostIoRegistration {
+            export_to_agents: export_agents,
+            export_to_agent_hosts: export_hosts,
+            write_text,
+            write_json,
+            remove_host_file: remove_file,
+            resolve_on_path: resolve,
+            codex_agent_files: files,
+            with_write_intents: intents,
+        }
+    }
+
+    /// Every callback must come from one registration. A second `register`
+    /// call replaces nothing, so no reader can observe a bundle spliced from
+    /// two roots — the failure mode eight independent `OnceLock` slots had.
+    #[test]
+    fn a_second_registration_cannot_replace_part_of_the_first() {
+        register(bundle());
+        let installed = registered().expect("a bundle is registered");
+        register(bundle());
+        assert!(
+            std::ptr::eq(
+                installed,
+                registered().expect("the bundle survives a second register")
+            ),
+            "a second register must not replace any part of the first bundle"
+        );
     }
 }

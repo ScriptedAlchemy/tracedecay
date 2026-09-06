@@ -2580,6 +2580,32 @@ impl DaemonSessionRuntimeRegistryV1 {
         let replay_root = project_database
             .database_path()
             .with_extension("graph-replay");
+        // Bind the sealed replay source at seat time, not only when a sealed
+        // publication classifies. Every replay-hydrating path -- verified-head
+        // recovery, and the staging release the semantic-vector retirement
+        // drives -- resolves its source through this binding, so a daemon that
+        // restarts and serves an existing generation without publishing a new
+        // one answered every one of them with "sealed code generation replay
+        // source is not mounted for this projection". That left the vector
+        // census permanently incomplete, and with a fail-closed vector
+        // inventory code-generation retention then collected nothing for the
+        // rest of the process lifetime. The bind is idempotent and additive,
+        // so the publication-time bind stays correct for a route this seat
+        // never covered.
+        self.graph_manifest_provider
+            .bind(
+                authority.binding().shard_id.clone(),
+                project_id.clone(),
+                repository_id.clone(),
+                replay_binding.generations_root.clone(),
+                replay_root.clone(),
+            )
+            .map_err(|error| {
+                session_registry_error(
+                    "bind sealed code generation replay source",
+                    error.to_string(),
+                )
+            })?;
         let publication_locks = self.retain_project_publication_locks(&project_shard);
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),

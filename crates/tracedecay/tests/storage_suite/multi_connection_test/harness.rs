@@ -280,7 +280,15 @@ impl McpProxy {
             pending: BTreeMap::new(),
             stdout_reader: Some(stdout_reader),
         };
-        proxy.request(1, "initialize", json!({}));
+        proxy.request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "multi-connection-harness", "version": "1"}
+            }),
+        );
         proxy.request(
             2,
             "tools/call",

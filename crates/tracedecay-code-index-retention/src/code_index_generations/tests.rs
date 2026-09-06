@@ -841,6 +841,7 @@ fn text_artifact_recovery_rolls_back_before_receipt_and_commits_after_receipt() 
     .expect("plan artifact transaction");
     let receipt = build_text_artifact_receipt(
         &plan,
+        plan.active_pointer.as_ref(),
         plan.collectable_text_artifacts.clone(),
         UtcMicros(14),
     )
@@ -892,6 +893,7 @@ fn cancellable_recovery_preserves_pending_artifact_journal_for_retry() {
     .expect("plan artifact transaction");
     let receipt = build_text_artifact_receipt(
         &plan,
+        plan.active_pointer.as_ref(),
         plan.collectable_text_artifacts.clone(),
         UtcMicros(17),
     )
@@ -2317,4 +2319,329 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     );
     assert!(!orphan_staging.exists());
     assert!(!orphan_sidecar.exists());
+}
+
+/// A production store's publication pointer names its whole retained history,
+/// not just the active generation. `fixture_store` writes the minimal pointer,
+/// which is exactly the shape that hid #897: with an index of one entry, no
+/// superseded generation was ever pointer-addressable.
+fn index_every_fixture_generation(
+    store: &tempfile::TempDir,
+    generations: &[FixtureGeneration],
+) -> DurablePublicationPointerV1 {
+    let mut pointer = read_active_pointer(store.path()).expect("read fixture pointer");
+    pointer.generation_index = generations
+        .iter()
+        .enumerate()
+        .map(|(sequence, generation)| DurableGenerationIndexEntryV1 {
+            generation_id: generation.id.as_str().to_owned(),
+            snapshot_content_identity: pointer.snapshot_content_identity.clone(),
+            sealed_at_micros: i64::try_from(sequence).expect("fixture sequence fits i64"),
+            size_bytes: generation.size_bytes,
+            segment_bytes: 0,
+            generation_file: generation.file.clone(),
+            state_digest: generation.state_digest.clone(),
+            source_reference: None,
+            source_revision: None,
+            source_tree: None,
+            cardinality: None,
+            text_artifact: None,
+        })
+        .collect();
+    pointer.generation_index_truncated = false;
+    pointer.generation_index_digest = Some(
+        durable_generation_index_digest(&pointer.generation_index, false).expect("index digest"),
+    );
+    write_active_pointer(store.path(), "fixture-full-history", &pointer)
+        .expect("write full-history pointer");
+    pointer
+}
+
+fn indexed_generation_ids(store_root: &Path) -> BTreeSet<String> {
+    read_active_pointer(store_root)
+        .expect("read active pointer")
+        .generation_index
+        .into_iter()
+        .map(|entry| entry.generation_id)
+        .collect()
+}
+
+/// Membership of the durable `generation_index` is history, not liveness.
+///
+/// Marking every entry live made `rollback_floor` dead and moved the real
+/// floor onto the index bounds, so a store that publishes as fast as
+/// maintenance collects never released a byte.
+#[test]
+fn the_durable_generation_index_does_not_pin_a_superseded_generation() {
+    let (store, generations) = fixture_store(5);
+    let pointer = index_every_fixture_generation(&store, &generations);
+    assert_eq!(pointer.generation_index.len(), 5);
+
+    let plan = plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("plan retention over a full durable history");
+
+    let collectable = plan
+        .collectable_generations
+        .first()
+        .cloned()
+        .expect("a pointer-indexed superseded generation must still be collectable");
+    assert_eq!(
+        collectable.generation_id, generations[0].id,
+        "collection sweeps from the oldest end"
+    );
+}
+
+/// The rollback reserve is the only history a plan keeps, and it is the
+/// caller's `rollback_floor` -- never the pointer's bounded index.
+#[test]
+fn the_rollback_floor_is_the_only_superseded_history_a_plan_keeps() {
+    let (store, generations) = fixture_store(5);
+    index_every_fixture_generation(&store, &generations);
+
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+        .expect("plan retention with a rollback reserve");
+
+    let collectable = plan
+        .collectable_generations
+        .iter()
+        .map(|generation| generation.generation_id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    // Four superseded generations, three reserved: exactly the oldest is free.
+    assert_eq!(
+        collectable,
+        BTreeSet::from([generations[0].id.as_str().to_owned()])
+    );
+}
+
+/// Applying that plan must leave the store re-plannable: the pointer may never
+/// name a generation this unit unlinked.
+#[test]
+fn applying_retention_rewrites_the_durable_index_before_unlinking() {
+    let (store, generations) = fixture_store(5);
+    index_every_fixture_generation(&store, &generations);
+    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+    let plan = plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("plan retention");
+    let collected = plan.collectable_generations.clone();
+    assert_eq!(collected.len(), 4, "every superseded generation is free");
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(211),
+        None,
+    )
+    .expect("apply retention");
+
+    assert_eq!(report.deleted_generations.len(), collected.len());
+    let indexed = indexed_generation_ids(store.path());
+    for generation in &collected {
+        assert!(!generations_root.join(&generation.generation_file).exists());
+        assert!(
+            !indexed.contains(generation.generation_id.as_str()),
+            "a collected generation must be gone from the durable index"
+        );
+    }
+    let pointer = read_active_pointer(store.path()).expect("read rewritten pointer");
+    assert_eq!(
+        indexed,
+        BTreeSet::from([generations[4].id.as_str().to_owned()]),
+        "only the active generation survives the rewrite"
+    );
+    assert!(
+        pointer.generation_index_truncated,
+        "a rewritten index no longer proves a revision was never indexed"
+    );
+    validate_durable_generation_index(&pointer).expect("the rewritten index must revalidate");
+    // Fails if the unlink outran the rewrite: the census refuses a pointer
+    // whose index names a missing generation.
+    plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("the store must stay plannable after a collection");
+}
+
+struct PointerRewriteFixture {
+    store: tempfile::TempDir,
+    original: DurablePublicationPointerV1,
+    rewritten: DurablePublicationPointerV1,
+    transaction: CodeGenerationRetentionTransactionV1,
+    collected: Vec<CodeGenerationRetentionGenerationV1>,
+}
+
+impl PointerRewriteFixture {
+    fn collected_files_present(&self) -> bool {
+        let generations_root = self.store.path().join(GENERATIONS_DIRECTORY);
+        self.collected
+            .iter()
+            .all(|generation| generations_root.join(&generation.generation_file).is_file())
+    }
+
+    fn collected_files_absent(&self) -> bool {
+        let generations_root = self.store.path().join(GENERATIONS_DIRECTORY);
+        self.collected
+            .iter()
+            .all(|generation| !generations_root.join(&generation.generation_file).exists())
+    }
+}
+
+/// Journal a real collection unit and stop before any durable step, so each
+/// crash-point test can replay exactly the prefix it wants to interrupt.
+fn pointer_rewrite_fixture() -> PointerRewriteFixture {
+    let (store, generations) = fixture_store(5);
+    let original = index_every_fixture_generation(&store, &generations);
+    let plan = plan_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("plan retention");
+    let collected = plan.collectable_generations.clone();
+    let receipt =
+        build_receipt(&plan, collected.clone(), UtcMicros(212)).expect("build retention receipt");
+    let rewritten = pointer_without_collected_generations(&original, &collected)
+        .expect("rewrite the durable index")
+        .expect("the fixture index names the collected generations");
+    let transaction = CodeGenerationRetentionTransactionV1 {
+        schema: TRANSACTION_SCHEMA.to_owned(),
+        active_pointer: Some(original.clone()),
+        receipt,
+    };
+    persist_transaction(store.path(), &transaction).expect("journal the collection unit");
+    PointerRewriteFixture {
+        store,
+        original,
+        rewritten,
+        transaction,
+        collected,
+    }
+}
+
+/// Crash between the durable index rewrite and the first unlink: recovery must
+/// put the index back, because nothing was collected.
+#[test]
+fn recovery_rolls_the_durable_index_back_when_no_generation_was_quarantined() {
+    let fixture = pointer_rewrite_fixture();
+    write_active_pointer(
+        fixture.store.path(),
+        RETENTION_POINTER_WRITE_CONTEXT,
+        &fixture.rewritten,
+    )
+    .expect("publish the rewritten index");
+
+    recover_code_generation_retention(fixture.store.path(), &BTreeSet::new(), None)
+        .expect("recover an uncommitted rewrite");
+
+    assert_eq!(
+        read_active_pointer(fixture.store.path()).expect("read pointer"),
+        fixture.original,
+        "an uncommitted unit must not shrink the durable history"
+    );
+    assert!(fixture.collected_files_present());
+    assert!(!transaction_path(fixture.store.path()).exists());
+}
+
+/// Crash after the rewrite *and* the quarantine but before the receipt:
+/// recovery must restore both, in that order.
+#[test]
+fn recovery_rolls_back_a_quarantined_generation_and_its_index_entry() {
+    let fixture = pointer_rewrite_fixture();
+    write_active_pointer(
+        fixture.store.path(),
+        RETENTION_POINTER_WRITE_CONTEXT,
+        &fixture.rewritten,
+    )
+    .expect("publish the rewritten index");
+    stage_collectable_generations(fixture.store.path(), &fixture.transaction)
+        .expect("quarantine the collectable generations");
+    assert!(fixture.collected_files_absent());
+
+    recover_code_generation_retention(fixture.store.path(), &BTreeSet::new(), None)
+        .expect("roll back an uncommitted collection unit");
+
+    assert!(
+        fixture.collected_files_present(),
+        "rollback must restore the quarantined generations"
+    );
+    assert_eq!(
+        read_active_pointer(fixture.store.path()).expect("read pointer"),
+        fixture.original,
+        "rollback must restore the index entries that named them"
+    );
+    plan_code_generation_retention(
+        fixture.store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("a rolled-back store must stay plannable");
+}
+
+/// Crash after the receipt is durable: recovery finishes forward and keeps the
+/// rewritten index.
+#[test]
+fn recovery_keeps_the_rewritten_index_once_the_receipt_is_durable() {
+    let fixture = pointer_rewrite_fixture();
+    write_active_pointer(
+        fixture.store.path(),
+        RETENTION_POINTER_WRITE_CONTEXT,
+        &fixture.rewritten,
+    )
+    .expect("publish the rewritten index");
+    stage_collectable_generations(fixture.store.path(), &fixture.transaction)
+        .expect("quarantine the collectable generations");
+    write_receipt(fixture.store.path(), &fixture.transaction.receipt)
+        .expect("commit the deletion receipt");
+
+    recover_code_generation_retention(fixture.store.path(), &BTreeSet::new(), None)
+        .expect("finish a committed collection unit");
+
+    assert!(fixture.collected_files_absent());
+    assert_eq!(
+        read_active_pointer(fixture.store.path()).expect("read pointer"),
+        fixture.rewritten,
+    );
+    assert!(!transaction_path(fixture.store.path()).exists());
+}
+
+/// The two pointer states are recoverable in either order: a committed unit
+/// whose store still carries the pre-collection pointer must have the rewrite
+/// finished for it, never be left naming an unlinked generation.
+#[test]
+fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
+    let fixture = pointer_rewrite_fixture();
+    stage_collectable_generations(fixture.store.path(), &fixture.transaction)
+        .expect("quarantine the collectable generations");
+    write_receipt(fixture.store.path(), &fixture.transaction.receipt)
+        .expect("commit the deletion receipt");
+    assert_eq!(
+        read_active_pointer(fixture.store.path()).expect("read pointer"),
+        fixture.original,
+        "this crash point never published the rewrite"
+    );
+
+    recover_code_generation_retention(fixture.store.path(), &BTreeSet::new(), None)
+        .expect("finish a committed collection unit");
+
+    assert_eq!(
+        read_active_pointer(fixture.store.path()).expect("read pointer"),
+        fixture.rewritten,
+        "recovery must finish the rewrite the receipt already released"
+    );
+    plan_code_generation_retention(
+        fixture.store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("a recovered store must stay plannable");
 }

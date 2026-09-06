@@ -1452,3 +1452,217 @@ fn a_cancelled_release_never_leaves_a_row_set_recovery_cannot_serve() {
     // sweep can actually produce here; the contract above holds either way.
     eprintln!("cancelled_release_partial_row_sets_observed={observed_partial}");
 }
+
+/// Mirrors the crate-private `limits::MAX_NATIVE_GENERATION_STAGE_MUTATIONS`,
+/// the mutation ceiling one native staging page flushes at. Kept in sync by
+/// hand; the geometry assertion below fails loudly if it drifts.
+const NATIVE_STAGE_PAGE_MUTATIONS: usize = 65_536;
+
+/// Mirrors `limits::MAX_VERIFIED_GENERATION_BATCH_MUTATIONS`, the rows one
+/// durable release transaction removes.
+const RELEASE_PAGE_MUTATIONS: usize = 4_096;
+
+/// A manifest in the two-page staging geometry an interrupted release can
+/// misrepresent: one full native page plus a second page wider than a single
+/// release transaction. Carries the same readable evidence entities and
+/// relation as [`rich_manifest`] so a recovered snapshot can still be walked.
+fn two_page_manifest(
+    projection_identity: GraphProjectionIdentity,
+    generation: &str,
+    marker: &str,
+    entity_count: usize,
+) -> GraphGenerationManifest {
+    let from = GraphEntityRef::new(
+        projection_identity.clone(),
+        GraphEntityId::new("entity:a").unwrap(),
+    );
+    let to = GraphEntityRef::new(
+        projection_identity.clone(),
+        GraphEntityId::new("entity:b").unwrap(),
+    );
+    // `entity:a` and `entity:b` sort below every `entity:f…` filler, so the
+    // release's ordered deletion pages start inside the first stage page --
+    // the range whose rows the count heuristic claimed were still present.
+    let mut entities = vec![
+        evidence_entity("entity:a", marker),
+        evidence_entity("entity:b", marker),
+    ];
+    entities.extend((0..entity_count - 2).map(|index| {
+        GraphEntity::new(
+            GraphEntityId::new(format!("entity:f{index:06}")).unwrap(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+        )
+        .unwrap()
+    }));
+    GraphGenerationManifest::new(
+        projection_identity,
+        GraphGenerationId::new(generation).unwrap(),
+        SourceGeneration::new(format!("source:{generation}")).unwrap(),
+        GraphWatermark::new(format!("watermark:{generation}")).unwrap(),
+        Vec::new(),
+        entities,
+        vec![
+            GraphGenerationRelation::new(
+                GraphRelationId::new("relation:a-b").unwrap(),
+                from,
+                to,
+                GraphRelationKind::new("references").unwrap(),
+                BTreeMap::from([(
+                    GraphPropertyName::new("weight").unwrap(),
+                    GraphProperty::I64(7),
+                )]),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+/// Restaging a generation whose staging-row release was interrupted must
+/// restore every released row, not just the pages a row count still misses.
+///
+/// The release deletes bounded pages of arbitrary identities, so the rows it
+/// leaves behind are not the ordered prefix the staging pipeline builds. At a
+/// one-page geometry any deletion drops the count below the only page's
+/// `range.end` and the replay is forced anyway; at this two-page geometry the
+/// survivors still out-count the *first* page, and treating that count as
+/// proof of the page's presence skipped the exact rows the release had
+/// removed. The replay then reported success while the recovered digest no
+/// longer matched the head, so the generation could not be served at all.
+///
+/// Fails if a remount after an interrupted release cannot serve the full row
+/// set, or if the restage leaves fewer rows than the manifest.
+#[test]
+fn a_partially_released_generation_restages_every_row_it_lost() {
+    let entity_count = NATIVE_STAGE_PAGE_MUTATIONS + 2 * RELEASE_PAGE_MUTATIONS;
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("code:gen-release-partial", "code");
+    let manifest = two_page_manifest(
+        identity.clone(),
+        "release-partial-g1",
+        "interrupted",
+        entity_count,
+    );
+    let full = manifest.row_counts();
+    assert_eq!(full, (entity_count, 1));
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:release-partial-g1",
+        None,
+        '5',
+    );
+    drop(publish_sealed(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &record,
+        &manifest,
+    ));
+
+    // Walk the cancellation budget upward until a durable entity release page
+    // has committed. The release is resumable, so each attempt resumes where
+    // the last stopped and the first attempt that removes rows removes one
+    // bounded page.
+    //
+    // The budget is measured in cancellation *polls*, and a release page polls
+    // once per row it enumerates before it commits `RELEASE_PAGE_MUTATIONS` of
+    // them -- so the first durable page costs on the order of the whole row
+    // count in polls, not the few dozen a short linear walk reaches. Start at
+    // that scale and double: the first budget that commits cannot reach a
+    // second page (which costs another full enumeration), so the fixture
+    // still lands in the one-page-removed geometry the assertion below reads.
+    let mut partial = None;
+    let mut cancel_after = entity_count;
+    while cancel_after <= 4 * entity_count {
+        let probe = CancelAfterPolls::new(cancel_after);
+        let control = probe.control();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        let _ = registered.registry.release_sealed_generation_staging_rows(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key.projection,
+        );
+        let counts = {
+            let database = probe_lease(&registered, temp.path());
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap()
+        };
+        if counts.0 < full.0 {
+            partial = Some(counts);
+            break;
+        }
+        cancel_after *= 2;
+    }
+    let counts =
+        partial.expect("an interrupted release must commit at least one durable entity page");
+    assert!(
+        counts.0 >= NATIVE_STAGE_PAGE_MUTATIONS && counts.0 < full.0,
+        "this fixture must reach the state the count heuristic misreads: \
+         {counts:?} of {full:?}, first stage page ends at {NATIVE_STAGE_PAGE_MUTATIONS}"
+    );
+
+    assert!(registered.close().unwrap());
+    drop(registered);
+    // Destroy the derived artifact, as the daemon fixture does, so the remount
+    // has to read the row set the interrupted release left behind instead of
+    // adopting the sealed copy.
+    assert!(corrupt_sealed_containers(temp.path()) > 0);
+
+    let registered = RegisteredGraph::new_mounted_with_manifest_provider(
+        temp.path(),
+        Arc::new(RemountSealedProvider {
+            manifest: manifest.clone(),
+        }),
+    )
+    .unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let recovered = registered.registry.recover_verified_snapshot(
+        registration(registered.binding.clone(), temp.path()),
+        &mut authority,
+        &context,
+        &record.publication.key.projection,
+    );
+    match recovered {
+        Ok(snapshot) => {
+            assert_snapshot_reads(&snapshot, &identity, "interrupted");
+            drop(snapshot);
+        }
+        Err(error) => {
+            let repaired = registered
+                .registry
+                .publish_verified(
+                    registration(registered.binding.clone(), temp.path()),
+                    &mut authority,
+                    &context,
+                    &record.publication.key,
+                    Some(Arc::new(manifest.clone())),
+                )
+                .unwrap_or_else(|republish| {
+                    panic!(
+                        "a release interrupted at {counts:?} of {full:?} rows left a row set \
+                         neither recovery ({error}) nor republication ({republish}) could serve"
+                    )
+                });
+            assert_snapshot_reads(&repaired.snapshot, &identity, "interrupted");
+            drop(repaired);
+        }
+    }
+    let restaged = {
+        let database = probe_lease(&registered, temp.path());
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap()
+    };
+    assert_eq!(
+        restaged, full,
+        "every released row must be restaged, not skipped by a row count"
+    );
+}

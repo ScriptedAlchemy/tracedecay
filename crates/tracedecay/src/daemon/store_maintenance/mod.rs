@@ -314,10 +314,12 @@ fn log_semantic_vector_retention_degraded(
 /// offline protection set without reporting a degradation. `CensusScanning`
 /// is in-progress: the bounded census is still paging toward its exact pin
 /// set, so the pass defers instead of planning against a mid-scan inventory.
-/// `Offline` is a typed degradation for an unavailable vector runtime; the
-/// pass then plans against the offline protection set. `Refused` is
-/// fail-closed: the vector authority reported reset/corrupt/denied and no
-/// sweep may run.
+/// `Offline` is a typed degradation for an unreadable vector inventory: the
+/// live pin set is unknown, so the pass reports and retains every source
+/// rather than planning against an offline protection set that cannot name
+/// the sources a mounted activation lease binds. `Refused` is fail-closed
+/// for the same reason: the vector authority reported reset/corrupt/denied
+/// and no sweep may run.
 pub(super) enum VectorRetentionInventoryV1 {
     Online {
         sources: std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
@@ -392,8 +394,9 @@ pub(super) async fn resolve_vector_retention_inventory(
 }
 
 /// Map the mounted graph's readable-source read onto the retention inventory:
-/// unavailable degrades to the offline protection set, while reset, corrupt,
-/// and denied stay fail-closed and refuse the sweep.
+/// unavailable is the typed offline degradation, while reset, corrupt, and
+/// denied are refusals. Both retain every source: an inventory that cannot be
+/// read cannot prove which sources a mounted activation lease binds.
 fn classify_vector_readable_sources(
     sources: tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources,
     configuration: tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
@@ -457,12 +460,14 @@ pub(in crate::daemon) enum CodeGenerationRetentionOutcomeV1 {
 /// graph when it is resolvable. A daemon without a seated semantic runtime
 /// (the default-off state) sweeps under the offline protection set as its
 /// ordinary quiet journey, and an in-progress census defers the sweep until
-/// its exact pin set is complete. When the graph runtime is unavailable —
-/// saturated capacity, failed activation, or nothing serving — the pass
-/// degrades to the offline protection set (active pointer head, durable
-/// pointer index, rollback floor, and the serving generation) so sealed files
-/// cannot grow without bound while the graph is dark. Reset, corrupt, and
-/// denied vector authorities stay fail-closed and collect nothing.
+/// its exact pin set is complete. When the vector inventory is unreadable —
+/// saturated capacity, failed activation, nothing serving, or a census reset
+/// by a failure or mutation — the pass reports its degradation and collects
+/// nothing: the offline protection set (active pointer head, durable pointer
+/// index, rollback floor, and the serving generation) cannot name the exact
+/// source generations a mounted vector activation lease binds, so sweeping
+/// under it deleted a live vector source. Reset, corrupt, and denied vector
+/// authorities stay fail-closed for the same reason.
 #[hotpath::measure(
     label = "daemon.git.maintenance.code_generation_retention",
     future = true
@@ -555,14 +560,21 @@ async fn apply_code_generation_retention(
     }
     // Published vectors live in the mounted code graph. When the graph is
     // resolvable, its inventory is the exact vector pin set. Without a seated
-    // semantic runtime, and while the vector runtime is unavailable, the pass
-    // plans against the offline protection set (active pointer head, durable
-    // pointer index, rollback floor, plus the serving generation) instead of
-    // letting sealed files grow without bound while the graph is dark. A
-    // paging census defers: its exact pin set arrives when the scan
-    // completes, and the vector retention pass already keeps the retry
-    // cadence short while paging. Reset, corrupt, and denied vector
-    // authorities stay fail-closed.
+    // semantic runtime the durable configuration is canonical proof that no
+    // vector stage can pin a source, so that journey sweeps under the offline
+    // protection set (active pointer head, durable pointer index, rollback
+    // floor, plus the serving generation). A paging census defers: its exact
+    // pin set arrives when the scan completes, and the vector retention pass
+    // already keeps the retry cadence short while paging.
+    //
+    // An unreadable vector inventory is fail-closed. The offline protection
+    // set names the serving generation, never the exact source generations a
+    // mounted vector activation lease still binds, so planning against it
+    // while the inventory is unknown collected a live vector source
+    // (production journey cc-5583). "Unknown" is retained, not swept: the
+    // pass reports its degradation and collects nothing until an exact — or
+    // canonically empty — inventory is readable again. Reset, corrupt, and
+    // denied vector authorities stay fail-closed for the same reason.
     let (vector_readable_sources, inventory_mode) = match &vector_inventory {
         VectorRetentionInventoryV1::Online { sources, .. } => (sources.clone(), "online"),
         VectorRetentionInventoryV1::SemanticUnseated => (
@@ -572,11 +584,7 @@ async fn apply_code_generation_retention(
         VectorRetentionInventoryV1::CensusScanning => {
             return CodeGenerationRetentionOutcomeV1::Complete;
         }
-        VectorRetentionInventoryV1::Offline { .. } => (
-            serving_generation_pins(schedulers, &layout.project_root).await,
-            "offline",
-        ),
-        VectorRetentionInventoryV1::Refused { .. } => {
+        VectorRetentionInventoryV1::Offline { .. } | VectorRetentionInventoryV1::Refused { .. } => {
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
@@ -701,8 +709,9 @@ async fn apply_code_generation_retention(
     // Freeze the vector writer, then re-read the committed active+rollback
     // identities and their exact source generations. Graph head order is not
     // retention authority: a newer unactivated candidate must not displace
-    // the configured generation from this fence. The offline protection set
-    // has no vector inventory to fence, so no freeze is taken there.
+    // the configured generation from this fence. The unseated default-off
+    // sweep has no vector inventory to fence, so no freeze is taken there;
+    // every other non-online inventory already returned without collecting.
     let vector_writer_freeze = if let VectorRetentionInventoryV1::Online {
         configuration,
         expected_vector_revision,

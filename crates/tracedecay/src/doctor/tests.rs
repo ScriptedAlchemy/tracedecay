@@ -165,7 +165,8 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
             }
         ]
     }))
-    .unwrap();
+    .unwrap()
+    .expect("published database telemetry is ready status");
 
     assert_eq!(
         parsed.pointer("/storage_health/quick_check_ok"),
@@ -430,13 +431,25 @@ fn canonical_doctor_revalidates_observed_report_wire_contract() {
     assert!(invalid.to_string().contains("violated its wire contract"));
 }
 
+/// A reachable daemon that has not admitted the project yet answers without a
+/// `database` block. That is the warming state Doctor keeps polling, distinct
+/// from an unreachable owner (an error) and from malformed telemetry (an error).
 #[test]
-fn daemon_runtime_parser_rejects_missing_database_telemetry() {
-    let error = super::daemon_runtime_status(&serde_json::json!({
+fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
+    let pending = super::daemon_runtime_status(&serde_json::json!({
         "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
     }))
+    .unwrap();
+    assert!(
+        pending.is_none(),
+        "absent telemetry is warming, not an error"
+    );
+
+    let malformed = super::daemon_runtime_status(&serde_json::json!({
+        "content": [{"type": "text", "text": r#"{"process":{"pid":1234},"database":7}"#}]
+    }))
     .unwrap_err();
-    assert!(error.to_string().contains("omitted database telemetry"));
+    assert!(malformed.to_string().contains("was not an object"));
 }
 
 /// The sole daemon owner is the only authority that can observe storage

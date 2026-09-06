@@ -104,7 +104,14 @@ pub async fn run_doctor() -> tracedecay_domain::errors::Result<()> {
     check_inert_project_config(&mut dc, &project_path);
     let daemon_status = daemon_project_status(&project_path).await;
     let storage_health = match daemon_status.as_ref() {
-        Ok(status) => match canonical_daemon_doctor_report(status)? {
+        Ok(None) => {
+            // The daemon answered, so the sole owner is reachable; it simply
+            // has not admitted this project far enough to publish storage
+            // telemetry. That is a warming state, not a lost authority.
+            dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
+            DatabaseHealth::unknown("daemon_storage_telemetry_pending")
+        }
+        Ok(Some(status)) => match canonical_daemon_doctor_report(status)? {
             Some(report) => {
                 let storage_health = database_health_from_canonical_report(&report);
                 render_canonical_doctor_report(&mut dc, &report);
@@ -139,7 +146,11 @@ pub async fn run_doctor() -> tracedecay_domain::errors::Result<()> {
         };
         for agent in agents::all_integrations() {
             if should_run_host_healthcheck(agent.as_ref(), home) {
-                agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
+                agent.healthcheck_with_daemon_status(
+                    &mut dc,
+                    &hctx,
+                    daemon_status.as_ref().ok().and_then(Option::as_ref),
+                );
             } else if let Some(surface) = agent.detected_host_surface(home) {
                 // The host itself is on this machine but carries no tracedecay
                 // integration. Silence here read as "nothing to say", which
@@ -320,26 +331,33 @@ fn doctor_result(
 #[hotpath::measure(label = "doctor.daemon_status", future = true)]
 async fn daemon_project_status(
     project_path: &Path,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
+) -> tracedecay_domain::errors::Result<Option<serde_json::Value>> {
     let handshake = crate::daemon::handshake_for_current_client(
         Some(project_path.to_path_buf()),
         None,
         false,
         false,
     )?;
-    let result = crate::daemon::call_default_tool_within(
-        &handshake,
-        "tracedecay_runtime",
-        daemon_doctor_runtime_args(),
-        // Diagnostic probe, not a liveness gate. A multi-gigabyte store
-        // cold-opening while agents saturate the daemon can take well over 10s
-        // for its first integrity read; a warm steady-state read returns in well
-        // under a second. Give it headroom so a contended read reports real
-        // status instead of failing the post-update with a spurious timeout.
-        tokio::time::Instant::now() + std::time::Duration::from_secs(90),
-    )
-    .await?;
-    daemon_runtime_status(&result)
+    let warmup_deadline = tokio::time::Instant::now() + RUNTIME_TELEMETRY_WARMUP;
+    loop {
+        let result = crate::daemon::call_default_tool_within(
+            &handshake,
+            "tracedecay_runtime",
+            daemon_doctor_runtime_args(),
+            // Diagnostic probe, not a liveness gate. A multi-gigabyte store
+            // cold-opening while agents saturate the daemon can take well over 10s
+            // for its first integrity read; a warm steady-state read returns in well
+            // under a second. Give it headroom so a contended read reports real
+            // status instead of failing the post-update with a spurious timeout.
+            tokio::time::Instant::now() + std::time::Duration::from_secs(90),
+        )
+        .await?;
+        match daemon_runtime_status(&result)? {
+            Some(status) => return Ok(Some(status)),
+            None if tokio::time::Instant::now() >= warmup_deadline => return Ok(None),
+            None => tokio::time::sleep(RUNTIME_TELEMETRY_POLL).await,
+        }
+    }
 }
 
 fn daemon_doctor_runtime_args() -> serde_json::Value {
@@ -361,16 +379,20 @@ fn daemon_doctor_runtime_args() -> serde_json::Value {
 /// yet" and remains a warming state to poll, while telemetry that is present
 /// but malformed remains a terminal contract violation.
 const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted database telemetry";
+/// How long Doctor keeps re-asking a reachable daemon for this project's
+/// storage telemetry before reporting the warming state as unknown health.
+const RUNTIME_TELEMETRY_WARMUP: std::time::Duration = std::time::Duration::from_secs(15);
+const RUNTIME_TELEMETRY_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// `Ok(None)` is the warming state: the daemon answered but has not published
+/// a `database` block for this project yet.
 fn daemon_runtime_status(
     result: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
+) -> tracedecay_domain::errors::Result<Option<serde_json::Value>> {
     let runtime = crate::daemon::tool_json_payload(result, "tracedecay_runtime")?;
-    let mut storage = runtime.get("database").cloned().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: RUNTIME_TELEMETRY_PENDING.to_string(),
-        }
-    })?;
+    let Some(mut storage) = runtime.get("database").cloned() else {
+        return Ok(None);
+    };
     let storage = storage.as_object_mut().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "daemon runtime database telemetry was not an object".to_string(),
@@ -386,7 +408,7 @@ fn daemon_runtime_status(
     if let Some(value) = runtime.get("doctor_report").cloned() {
         status["doctor_report"] = value;
     }
-    Ok(status)
+    Ok(Some(status))
 }
 
 /// What Doctor actually observed about the current project's storage.
