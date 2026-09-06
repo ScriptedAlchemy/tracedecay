@@ -121,25 +121,6 @@ impl GraphDbLeaseV1 {
     pub(crate) fn owner_id(&self) -> GraphDbOwnerId {
         self.token.source.owner_id
     }
-
-    /// Demands that every sealed generation be proven again from its stored
-    /// rows, discarding the verified-generation markers admitted at open.
-    ///
-    /// Sealed-generation verification is normally proven once per set of
-    /// container bytes and then re-checked against the container's file
-    /// identity, which is an OS-integrity assumption rather than a
-    /// cryptographic one: it detects a container that was replaced, extended,
-    /// truncated, or rewritten, but not bytes edited in place under a
-    /// preserved timestamp. (Grafeo's per-section CRC-32, checked on every
-    /// section read, is what stands behind that for accidental corruption.)
-    ///
-    /// This is the hook that drops the assumption on demand -- a doctor
-    /// command, a scheduled audit, or an operator who has reason to distrust
-    /// the store's metadata. The next activation of each generation pays the
-    /// full row-streaming proof again.
-    pub fn demand_full_generation_reverification(&self) {
-        self.token.source.database.forget_verified_markers();
-    }
 }
 
 /// Opaque map-owned authority for a graph runtime.

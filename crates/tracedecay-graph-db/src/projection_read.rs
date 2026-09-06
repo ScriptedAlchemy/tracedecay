@@ -7,12 +7,12 @@ use grafeo_engine::GrafeoDB;
 
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
-    entity_projection_domain_label, entity_projection_label, relation_projection_label,
+    entity_projection_label, relation_projection_label,
 };
 use crate::state::{labeled_projection_nodes, latest_projection, load_entity, load_relation};
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId,
-    GraphLabel, GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
+    GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
     GraphWatermark, SourceGeneration,
 };
 
@@ -132,58 +132,6 @@ impl GraphDb {
             crate::hotpath_observe::HydrationSource::Live,
         );
         Ok(telemetry)
-    }
-
-    /// Reads one bounded exact-label page from a projection-scoped native
-    /// label index. The total counts only entities carrying this exact label;
-    /// reference-only nodes in the same projection are excluded.
-    #[hotpath::measure(label = "graph_db.search.label", impl_type = "GraphDb")]
-    pub fn projection_entities_by_label(
-        &self,
-        namespace: &GraphNamespace,
-        projection: &GraphProjectionId,
-        label: &GraphLabel,
-        limit: usize,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<GraphProjectionLabelPage, GraphDbError> {
-        validate_page_limit(limit)?;
-        let guard = self.read_database(cancellation.as_ref())?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_projection_readable(namespace, projection)?;
-        let owner_label = entity_projection_domain_label(namespace, projection, label);
-        let scope = IdentityScope {
-            owner_label: &owner_label,
-            record_label: ENTITY_LABEL,
-            identity_property: ENTITY_ID_PROPERTY,
-        };
-        let total_entities = count_labeled_nodes(self, database, scope, cancellation.as_ref())?;
-        let identities =
-            query_identity_page(self, database, scope, None, limit, cancellation.as_ref())?;
-        let mut entities = Vec::with_capacity(identities.len());
-        for identity in identities {
-            let identity = GraphEntityId::new(identity)
-                .map_err(|error| persisted_identity_error("entity", error))?;
-            let stored = load_entity(database, namespace, &identity)?.ok_or_else(|| {
-                GraphDbError::Corrupt {
-                    message: "projection label query returned an unindexed entity".to_owned(),
-                }
-            })?;
-            if stored.projection != *projection || !stored.entity.labels.contains(label) {
-                return Err(GraphDbError::Corrupt {
-                    message: "projection label index does not match entity ownership".to_owned(),
-                });
-            }
-            entities.push(stored.entity);
-        }
-        check_cancelled(cancellation.as_ref())?;
-        crate::hotpath_observe::record_counts(entities.len(), 0, 0, 0);
-        crate::hotpath_observe::record_hydration_source(
-            crate::hotpath_observe::HydrationSource::Live,
-        );
-        Ok(GraphProjectionLabelPage {
-            entities,
-            total_entities,
-        })
     }
 }
 
@@ -518,17 +466,6 @@ fn count_labeled_nodes(
     })?;
     check_cancelled(cancellation)?;
     Ok(count)
-}
-
-fn validate_page_limit(limit: usize) -> Result<(), GraphDbError> {
-    if limit == 0 || limit > MAX_PROJECTION_PAGE_ITEMS {
-        Err(GraphDbError::budget_exhausted_count(
-            GraphBudgetKind::Read,
-            MAX_PROJECTION_PAGE_ITEMS,
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 fn validate_optional_page_limit(limit: usize) -> Result<(), GraphDbError> {

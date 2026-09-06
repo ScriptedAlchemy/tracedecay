@@ -163,19 +163,6 @@ pub(crate) fn entity_projection_label(
     )
 }
 
-pub(crate) fn entity_projection_domain_label(
-    namespace: &GraphNamespace,
-    projection: &GraphProjectionId,
-    label: &GraphLabel,
-) -> String {
-    format!(
-        "{OWNER_DOMAIN_LABEL_PREFIX}{}_{}_{}",
-        hex::encode(namespace.as_str().as_bytes()),
-        hex::encode(projection.as_str().as_bytes()),
-        hex::encode(label.as_str().as_bytes())
-    )
-}
-
 pub(crate) fn relation_type_for_kind(kind: &GraphRelationKind) -> String {
     format!(
         "{RELATION_TYPE_PREFIX}{}",
