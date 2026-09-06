@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -6,7 +6,9 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
-use tracedecay_code_index::production::UninterruptibleCodeIndexControlV1;
+use tracedecay_code_index::production::{
+    CodeIndexProductionErrorV1, UninterruptibleCodeIndexControlV1,
+};
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationStoreLockV1, GRAPH_REPLAY_POOL_ACQUIRE_POLL,
     try_acquire_code_generation_store_lock,
@@ -317,6 +319,18 @@ fn with_verified_seal_from_roots<T>(
     read(pool, expected_digest, check, pool_lock)
 }
 
+/// Only NotFound abstains; malformed or inaccessible seal authority fails closed.
+fn seal_is_present(path: &std::path::Path) -> Result<bool, GraphDbError> {
+    match path.symlink_metadata() {
+        Ok(metadata) => validate_sealed_generation_metadata(&metadata).map(|_| true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(GraphDbError::unavailable(format!(
+            "sealed generation metadata cannot be read: {error}"
+        ))),
+    }
+}
+
+#[hotpath::measure(label = "daemon.session_registry.seal.acquire_bundle_lock")]
 fn acquire_generation_bundle_lock(
     root: &std::path::Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -332,29 +346,6 @@ fn acquire_generation_bundle_lock(
     }
 }
 
-fn decode_verified_seal_from_roots(
-    canonical: &std::path::Path,
-    pool: &std::path::Path,
-    expected_digest: &str,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
-    let segments_root = canonical
-        .parent()
-        .and_then(std::path::Path::parent)
-        .ok_or_else(|| GraphDbError::invalid("canonical generation root has no store parent"))?
-        .join("code-generation-segments-v1");
-    with_verified_seal_from_roots(
-        canonical,
-        pool,
-        expected_digest,
-        check,
-        |path, expected_digest, check, lifetime_lock| {
-            decode_verified_seal(path, &segments_root, expected_digest, check, lifetime_lock)
-        },
-    )
-}
-
-#[hotpath::measure(label = "daemon.session_registry.seal.decode")]
 fn decode_verified_seal(
     path: &std::path::Path,
     segments_root: &std::path::Path,
@@ -364,7 +355,7 @@ fn decode_verified_seal(
 ) -> Result<tracedecay_code_index::production::CodeIndexPublishedGenerationV1, GraphDbError> {
     decode_verified_seal_with_bundle_barrier(
         path,
-        segments_root,
+        &[segments_root.to_path_buf()],
         expected_digest,
         check,
         lifetime_lock,
@@ -372,9 +363,10 @@ fn decode_verified_seal(
     )
 }
 
+#[hotpath::measure(label = "daemon.session_registry.seal.decode")]
 fn decode_verified_seal_with_bundle_barrier(
     path: &std::path::Path,
-    segments_root: &std::path::Path,
+    segment_roots: &[PathBuf],
     expected_digest: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     lifetime_lock: CodeGenerationStoreLockV1,
@@ -469,13 +461,13 @@ fn decode_verified_seal_with_bundle_barrier(
                 match request {
                     tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
                         ..
-                    } => read_partitioned_segment(segments_root, request, buffer),
+                    } => read_partitioned_segment(select_partitioned_segment_root(segment_roots, request)?, request, buffer),
                     tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
                         ..
                     } => {
                         if pinned_evidence.is_none() {
                             pinned_evidence = Some(open_partitioned_segment(
-                                segments_root,
+                                select_partitioned_segment_root(segment_roots, request)?,
                                 request,
                             )?);
                             // The manifest/pool lock proves the pack pathname is live
@@ -580,6 +572,33 @@ fn partitioned_segment_request(
         ));
     }
     Ok((digest, expected_size, offset, length))
+}
+
+fn select_partitioned_segment_root<'a>(
+    roots: &'a [PathBuf],
+    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+) -> Result<&'a std::path::Path, CodeIndexProductionErrorV1> {
+    let (digest, _, _, _) = partitioned_segment_request(request)?;
+    let digest = digest.strip_prefix("sha256:").ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+    })?;
+    for root in roots {
+        match root
+            .join(format!("segment-{digest}.json"))
+            .symlink_metadata()
+        {
+            Ok(_) => return Ok(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed segment metadata cannot be read: {error}"
+                )));
+            }
+        }
+    }
+    Err(CodeIndexProductionErrorV1::Contract(
+        "sealed generation segment is absent from active routes".to_owned(),
+    ))
 }
 
 fn open_partitioned_segment(
@@ -867,26 +886,51 @@ pub(super) fn verify_sealed_generation_source_from_roots(
     )
 }
 
-/// One worktree route's sealed-generation roots under a project shard.
-///
-/// A linked worktree shares its project's shard but keeps its own code-index
-/// store, so the same shard legitimately owns several root pairs. The roots are
-/// only *where* to look: every read below is still gated on the exact
-/// content-addressed digest and on the decoded manifest's own project,
-/// repository, and generation identity.
+/// The exact repository and worktree source retained by a runtime.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct CodeGenerationRootsV1 {
+struct CodeGenerationRouteV1 {
+    repository: RepositoryId,
     generations_root: PathBuf,
-    replay_root: PathBuf,
 }
 
 #[derive(Clone)]
 struct BoundCodeGenerationSourceV1 {
     project_shard: StoreShardIdV1,
     project_id: ProjectId,
-    repositories: BTreeSet<RepositoryId>,
-    /// Every worktree route bound under this shard, in a deterministic order.
-    roots: BTreeSet<CodeGenerationRootsV1>,
+    replay_root: PathBuf,
+    routes: BTreeMap<CodeGenerationRouteV1, usize>,
+}
+
+/// A runtime owns one reference; equal routes retire only with their last owner.
+#[must_use = "retain the route guard for the runtime's lifetime"]
+pub(super) struct CodeGraphManifestRouteV1 {
+    provider: Arc<DaemonCodeGraphManifestProviderV1>,
+    shard: StoreShardIdV1,
+    route: CodeGenerationRouteV1,
+}
+
+impl Drop for CodeGraphManifestRouteV1 {
+    fn drop(&mut self) {
+        let mut sources = match self.provider.sources.write() {
+            Ok(sources) => sources,
+            Err(error) => {
+                tracing::error!(%error, "cannot retire poisoned graph replay route registry");
+                return;
+            }
+        };
+        if let Some(binding) = sources.get_mut(&self.shard) {
+            if let Some(references) = binding.routes.get_mut(&self.route) {
+                *references -= 1;
+                if *references == 0 {
+                    binding.routes.remove(&self.route);
+                }
+            }
+            if binding.routes.is_empty() {
+                sources.remove(&self.shard);
+                self.provider.decoded.release_shard(&self.shard);
+            }
+        }
+    }
 }
 
 /// One already-decoded sealed generation — offered by the code-index
@@ -1190,51 +1234,51 @@ const DECODED_OFFER_PRESSURE_PRIORITY_V1: u32 = 10;
 
 impl DaemonCodeGraphManifestProviderV1 {
     pub(super) fn bind(
-        &self,
+        self: &Arc<Self>,
         project_shard: StoreShardIdV1,
         project_id: ProjectId,
         repository: RepositoryId,
         generations_root: PathBuf,
         replay_root: PathBuf,
-    ) -> Result<(), GraphDbError> {
+    ) -> Result<CodeGraphManifestRouteV1, GraphDbError> {
         let mut sources = self.sources.write().map_err(|_| {
             GraphDbError::unavailable("code generation manifest provider lock is poisoned")
         })?;
-        let roots = CodeGenerationRootsV1 {
+        let route = CodeGenerationRouteV1 {
+            repository,
             generations_root,
-            replay_root,
         };
         if let Some(existing) = sources.get_mut(&project_shard) {
-            // Different roots under one shard are the ordinary linked-worktree
-            // shape: a branch worktree shares the primary's project shard while
-            // sealing into its own code-index store. Treating that rebind as a
-            // conflict refused every branch publication with
-            // `code_graph_manifest.bind`. A different project identity under the
-            // same shard is still a genuinely different source and stays fatal.
-            if existing.project_shard != project_shard || existing.project_id != project_id {
+            if existing.project_id != project_id || existing.replay_root != replay_root {
                 return Err(GraphDbError::conflict("code_graph_manifest.bind"));
             }
-            existing.repositories.insert(repository);
-            existing.roots.insert(roots);
-            return Ok(());
+            let references = existing.routes.entry(route.clone()).or_default();
+            *references = references.checked_add(1).ok_or_else(|| {
+                GraphDbError::unavailable("code graph replay route reference count overflow")
+            })?;
+        } else {
+            sources.insert(
+                project_shard.clone(),
+                BoundCodeGenerationSourceV1 {
+                    project_shard: project_shard.clone(),
+                    project_id,
+                    replay_root,
+                    routes: BTreeMap::from([(route.clone(), 1)]),
+                },
+            );
         }
-        sources.insert(
-            project_shard.clone(),
-            BoundCodeGenerationSourceV1 {
-                project_shard,
-                project_id,
-                repositories: BTreeSet::from([repository]),
-                roots: BTreeSet::from([roots]),
-            },
-        );
-        Ok(())
+        Ok(CodeGraphManifestRouteV1 {
+            provider: Arc::clone(self),
+            shard: project_shard,
+            route,
+        })
     }
 
     /// Offer the sealed generation this shard just decoded for query serving.
     ///
     /// Cold activation decodes the sealed payload once to serve queries; without
     /// this offer the graph publication and recovery branches decode the very
-    /// same bytes a second time through [`decode_verified_seal_from_roots`].
+    /// same bytes a second time through [`decode_verified_seal`].
     /// The offer is a pure accelerator: it is consulted only on an exact
     /// generation-and-digest match, and every miss falls through to the
     /// canonical-then-pool read that remains the authority.
@@ -1291,6 +1335,14 @@ impl DaemonCodeGraphManifestProviderV1 {
         source: &SealedCodeGenerationReplay,
         decoded: Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
     ) -> Result<(), GraphDbError> {
+        // Retirement must either follow this cache insertion and clear it, or
+        // win first and leave no runtime-owned decode behind.
+        let sources = self.sources.read().map_err(|_| {
+            GraphDbError::unavailable("code generation manifest provider lock is poisoned")
+        })?;
+        if !sources.contains_key(&project_shard) {
+            return Ok(());
+        }
         self.decoded.retain_hydrated(
             project_shard,
             DecodedSealedCodeGenerationV1::retained(
@@ -1341,7 +1393,10 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                 )
             })?;
         if owner.shard_id != binding.project_shard
-            || !binding.repositories.contains(&source.repository)
+            || !binding
+                .routes
+                .keys()
+                .any(|route| route.repository == source.repository)
         {
             return Err(GraphDbError::conflict(
                 "code_graph_manifest.hydrate_sealed_code_generation",
@@ -1382,37 +1437,90 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                     .strip_prefix("sha256:")
                     .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
                 let seal_file = format!("generation-{digest}.json");
-                // One shard can own several worktree routes. The seal is
-                // content-addressed, so a route whose store simply does not hold
-                // this generation abstains (`unavailable`) and the next route is
-                // tried; every other verdict — a corrupt payload, a cancelled
-                // read, a blown deadline — is terminal here and is reported as
-                // it stands rather than papered over by a sibling worktree.
                 let mut decoded = None;
-                let mut first_abstention = None;
-                for roots in &binding.roots {
-                    match decode_verified_seal_from_roots(
-                        &roots.generations_root.join(&seal_file),
-                        &roots.replay_root.join(&seal_file),
+                let mut canonical_error = None;
+                let segment_roots = binding
+                    .routes
+                    .keys()
+                    .filter(|route| route.repository == source.repository)
+                    .map(|route| {
+                        route
+                            .generations_root
+                            .parent()
+                            .map(|root| root.join("code-generation-segments-v1"))
+                            .ok_or_else(|| {
+                                GraphDbError::invalid(
+                                    "canonical generation root has no store parent",
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for route in binding
+                    .routes
+                    .keys()
+                    .filter(|route| route.repository == source.repository)
+                {
+                    check()?;
+                    let store_root = route.generations_root.parent().ok_or_else(|| {
+                        GraphDbError::invalid("canonical generation root has no store parent")
+                    })?;
+                    let canonical = route.generations_root.join(&seal_file);
+                    // Absence abstains before lock acquisition. Presence is only a
+                    // prefilter: the decoder revalidates identity under the lock.
+                    if !seal_is_present(&canonical)? {
+                        continue;
+                    }
+                    let lock = acquire_generation_bundle_lock(store_root, check)?;
+                    if !seal_is_present(&canonical)? {
+                        // Retention may move the seal while this reader waits.
+                        // The single replay-pool probe below resolves that move.
+                        drop(lock);
+                        continue;
+                    }
+                    match decode_verified_seal(
+                        &canonical,
+                        &store_root.join("code-generation-segments-v1"),
                         digest,
                         check,
+                        lock,
                     ) {
-                        Ok(generation) => {
-                            decoded = Some(generation);
-                            break;
+                        Ok(generation) => decoded = Some(generation),
+                        Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
+                            return Err(error);
                         }
-                        Err(error @ GraphDbError::Unavailable { .. }) => {
-                            first_abstention.get_or_insert(error);
-                        }
-                        Err(error) => return Err(error),
+                        Err(error) => canonical_error = Some(error),
                     }
+                    break;
                 }
-                let Some(generation) = decoded else {
-                    return Err(first_abstention.unwrap_or_else(|| {
-                        GraphDbError::unavailable(
-                            "sealed code generation replay source is not mounted for this projection",
+                let generation = match decoded {
+                    Some(generation) => generation,
+                    None => {
+                        let pool = binding.replay_root.join(&seal_file);
+                        if !seal_is_present(&pool)? {
+                            return Err(canonical_error.unwrap_or_else(|| GraphDbError::unavailable(
+                                "sealed code generation is absent from all active routes and replay pool",
+                            )));
+                        }
+                        let lock = acquire_generation_bundle_lock(&binding.replay_root, check)?;
+                        decode_verified_seal_with_bundle_barrier(
+                            &pool,
+                            &segment_roots,
+                            digest,
+                            check,
+                            lock,
+                            || {},
                         )
-                    }));
+                        .map_err(|error| {
+                            if matches!(
+                                error,
+                                GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
+                            ) {
+                                error
+                            } else {
+                                canonical_error.unwrap_or(error)
+                            }
+                        })?
+                    }
                 };
                 Arc::new(generation)
             }
@@ -1512,7 +1620,8 @@ mod tests {
         generations_root: std::path::PathBuf,
         replay_root: std::path::PathBuf,
     ) -> (
-        DaemonCodeGraphManifestProviderV1,
+        Arc<DaemonCodeGraphManifestProviderV1>,
+        super::CodeGraphManifestRouteV1,
         GraphProjectionIdentityV1,
         SealedCodeGenerationReplay,
     ) {
@@ -1523,8 +1632,8 @@ mod tests {
             UserProfileId::new("profile.provider").unwrap(),
             project.clone(),
         );
-        let provider = DaemonCodeGraphManifestProviderV1::default();
-        provider
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let route = provider
             .bind(
                 shard.clone(),
                 project,
@@ -1535,6 +1644,7 @@ mod tests {
             .unwrap();
         (
             provider,
+            route,
             GraphProjectionIdentityV1 {
                 shard_id: shard,
                 namespace: GraphNamespaceV1::new("namespace.provider").unwrap(),
@@ -1564,7 +1674,8 @@ mod tests {
         let replay_root = temp.path().join("replay");
         std::fs::create_dir_all(&generations_root).unwrap();
         std::fs::create_dir_all(&replay_root).unwrap();
-        let (provider, owner, source) = fixture(generations_root.clone(), replay_root.clone());
+        let (provider, _route, owner, source) =
+            fixture(generations_root.clone(), replay_root.clone());
         let seal_file = format!(
             "generation-{}.json",
             source
@@ -1614,7 +1725,7 @@ mod tests {
         let primary_generations = temp.path().join("primary/generations");
         let primary_replay = temp.path().join("primary/replay");
         let branch_generations = temp.path().join("branch/generations");
-        let branch_replay = temp.path().join("branch/replay");
+        let branch_replay = primary_replay.clone();
         for root in [
             &primary_generations,
             &primary_replay,
@@ -1623,9 +1734,9 @@ mod tests {
         ] {
             std::fs::create_dir_all(root).unwrap();
         }
-        let (provider, owner, source) = fixture(primary_generations, primary_replay);
+        let (provider, _route, owner, source) = fixture(primary_generations, primary_replay);
 
-        provider
+        let _branch_route = provider
             .bind(
                 owner.shard_id.clone(),
                 ProjectId::new("project.provider").unwrap(),
@@ -1677,7 +1788,8 @@ mod tests {
         let replay_root = temp.path().join("replay");
         std::fs::create_dir_all(&generations_root).unwrap();
         std::fs::create_dir_all(&replay_root).unwrap();
-        let (provider, owner, source) = fixture(generations_root.clone(), replay_root.clone());
+        let (provider, _route, owner, source) =
+            fixture(generations_root.clone(), replay_root.clone());
         let seal_file = format!(
             "generation-{}.json",
             source
@@ -1870,6 +1982,9 @@ mod tests {
         pool_manifest: std::path::PathBuf,
         segments_root: std::path::PathBuf,
         digest: String,
+        project: ProjectId,
+        repository: RepositoryId,
+        generation: CodeGenerationId,
     }
 
     fn partitioned_seal_fixture(label: &str) -> PartitionedSealFixture {
@@ -1906,13 +2021,16 @@ mod tests {
         let store_root = root.join("code-index-store");
         let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
         let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
-            project_id,
+            project_id.clone(),
             &canonical_project,
             scoped_store.clone(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .unwrap();
         scheduler.reconcile_now().unwrap();
+        let latest = scheduler.latest_complete().unwrap();
+        let repository = latest.generation().snapshot().repository.clone();
+        let generation = latest.generation().manifest().generation_id.clone();
         drop(scheduler);
         let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
             &std::fs::read(scoped_store.join("active-code-generation-v1.json")).unwrap(),
@@ -1950,6 +2068,159 @@ mod tests {
             pool_manifest,
             segments_root,
             digest,
+            project: project_id,
+            repository,
+            generation,
+        }
+    }
+
+    #[test]
+    fn active_routes_skip_absent_locked_store_for_canonical_and_pool_hydration() {
+        let fixture = partitioned_seal_fixture("active-routes");
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let shard = StoreShardIdV1::project(
+            BrainId::new("brain.active-routes").unwrap(),
+            UserProfileId::new("profile.active-routes").unwrap(),
+            fixture.project.clone(),
+        );
+        let absent_store = fixture
+            .pool_manifest
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("aaa-absent");
+        std::fs::create_dir_all(absent_store.join("code-generations-v1")).unwrap();
+        let replay_root = fixture.pool_manifest.parent().unwrap().to_path_buf();
+        let absent_route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                absent_store.join("code-generations-v1"),
+                replay_root.clone(),
+            )
+            .unwrap();
+        let store = fixture.segments_root.parent().unwrap();
+        assert!(absent_store.as_path() < store);
+        let route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                store.join("code-generations-v1"),
+                replay_root,
+            )
+            .unwrap();
+        let equal_route = provider
+            .bind(
+                shard.clone(),
+                fixture.project.clone(),
+                fixture.repository.clone(),
+                store.join("code-generations-v1"),
+                fixture.pool_manifest.parent().unwrap().to_path_buf(),
+            )
+            .unwrap();
+        drop(route);
+        let owner = GraphProjectionIdentityV1 {
+            shard_id: shard,
+            namespace: GraphNamespaceV1::new("namespace.active-routes").unwrap(),
+            projection: GraphProjectionIdV1::new("code-generation").unwrap(),
+        };
+        let source = SealedCodeGenerationReplay {
+            repository: fixture.repository.clone(),
+            generation: fixture.generation.clone(),
+            sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+                "sha256:{}",
+                fixture.digest
+            ))
+            .unwrap(),
+            projector_revision: GraphProjectorRevision::try_from(
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+            )
+            .unwrap(),
+        };
+        #[cfg(feature = "hotpath")]
+        let _profile = hotpath::HotpathGuardBuilder::new("active-graph-replay-routes").build();
+        let _absent_lock = acquire_code_generation_store_lock(&absent_store).unwrap();
+        let canonical = store
+            .join("code-generations-v1")
+            .join(fixture.pool_manifest.file_name().unwrap());
+        std::fs::copy(&fixture.pool_manifest, &canonical).unwrap();
+        let hydrate = |route_kind: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            provider
+                .hydrate_sealed_code_generation(&owner, &source, &|| {
+                    if std::time::Instant::now() >= deadline {
+                        Err(GraphDbError::DeadlineExceeded)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_or_else(|error| panic!("{route_kind} hydration failed: {error:?}"));
+        };
+        hydrate("canonical");
+        provider.release_decoded_offer(&owner.shard_id);
+        std::fs::remove_file(&canonical).unwrap();
+        hydrate("pool");
+        // A verified pool copy also recovers a damaged canonical payload.
+        provider.release_decoded_offer(&owner.shard_id);
+        std::fs::write(&canonical, b"corrupt").unwrap();
+        hydrate("canonical recovery");
+        drop(equal_route);
+        drop(absent_route);
+        assert!(provider.sources.read().unwrap().is_empty());
+        assert_eq!(provider.retained_decoded_offer_count(), 0);
+        assert!(matches!(
+            provider.hydrate_sealed_code_generation(&owner, &source, &|| Ok(())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn equal_route_references_retire_exactly_and_reject_divergent_replay_authority() {
+        let temporary = TempDir::new().unwrap();
+        let generations = temporary.path().join("generations");
+        let replay = temporary.path().join("replay");
+        let (provider, initial, owner, source) = fixture(generations.clone(), replay.clone());
+        drop(initial);
+        for _ in 0..16 {
+            let first = provider
+                .bind(
+                    owner.shard_id.clone(),
+                    ProjectId::new("project.provider").unwrap(),
+                    source.repository.clone(),
+                    generations.clone(),
+                    replay.clone(),
+                )
+                .unwrap();
+            let second = provider
+                .bind(
+                    owner.shard_id.clone(),
+                    ProjectId::new("project.provider").unwrap(),
+                    source.repository.clone(),
+                    generations.clone(),
+                    replay.clone(),
+                )
+                .unwrap();
+            assert!(matches!(
+                provider.bind(
+                    owner.shard_id.clone(),
+                    ProjectId::new("project.provider").unwrap(),
+                    source.repository.clone(),
+                    generations.clone(),
+                    temporary.path().join("other-replay")
+                ),
+                Err(GraphDbError::Conflict { .. })
+            ));
+            drop(first);
+            let sources = provider.sources.read().unwrap();
+            let routes = &sources.get(&owner.shard_id).unwrap().routes;
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes.values().copied().collect::<Vec<_>>(), vec![1]);
+            drop(sources);
+            drop(second);
+            assert!(provider.sources.read().unwrap().is_empty());
         }
     }
 
@@ -1963,7 +2234,7 @@ mod tests {
         let replay_root = fixture.pool_manifest.parent().unwrap();
         let error = decode_verified_seal_with_bundle_barrier(
             &fixture.pool_manifest,
-            &fixture.segments_root,
+            std::slice::from_ref(&fixture.segments_root),
             &fixture.digest,
             &|| {
                 if evidence_ranges_started.load(Ordering::SeqCst) {
@@ -2121,7 +2392,7 @@ mod tests {
         let segments_root = scoped_store.join("code-generation-segments-v1");
         let decoded = decode_verified_seal_with_bundle_barrier(
             &staged_manifest,
-            &segments_root,
+            std::slice::from_ref(&segments_root),
             digest,
             &|| Ok(()),
             acquire_code_generation_store_lock(&replay_root).unwrap(),
@@ -2215,8 +2486,8 @@ mod tests {
             UserProfileId::new("profile.single-pass").unwrap(),
             project_id.clone(),
         );
-        let provider = DaemonCodeGraphManifestProviderV1::default();
-        provider
+        let provider = Arc::new(DaemonCodeGraphManifestProviderV1::default());
+        let _route = provider
             .bind(
                 shard.clone(),
                 project_id,

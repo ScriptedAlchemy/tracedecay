@@ -108,12 +108,34 @@ impl CompleteSemanticGenerationV1 {
         })
     }
 
+    /// The first identity field on which the published generation and the
+    /// request disagree, or `None` when every field agrees.
+    ///
+    /// Named rather than boolean: the caller collapses any disagreement into
+    /// one public `IndexIncompatible` abstention, so without the field a
+    /// serving-side capability drift is indistinguishable from a projection
+    /// or vector-generation drift.
+    pub fn mismatch(&self, request: &SemanticRetrievalRequestV1<'_>) -> Option<&'static str> {
+        if self.projection_key != *request.projection.projection_key() {
+            return Some("projection_key");
+        }
+        if self.search_index_key != *request.search_index_key {
+            return Some("search_index_key");
+        }
+        if self.vector_generation != request.vector_generation {
+            return Some("vector_generation");
+        }
+        if self.source_generation != request.code_generation {
+            return Some("source_generation");
+        }
+        if self.capability_manifest_digest != request.capability_manifest_digest {
+            return Some("capability_manifest_digest");
+        }
+        None
+    }
+
     fn matches(&self, request: &SemanticRetrievalRequestV1<'_>) -> bool {
-        self.projection_key == *request.projection.projection_key()
-            && self.search_index_key == *request.search_index_key
-            && self.vector_generation == request.vector_generation
-            && self.source_generation == request.code_generation
-            && self.capability_manifest_digest == request.capability_manifest_digest
+        self.mismatch(request).is_none()
     }
 }
 

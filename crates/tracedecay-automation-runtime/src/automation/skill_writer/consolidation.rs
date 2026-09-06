@@ -127,9 +127,16 @@ pub(super) fn skill_merge_from_proposal(
         ));
     }
 
+    if object.contains_key("routing_description") {
+        super::validate_routing_examples(proposal, &target.host_skill_slug())?;
+    }
     let update = ManagedSkillUpdate {
         title: optional_proposal_string(object.get("title"))?,
         summary: optional_proposal_string(object.get("summary"))?,
+        routing_description: object
+            .get("routing_description")
+            .map(|value| super::required_routing_description(Some(value)))
+            .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
         targets: optional_proposal_targets(object.get("targets"))?,
         body_markdown: optional_proposal_string(
@@ -144,6 +151,7 @@ pub(super) fn skill_merge_from_proposal(
     };
     let has_update = update.title.is_some()
         || update.summary.is_some()
+        || update.routing_description.is_some()
         || update.category.is_some()
         || update.targets.is_some()
         || update.body_markdown.is_some()
@@ -279,6 +287,8 @@ mod tests {
             id: id.to_string(),
             title: format!("{id} guidance"),
             summary: format!("Guidance for {id}."),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "workflow".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: format!("Follow the {id} workflow before applying changes."),

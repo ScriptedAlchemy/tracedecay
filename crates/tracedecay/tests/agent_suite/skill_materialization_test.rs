@@ -50,6 +50,7 @@ fn draft(id: &str) -> ManagedSkillDraft {
         id: id.to_string(),
         title: "Code slop cleanup".to_string(),
         summary: "Use when tidying obvious code slop before review.".to_string(),
+        routing_description: "Use when tidying obvious code slop before review.".to_string(),
         category: "maintenance".to_string(),
         targets: default_managed_skill_targets(),
         body_markdown: "# Cleanup\n\nRemove dead code and stray debug prints.".to_string(),
@@ -283,7 +284,8 @@ async fn metadata_update_re_materializes_the_file() {
     .unwrap();
     materialize_skill(&scope, &skill, INSTALL).unwrap();
 
-    skill.metadata.summary = "Use when performing a strict cleanup before review.".to_string();
+    skill.metadata.routing_description =
+        "Use when performing a strict cleanup before review.".to_string();
     let updated = materialize_skill(&scope, &skill, INSTALL).unwrap();
 
     assert_eq!(updated.action, MaterializeAction::Written);
