@@ -2345,6 +2345,35 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// Take the scheduler for one optional-graph step with the worker's pass
+    /// visible for as long as the acquisition blocks.
+    ///
+    /// The graph section runs after the source pass releases
+    /// `reconcile_in_progress`, because an O(store) sealed decode must not
+    /// read as a rebuild in flight. Blocking on the scheduler mutex is the
+    /// opposite case: the worker is still inside its pass and cannot move
+    /// until whoever holds that mutex lets go, so a caller that holds it and
+    /// waits for the flag to rise waits on itself. Count the wait and the
+    /// locked step; the decode between two of these stays uncounted.
+    ///
+    /// The returned pass guard rides in the tuple so it lives exactly as long
+    /// as the statement that took the lock.
+    fn lock_scheduler_for_graph_step<'a>(
+        scheduler: &'a Mutex<CodeIndexWorktreeSchedulerV1>,
+        shutting_down: &AtomicBool,
+        passes: &Arc<AtomicUsize>,
+    ) -> Result<
+        (
+            super::ReconcilePassGuard,
+            std::sync::MutexGuard<'a, CodeIndexWorktreeSchedulerV1>,
+        ),
+        CodeIndexSchedulerErrorV1,
+    > {
+        let pass = super::ReconcilePassGuard::enter(passes);
+        Self::lock_scheduler_unless_shutting_down(scheduler, shutting_down)
+            .map(|scheduler| (pass, scheduler))
+    }
+
     /// Returns the pass's service time so the caller can attach the same
     /// measurement to the canonical index-lifecycle observation.
     /// Project one terminal source-reconcile outcome onto the installed
@@ -3604,6 +3633,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 // activation begin. Keep the pass through text seating so
                 // `reconcile_in_progress` stays truthful while this worker
                 // still owns source/text work; optional graph must not.
+                // Each graph step that must take the scheduler re-enters the
+                // pass around that acquisition (see
+                // `lock_scheduler_for_graph_step`); only the unlocked decode
+                // and native activation run outside it.
                 drop(_reconcile_pass);
                 let gate = GraphSeatGateV1::decide(
                     graph_activation_enabled,
@@ -3734,11 +3767,14 @@ impl CodeIndexSchedulerRegistryV1 {
                     let generation_id = retained.metadata().manifest().generation_id.clone();
                     let replay_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
+                    let replay_passes = Arc::clone(&worker_reconcile_in_progress);
                     let replay_binding = tokio::task::spawn_blocking(move || {
-                        Self::lock_scheduler_unless_shutting_down(
+                        Self::lock_scheduler_for_graph_step(
                             &replay_scheduler,
                             &shutting_down,
+                            &replay_passes,
                         )?
+                        .1
                         .code_graph_replay_binding(&generation_id)
                     })
                     .await;
@@ -3818,7 +3854,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // partition replay the verified-head recovery exists to
                 // avoid: the decoder reloads the active generation, and the
                 // seat that follows is a second copy of what already serves.
-                // Restarts of a partitioned manifest therefore answer complete
+                // Restarts of a partitioned manifest therefore serve complete
                 // demands through the text projection and leave the sealed
                 // slot unseated, exactly as `sealed_decode_count() == 0`
                 // requires. A publication seats its own product as usual, and
@@ -3843,12 +3879,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         let graph_scheduler = Arc::clone(&worker_scheduler);
                         let graph_text = graph_text.clone();
                         let shutting_down = Arc::clone(&worker_shutting_down);
+                        let prepare_passes = Arc::clone(&worker_reconcile_in_progress);
                         match hotpath::future!(
                             tokio::task::spawn_blocking(move || {
-                                let decoder = Self::lock_scheduler_unless_shutting_down(
+                                let decoder = Self::lock_scheduler_for_graph_step(
                                     &graph_scheduler,
                                     &shutting_down,
+                                    &prepare_passes,
                                 )?
+                                .1
                                 .active_generation_decoder();
                                 if decoder.is_none() {
                                     tracing::warn!(
@@ -3872,10 +3911,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                     }
                                 });
                                 let latest = match generation {
-                                    Some(generation) => Self::lock_scheduler_unless_shutting_down(
+                                    Some(generation) => Self::lock_scheduler_for_graph_step(
                                         &graph_scheduler,
                                         &shutting_down,
+                                        &prepare_passes,
                                     )?
+                                    .1
                                     .servable_decoded_retained_generation(
                                         generation,
                                         graph_text.as_ref(),
@@ -3887,17 +3928,21 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // the successor — but this pass consumed the
                                 // wake that would have run it.
                                 let roster_refusal_rebuild = latest.is_none()
-                                    && Self::lock_scheduler_unless_shutting_down(
+                                    && Self::lock_scheduler_for_graph_step(
                                         &graph_scheduler,
                                         &shutting_down,
+                                        &prepare_passes,
                                     )?
+                                    .1
                                     .take_ignored_roster_refusal_rebuild();
                                 let replay_binding = match latest.as_ref() {
                                     Some(latest) => Some(
-                                        Self::lock_scheduler_unless_shutting_down(
+                                        Self::lock_scheduler_for_graph_step(
                                             &graph_scheduler,
                                             &shutting_down,
+                                            &prepare_passes,
                                         )?
+                                        .1
                                         .code_graph_replay_binding(
                                             &latest.generation().manifest().generation_id,
                                         ),
@@ -4076,11 +4121,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
+                    let swap_passes = Arc::clone(&worker_reconcile_in_progress);
                     let serving_swap = hotpath::future!(
                         tokio::task::spawn_blocking(move || {
-                            let scheduler = Self::lock_scheduler_unless_shutting_down(
+                            let (_swap_pass, scheduler) = Self::lock_scheduler_for_graph_step(
                                 &scheduler,
                                 &shutting_down,
+                                &swap_passes,
                             )?;
                             // A generation that sealed while the checkout kept
                             // moving is stale the moment it completes, and the
