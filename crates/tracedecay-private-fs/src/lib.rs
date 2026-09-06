@@ -68,7 +68,8 @@ pub mod windows;
 pub use windows::{
     available_space, create_private_directory, create_private_file, create_private_file_retained,
     make_private_directory, make_private_file, open_private_directory, open_private_file,
-    validate_directory_path, validate_private_directory, validate_private_file,
+    replace_file_atomically, validate_directory_path, validate_private_directory,
+    validate_private_file,
 };
 
 #[cfg(unix)]

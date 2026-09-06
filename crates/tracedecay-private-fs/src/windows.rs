@@ -1,11 +1,11 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
-use std::mem::{MaybeUninit, size_of};
+use std::mem::{MaybeUninit, offset_of, size_of};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
-use std::ptr::{addr_of, addr_of_mut, null, null_mut};
+use std::ptr::{addr_of, addr_of_mut, copy_nonoverlapping, null, null_mut};
 
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, INVALID_HANDLE_VALUE, LocalFree,
@@ -26,12 +26,13 @@ use windows_sys::Win32::Security::{
     TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
+    CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileAttributeTagInfo, GetDiskFreeSpaceExW, GetFileInformationByHandleEx, OPEN_ALWAYS,
-    OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TRAVERSE, FileAttributeTagInfo, FileRenameInfoEx, GetDiskFreeSpaceExW,
+    GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
+    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -290,6 +291,126 @@ pub fn create_private_file_retained(
         ));
     }
     Ok(file)
+}
+
+/// Atomically replace one sibling file with another through exact file and
+/// parent-directory handles.
+pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
+    const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
+    const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
+
+    let source = absolute_security_path(source)?;
+    let destination = absolute_security_path(destination)?;
+    if source == destination {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement source and destination must differ",
+        ));
+    }
+    if source.file_name().is_none() || destination.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement paths must have basenames",
+        ));
+    }
+    let source_parent = source.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement source has no parent",
+        )
+    })?;
+    let destination_parent = destination.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement destination has no parent",
+        )
+    })?;
+    if source_parent != destination_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement paths must be siblings",
+        ));
+    }
+
+    let parent = open_raw_handle(
+        source_parent,
+        OPEN_EXISTING,
+        FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+        null(),
+        SHARE_READ_WRITE,
+    )?;
+    validate_file_kind(&parent, source_parent, PathKind::Directory)?;
+    let source_file = open_raw_handle(
+        &source,
+        OPEN_EXISTING,
+        DELETE | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        null(),
+        SHARE_READ_WRITE_DELETE,
+    )?;
+    validate_file_kind(&source_file, &source, PathKind::File)?;
+    source_file.sync_all()?;
+
+    let destination_name = destination
+        .file_name()
+        .expect("destination basename was validated")
+        .encode_wide()
+        .collect::<Vec<_>>();
+    if destination_name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows replacement destination basename contains a NUL",
+        ));
+    }
+    let filename_offset = offset_of!(FILE_RENAME_INFO, FileName);
+    let filename_bytes = destination_name
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
+    let payload_size = filename_offset
+        .checked_add(filename_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
+    let buffer_size: u32 = payload_size
+        .max(size_of::<FILE_RENAME_INFO>())
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "basename is too long"))?;
+    let word_count = usize::try_from(buffer_size)
+        .expect("u32 fits usize")
+        .div_ceil(size_of::<usize>());
+    let mut storage = vec![0_usize; word_count];
+    let rename_info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let mut header = FILE_RENAME_INFO::default();
+    header.Anonymous.Flags = FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
+    header.RootDirectory = parent.as_raw_handle();
+    header.FileNameLength = filename_bytes as u32;
+    // SAFETY: `storage` is pointer-aligned and sized for the fixed header plus
+    // every UTF-16 code unit. `FileNameLength` excludes a terminator.
+    unsafe {
+        rename_info.write(header);
+        copy_nonoverlapping(
+            destination_name.as_ptr(),
+            storage
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(filename_offset)
+                .cast::<u16>(),
+            destination_name.len(),
+        );
+    }
+
+    // SAFETY: both handles remain live, the source has DELETE access, and the
+    // aligned buffer contains a complete FILE_RENAME_INFO_EX payload.
+    if unsafe {
+        SetFileInformationByHandle(
+            source_file.as_raw_handle(),
+            FileRenameInfoEx,
+            storage.as_ptr().cast(),
+            buffer_size,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    source_file.sync_all()
 }
 
 /// Returns bytes available to the current user at `path` (quota-aware).
@@ -872,8 +993,26 @@ fn rejected(path: &Path, reason: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
     use std::io::{Read, Write};
+    use std::mem::{align_of, offset_of, size_of};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::process::Command;
+
+    #[test]
+    fn file_rename_info_layout_matches_windows_abi() {
+        let pointer_width = size_of::<usize>();
+        let expected_filename_offset = if pointer_width == 8 { 20 } else { 12 };
+        let expected_size = if pointer_width == 8 { 24 } else { 16 };
+
+        assert_eq!(align_of::<FILE_RENAME_INFO>(), pointer_width);
+        assert_eq!(
+            offset_of!(FILE_RENAME_INFO, FileName),
+            expected_filename_offset
+        );
+        assert_eq!(size_of::<FILE_RENAME_INFO>(), expected_size);
+        assert_eq!(FileRenameInfoEx, 22);
+    }
 
     #[test]
     fn current_user_sid_string_is_canonical() {
@@ -1037,15 +1176,50 @@ mod tests {
         replacement_file.write_all(b"new").unwrap();
         drop(replacement_file);
 
-        // Replace through the same primitive production uses. Rust's
-        // `std::fs::rename` requests POSIX rename semantics on Windows, which
-        // is what makes replacement succeed while a delete-sharing reader is
-        // still open; the legacy MoveFileExW replace is denied in that state.
-        std::fs::rename(&replacement, &path).unwrap();
+        replace_file_atomically(&replacement, &path).unwrap();
         let mut old_contents = Vec::new();
         reader.read_to_end(&mut old_contents).unwrap();
         assert_eq!(old_contents, b"old");
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reader_without_delete_sharing_blocks_atomic_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("record");
+        let source = temp.path().join("replacement");
+        let mut destination_file = create_private_file(&destination).unwrap();
+        destination_file.write_all(b"old").unwrap();
+        drop(destination_file);
+        let mut source_file = create_private_file(&source).unwrap();
+        source_file.write_all(b"new").unwrap();
+        drop(source_file);
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        let mut held_reader = options.open(&destination).unwrap();
+
+        let error = replace_file_atomically(&source, &destination).unwrap_err();
+        assert!(
+            matches!(error.raw_os_error(), Some(5 | 32)),
+            "expected access denied or sharing violation, got {error:?}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        let mut held_contents = Vec::new();
+        held_reader.read_to_end(&mut held_contents).unwrap();
+        assert_eq!(held_contents, b"old");
+
+        drop(held_reader);
+        replace_file_atomically(&source, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(&source).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]
