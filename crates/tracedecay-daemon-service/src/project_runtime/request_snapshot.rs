@@ -15,10 +15,17 @@ use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
 use super::{ProjectRuntimeRegistryV1, ProjectRuntimeRequestLeaseV1};
 
 /// The per-project components one request may need, resolved together.
+///
+/// This is the typed readiness result for an admitted project request: the
+/// exact registered root, the owner-publication stage, and the owners that
+/// were published under that root. A request spelling that only matches the
+/// canonical or Windows-verbatim key still names that same result.
 #[derive(Default)]
 pub struct ProjectRequestRuntimesV1 {
     _request_lease: Option<ProjectRuntimeRequestLeaseV1>,
     admitted: bool,
+    pub resolved_root: Option<PathBuf>,
+    pub publication: Option<super::ProjectRuntimePublicationStateV1>,
     pub feedback: Option<Arc<FeedbackRuntime>>,
     pub feedback_owner: Option<DaemonFeedbackInvocationOwner>,
     pub advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
@@ -57,16 +64,25 @@ impl ProjectRuntimeRegistryV1 {
             return None;
         }
         let runtimes = self.lock_runtimes();
-        if !candidate_roots
-            .iter()
-            .any(|root| runtimes.contains_key(root))
-        {
+        let Some(resolved_root) =
+            super::resolved_runtime_key(&runtimes, project_root, canonical_root)
+        else {
             hotpath::gauge!("daemon.service.request_admission.runtime_missing_total").inc(1_u64);
             tracing::warn!(
                 event = "project_request_admission",
                 outcome = "unavailable",
                 reason = "runtime_missing",
                 "project request runtime is not registered"
+            );
+            return None;
+        };
+        if fences.contains(&resolved_root) {
+            hotpath::gauge!("daemon.service.request_admission.fenced_total").inc(1_u64);
+            tracing::warn!(
+                event = "project_request_admission",
+                outcome = "unavailable",
+                reason = "root_fenced",
+                "project request root is fenced"
             );
             return None;
         }
@@ -85,7 +101,9 @@ impl ProjectRuntimeRegistryV1 {
             );
             return None;
         }
-        for root in &candidate_roots {
+        let mut lease_roots = candidate_roots;
+        lease_roots.insert(resolved_root);
+        for root in &lease_roots {
             *fences.request_leases.entry(root.clone()).or_default() += 1;
         }
         drop(runtimes);
@@ -94,7 +112,7 @@ impl ProjectRuntimeRegistryV1 {
         Some(ProjectRuntimeRequestLeaseV1 {
             inner: Arc::new(super::ProjectRuntimeRequestLeaseInnerV1 {
                 registry: self.clone(),
-                roots: candidate_roots,
+                roots: lease_roots,
                 canonical_root: canonical_root.map(Path::to_path_buf),
             }),
         })
@@ -102,8 +120,9 @@ impl ProjectRuntimeRegistryV1 {
 
     /// Resolve all request runtimes from one consistent registry view.
     ///
-    /// Only LSP retains canonical-root fallback because it is the sole runtime
-    /// historically registered by either spelling of an opened root.
+    /// Owners are keyed by the registered root. A request spelling that only
+    /// matches through canonicalize, the admitted canonical root, or the
+    /// Windows verbatim/ordinary pair still resolves that same entry.
     #[hotpath::skip]
     pub async fn request_runtimes(
         &self,
@@ -116,27 +135,7 @@ impl ProjectRuntimeRegistryV1 {
         let Some(request_lease) = self.admit_request(project_root, canonical_root) else {
             return ProjectRequestRuntimesV1::default();
         };
-        let runtimes = self.lock_runtimes();
-        let runtime = runtimes.get(project_root);
-        let feedback = runtime.and_then(|runtime| runtime.feedback.as_ref());
-        let lsp_owner = Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(
-            &runtimes,
-            project_root,
-            canonical_root,
-        );
-        let snapshot = ProjectRequestRuntimesV1 {
-            _request_lease: Some(request_lease),
-            admitted: true,
-            feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
-            feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
-            advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
-            configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
-            work: runtime.and_then(|runtime| runtime.work.clone()),
-            retained: runtime.and_then(|runtime| runtime.retained.clone()),
-            lsp_owner,
-        };
-        drop(runtimes);
-        snapshot
+        self.snapshot_request_runtimes(project_root, canonical_root, Some(request_lease))
     }
 
     pub fn request_runtimes_with_admission(
@@ -148,23 +147,37 @@ impl ProjectRuntimeRegistryV1 {
         if !admission.covers(self, project_root) {
             return ProjectRequestRuntimesV1::default();
         }
+        self.snapshot_request_runtimes(project_root, canonical_root, None)
+    }
+
+    fn snapshot_request_runtimes(
+        &self,
+        project_root: &Path,
+        canonical_root: Option<&Path>,
+        request_lease: Option<ProjectRuntimeRequestLeaseV1>,
+    ) -> ProjectRequestRuntimesV1 {
         let runtimes = self.lock_runtimes();
-        let runtime = runtimes.get(project_root);
+        let resolved_root = super::resolved_runtime_key(&runtimes, project_root, canonical_root);
+        let runtime = resolved_root.as_ref().and_then(|root| runtimes.get(root));
         let feedback = runtime.and_then(|runtime| runtime.feedback.as_ref());
+        let publication = runtime.map(|runtime| runtime.publication);
+        let lsp_owner = Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(
+            &runtimes,
+            project_root,
+            canonical_root,
+        );
         ProjectRequestRuntimesV1 {
-            _request_lease: None,
+            _request_lease: request_lease,
             admitted: true,
+            resolved_root,
+            publication,
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
             advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
             configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
             work: runtime.and_then(|runtime| runtime.work.clone()),
             retained: runtime.and_then(|runtime| runtime.retained.clone()),
-            lsp_owner: Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(
-                &runtimes,
-                project_root,
-                canonical_root,
-            ),
+            lsp_owner,
         }
     }
 }
@@ -228,6 +241,44 @@ mod tests {
         let mounted = snapshot
             .advisory_cycle
             .expect("mounted advisory owner must be in the request snapshot");
+        assert_eq!(mounted.project_id, project_id);
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_resolves_owners_from_the_admitted_canonical_root() {
+        let registry = ProjectRuntimeRegistryV1::default();
+        let alias = PathBuf::from("/projects/storage-status-alias");
+        let canonical = PathBuf::from("/projects/storage-status-canonical");
+        let project_id = ProjectId::new("project.storage-status-alias").expect("project id");
+        let owner = DaemonAdvisoryCycleInvocationOwner::new(
+            project_id.clone(),
+            Arc::new(UnavailableAdvisoryCycle),
+        );
+        registry
+            .register(canonical.clone(), owner)
+            .await
+            .expect("canonical owner registration");
+
+        let snapshot = registry
+            .request_runtimes(Some(&alias), Some(&canonical))
+            .await;
+
+        assert!(
+            snapshot.is_admitted(),
+            "admission already accepts the alias plus canonical candidate set"
+        );
+        assert_eq!(
+            snapshot.resolved_root.as_deref(),
+            Some(canonical.as_path()),
+            "the typed readiness result must carry the registered root, not only the request spelling"
+        );
+        assert_eq!(
+            snapshot.publication,
+            Some(crate::ProjectRuntimePublicationStateV1::Warming)
+        );
+        let mounted = snapshot.advisory_cycle.expect(
+            "an owner registered under the admitted canonical root must be callable through the request spelling",
+        );
         assert_eq!(mounted.project_id, project_id);
     }
 }

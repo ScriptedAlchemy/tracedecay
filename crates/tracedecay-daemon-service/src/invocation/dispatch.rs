@@ -716,9 +716,19 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::NotFoundOrNotAuthorized,
                     );
                 }
+                let Some(configuration_runtime) = configuration_runtime else {
+                    return match project_root {
+                        Some(project_root) => missing_registered_owner_problem(
+                            &self.project_runtimes,
+                            project_root,
+                            request_id,
+                        ),
+                        None => runtime_mounting_problem(request_id),
+                    };
+                };
                 Box::pin(execute_configuration(
                     request_id,
-                    configuration_runtime,
+                    Some(configuration_runtime),
                     surface_operation,
                     request,
                     observed_at,
