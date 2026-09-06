@@ -167,5 +167,3 @@ pub enum StorageRuntimeErrorV1 {
     #[error("duplicate operation {operation_id} is already in the persistent writer")]
     DuplicateOperationInFlight { operation_id: String },
 }
-
-pub type StorageRuntimeResultV1<T> = Result<T, StorageRuntimeErrorV1>;
