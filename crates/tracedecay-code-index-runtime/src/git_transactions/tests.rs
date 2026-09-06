@@ -39,6 +39,19 @@ use super::{
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
+/// Registry owners take their catalog composer by construction, so these
+/// fixtures compose a real (contribution-free) snapshot rather than relying on
+/// whatever some other test installed first.
+fn test_catalog_provider() -> crate::ports::ApplicationCatalogProviderV1 {
+    crate::ports::ApplicationCatalogProviderV1::new(|| {
+        tracedecay_tool_catalog::CatalogSnapshotBuilderV1::new()
+            .build()
+            .map_err(|error| {
+                crate::ports::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
+            })
+    })
+}
+
 #[test]
 fn same_repository_mutations_never_enter_the_native_section_together() {
     let queue = Arc::new(RepositoryMutationQueue::default());
@@ -852,7 +865,7 @@ fn quarantine_clears_only_after_a_proven_recovery_receipt() {
 async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
     let directory = tempfile::tempdir().expect("project directory");
     let database = RegisteredGlobalDbHarness::open("git-index-owner-singleton").await;
-    let registry = DaemonGitIndexTransactionServiceRegistry::default();
+    let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_provider());
     let project_id = id::<ProjectId>("project.singleton.fixture");
 
     let first = registry
@@ -881,7 +894,7 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
 async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_actor() {
     let directory = tempfile::tempdir().expect("project directory");
     let database = RegisteredGlobalDbHarness::open("git-index-owner-shutdown").await;
-    let registry = DaemonGitIndexTransactionServiceRegistry::default();
+    let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_provider());
     let project_id = id::<ProjectId>("project.shutdown.fixture");
     let service = registry
         .ensure(
@@ -932,7 +945,7 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     let directory = tempfile::tempdir().expect("project directory");
     let alternate = tempfile::tempdir().expect("alternate worktree directory");
     let database = RegisteredGlobalDbHarness::open("git-index-owner-worktrees").await;
-    let registry = DaemonGitIndexTransactionServiceRegistry::default();
+    let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_provider());
     let project_id = id::<ProjectId>("project.singleton.fixture");
     let primary = registry
         .ensure(
@@ -990,7 +1003,7 @@ async fn daemon_owner_resolves_symlink_alias_to_the_canonical_mounted_root() {
     let alias = alias_parent.path().join("worktree-alias");
     symlink(directory.path(), &alias).expect("worktree root symlink alias");
     let database = RegisteredGlobalDbHarness::open("git-index-owner-alias").await;
-    let registry = DaemonGitIndexTransactionServiceRegistry::default();
+    let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_provider());
     let project_id = id::<ProjectId>("project.alias.fixture");
     let first = registry
         .ensure(

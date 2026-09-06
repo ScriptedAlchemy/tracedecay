@@ -49,12 +49,10 @@ pub fn register_runtime_ports() -> Result<()> {
 pub fn register_runtime_ports_without_mcp_tool_catalog() {
     register_session_ports();
     register_agent_host_ports();
-    tracedecay_code_index_runtime::install_application_catalog_snapshot(
-        compose_application_catalog_snapshot,
-    );
 }
 
-fn compose_application_catalog_snapshot() -> std::result::Result<
+/// Adapts the root catalog composer to the code-index runtime's provider seam.
+pub(crate) fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
 > {
