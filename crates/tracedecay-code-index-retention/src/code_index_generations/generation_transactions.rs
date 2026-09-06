@@ -278,16 +278,12 @@ impl GraphReplayPoolLockV1 {
                 crate::hotpath_observe::retention_replay_pool_acquire_cancelled();
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
-            // Honor an already-expired caller deadline before the syscall so a
-            // free pool is not taken after the budget, and so a Windows lock
-            // conflict cannot replace the typed busy result with Storage.
-            // Production callers always pass `now + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET`
-            // (execute, cleanup, and the convenience wrapper). None use
-            // `deadline == now` as a try-once probe on a free pool.
-            if Instant::now() >= deadline {
-                crate::hotpath_observe::retention_replay_pool_busy();
-                return Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy);
-            }
+            // One non-blocking try comes before the elapsed-deadline
+            // classification. A free pool must still be taken so later
+            // UnsafeState proofs (directory/symlink/corrupt pool entries)
+            // can run; a held pool returns typed busy without polling once
+            // the budget is gone. Windows lock-conflict is `Ok(None)` via
+            // `is_lock_contended`, not Storage.
             match try_acquire_code_generation_store_lock(pool_root)? {
                 Some(guard) => {
                     crate::hotpath_observe::retention_replay_pool_acquired();
@@ -295,6 +291,10 @@ impl GraphReplayPoolLockV1 {
                         root: guard.generation_store_root()?.to_path_buf(),
                         guard: Some(guard),
                     });
+                }
+                None if Instant::now() >= deadline => {
+                    crate::hotpath_observe::retention_replay_pool_busy();
+                    return Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy);
                 }
                 None => Self::wait_for_exclusive(deadline),
             }

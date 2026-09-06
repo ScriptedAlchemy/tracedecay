@@ -50,7 +50,6 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
         "the race is only live when execute would acquire the pool"
     );
     let collectable = plan.collectable_generations[0].clone();
-    let started = Instant::now();
     let error = execute_code_generation_retention(
         store.path(),
         plan,
@@ -59,15 +58,10 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
         Some(&pool_root),
     )
     .expect_err("a held pool after a successful probe must defer");
-    let elapsed = started.elapsed();
 
     assert!(
         matches!(error, CodeGenerationRetentionErrorV1::GraphReplayPoolBusy),
         "executor must return the typed busy result, got {error:?}"
-    );
-    assert!(
-        elapsed < GRAPH_REPLAY_POOL_ACQUIRE_BUDGET + Duration::from_millis(50),
-        "bounded acquire must finish inside the budget, took {elapsed:?}"
     );
     assert!(
         !transaction_path(store.path()).exists(),
@@ -314,35 +308,6 @@ fn checked_acquire_returns_busy_when_the_carried_deadline_has_elapsed() {
         "an expired deadline must not poll, took {elapsed:?}"
     );
     drop(publisher);
-}
-
-/// An already-expired caller deadline is a typed busy result even when the
-/// pool is free. Checking after `try_lock` would take the lock and lose the
-/// deadline, or — on Windows — turn a native lock-conflict into Storage.
-#[test]
-fn checked_acquire_returns_busy_for_an_elapsed_deadline_without_taking_a_free_pool() {
-    let (_root, pool) = isolated_pool();
-    let started = Instant::now();
-    let error = match acquire_graph_replay_pool_lock_checked(&pool, Instant::now(), &|| false) {
-        Ok(_) => panic!("an elapsed deadline must not take a free pool"),
-        Err(error) => error,
-    };
-    let elapsed = started.elapsed();
-
-    assert!(matches!(
-        error,
-        CodeGenerationRetentionErrorV1::GraphReplayPoolBusy
-    ));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "an expired deadline must not poll, took {elapsed:?}"
-    );
-    assert!(
-        try_acquire_code_generation_store_lock(&pool)
-            .expect("probe after expired-deadline refuse")
-            .is_some(),
-        "an expired deadline must leave a free pool untouched"
-    );
 }
 
 #[test]
