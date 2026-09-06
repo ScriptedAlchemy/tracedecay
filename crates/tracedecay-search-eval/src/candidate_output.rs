@@ -2539,6 +2539,7 @@ fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<(), Candidat
     })
 }
 
+#[cfg(target_os = "linux")]
 fn peak_rss_bytes() -> Option<u64> {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
         return None;
@@ -2546,6 +2547,29 @@ fn peak_rss_bytes() -> Option<u64> {
     peak_rss_bytes_from_status(&status)
 }
 
+/// macOS reports the peak resident set in bytes through `getrusage`; Linux
+/// keeps `/proc` because `ru_maxrss` there is kilobytes and `VmHWM` is exact.
+#[cfg(target_os = "macos")]
+fn peak_rss_bytes() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: `getrusage` fully initialises the out-parameter when it returns 0.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: checked above that the call succeeded and wrote the struct.
+    let usage = unsafe { usage.assume_init() };
+    u64::try_from(usage.ru_maxrss)
+        .ok()
+        .filter(|bytes| *bytes > 0)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn peak_rss_bytes_from_status(status: &str) -> Option<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmHWM:") {
