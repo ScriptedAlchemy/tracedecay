@@ -132,8 +132,10 @@ impl DaemonInvocationClient {
                             )
                             .await
                             {
-                                Ok(result) => ControlledConnectionOutcome::Completed(result),
-                                Err(_) => ControlledConnectionOutcome::Indeterminate,
+                                Ok(Ok(response)) => {
+                                    ControlledConnectionOutcome::Completed(Ok(response))
+                                }
+                                Ok(Err(_)) | Err(_) => ControlledConnectionOutcome::Indeterminate,
                             }
                         }
                     }

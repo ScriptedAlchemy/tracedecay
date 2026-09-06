@@ -84,6 +84,30 @@ impl RuntimeFixture {
     fn home(&self) -> &Path {
         self._environment.home()
     }
+
+    /// The path an LSP client addresses the admitted project through.
+    ///
+    /// Daemon admission canonicalizes the root, while a client spells it the
+    /// way its host does: macOS hands out `/var/folders/...` for a directory
+    /// that canonicalizes to `/private/var/...`, and a linked worktree is
+    /// reached through its symlink. On Unix the fixture therefore addresses
+    /// the project through a real filesystem alias, so every request in the
+    /// journey — initialize, document routing, feedback reads — has to
+    /// preserve the admitted identity across the spelling difference rather
+    /// than only on hosts whose temp directory happens to be an alias.
+    fn client_project_path(&self) -> PathBuf {
+        #[cfg(unix)]
+        {
+            let alias = self._environment.scratch().join("project-alias");
+            std::os::unix::fs::symlink(&self.project, &alias)
+                .expect("alias the admitted project root");
+            alias
+        }
+        #[cfg(not(unix))]
+        {
+            self.project.clone()
+        }
+    }
 }
 
 async fn runtime_fixture() -> RuntimeFixture {
@@ -2005,10 +2029,11 @@ async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
     let fixture = lsp_runtime_fixture().await;
-    let root_uri = url::Url::from_directory_path(&fixture.project)
+    let client_project = fixture.client_project_path();
+    let root_uri = url::Url::from_directory_path(&client_project)
         .expect("project root URI")
         .to_string();
-    let document_uri = url::Url::from_file_path(fixture.project.join("src/auth/login.rs"))
+    let document_uri = url::Url::from_file_path(client_project.join("src/auth/login.rs"))
         .expect("document URI")
         .to_string();
     let source = std::fs::read_to_string(fixture.project.join("src/auth/login.rs"))
@@ -2135,7 +2160,9 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let projection = poll_lsp_context(&mut session, &document_uri, "diagnostics", 2).await;
     // The gateway compares roots by parsed path rather than by raw string,
     // because a directory URI legitimately arrives with or without a trailing
-    // slash, so the projection is checked the same way it is admitted.
+    // slash, so the projection is checked the same way it is admitted. The
+    // projection names the root the daemon admitted — the canonical directory
+    // — not the alias the client spelled it through.
     let projected_root = projection["result"]["rootUri"]
         .as_str()
         .expect("projected root URI");
@@ -2143,7 +2170,12 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         url::Url::parse(projected_root)
             .ok()
             .and_then(|url| url.to_file_path().ok()),
-        Some(fixture.project.clone()),
+        Some(
+            fixture
+                .project
+                .canonicalize()
+                .expect("canonical admitted project root")
+        ),
         "the projection must name the admitted root, got {projected_root}"
     );
     assert_eq!(projection["result"]["documentUri"], document_uri);
