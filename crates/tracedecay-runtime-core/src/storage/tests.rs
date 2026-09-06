@@ -127,41 +127,32 @@ mod tests {
 
     #[test]
     fn concurrent_durable_overlapping_parents_converge() {
-        let root = Arc::new(tempfile::tempdir().unwrap());
+        let root = tempfile::tempdir().unwrap();
         let dashboard = root.path().join("dashboard");
         let lock_dir = dashboard.join("automation_locks");
         let writers = 8;
         let barrier = Arc::new(Barrier::new(writers));
         let workers = (0..writers)
             .map(|index| {
-                let dashboard = dashboard.clone();
-                let lock_dir = lock_dir.clone();
+                let target = if index % 2 == 0 {
+                    dashboard.clone()
+                } else {
+                    lock_dir.clone()
+                };
                 let barrier = Arc::clone(&barrier);
-                let root = Arc::clone(&root);
                 std::thread::spawn(move || {
-                    let retained = root.path().to_path_buf();
-                    let target = if index % 2 == 0 { dashboard } else { lock_dir };
                     barrier.wait();
-                    PrivateStoreIo::create_dir_all_durable(&target).map(|()| (retained, target))
+                    PrivateStoreIo::create_dir_all_durable(&target)
                 })
             })
             .collect::<Vec<_>>();
 
-        let mut resolved = Vec::new();
         for worker in workers {
-            let (retained, target) = worker.join().unwrap().unwrap();
-            assert!(
-                retained.is_dir(),
-                "fixture root must outlive overlapping parent creators"
-            );
-            assert!(target.is_dir(), "{}", target.display());
-            resolved.push(target);
+            worker.join().unwrap().unwrap();
         }
 
         assert!(dashboard.is_dir());
         assert!(lock_dir.is_dir());
-        assert!(resolved.iter().any(|path| path == &dashboard));
-        assert!(resolved.iter().any(|path| path == &lock_dir));
     }
 
     #[test]

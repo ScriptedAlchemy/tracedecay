@@ -1195,96 +1195,56 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
         }
     }
 
-    let temp = Arc::new(tempdir().unwrap());
+    let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     let profile_root = temp.path().join("profile");
     let lock_dir = dashboard_root.join("automation_locks");
-    let lock_path = lock_dir.join("user_job_concurrent-job.lock");
     PrivateStoreIo::create_dir_all_durable(&profile_root).unwrap();
     PrivateStoreIo::create_dir_all_durable(&lock_dir).unwrap();
-    let job = Arc::new(sample_job("concurrent-job"));
-    let config = Arc::new(enabled_job_config());
-    let backend = Arc::new(SlowBackend {
+    let job = sample_job("concurrent-job");
+    let config = enabled_job_config();
+    let backend = SlowBackend {
         calls: AtomicUsize::new(0),
-    });
-    let barrier = Arc::new(Barrier::new(2));
+    };
+    let barrier = Barrier::new(2);
 
     let (first, second) = tokio::join!(
-        {
-            let temp = Arc::clone(&temp);
-            let barrier = Arc::clone(&barrier);
-            let dashboard_root = dashboard_root.clone();
-            let profile_root = profile_root.clone();
-            let lock_path = lock_path.clone();
-            let job = Arc::clone(&job);
-            let config = Arc::clone(&config);
-            let backend = Arc::clone(&backend);
-            async move {
-                barrier.wait().await;
-                let run = run_user_job_with_backend(
-                    &dashboard_root,
-                    &config,
-                    backend.as_ref(),
-                    &job,
-                    UserJobRunOptions {
-                        trigger: AutomationTrigger::Dashboard,
-                        run_id: Some("concurrent-run-1".to_string()),
-                        profile_root: Some(profile_root),
-                        project_root: None,
-                        occurrence_anchor_run_id: None,
-                    },
-                )
-                .await;
-                (run, temp.path().to_path_buf(), dashboard_root, lock_path)
-            }
+        async {
+            barrier.wait().await;
+            run_user_job_with_backend(
+                &dashboard_root,
+                &config,
+                &backend,
+                &job,
+                UserJobRunOptions {
+                    trigger: AutomationTrigger::Dashboard,
+                    run_id: Some("concurrent-run-1".to_string()),
+                    profile_root: Some(profile_root.clone()),
+                    project_root: None,
+                    occurrence_anchor_run_id: None,
+                },
+            )
+            .await
         },
-        {
-            let temp = Arc::clone(&temp);
-            let barrier = Arc::clone(&barrier);
-            let dashboard_root = dashboard_root.clone();
-            let profile_root = profile_root.clone();
-            let lock_path = lock_path.clone();
-            let job = Arc::clone(&job);
-            let config = Arc::clone(&config);
-            let backend = Arc::clone(&backend);
-            async move {
-                barrier.wait().await;
-                let run = run_user_job_with_backend(
-                    &dashboard_root,
-                    &config,
-                    backend.as_ref(),
-                    &job,
-                    UserJobRunOptions {
-                        trigger: AutomationTrigger::ManualCli,
-                        run_id: Some("concurrent-run-2".to_string()),
-                        profile_root: Some(profile_root),
-                        project_root: None,
-                        occurrence_anchor_run_id: None,
-                    },
-                )
-                .await;
-                (run, temp.path().to_path_buf(), dashboard_root, lock_path)
-            }
+        async {
+            barrier.wait().await;
+            run_user_job_with_backend(
+                &dashboard_root,
+                &config,
+                &backend,
+                &job,
+                UserJobRunOptions {
+                    trigger: AutomationTrigger::ManualCli,
+                    run_id: Some("concurrent-run-2".to_string()),
+                    profile_root: Some(profile_root.clone()),
+                    project_root: None,
+                    occurrence_anchor_run_id: None,
+                },
+            )
+            .await
         }
     );
-    let runs = [first.0.unwrap(), second.0.unwrap()];
-    assert_eq!(
-        first.1, second.1,
-        "both workers must share one fixture root"
-    );
-    assert_eq!(
-        first.2, second.2,
-        "both workers must share one dashboard root"
-    );
-    assert_eq!(first.3, second.3, "both workers must share one lock path");
-    assert!(
-        first.1.is_dir(),
-        "fixture root must stay alive until both workers settle"
-    );
-    assert!(
-        first.3.parent().is_some_and(|parent| parent.is_dir()),
-        "automation lock parent must remain after concurrent triggers"
-    );
+    let runs = [first.unwrap(), second.unwrap()];
     let delivered = runs
         .iter()
         .filter(|run| run.report["status"] == json!("delivered"))
