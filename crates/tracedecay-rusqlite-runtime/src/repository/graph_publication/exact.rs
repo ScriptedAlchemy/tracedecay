@@ -176,6 +176,16 @@ pub(super) fn active_replay_in_transaction(
     read_exact(transaction, &encoded, key)
 }
 
+/// The same active-replay read served from a reader snapshot, for callers that
+/// only read and must not take the exclusive writer lane to do it.
+pub(super) fn active_replay_in_snapshot(
+    snapshot: &ExactSqlReadSnapshot,
+    key: &GraphPublicationKeyV1,
+) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayRecordV1>> {
+    let encoded = EncodedProjection::new(&key.projection)?;
+    read_exact(snapshot, &encoded, key)
+}
+
 pub(crate) fn retire_replay_in_transaction(
     transaction: &ExactSqlTransaction,
     request: &GraphPublicationReplayRetirementV1,

@@ -29,17 +29,48 @@ pub(super) fn published_stage_evidence(
     authority: &ExactSqlTransaction,
     stage: &Stage,
 ) -> SemanticVectorStagingStoreResult<tracedecay_store::GraphVerifiedHeadV1> {
+    ensure_published(stage)?;
+    let replay = crate::repository::graph_publication::active_replay_in_transaction(
+        authority,
+        &stage.record.plan.publication_key,
+    )
+    .map_err(map_graph)?;
+    stage_verified_head(stage, replay)
+}
+
+/// The same evidence read from a reader snapshot. A published-generation
+/// lookup mutates nothing, so it must not take the project's exclusive writer
+/// lane: that lane is the one project open, Context Scout durable startup and
+/// every other writer share, and holding a blocking acquisition of it on the
+/// runtime is what turns a concurrent open into a lease-expiry stall.
+pub(super) fn published_stage_evidence_in_snapshot(
+    authority: &crate::exact_sql::ExactSqlReadSnapshot,
+    stage: &Stage,
+) -> SemanticVectorStagingStoreResult<tracedecay_store::GraphVerifiedHeadV1> {
+    ensure_published(stage)?;
+    let replay = crate::repository::graph_publication::active_replay_in_snapshot(
+        authority,
+        &stage.record.plan.publication_key,
+    )
+    .map_err(map_graph)?;
+    stage_verified_head(stage, replay)
+}
+
+fn ensure_published(stage: &Stage) -> SemanticVectorStagingStoreResult<()> {
     if stage.record.state != SemanticVectorStageState::Published {
         return Err(corrupt(
             "semantic vector published-generation lookup found a non-published stage",
         ));
     }
-    let replay = crate::repository::graph_publication::active_replay_in_transaction(
-        authority,
-        &stage.record.plan.publication_key,
-    )
-    .map_err(map_graph)?
-    .ok_or_else(|| corrupt("published semantic vector generation lost its active replay"))?;
+    Ok(())
+}
+
+fn stage_verified_head(
+    stage: &Stage,
+    replay: Option<tracedecay_store::GraphPublicationReplayRecordV1>,
+) -> SemanticVectorStagingStoreResult<tracedecay_store::GraphVerifiedHeadV1> {
+    let replay = replay
+        .ok_or_else(|| corrupt("published semantic vector generation lost its active replay"))?;
     let intent =
         stage.record.publication_intent.as_ref().ok_or_else(|| {
             corrupt("published semantic vector generation has no publication intent")

@@ -36,6 +36,13 @@ pub(crate) fn active_replay_in_transaction(
     exact::active_replay_in_transaction(transaction, key)
 }
 
+pub(crate) fn active_replay_in_snapshot(
+    snapshot: &crate::exact_sql::ExactSqlReadSnapshot,
+    key: &GraphPublicationKeyV1,
+) -> GraphPublicationStoreResultV1<Option<GraphPublicationReplayRecordV1>> {
+    exact::active_replay_in_snapshot(snapshot, key)
+}
+
 pub(crate) fn retire_replay_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     request: &GraphPublicationReplayRetirementV1,
