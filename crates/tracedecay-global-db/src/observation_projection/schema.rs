@@ -294,10 +294,14 @@ pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );";
 
-/// V4 anchor-binding triggers, shared with the scoped observation reset like
-/// [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
+/// Session-message anchor-binding triggers, shared with the scoped observation
+/// reset like [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
+///
+/// The guard matches the whole `claude-session-message-v*` projector family,
+/// not one pinned version: a projector-version bump must never silently drop
+/// the anchor binding every published row depends on.
 pub(crate) const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
-    include_str!("projection_v4_binding_triggers.sql");
+    include_str!("projection_binding_triggers.sql");
 
 /// Historical-data indexes the schema contract requires on the projection
 /// authority, shared with the scoped observation reset.
@@ -345,7 +349,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
     conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL)
         .await?;
     verify_final_projection_shape(conn).await?;
-    ensure_v4_projection_binding_triggers(conn).await
+    ensure_projection_binding_triggers(conn).await
 }
 
 pub(in super::super) async fn ensure_observation_projection_performance_indexes(
@@ -379,7 +383,7 @@ async fn projection_table_column_exists(
     Ok(rows.next().await?.is_some())
 }
 
-async fn ensure_v4_projection_binding_triggers(conn: &impl Executor) -> Result<(), Error> {
+async fn ensure_projection_binding_triggers(conn: &impl Executor) -> Result<(), Error> {
     conn.execute_batch(OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL)
         .await
 }
