@@ -573,7 +573,7 @@ async fn operation_authority_is_minted_before_store_admission_wait() {
     let outcome = reserve.await.unwrap();
     assert!(
         matches!(outcome, Err(VectorGenerationStoreErrorV1::Unavailable(_))),
-        "isolated evaluation retention must remain unavailable: {outcome:?}"
+        "isolated evaluation retention must remain unavailable"
     );
     let reserve_deadline = probe
         .reserve_deadline
