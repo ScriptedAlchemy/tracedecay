@@ -3,7 +3,6 @@
 //! Work admits the task/version/attempt join; session retrieval retains that
 //! identity through compact ranking and selected-anchor hydration.
 
-use std::any::Any;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -437,14 +436,12 @@ where
 
 /// Combined Work evidence adapter retained by a registered Work runtime.
 ///
-/// The two hydration ports are the consumer contract. Identity comparison is
-/// required so project-open re-registration can renew a grant without
-/// replacing an equivalent authority.
+/// The two hydration ports are the consumer contract. The adapter carries no
+/// identity of its own: a registered Work runtime is keyed by its store
+/// authority, and every route that mounts the store builds its own adapter.
 pub trait WorkEvidenceRetrievalPortV1:
     WorkTaskSessionPortV1 + WorkAnchorHydrationPortV1 + Send + Sync
 {
-    fn as_any(&self) -> &dyn Any;
-    fn same_retrieval_authority(&self, other: &dyn WorkEvidenceRetrievalPortV1) -> bool;
     fn clone_arc(&self) -> Arc<dyn WorkEvidenceRetrievalPortV1>;
 }
 
