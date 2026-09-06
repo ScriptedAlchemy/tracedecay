@@ -427,16 +427,44 @@ where
             &linked.audit.result_revision,
             &linked.transition_digest,
         )?;
+        // Both skips below leave a durably committed transition uninstalled in
+        // live serving, and neither carried a reason: the caller sees only that
+        // nothing was observed. Name them.
         let committed = match self.configuration.committed_profile_state(linked).await {
             Ok(committed) => committed,
-            Err(SemanticConfigurationBackendErrorV1::Conflict) => return None,
-            Err(
-                SemanticConfigurationBackendErrorV1::Unavailable
-                | SemanticConfigurationBackendErrorV1::Rejected
-                | SemanticConfigurationBackendErrorV1::RejectedAt(_),
-            ) => return Some((ticket, false)),
+            Err(SemanticConfigurationBackendErrorV1::Conflict) => {
+                tracing::warn!(
+                    event = "semantic_activation_observation",
+                    step = "committed_profile_state",
+                    outcome = "skipped",
+                    epoch = linked.epoch,
+                    result_revision = %linked.audit.result_revision,
+                    "the committed state moved before the transition could be observed"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "semantic_activation_observation",
+                    step = "committed_profile_state",
+                    outcome = "failed",
+                    epoch = linked.epoch,
+                    error = %error,
+                    "the committed state could not be read back for observation"
+                );
+                return Some((ticket, false));
+            }
         };
-        if committed.validate_for(linked).is_err() {
+        if let Err(error) = committed.validate_for(linked) {
+            tracing::warn!(
+                event = "semantic_activation_observation",
+                step = "committed_state_validation",
+                outcome = "failed",
+                epoch = linked.epoch,
+                error = %error,
+                activation_receipt_digest = ?linked.activation_receipt_digest,
+                "the committed state did not match the transition that produced it"
+            );
             return Some((ticket, false));
         }
         let observed = observer.activation_committed(committed).await.is_ok();
