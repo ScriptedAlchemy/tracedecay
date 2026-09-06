@@ -249,6 +249,11 @@ impl ScopeQuarantineAuthority {
             match (source, staged) {
                 (Some((_, actual)), None) if actual == expected => {}
                 (None, Some((staged, actual))) => {
+                    if actual != expected
+                        || directory_identity(&staged).map_err(storage)? != expected
+                    {
+                        return Err(identity_changed(&scope.scope_hash, "during rollback"));
+                    }
                     drop(staged);
                     let stage = self.stage.as_ref().ok_or_else(|| {
                         unsafe_state("scope rollback lost its quarantine capability")
@@ -262,7 +267,7 @@ impl ScopeQuarantineAuthority {
                     .map_err(storage)?;
                     let (_, restored) = open_child_directory(&self.store, &scope.scope_hash)?
                         .ok_or_else(|| unsafe_state("scope rollback did not restore its source"))?;
-                    if restored != actual {
+                    if restored != expected {
                         return Err(identity_changed(&scope.scope_hash, "after rollback"));
                     }
                     sync_directory(&self.store).map_err(storage)?;
@@ -760,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_restores_mismatched_staged_identity_without_deletion() {
+    fn rollback_retains_a_mismatched_staged_identity() {
         let (store, scope) = fixture();
         let mut authority = ScopeQuarantineAuthority::prepare(
             store.path(),
@@ -782,19 +787,28 @@ mod tests {
         std::fs::write(staged.join("payload"), b"replacement-exact-bytes")
             .expect("write staged replacement");
 
-        authority
+        let error = authority
             .rollback(std::slice::from_ref(&scope))
-            .expect("restore the exact object found at the staged name");
+            .expect_err("a replacement at the staged name cannot be restored");
 
+        let CodeGenerationRetentionErrorV1::UnsafeState(message) = error else {
+            panic!("identity mismatch must fail as unsafe state");
+        };
         assert_eq!(
-            std::fs::read(store.path().join(SCOPE_HASH).join("payload"))
-                .expect("restored replacement survives"),
+            message,
+            format!("stranded scope '{SCOPE_HASH}' changed filesystem identity during rollback")
+        );
+        assert_eq!(
+            std::fs::read(staged.join("payload")).expect("staged replacement survives"),
             b"replacement-exact-bytes"
         );
         assert_eq!(
             std::fs::read(displaced.join("payload")).expect("displaced original survives"),
             b"owned"
         );
-        assert!(!staged.exists());
+        assert!(
+            !store.path().join(SCOPE_HASH).exists(),
+            "rollback must not promote the mismatched staged identity"
+        );
     }
 }
