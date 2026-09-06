@@ -692,7 +692,9 @@ fn clear_journal(
 ) -> Result<(), CollectionMutationFailure> {
     let renamed = renamed_marker_name(journal_name);
     let marker = retired_marker_name(journal_name);
-    for name in [journal_name, renamed.as_str(), marker.as_str()] {
+    // The journal is the recovery authority, so remove it last. A marker
+    // cleanup failure must leave the exact intent discoverable on retry.
+    for name in [renamed.as_str(), marker.as_str(), journal_name] {
         match parent.remove_file(name) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -979,22 +981,118 @@ fn recover_named_store_quarantine_inner(
             let Some(journal) = journal else {
                 return Ok(None);
             };
-            let actual_path = if child_has_store_identity(
+            // The commit authority is independent of either filesystem name.
+            // Classify it before requiring a live-name identity: a completed
+            // recursive delete legitimately leaves both names absent.
+            let decision = match journal.kind {
+                QuarantineKindV1::Registered => match registered {
+                    Some((intent, decision))
+                        if registered_intent_matches_journal(intent, &journal) =>
+                    {
+                        decision
+                    }
+                    Some((intent, _)) => {
+                        return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                            failure: Some(CollectionMutationFailure::without_native_error(
+                                CollectionMutationOperation::ProbeRecoveryJournal,
+                                parent_path.join(&journal_name),
+                                Some(intent.expected_root_identity.clone()),
+                            )),
+                            actual_path: quarantine_path.clone(),
+                            quarantine_path,
+                        }));
+                    }
+                    None => RegisteredQuarantineDecisionV1::Retain,
+                },
+                QuarantineKindV1::Unregistered => {
+                    match probe_regular_recovery_marker(
+                        &capability.parent,
+                        parent_path,
+                        &retired_marker_name(&journal_name),
+                        &journal.expected_root_identity,
+                    ) {
+                        Ok(true) => RegisteredQuarantineDecisionV1::Remove,
+                        Ok(false) => RegisteredQuarantineDecisionV1::Restore,
+                        Err(failure) => {
+                            return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                                failure: Some(failure),
+                                actual_path: quarantine_path.clone(),
+                                quarantine_path,
+                            }));
+                        }
+                    }
+                }
+            };
+            let original_identity = match child_store_identity(
                 &capability.parent,
                 &capability.leaf_name,
+                data_root,
                 &journal.expected_root_identity,
             ) {
-                data_root.to_path_buf()
-            } else {
-                quarantine_path.clone()
+                Ok(identity) => identity,
+                Err(failure) => {
+                    return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                        failure: Some(failure),
+                        actual_path: data_root.to_path_buf(),
+                        quarantine_path,
+                    }));
+                }
             };
+            let Some(original_identity) = original_identity else {
+                if decision == RegisteredQuarantineDecisionV1::Remove {
+                    let journal_failure = clear_journal(
+                        &capability.parent,
+                        parent_path,
+                        &journal_name,
+                        Some(journal.expected_root_identity),
+                    )
+                    .err();
+                    return Ok(Some(QuarantineRecoveryOutcome::Removed {
+                        quarantine_path,
+                        journal_failure,
+                    }));
+                }
+                return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                    failure: Some(CollectionMutationFailure::without_native_error(
+                        CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                        data_root.to_path_buf(),
+                        Some(journal.expected_root_identity),
+                    )),
+                    actual_path: quarantine_path.clone(),
+                    quarantine_path,
+                }));
+            };
+            if original_identity != journal.expected_root_identity {
+                return Ok(Some(QuarantineRecoveryOutcome::Retained {
+                    failure: Some(CollectionMutationFailure::without_native_error(
+                        CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                        data_root.to_path_buf(),
+                        Some(journal.expected_root_identity),
+                    )),
+                    actual_path: data_root.to_path_buf(),
+                    quarantine_path,
+                }));
+            }
+            if decision == RegisteredQuarantineDecisionV1::Restore {
+                let failure = clear_journal(
+                    &capability.parent,
+                    parent_path,
+                    &journal_name,
+                    Some(journal.expected_root_identity),
+                )
+                .err();
+                return Ok(Some(QuarantineRecoveryOutcome::Restored {
+                    restored_path: data_root.to_path_buf(),
+                    failure,
+                }));
+            }
             return Ok(Some(QuarantineRecoveryOutcome::Retained {
                 failure: Some(CollectionMutationFailure::without_native_error(
                     CollectionMutationOperation::ValidateRestoredStoreIdentity,
-                    quarantine_path.clone(),
+                    data_root.to_path_buf(),
                     Some(journal.expected_root_identity),
                 )),
-                actual_path,
+                actual_path: data_root.to_path_buf(),
                 quarantine_path,
             }));
         }
@@ -1048,17 +1146,7 @@ fn recover_named_store_quarantine_inner(
         )));
     };
     if let Some((intent, _)) = registered
-        && (journal_record.kind != QuarantineKindV1::Registered
-            || journal_record.project_id != intent.project_id
-            || journal_record.store_id != intent.store_id
-            || journal_record.original_name
-                != intent
-                    .original_path
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or_default()
-            || journal_record.registry_fence.as_ref() != Some(&intent.registry_fence)
-            || journal_record.expected_root_identity != intent.expected_root_identity)
+        && !registered_intent_matches_journal(intent, &journal_record)
     {
         drop(quarantine_root);
         return Ok(Some(QuarantineRecoveryOutcome::Retained {
@@ -1395,6 +1483,51 @@ fn child_has_store_identity(parent: &Dir, name: &OsStr, expected: &StoreRootIden
         return false;
     };
     store_root_identity(&root).is_ok_and(|identity| identity == *expected)
+}
+
+fn child_store_identity(
+    parent: &Dir,
+    name: &OsStr,
+    path: &Path,
+    expected: &StoreRootIdentity,
+) -> Result<Option<StoreRootIdentity>, CollectionMutationFailure> {
+    let root = match parent.open_dir_nofollow(name) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(CollectionMutationFailure::from_io_error(
+                CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                path.to_path_buf(),
+                Some(expected.clone()),
+                &error,
+            ));
+        }
+    };
+    store_root_identity(&root).map(Some).map_err(|error| {
+        CollectionMutationFailure::from_io_error(
+            CollectionMutationOperation::ValidateRestoredStoreIdentity,
+            path.to_path_buf(),
+            Some(expected.clone()),
+            &error,
+        )
+    })
+}
+
+fn registered_intent_matches_journal(
+    intent: &RegisteredQuarantineIntentV1,
+    journal: &QuarantineJournalV1,
+) -> bool {
+    journal.kind == QuarantineKindV1::Registered
+        && journal.project_id == intent.project_id
+        && journal.store_id == intent.store_id
+        && journal.original_name
+            == intent
+                .original_path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or_default()
+        && journal.registry_fence.as_ref() == Some(&intent.registry_fence)
+        && journal.expected_root_identity == intent.expected_root_identity
 }
 
 fn read_recovery_journal(
