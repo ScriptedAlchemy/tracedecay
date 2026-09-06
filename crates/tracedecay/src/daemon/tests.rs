@@ -565,36 +565,6 @@ fn scheduled_automation_patch(
     }
 }
 
-#[cfg(unix)]
-async fn apply_project_automation_patch_via_surface(
-    engine: &DaemonEngine,
-    handshake: &DaemonHandshake,
-    patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
-) -> Arc<crate::mcp::McpServer> {
-    apply_project_setting_via_surface(engine, handshake, |snapshot| {
-        let configured =
-            tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-                snapshot,
-            )
-            .expect("decode pinned automation configuration");
-        let desired = tracedecay_automation_runtime::automation::config::effective_config(
-            &configured,
-            Some(&patch),
-        )
-        .expect("apply automation configuration patch");
-        (
-            tracedecay_domain::configuration::SettingKey::new(
-                tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
-            )
-            .expect("automation setting key"),
-            tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(Box::new(
-                desired,
-            )),
-        )
-    })
-    .await
-}
-
 /// Writes one project-layer setting through the production configuration
 /// surface (the same `ConfigurationBatch` path the CLI and MCP tools take),
 /// pinned to the revision the project currently serves. `setting` derives the
@@ -706,6 +676,36 @@ async fn apply_project_setting_via_surface(
     .result
     .expect("configuration setting effect");
     server
+}
+
+#[cfg(unix)]
+async fn apply_project_automation_patch_via_surface(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
+) -> Arc<crate::mcp::McpServer> {
+    apply_project_setting_via_surface(engine, handshake, |snapshot| {
+        let configured =
+            tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+                snapshot,
+            )
+            .expect("decode pinned automation configuration");
+        let desired = tracedecay_automation_runtime::automation::config::effective_config(
+            &configured,
+            Some(&patch),
+        )
+        .expect("apply automation configuration patch");
+        (
+            tracedecay_domain::configuration::SettingKey::new(
+                tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
+            )
+            .expect("automation setting key"),
+            tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(Box::new(
+                desired,
+            )),
+        )
+    })
+    .await
 }
 
 #[cfg(unix)]

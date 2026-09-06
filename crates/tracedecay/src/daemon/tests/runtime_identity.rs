@@ -5,6 +5,8 @@ use tracedecay_code_index_runtime::code_index_scheduler;
 use super::bootstrap::run_git;
 use super::*;
 
+static RUNTIME_IDENTITY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn notify_workspace_open(
     server: &crate::mcp::McpServer,
     session_id: &str,
@@ -105,6 +107,7 @@ fn files_listing_text(response: &tracedecay_mcp::JsonRpcResponse) -> &str {
 #[cfg(unix)]
 #[tokio::test]
 async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bindings() {
+    let _runtime_identity_guard = RUNTIME_IDENTITY_TEST_LOCK.lock().await;
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let (primary, linked) = create_linked_worktree_fixture(&root);
@@ -455,6 +458,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 #[cfg(unix)]
 #[tokio::test]
 async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary() {
+    let _runtime_identity_guard = RUNTIME_IDENTITY_TEST_LOCK.lock().await;
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let (primary, linked) = create_linked_worktree_fixture(&root);
@@ -616,4 +620,199 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("opted-in linked-worktree shutdown must remain bounded");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn linked_worktree_enablement_restarts_dependent_owners() {
+    use super::super::project_open_owners::ProjectOpenDependentOwnerSignal;
+
+    let _runtime_identity_guard = RUNTIME_IDENTITY_TEST_LOCK.lock().await;
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let (primary, linked) = create_linked_worktree_fixture(&root);
+    run_git(&linked, &["add", "."]);
+    run_git(&linked, &["commit", "-m", "linked fixture", "--quiet"]);
+    let profile_root = root.join("profile");
+
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "linked worktree enablement");
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let linked_handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let (primary_server, linked_server) = tokio::join!(
+        engine.project_server(&primary_handshake),
+        engine.project_server(&linked_handshake),
+    );
+    let primary_server = primary_server.expect("primary project must open");
+    let linked_server = linked_server.expect("disabled linked route must open");
+    let linked_graph = linked_server.cg().await;
+    let project_id = tracedecay_domain::ProjectId::new(
+        linked_graph
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("linked route carries project identity"),
+    )
+    .expect("project id");
+    let linked_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&linked, &project_id)
+            .expect("linked scope");
+    assert_eq!(
+        engine
+            .invocation
+            .code_index_schedulers
+            .automatic_admission_for_scope(&linked_scope),
+        Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
+    );
+
+    let watch_key = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    )
+    .expect("linked-worktree watch setting key");
+    let registry = tracedecay_global_db::configuration::registry::ConfigurationRegistry::core()
+        .expect("configuration registry");
+    assert_eq!(
+        registry
+            .definition(&watch_key)
+            .expect("linked-worktree watch setting")
+            .restart_requirement,
+        tracedecay_domain::configuration::RestartRequirementV1::DaemonRestart,
+        "the typed configuration contract must require route recreation"
+    );
+    drop(
+        apply_project_setting_via_surface(&engine, &primary_handshake, |_snapshot| {
+            (
+                watch_key,
+                tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+            )
+        })
+        .await,
+    );
+    assert_eq!(
+        engine
+            .invocation
+            .code_index_schedulers
+            .automatic_admission_for_scope(&linked_scope),
+        Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled),
+        "the mounted route must retain its typed admission until the required restart"
+    );
+
+    drop(linked_graph);
+    drop(linked_server);
+    drop(primary_server);
+    tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
+        .await
+        .expect("disabled linked-route shutdown must remain bounded");
+    drop(engine);
+
+    let restarted = test_daemon_engine_for_profile(&profile_root);
+    let mut serving_seats = restarted
+        .invocation
+        .code_index_schedulers
+        .subscribe_serving_seats();
+    let mut dependent_owner_signals =
+        super::super::project_open_owners::subscribe_project_open_dependent_owner_signals();
+    let (primary_server, linked_server) = tokio::join!(
+        restarted.project_server(&primary_handshake),
+        restarted.project_server(&linked_handshake),
+    );
+    let primary_server = primary_server.expect("primary route must reopen");
+    let linked_server = linked_server.expect("enabled linked route must reopen");
+    let linked_graph = linked_server.cg().await;
+    assert!(
+        linked_graph.get_config().sync.watch_linked_worktrees,
+        "the recreated route must load the enabled configuration"
+    );
+    let linked_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&linked, &project_id)
+            .expect("restarted linked scope");
+    assert_eq!(
+        restarted
+            .invocation
+            .code_index_schedulers
+            .automatic_admission_for_scope(&linked_scope),
+        Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted)
+    );
+
+    let schedulers = restarted.invocation.code_index_schedulers.clone();
+    let serving_scope = linked_scope.clone();
+    let serving = async move {
+        loop {
+            if let Some(serving) = schedulers
+                .latest_complete_ready_for_scope(&serving_scope)
+                .await
+            {
+                break serving;
+            }
+            serving_seats
+                .changed()
+                .await
+                .expect("serving-seat authority must remain open");
+        }
+    };
+    let expected_owner_root = linked.clone();
+    let dependent_owners = async move {
+        let mut advisory = false;
+        let mut query_authority = false;
+        while !(advisory && query_authority) {
+            match dependent_owner_signals
+                .recv()
+                .await
+                .expect("dependent-owner signal authority must remain open")
+            {
+                ProjectOpenDependentOwnerSignal::AdvisoryDeferred(root)
+                    if root == expected_owner_root =>
+                {
+                    advisory = true;
+                }
+                ProjectOpenDependentOwnerSignal::QueryAuthorityDeferred(root)
+                    if root == expected_owner_root =>
+                {
+                    query_authority = true;
+                }
+                _ => {}
+            }
+        }
+    };
+    let (serving, ()) = tokio::join!(serving, dependent_owners);
+    assert_eq!(
+        serving.generation().snapshot().repository,
+        linked_scope.repository_id,
+        "the serving seat must belong to the recreated repository"
+    );
+    assert_eq!(
+        serving.generation().snapshot().worktree.as_ref(),
+        Some(&linked_scope.worktree_id),
+        "the serving seat must belong to the recreated linked route"
+    );
+
+    let linked_session_id = "session.enabled-linked-worktree";
+    notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
+    let routed = files_for_session(primary_server.as_ref(), linked_session_id).await;
+    assert!(
+        routed.error.is_none(),
+        "the enabled linked route must serve its own listing: {routed:?}"
+    );
+    let linked_text = files_listing_text(&routed);
+    assert!(linked_text.contains("linked.rs"), "{linked_text}");
+
+    drop(serving);
+    drop(linked_graph);
+    drop(linked_server);
+    drop(primary_server);
+    tokio::time::timeout(std::time::Duration::from_secs(5), restarted.shutdown_all())
+        .await
+        .expect("enabled linked-route shutdown must remain bounded");
 }

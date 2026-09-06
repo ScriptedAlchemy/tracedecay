@@ -61,7 +61,9 @@ pub(super) fn spawn_deferred_query_authority_mount(
         );
         return false;
     }
-    owner.spawn_background_task(hotpath::future!(
+    #[cfg(test)]
+    let signal_root = project_root.clone();
+    let spawned = owner.spawn_background_task(hotpath::future!(
         async move {
             let mut publications = invocation
                 .code_index_schedulers
@@ -94,7 +96,14 @@ pub(super) fn spawn_deferred_query_authority_mount(
             }
         },
         label = "daemon.project.query_authority_deferred"
-    ))
+    ));
+    #[cfg(test)]
+    if spawned {
+        super::signal_project_open_dependent_owner(
+            super::ProjectOpenDependentOwnerSignal::QueryAuthorityDeferred(signal_root),
+        );
+    }
+    spawned
 }
 
 /// One deferred mount attempt, terminal unless the generation is still
