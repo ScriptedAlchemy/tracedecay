@@ -657,10 +657,12 @@ mod tests {
             canonical_uri.clone(),
             ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
-        let workspace = AuthorizedLspWorkspace::single(admitted.clone());
+        let workspace =
+            AuthorizedLspWorkspace::anchored(None, vec![admitted.clone()], alias_uri.clone())
+                .unwrap();
 
+        assert_eq!(workspace.primary(), &admitted);
         assert!(workspace.admits_exact_root_hints(std::slice::from_ref(&alias_uri)));
-        assert_eq!(workspace.resolve_root_uri(&alias_uri), Ok(&admitted));
         assert!(!workspace.admits_exact_root_hints(&[canonical_uri, alias_uri]));
         assert!(!workspace.admits_exact_root_hints(std::slice::from_ref(&outside_uri)));
         for path in [alias.join("src/lib.rs"), alias.join("src/unsaved.rs")] {
