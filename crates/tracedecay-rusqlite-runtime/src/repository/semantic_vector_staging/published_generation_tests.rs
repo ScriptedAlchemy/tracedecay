@@ -1122,6 +1122,145 @@ fn a_branch_bound_source_scope_refuses_the_checkout_scope_and_names_both_tuples(
     );
 }
 
+/// `8294a78c7` moved `published_semantic_generation` off the project's
+/// exclusive writer lane onto a reader snapshot. Two properties follow, and
+/// both are asserted here against a *held* write transaction rather than a
+/// timing window: the read completes while another writer holds the lane, and
+/// the consistent historical answer it returns is a snapshot, not a retention
+/// lease — once the generation is retired the verified-generation check runs
+/// again and refuses.
+#[test]
+fn a_held_writer_lane_serves_the_published_read_without_leasing_its_retention() {
+    let fixture = Fixture::new();
+    let empty_manifest = semantic_vector_chunk_manifest_digest(&[]).unwrap();
+    let first = plan_with_count(&fixture, "snapshot-read", empty_manifest.clone(), 0);
+    publish_empty_stage(&fixture, &first, "snapshot-read.first");
+    let first_replay = publication_replay(&first);
+    let first_key = SemanticVectorPublishedGenerationKey {
+        projection: first.key.projection.clone(),
+        semantic_generation_id: first.semantic_generation_id.clone(),
+    };
+
+    // Hold the project's one exclusive writer transaction for the whole read.
+    // This is the lane project open, Context Scout durable startup and the
+    // publication writers share; a `begin_immediate` inside the lookup could
+    // not be granted while this guard lives.
+    let held = fixture
+        .handle
+        .begin_immediate()
+        .expect("hold the exclusive writer lane");
+    let (control, probe) = operation("snapshot-read.under-held-writer");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let (record, verified_head) = match fixture
+        .storage()
+        .published_semantic_generation(&first_key, &context)
+        .unwrap()
+    {
+        SemanticVectorPublishedGenerationLookup::Published {
+            record,
+            verified_head,
+        } => (*record, *verified_head),
+        SemanticVectorPublishedGenerationLookup::Missing => {
+            panic!("the published generation must be readable while a writer holds the lane")
+        }
+    };
+    assert_eq!(record.plan, first);
+    held.rollback().expect("release the held writer lane");
+
+    // The snapshot answered from a consistent history. It conferred nothing:
+    // publish a new head, retire the generation that was read, and the same
+    // key must now refuse.
+    let second = SemanticVectorStagePlan::new(
+        first.key.projection.clone(),
+        SemanticVectorBuildId::new("build.snapshot-read.second").unwrap(),
+        VectorGenerationIdV1::new(
+            canonical_sha256(&("semantic-vector-test-generation", "snapshot-read.second")).unwrap(),
+        ),
+        None,
+        GraphPublicationKeyV1::new(
+            first.key.projection.clone(),
+            GraphGenerationIdV1::new("generation.snapshot-read.second").unwrap(),
+            GraphPublicationIdempotencyKeyV1::new("publication.snapshot-read.second").unwrap(),
+        ),
+        first.source_scope.clone(),
+        first.code_scope_hash.clone(),
+        first.source_generation.clone(),
+        first.source_dependency.clone(),
+        SemanticVectorReconstructionRecipe {
+            expected_chunk_manifest_digest: empty_manifest,
+            ..first.recipe.clone()
+        },
+        0,
+        Some(verified_head.clone()),
+        first.initial_checkpoint_digest.clone(),
+        first.writer_fence.clone(),
+    )
+    .unwrap();
+    publish_empty_stage(&fixture, &second, "snapshot-read.second");
+
+    let (control, probe) = operation("snapshot-read.retire-first");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        fixture
+            .storage()
+            .retire_published_generation(
+                &SemanticVectorPublishedRetirement {
+                    stage: first.key.clone(),
+                    semantic_generation_id: first.semantic_generation_id.clone(),
+                    replay: GraphPublicationReplayRetirementV1::new(
+                        first_replay.key.clone(),
+                        first_replay.input_digest.clone(),
+                        first_replay.dependency_generation_closure_digest.clone(),
+                        first_replay.direct_dependency_generations.clone(),
+                        first_replay.expected_prior_head.clone(),
+                        first_replay.expected_recovered_digest.clone(),
+                        first_replay.canonical_replay_source_digest.clone(),
+                    )
+                    .unwrap(),
+                    writer_fence: first.writer_fence.clone(),
+                },
+                &context,
+            )
+            .unwrap(),
+        SemanticVectorPublishedRetirementOutcome::Retired(_)
+    ));
+
+    let (control, probe) = operation("snapshot-read.after-retirement");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .storage()
+                .published_semantic_generation(&first_key, &context)
+                .unwrap(),
+            SemanticVectorPublishedGenerationLookup::Missing
+        ),
+        "the earlier snapshot must not keep the retired generation lookupable"
+    );
+
+    // The verified head the read handed back is likewise not a lease: settling
+    // it again must not resurrect the retired stage as an exact replay.
+    let (control, probe) = operation("snapshot-read.settle-retained-head");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .storage()
+                .settle_published(
+                    &SemanticVectorStagePublishSettlement {
+                        stage: first.key.clone(),
+                        verified_head,
+                    },
+                    &first.writer_fence,
+                    &context,
+                )
+                .unwrap(),
+            SemanticVectorStagePublishOutcome::MissingStage
+        ),
+        "a retained verified head must not replay a retired generation"
+    );
+}
+
 fn plan_with_source_scope(
     fixture: &Fixture,
     name: &str,
