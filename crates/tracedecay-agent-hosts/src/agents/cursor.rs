@@ -41,7 +41,6 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "reviewing-changes",
     "tracing-functions",
     "using-the-cli",
-    "using-tracedecay",
 ];
 
 impl AgentIntegration for CursorIntegration {
