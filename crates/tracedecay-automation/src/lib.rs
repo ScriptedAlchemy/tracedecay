@@ -29,6 +29,7 @@ pub mod managed_skills {
         ManagedSkillMaterializationScope, ManagedSkillMetadata, ManagedSkillProvenance,
         ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile,
         SkillInstallTarget, current_metadata_timestamp, default_managed_skill_targets,
+        legacy_managed_skill_routing_description,
     };
     pub use crate::managed_skill_validation::{
         validate_managed_skill, validate_managed_skill_update, validate_managed_support_files,
