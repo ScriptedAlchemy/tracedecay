@@ -6,6 +6,8 @@ use crate::common::{
     MessageRecordBuilder, canonical_existing_path as canonical_temp_path, create_runtime,
     global_session,
 };
+#[path = "../../build-support/provision_host_cli_fixture.rs"]
+mod provision_host_cli_fixture;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -144,50 +146,13 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     shim
 }
 
-/// Install a non-interactive `codex` that emulates `plugin add` / `remove`
-/// against the isolated HOME. Real Codex CLI 0.147 does this; CI must not
-/// depend on that binary being present.
+/// Install a compiled `codex` that emulates `plugin add` / `remove` against
+/// the isolated HOME. Real Codex CLI 0.147 does this; CI must not depend on
+/// that binary being present, and Windows must not rename a shell script to
+/// `.exe`.
 fn add_codex_plugin_cli_shim(command: &mut Command, home: &Path) {
     let bin_dir = home.join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let shim = bin_dir.join(if cfg!(windows) { "codex.exe" } else { "codex" });
-    let version = PRODUCT_VERSION;
-    let script = format!(
-        r#"#!/bin/sh
-set -eu
-config="$HOME/.codex/config.toml"
-source="$HOME/.codex/plugins/tracedecay"
-cache="$HOME/.codex/plugins/cache/personal/tracedecay/{version}"
-case "${{1:-}} ${{2:-}}" in
-  "plugin add")
-    mkdir -p "$(dirname "$config")" "$cache"
-    if [ -d "$source" ]; then
-      cp -a "$source/." "$cache/"
-    fi
-    printf '%s\n' '[plugins."tracedecay@personal"]' 'enabled = true' > "$config"
-    printf '%s\n' '{{"pluginId":"tracedecay@personal","enabled":true}}'
-    exit 0
-    ;;
-  "plugin remove")
-    if [ -f "$config" ]; then
-      printf '%s\n' > "$config"
-    fi
-    rm -rf "$HOME/.codex/plugins/cache/personal/tracedecay"
-    exit 0
-    ;;
-esac
-echo "unexpected codex invocation: $*" >&2
-exit 2
-"#,
-        version = version
-    );
-    std::fs::write(&shim, script).unwrap();
-    #[cfg(unix)]
-    {
-        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim, permissions).unwrap();
-    }
+    provision_host_cli_fixture::install_compiled_host_cli_fixture(&bin_dir, "codex");
     let path = command
         .get_envs()
         .find(|(key, _)| *key == "PATH")
@@ -674,6 +639,22 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
 /// Drives the Codex activation journey non-interactively: install stages the
 /// plugin source and marketplace entry, then drives `codex plugin add` through
 /// a host-CLI shim that emulates Codex 0.147's non-interactive registry.
+#[test]
+fn codex_plugin_cli_shim_is_a_native_executable() {
+    let home = TempDir::new().unwrap();
+    let mut command = Command::new("true");
+    add_codex_plugin_cli_shim(&mut command, home.path());
+    let shim = home
+        .path()
+        .join(format!("bin/codex{}", std::env::consts::EXE_SUFFIX));
+    let bytes = std::fs::read(&shim).unwrap();
+    assert!(
+        provision_host_cli_fixture::looks_like_native_executable(&bytes),
+        "Codex host-CLI fixture must be a compiled executable, not a script (Windows os error 216); first bytes: {:?}",
+        &bytes[..bytes.len().min(8)]
+    );
+}
+
 fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
     let home_path = canonical_temp_path(home.path());
 

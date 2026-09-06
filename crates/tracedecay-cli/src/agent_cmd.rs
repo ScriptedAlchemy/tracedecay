@@ -12,6 +12,8 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, sync_
 use tracedecay_session_memory::user_config::UserConfig;
 
 mod automation;
+#[cfg(test)]
+mod host_cli_fixture;
 pub(crate) use automation::CodexAutomationInstall;
 #[cfg(test)]
 use automation::broker_codex_daemon_automation_project;
@@ -3958,7 +3960,6 @@ mod tests {
         /// (`which_tracedecay`) and must keep seeing whatever the ambient
         /// environment offers — replacing `PATH` outright would silently
         /// change the staged binary identity the activation probe compares.
-        #[cfg(unix)]
         fn prepend_path(dir: &Path) -> Self {
             let mut entries = vec![dir.to_path_buf()];
             if let Some(existing) = std::env::var_os("PATH") {
@@ -3978,133 +3979,24 @@ mod tests {
         }
     }
 
-    /// Keep Kiro lifecycle tests on the native `kiro-cli` route.  The child
-    /// receives a cleared environment, so the script only uses absolute
-    /// utility paths and derives its profile from the admitted `HOME`.
-    #[cfg(unix)]
+    /// Keep Kiro lifecycle tests on the native `kiro-cli` route. The compiled
+    /// fixture is a real executable so Windows runners do not rename a shell
+    /// script to `.exe` or depend on an ambient Kiro install.
     fn write_fake_kiro_cli(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let body = r#"#!/bin/sh
-set -eu
-config="$HOME/.kiro/settings/mcp.json"
-/bin/mkdir -p "$HOME/.kiro/settings"
-case "${1-}:${2-}" in
-  mcp:add)
-    if [ "${7-}" != "--args" ] || [ "${8-}" != "serve" ] || [ "${9-}" != "--scope" ] || [ "${10-}" != "global" ] || [ "${11-}" != "--force" ]; then
-      echo "unexpected kiro-cli mcp add arguments: $*" >&2
-      exit 64
-    fi
-    command="$6"
-    if [ -f "$config" ] && /usr/bin/grep -q '"other"' "$config"; then
-      printf '{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$config"
-    else
-      printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$config"
-    fi
-    ;;
-  mcp:remove)
-    if [ "${3-}" != "--name" ] || [ "${4-}" != "tracedecay" ] || [ "${5-}" != "--scope" ] || [ "${6-}" != "global" ]; then
-      echo "unexpected kiro-cli mcp remove arguments: $*" >&2
-      exit 64
-    fi
-    if [ -f "$config" ] && /usr/bin/grep -q '"other"' "$config"; then
-      printf '{"mcpServers":{"other":{"command":"other","args":[]}}}\n' > "$config"
-    else
-      /bin/rm -f "$config"
-    fi
-    ;;
-  *)
-    echo "unexpected kiro-cli invocation: $*" >&2
-    exit 64
-    ;;
-esac
-"#;
-        std::fs::write(path, body).expect("write fake kiro-cli");
-        let mut permissions = std::fs::metadata(path)
-            .expect("fake kiro-cli metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("chmod fake kiro-cli");
+        let dir = path.parent().expect("kiro-cli fixture path has a parent");
+        super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "kiro-cli");
     }
 
-    /// Install a fake `codex` on `PATH` for the Core lifecycle tests, and hand
-    /// back both the `PATH` guard and the directory that holds it.
+    /// Install a compiled `codex` fixture on `PATH` for Core lifecycle tests.
     ///
     /// Core activation drives Codex's own `codex plugin add`
     /// (`plugin_registry::require_codex_plugin_cli`), which is a *requirement*,
     /// not a preference: the host-capability doctrine forbids a fallback that
     /// edits Codex-owned files behind the host's back. CI runners carry no
     /// `codex` binary, so a test that exercises activation has to supply the
-    /// host CLI the same way the Kiro and MCP-registry tests supply theirs.
-    #[cfg(unix)]
+    /// host CLI the same way the Kiro tests supply theirs.
     fn install_fake_codex_cli(dir: &std::path::Path) -> EnvVarGuard {
-        use std::os::unix::fs::PermissionsExt;
-
-        // Mirrors the probed behaviour recorded in
-        // `agents::codex::plugin_registry`: `plugin add` enables
-        // `[plugins."tracedecay@<marketplace>"]` in `config.toml` and copies
-        // the staged source into the versioned cache; `plugin remove` undoes
-        // exactly those two. Peer plugins, `[mcp_servers]`, and `[hooks]` are
-        // preserved because the entry is appended and removed in place —
-        // rewriting the file would trip the registry's own region guard.
-        //
-        // The child is launched with a cleared environment, so the script
-        // establishes its own `PATH` for the utilities it calls and derives
-        // everything else from the admitted `HOME`.
-        let body = format!(
-            r#"#!/bin/sh
-set -eu
-PATH=/usr/bin:/bin
-export PATH
-selector="${{3-}}"
-case "$selector" in
-  tracedecay@?*) ;;
-  *) echo "unexpected codex plugin selector: $*" >&2; exit 64 ;;
-esac
-marketplace="${{selector#tracedecay@}}"
-config="$HOME/.codex/config.toml"
-entry='[plugins."'"$selector"'"]'
-source_dir="$HOME/.codex/plugins/tracedecay"
-cache_dir="$HOME/.codex/plugins/cache/$marketplace/tracedecay/{version}"
-case "${{1-}} ${{2-}}" in
-  "plugin add")
-    mkdir -p "$HOME/.codex"
-    if [ ! -f "$config" ] || ! grep -qF "$entry" "$config"; then
-      printf '\n%s\nenabled = true\n' "$entry" >> "$config"
-    fi
-    rm -rf "$cache_dir"
-    mkdir -p "$cache_dir"
-    cp -R "$source_dir/." "$cache_dir/"
-    ;;
-  "plugin remove")
-    if [ -f "$config" ]; then
-      awk -v entry="$entry" '
-        BEGIN {{ dropping = 0 }}
-        $0 == entry {{ dropping = 1; next }}
-        dropping == 1 && substr($0, 1, 1) == "[" {{ dropping = 0 }}
-        dropping == 0 {{ print }}
-      ' "$config" > "$config.next"
-      mv "$config.next" "$config"
-    fi
-    rm -rf "$cache_dir"
-    ;;
-  *)
-    echo "unexpected codex invocation: $*" >&2
-    exit 64
-    ;;
-esac
-exit 0
-"#,
-            version = tracedecay_agent_hosts::PRODUCT_VERSION,
-        );
-
-        let path = dir.join("codex");
-        std::fs::write(&path, body).expect("write fake codex");
-        let mut permissions = std::fs::metadata(&path)
-            .expect("fake codex metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).expect("chmod fake codex");
+        super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "codex");
         EnvVarGuard::prepend_path(dir)
     }
 
@@ -4568,13 +4460,9 @@ exit 0
         use tracedecay::agents::host_bundle_v2::HostBundleError;
 
         let _profile = pinned_host_profile();
-        #[cfg(unix)]
         let kiro_cli_dir = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
         let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
-        #[cfg(unix)]
         write_fake_kiro_cli(&kiro_cli_path);
-        #[cfg(unix)]
         let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
@@ -4652,6 +4540,106 @@ exit 0
             "a standing refusal must not be laundered into a retryable staleness report"
         );
         assert!(matches!(error, HostBundleError::OwnershipConflict(_)));
+    }
+
+    #[test]
+    fn compiled_kiro_fixture_is_a_native_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kiro-cli");
+        write_fake_kiro_cli(&path);
+        let installed = dir
+            .path()
+            .join(format!("kiro-cli{}", std::env::consts::EXE_SUFFIX));
+        let bytes = std::fs::read(&installed).unwrap();
+        assert!(
+            super::host_cli_fixture::looks_like_native_executable(&bytes),
+            "Kiro host-CLI fixture must be a compiled executable, not a script"
+        );
+    }
+
+    #[test]
+    fn absent_kiro_cli_is_typed_unavailability_not_an_ownership_conflict() {
+        let _profile = pinned_host_profile();
+        let empty_path = tempfile::tempdir().unwrap();
+        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
+                .unwrap()
+                .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+        let error = apply_canonical_component_set(
+            "kiro",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+        )
+        .expect_err("an absent Kiro CLI must refuse the lifecycle");
+        let message = error.to_string();
+        assert!(
+            message.contains("unavailable"),
+            "missing executable must stay a typed unavailability: {message}"
+        );
+        assert!(
+            !message.contains("ownership conflict"),
+            "absence must not be reported as an ownership conflict: {message}"
+        );
+    }
+
+    #[test]
+    fn malformed_kiro_fixture_output_is_not_unavailability_or_ownership_conflict() {
+        let _profile = pinned_host_profile();
+        let kiro_cli_dir = tempfile::tempdir().unwrap();
+        write_fake_kiro_cli(&kiro_cli_dir.path().join("kiro-cli"));
+        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".tracedecay-host-cli-fixture")).unwrap();
+        std::fs::write(
+            home.path().join(".tracedecay-host-cli-fixture/malformed"),
+            b"",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
+                .unwrap()
+                .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+        let error = apply_canonical_component_set(
+            "kiro",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
+        )
+        .expect_err("malformed helper output must fail the lifecycle");
+        let message = error.to_string();
+        assert!(
+            !message.contains("unavailable"),
+            "a present helper that writes garbage must not look like a missing CLI: {message}"
+        );
+        assert!(
+            !message.contains("ownership conflict"),
+            "malformed helper output must not be laundered into an ownership conflict: {message}"
+        );
     }
 
     /// A foreign edit landing between `stage` and `apply` must still abort the

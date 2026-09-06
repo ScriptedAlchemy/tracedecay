@@ -22,6 +22,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+#[path = "build-support/compile_host_cli_fixture.rs"]
+mod compile_host_cli_fixture;
 #[path = "build-support/dashboard_manifest.rs"]
 mod dashboard_manifest;
 #[path = "build-support/source_provenance.rs"]
@@ -322,6 +324,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let code = generated_module(&provenance, &dashboard)?;
 
     let out_dir = std::env::var("OUT_DIR")?;
+    compile_host_cli_fixture::compile_host_cli_fixture(
+        Path::new(&out_dir),
+        env!("CARGO_PKG_VERSION"),
+    )?;
     let out = Path::new(&out_dir).join("product_runtime_generated.rs");
     if !matches!(fs::read_to_string(&out), Ok(current) if current == code) {
         fs::write(&out, code)?;
