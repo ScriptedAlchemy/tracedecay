@@ -129,6 +129,10 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "session_temporal_generation_floors",
+        &["session_id", "next_generation", "reset_at"],
+    ),
+    (
         "session_temporal_generations",
         &[
             "session_id",

@@ -136,8 +136,11 @@ const IMMUTABLE_DERIVED_TEMPORAL_TABLES: &[&str] = &[
 ///
 /// Everything session-temporal that is not projector output stays: summary
 /// nodes and their FTS index, external payload manifests (see
-/// [`PRESERVED_DEPENDENT_TABLES`]), cursor keys, and the retrieval anchors the
-/// rebuilt projection re-attaches to.
+/// [`PRESERVED_DEPENDENT_TABLES`]), cursor keys, generation-allocation floors,
+/// and the retrieval anchors the rebuilt projection re-attaches to. The floor
+/// advances past every deleted generation before invalidation, so rebuilt
+/// cursors and native relation projections cannot alias retained pre-reset
+/// graph state.
 const OBSERVATION_DERIVED_TEMPORAL_DELETES: &[&str] = &[
     "DELETE FROM session_refresh_batch_bindings",
     "DELETE FROM session_refresh_bindings",
@@ -247,6 +250,69 @@ fn row_count(conn: &rusqlite::Connection, table: &str) -> Result<u64, TraceDecay
         operation: OPERATION.to_string(),
         message: format!("{table} row count was negative"),
     })
+}
+
+/// Advances the non-derived allocation floor past every generation the reset
+/// is about to invalidate.
+///
+/// Relation-graph projections are durable derived artifacts outside this
+/// SQLite transaction. Reusing a deleted numeric generation would either
+/// serve that stale projection or conflict while publishing its replacement;
+/// it would also make a still-authentic pre-reset cursor name the rebuilt
+/// generation. The floor is the minimal retained identity needed to prevent
+/// both aliases without preserving any temporal projection row.
+fn preserve_temporal_generation_floors(conn: &rusqlite::Connection) -> Result<(), TraceDecayError> {
+    if !table_exists(conn, "session_temporal_generations")? {
+        return Ok(());
+    }
+    if !table_exists(conn, "session_temporal_generation_floors")? {
+        if row_count(conn, "session_temporal_generations")? == 0 {
+            return Ok(());
+        }
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "the {OBSERVATION_AUTHORITY} reset cannot preserve temporal generation identity \
+                 because session_temporal_generation_floors is unavailable; nothing was reset"
+            ),
+        });
+    }
+    let exhausted = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM session_temporal_generations WHERE generation = ?1
+             )",
+            [i64::MAX],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(reset_storage)?;
+    if exhausted {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "the {OBSERVATION_AUTHORITY} reset cannot advance an exhausted temporal \
+                 generation identity; nothing was reset"
+            ),
+        });
+    }
+    conn.execute(
+        "INSERT INTO session_temporal_generation_floors (
+             session_id, next_generation, reset_at
+         )
+         SELECT session_id, MAX(generation) + 1, unixepoch()
+         FROM session_temporal_generations
+         GROUP BY session_id
+         ON CONFLICT(session_id) DO UPDATE SET
+             next_generation = MAX(
+                 session_temporal_generation_floors.next_generation,
+                 excluded.next_generation
+             ),
+             reset_at = MAX(
+                 session_temporal_generation_floors.reset_at,
+                 excluded.reset_at
+             )",
+        [],
+    )
+    .map_err(reset_storage)?;
+    Ok(())
 }
 
 fn canonical(columns: &[&str]) -> BTreeSet<String> {
@@ -367,6 +433,7 @@ fn reset_within_maintenance_transaction(
     }
     // The session-temporal projection derives from the observation stream, so
     // it resets with it rather than being orphaned or refused over.
+    preserve_temporal_generation_floors(&transaction)?;
     let mut cleared_derived_temporal_rows = 0u64;
     for name in invariant_trigger_names_for_tables(IMMUTABLE_DERIVED_TEMPORAL_TABLES) {
         transaction

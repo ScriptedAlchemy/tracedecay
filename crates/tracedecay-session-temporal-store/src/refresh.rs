@@ -1195,7 +1195,12 @@ async fn ensure_active_generation(
     }
     drop(rows);
 
-    let generation = SessionProjectionGenerationV1::new(1)?;
+    // A scoped observation reset deletes every projection row but preserves a
+    // monotonic allocation floor. Bootstrap at that floor so neither signed
+    // cursors nor retained native relation projections can alias a pre-reset
+    // numeric generation.
+    let generation = next_generation(conn, request.session_id()).await?;
+    let generation_value = generation_i64(generation, BEGIN_REFRESH)?;
     let watermarks = SessionFrozenWatermarksV1::new(
         generation,
         request.target_frontier().committed_through(),
@@ -1207,24 +1212,37 @@ async fn ensure_active_generation(
     conn.execute(
         "INSERT INTO session_temporal_generations (
             session_id, generation, state, frozen_watermarks_json, created_at
-         ) VALUES (?1, 1, 'building', ?2, ?3)",
-        params![request.session_id().as_str(), encoded, recorded_at.0],
+         ) VALUES (?1, ?2, 'building', ?3, ?4)",
+        params![
+            request.session_id().as_str(),
+            generation_value,
+            encoded,
+            recorded_at.0
+        ],
     )
     .await
     .map_err(|error| storage(BEGIN_REFRESH, error))?;
     conn.execute(
         "UPDATE session_temporal_generations
-         SET state = 'ready', ready_at = ?2
-         WHERE session_id = ?1 AND generation = 1 AND state = 'building'",
-        params![request.session_id().as_str(), recorded_at.0],
+         SET state = 'ready', ready_at = ?3
+         WHERE session_id = ?1 AND generation = ?2 AND state = 'building'",
+        params![
+            request.session_id().as_str(),
+            generation_value,
+            recorded_at.0
+        ],
     )
     .await
     .map_err(|error| storage(BEGIN_REFRESH, error))?;
     conn.execute(
         "UPDATE session_temporal_generations
-         SET state = 'active', activated_at = ?2
-         WHERE session_id = ?1 AND generation = 1 AND state = 'ready'",
-        params![request.session_id().as_str(), recorded_at.0],
+         SET state = 'active', activated_at = ?3
+         WHERE session_id = ?1 AND generation = ?2 AND state = 'ready'",
+        params![
+            request.session_id().as_str(),
+            generation_value,
+            recorded_at.0
+        ],
     )
     .await
     .map_err(|error| storage(BEGIN_REFRESH, error))?;
@@ -1237,8 +1255,16 @@ async fn next_generation(
 ) -> SessionStoreResult<SessionProjectionGenerationV1> {
     let mut rows = conn
         .query(
-            "SELECT COALESCE(MAX(generation), 0) + 1
-             FROM session_temporal_generations WHERE session_id = ?1",
+            "SELECT MAX(candidate)
+             FROM (
+                 SELECT COALESCE(MAX(generation), 0) + 1 AS candidate
+                 FROM session_temporal_generations
+                 WHERE session_id = ?1
+                 UNION ALL
+                 SELECT next_generation AS candidate
+                 FROM session_temporal_generation_floors
+                 WHERE session_id = ?1
+             )",
             params![session_id.as_str()],
         )
         .await
