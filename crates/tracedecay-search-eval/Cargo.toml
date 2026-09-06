@@ -105,3 +105,6 @@ path = "src/bin/tracedecay-search-eval.rs"
 [[bin]]
 name = "tracedecay-search-eval-direct"
 path = "src/bin/tracedecay-search-eval-direct.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
