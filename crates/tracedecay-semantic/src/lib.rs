@@ -732,6 +732,32 @@ impl DaemonSemanticRuntimeHandleV1 {
         Some(SemanticEvaluationQueryFactoryV1::from_runtime(inner))
     }
 
+    /// Query-embedder admission for a caller that has already proven exact
+    /// source-content coherence between its pinned vector generation and the
+    /// code generation it serves (see
+    /// `semantic_source_content_coherent` in `tracedecay-usecases`).
+    ///
+    /// Generation identifiers name physical publications; a warmed query
+    /// embedder is physically identified by its projection key alone. Callers
+    /// without a content proof must use [`Self::query_factory`], which pins the
+    /// scheduler's exact current pointer.
+    pub fn query_factory_for_projection(
+        &self,
+        projection_key: &ProjectionKeyV1,
+    ) -> Option<SemanticEvaluationQueryFactoryV1> {
+        let current = self.current()?;
+        if current.projection_key != *projection_key {
+            return None;
+        }
+        let inner = self
+            .runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()?
+            .factory_for_projection(projection_key)?;
+        Some(SemanticEvaluationQueryFactoryV1::from_runtime(inner))
+    }
+
     /// Test-only binding for a pointer published without a production runtime.
     ///
     /// Requires `semantic-fastembed`: the handle's query runtime is concretely
