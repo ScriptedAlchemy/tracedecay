@@ -163,6 +163,68 @@ const SESSION_TEMPORAL_PROJECTION_RECEIPTS_V4: Table = table!(
     ]
 );
 
+const SESSION_RELATION_RECEIPTS: Table = table!(
+    "session_relation_receipts",
+    [
+        column("session_id", "TEXT", true, None, 1),
+        column("generation", "INTEGER", true, None, 2),
+        column("scope_kind", "TEXT", true, None, 0),
+        column("scope_id", "TEXT", true, None, 0),
+        column("expected_graph_watermark", "TEXT", true, None, 0),
+        column("state", "TEXT", true, None, 0),
+        column("graph_watermark", "TEXT", false, None, 0),
+        column("created_at", "INTEGER", true, None, 0),
+        column("applied_at", "INTEGER", false, None, 0),
+        column("recovery_state", "TEXT", true, Some("'pending'"), 0),
+        column("recovery_failure_code", "TEXT", false, None, 0),
+        column("recovery_failure_count", "INTEGER", true, Some("0"), 0),
+        column("recovery_next_attempt_at", "INTEGER", true, Some("0"), 0),
+    ],
+    [
+        foreign_key(
+            "session_id",
+            "session_temporal_generations",
+            "session_id",
+            "CASCADE"
+        ),
+        foreign_key_sequence(
+            "generation",
+            "session_temporal_generations",
+            "generation",
+            "CASCADE",
+            1
+        ),
+    ]
+);
+
+/// Trailing `session_relation_receipts` columns added by receipt recovery,
+/// in persisted `cid` order.
+pub(crate) const SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS: &[&str] = &[
+    "recovery_state",
+    "recovery_failure_code",
+    "recovery_failure_count",
+    "recovery_next_attempt_at",
+];
+
+/// Index that receipt recovery added alongside its columns.
+pub(super) const SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX: &str =
+    "idx_session_relation_receipts_recovery_due";
+
+/// The exact v4 `session_relation_receipts` shape persisted by installations
+/// that migrated before receipt recovery existed: the final contract without
+/// its trailing recovery columns.
+pub(super) const SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY: Table = Table {
+    name: SESSION_RELATION_RECEIPTS.name,
+    columns: SESSION_RELATION_RECEIPTS
+        .columns
+        .split_at(
+            SESSION_RELATION_RECEIPTS.columns.len()
+                - SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS.len(),
+        )
+        .0,
+    foreign_keys: SESSION_RELATION_RECEIPTS.foreign_keys,
+};
+
 pub(super) const TABLES: &[Table] = &[
     table!(
         "projects",
@@ -973,39 +1035,7 @@ pub(super) const TABLES: &[Table] = &[
             "NO ACTION"
         )]
     ),
-    table!(
-        "session_relation_receipts",
-        [
-            column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("scope_kind", "TEXT", true, None, 0),
-            column("scope_id", "TEXT", true, None, 0),
-            column("expected_graph_watermark", "TEXT", true, None, 0),
-            column("state", "TEXT", true, None, 0),
-            column("graph_watermark", "TEXT", false, None, 0),
-            column("created_at", "INTEGER", true, None, 0),
-            column("applied_at", "INTEGER", false, None, 0),
-            column("recovery_state", "TEXT", true, Some("'pending'"), 0),
-            column("recovery_failure_code", "TEXT", false, None, 0),
-            column("recovery_failure_count", "INTEGER", true, Some("0"), 0),
-            column("recovery_next_attempt_at", "INTEGER", true, Some("0"), 0),
-        ],
-        [
-            foreign_key(
-                "session_id",
-                "session_temporal_generations",
-                "session_id",
-                "CASCADE"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_temporal_generations",
-                "generation",
-                "CASCADE",
-                1
-            ),
-        ]
-    ),
+    SESSION_RELATION_RECEIPTS,
     table!(
         "session_relation_effect_journal",
         [

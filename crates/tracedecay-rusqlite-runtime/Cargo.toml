@@ -33,6 +33,7 @@ hotpath-cpu = [
 test-transport = []
 
 [dependencies]
+async-channel = "2.5.0"
 hotpath.workspace = true
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "cache", "hooks", "limits", "trace"] }
 serde = { version = "1", features = ["derive"] }

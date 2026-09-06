@@ -5,9 +5,10 @@ use std::fmt;
 
 use serde_json::json;
 use tracedecay_application::{
-    AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, MultiRootScopeSetCasRequestV1,
-    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
+    AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
+    AuthorizedScopeSetError, CancellationContext, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, MultiRootScopeSetCasRequestV1, RegisteredRootLocatorV1, RequestContext,
+    RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
@@ -157,6 +158,55 @@ fn authorized_scope_set_preserves_registered_root_locator() {
 
     assert_eq!(set.roots()[0].locator(), Some(&locator));
     assert_eq!(set.roots()[0].scope().project_id, locator.project_id);
+}
+
+#[test]
+fn registered_scope_set_refuses_missing_duplicate_and_foreign_profile_roots() {
+    let admission = |suffix: &str, profile: &str| {
+        let context = context_at(
+            &format!("project.{suffix}"),
+            &format!("repository.{suffix}"),
+            &format!("worktree.{suffix}"),
+            suffix,
+        );
+        let locator = RegisteredRootLocatorV1::new(
+            context.scope().project_id.clone(),
+            UserProfileId::new(profile).unwrap(),
+            "store.shared",
+            common::fixture_abs_root(&format!("/workspace/{suffix}")),
+        )
+        .unwrap();
+        AuthorizedRootAdmission::new(context, locator).unwrap()
+    };
+    let authorize = |roots| {
+        AuthorizedScopeSetAuthority::authorize_registered(
+            ScopeSetId::new("scope-set.registered-refusals").unwrap(),
+            ScopeSetRevision::new(1).unwrap(),
+            roots,
+            &CapabilityId::new(CAPABILITY).unwrap(),
+            &UseCaseId::new(USE_CASE).unwrap(),
+            UtcMicros(10),
+        )
+    };
+
+    assert_eq!(authorize(Vec::new()), Err(AuthorizedScopeSetError::Empty));
+
+    let duplicate = admission("duplicate", "profile.shared");
+    assert_eq!(
+        authorize(vec![duplicate.clone(), duplicate]),
+        Err(AuthorizedScopeSetError::DuplicateRoot)
+    );
+
+    assert_eq!(
+        authorize(vec![
+            admission("alpha", "profile.shared"),
+            admission("beta", "profile.foreign"),
+        ]),
+        Err(AuthorizedScopeSetError::Invalid(
+            "authorized roots must either all be registered under one profile store locator or all be pre-resolved"
+                .to_owned()
+        ))
+    );
 }
 
 #[test]
