@@ -258,10 +258,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = temp.path().join("config.yaml");
         let pinned = temp.path().join("pinned-project");
+        // Single-quoted so a Windows path's backslashes are not read as YAML
+        // escapes (`\a` -> BEL, `\t` -> TAB).
         std::fs::write(
             &config,
             format!(
-                "plugins:\n  tracedecay:\n    project_root: \"{}\"\n",
+                "plugins:\n  tracedecay:\n    project_root: '{}'\n",
                 pinned.display()
             ),
         )
