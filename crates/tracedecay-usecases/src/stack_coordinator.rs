@@ -356,14 +356,6 @@ impl DaemonGitHubStackCoordinatorV1 {
         Ok(())
     }
 
-    pub fn seal_transition(
-        &self,
-        scope: &ResolvedScope,
-        draft: StackSignalDraftV1,
-    ) -> Result<StackSignalV1, StackCoordinatorErrorV1> {
-        StackSignalV1::seal(scope, draft)
-    }
-
     pub fn restore_open_drift_interval(
         &self,
         scope: &ResolvedScope,

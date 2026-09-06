@@ -514,40 +514,6 @@ pub fn github_review_contribution_v1(
     })
 }
 
-/// Builds an advisory contribution for a pillar whose anchor identity is
-/// assembled by the caller (CI localization, proximity).
-///
-/// Unlike GitHub review anchors, `CiExactCodeEvidenceV1` and proximity
-/// candidates do not carry a `(file, content_digest, span)` triple directly;
-/// the caller resolves those from its own generation evidence and passes them
-/// here so no identity is invented inside the publication layer.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DiagnosticContributionAnchorV1 {
-    pub anchor: RetrievalAnchorId,
-    pub file_occurrence_id: FileOccurrenceId,
-    pub content_digest: ContentDigest,
-    pub span: SourceSpan,
-    pub symbol_occurrence_id: Option<SymbolOccurrenceId>,
-}
-
-pub fn advisory_contribution_v1(
-    anchor: DiagnosticContributionAnchorV1,
-    code: &str,
-    severity: DiagnosticSeverityV1,
-    notice: &str,
-) -> DiagnosticContributionV1 {
-    DiagnosticContributionV1 {
-        anchor: anchor.anchor,
-        file_occurrence_id: anchor.file_occurrence_id,
-        content_digest: anchor.content_digest,
-        span: anchor.span,
-        symbol_occurrence_id: anchor.symbol_occurrence_id,
-        code: code.to_owned(),
-        severity,
-        message: bounded_notice(notice),
-    }
-}
-
 /// A parsed compiler diagnostic resolved against real file content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedCompilerDiagnosticV1 {

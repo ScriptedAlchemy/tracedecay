@@ -374,38 +374,6 @@ impl SessionRelationGraphStore {
         }
         Ok(visits)
     }
-
-    pub fn has_summary_successor(
-        &self,
-        scope: &SessionRelationScope,
-        session_id: &SessionId,
-        generation: u64,
-        summary_id: &str,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<bool, SessionRelationError> {
-        let namespace = namespace(scope)?;
-        let projection = projection(session_id, generation)?;
-        let snapshot = self.database.snapshot().map_err(map_graph_error)?;
-        if snapshot
-            .projection_telemetry(GraphProjectionTelemetryRequest {
-                namespace: namespace.clone(),
-                projection,
-                cancellation: Arc::clone(&cancellation),
-            })
-            .map_err(map_graph_error)?
-            .is_none()
-        {
-            return Err(SessionRelationError::NotFound);
-        }
-        let starts = [summary_entity_id(session_id, generation, summary_id)?];
-        let kinds = BTreeSet::from([
-            GraphRelationKind::new(SUMMARY_SUCCESSOR_KIND).map_err(map_graph_error)?
-        ]);
-        self.database
-            .outgoing_relations(&namespace, &starts, &kinds, 1, cancellation)
-            .map(|mut batches| batches.pop().is_some_and(|relations| !relations.is_empty()))
-            .map_err(map_graph_error)
-    }
 }
 
 pub(crate) fn projection_watermark(
@@ -804,22 +772,6 @@ fn occurrence_entity_id(
         OCCURRENCE_KIND,
         occurrence_id.as_str(),
     )
-}
-
-fn thread_entity_id(
-    session_id: &SessionId,
-    generation: u64,
-    thread_id: &ThreadId,
-) -> Result<GraphEntityId, SessionRelationError> {
-    entity_id(session_id, generation, THREAD_KIND, thread_id.as_str())
-}
-
-fn agent_entity_id(
-    session_id: &SessionId,
-    generation: u64,
-    agent_id: &AgentInstanceId,
-) -> Result<GraphEntityId, SessionRelationError> {
-    entity_id(session_id, generation, AGENT_KIND, agent_id.as_str())
 }
 
 fn session_entity_id(

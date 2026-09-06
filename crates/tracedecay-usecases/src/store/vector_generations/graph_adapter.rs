@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use tokio::sync::Semaphore;
 
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
@@ -9,8 +10,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProjectionId,
-    GraphPropertyName, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
-    MAX_VECTOR_SEARCH_LIMIT, VectorMetric, VectorSearchRequest,
+    GraphPropertyName, GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT,
+    VectorMetric, VectorSearchRequest,
 };
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
@@ -42,14 +43,13 @@ pub(super) mod transitions;
 use native_records::{
     PublishedBaseRecover, ScopedGenerationRecordsV1, peek_generation_base, read_build_records,
     read_cataloged_generation_records, read_generation_catalog, read_generation_catalog_entry,
-    read_generation_metadata, read_generation_records_with_recover, read_state_metadata,
+    read_generation_records_with_recover, read_state_metadata,
 };
 
 #[cfg(test)]
 pub(crate) use native_records::encode_generation_batch_delta;
 use persistence::{
-    check_cancelled, map_graph_error, resident_size_overflow, search_vector_property,
-    storage_error, vector_metric,
+    check_cancelled, map_graph_error, search_vector_property, storage_error, vector_metric,
 };
 use snapshot::SemanticVectorVerifiedReadV1;
 
@@ -64,12 +64,59 @@ const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 /// cancellation as the earlier reclamation path.
 pub const GRAPH_BACKGROUND_OPERATION_BUDGET: Duration = Duration::from_secs(15 * 60);
 
-pub struct GraphVectorGenerationStoreV1 {
+/// One corpus-scaled phase of publishing a generation.
+///
+/// Each is an independent whole-generation pass with its own fresh background
+/// authority, so progress and cancellation are named per phase: a publication
+/// that stalls has to say *which* pass is still running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorPublicationPhaseV1 {
+    /// Re-derives the staged generation's digest over every stored row.
+    Verify,
+    /// Installs the verified generation as the published head.
+    Publish,
+}
+
+impl VectorPublicationPhaseV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verify => "verify",
+            Self::Publish => "publish",
+        }
+    }
+}
+
+/// Every durable operation this store performs is synchronous SQL: it acquires
+/// the project's single exclusive writer, runs its statements, and commits or
+/// rolls back before returning. That work is owned here, behind one `Arc`, so
+/// the async facade can hand a whole operation to the blocking pool instead of
+/// running it on a runtime worker.
+pub struct GraphVectorGenerationStoreStateV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
     snapshot: Mutex<Option<SemanticVectorVerifiedReadV1>>,
     descriptor: Mutex<Option<SemanticVectorStageDescriptorV1>>,
     pending: Mutex<BTreeMap<VectorGenerationBuildIdV1, PendingSemanticVectorBuildV1>>,
 }
+
+pub struct GraphVectorGenerationStoreV1 {
+    state: Arc<GraphVectorGenerationStoreStateV1>,
+    admission: Arc<Semaphore>,
+}
+
+/// The synchronous surface stays reachable by name on the store itself, so the
+/// callers that are already outside an async context keep calling it directly.
+impl std::ops::Deref for GraphVectorGenerationStoreV1 {
+    type Target = GraphVectorGenerationStoreStateV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+/// One durable operation per store may be in flight. The operations contend on
+/// that one exclusive writer regardless, so admitting more only converts writer
+/// contention into blocking-pool waiters.
+const STORE_OPERATION_ADMISSION: usize = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
@@ -295,19 +342,6 @@ impl VerifiedGraphVectorGenerationSnapshotV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VerifiedVectorResidentPlanV1 {
-    pub watermark: GraphWatermark,
-    pub generation_id: VectorGenerationIdV1,
-    pub retained_bytes: u64,
-    pub hydration_peak_bytes: u64,
-}
-
-pub struct ResidentVectorRowV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub values: Box<[f32]>,
-}
-
 /// One generation-bound persisted ANN index, retained with the verified
 /// snapshot lease it serves from.
 ///
@@ -403,12 +437,31 @@ impl GraphVectorGenerationStoreV1 {
             .recover_verified_snapshot(&authority)
             .map_err(map_graph_error)?
             .map(SemanticVectorVerifiedReadV1::new);
-        Ok(Self {
+        Ok(Self::from_state(GraphVectorGenerationStoreStateV1 {
             runtime,
             snapshot: Mutex::new(snapshot),
             descriptor: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
-        })
+        }))
+    }
+
+    /// Swap the graph runtime of a store no operation has been dispatched
+    /// against yet, so a test can wrap it in a probe.
+    #[cfg(test)]
+    pub(crate) fn replace_runtime(
+        &mut self,
+        runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    ) {
+        Arc::get_mut(&mut self.state)
+            .expect("store state is uniquely held when its runtime is replaced")
+            .runtime = runtime;
+    }
+
+    fn from_state(state: GraphVectorGenerationStoreStateV1) -> Self {
+        Self {
+            state: Arc::new(state),
+            admission: Arc::new(Semaphore::new(STORE_OPERATION_ADMISSION)),
+        }
     }
 
     /// Recover the one verified physical graph generation bound to a stable
@@ -462,14 +515,66 @@ impl GraphVectorGenerationStoreV1 {
                 format!("verified_head={:?}", snapshot.verified_head()),
             )));
         }
-        Ok(Some(Self {
+        Ok(Some(Self::from_state(GraphVectorGenerationStoreStateV1 {
             runtime,
             snapshot: Mutex::new(Some(SemanticVectorVerifiedReadV1::new(snapshot))),
             descriptor: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
-        }))
+        })))
     }
 
+    /// Admit one operation, then hand the whole of it to the blocking pool.
+    ///
+    /// The permit travels *into* the job. A started `spawn_blocking` task
+    /// cannot be aborted and dropping its awaiter does not stop its writes, so
+    /// releasing the permit on the awaiting side would admit the next mutation
+    /// on top of one that is still running. Cancellation stays cooperative:
+    /// the operation's own `GraphCancellation` is checkpointed inside the job.
+    async fn dispatch<T>(
+        &self,
+        operation: impl FnOnce(
+            &GraphVectorGenerationStoreStateV1,
+        ) -> Result<T, VectorGenerationStoreErrorV1>
+        + Send
+        + 'static,
+    ) -> Result<T, VectorGenerationStoreErrorV1>
+    where
+        T: Send + 'static,
+    {
+        let permit = Arc::clone(&self.admission)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                VectorGenerationStoreErrorV1::Unavailable(
+                    "semantic vector store admission is closed".to_owned(),
+                )
+            })?;
+        let state = Arc::clone(&self.state);
+        settle_blocking(tokio::task::spawn_blocking(move || {
+            let outcome = operation(state.as_ref());
+            drop(permit);
+            outcome
+        }))
+        .await?
+    }
+}
+
+/// Await one dispatched blocking job. A panic inside the job stays a panic on
+/// the caller, exactly as the synchronous call it replaced; only a runtime
+/// shutdown that drops the job answers as cancellation.
+async fn settle_blocking<T>(
+    handle: tokio::task::JoinHandle<T>,
+) -> Result<T, VectorGenerationStoreErrorV1> {
+    match handle.await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => Err(VectorGenerationStoreErrorV1::Cancelled),
+        },
+    }
+}
+
+impl GraphVectorGenerationStoreStateV1 {
     pub fn configure_stage(
         &self,
         descriptor: SemanticVectorStageDescriptorV1,
@@ -562,12 +667,19 @@ impl GraphVectorGenerationStoreV1 {
         }
         let generation_id = catalog[0].generation_id.clone();
         drop(snapshot);
-        self.read_cataloged_hydrating_published_bases(&generation_id, Arc::clone(&cancellation))?
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Corrupt(
-                    "verified semantic vector generation records are missing".to_owned(),
-                )
-            })?;
+        // Opening a store re-proves the published generation over every stored
+        // row, so this is daemon-owned whole-generation verification, not an
+        // interactive read.
+        self.read_cataloged_hydrating_published_bases(
+            &generation_id,
+            Arc::clone(&cancellation),
+            GRAPH_BACKGROUND_OPERATION_BUDGET,
+        )?
+        .ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Corrupt(
+                "verified semantic vector generation records are missing".to_owned(),
+            )
+        })?;
         check_cancelled(cancellation.as_ref())?;
         Ok(())
     }
@@ -576,27 +688,45 @@ impl GraphVectorGenerationStoreV1 {
     /// published base identity. Recover that published snapshot only after
     /// dropping the current verified read: isolated evaluation's SQLite writer
     /// cannot open another generation while a reader snapshot is still live.
+    ///
+    /// `recovery_budget` is the authority policy of the phase that asked, not
+    /// a property of this walk: an interactive read keeps
+    /// [`GRAPH_OPERATION_DEADLINE`], while a daemon-owned lifecycle phase
+    /// passes [`GRAPH_BACKGROUND_OPERATION_BUDGET`]. Each generation in the
+    /// lineage still mints its own authority from it, because each is an
+    /// independent whole-generation pass.
     fn read_cataloged_hydrating_published_bases(
         &self,
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
+        recovery_budget: Duration,
     ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
         let Some(snapshot) = self.optional_snapshot()? else {
-            let cache =
-                self.preload_published_lineage(Some(generation_id), Arc::clone(&cancellation))?;
+            let cache = self.preload_published_lineage(
+                Some(generation_id),
+                Arc::clone(&cancellation),
+                recovery_budget,
+            )?;
             return Ok(cache.get(generation_id).cloned());
         };
         let catalog =
             read_generation_catalog_entry(&snapshot, generation_id, Arc::clone(&cancellation))?;
         let Some(catalog) = catalog else {
             drop(snapshot);
-            let cache =
-                self.preload_published_lineage(Some(generation_id), Arc::clone(&cancellation))?;
+            let cache = self.preload_published_lineage(
+                Some(generation_id),
+                Arc::clone(&cancellation),
+                recovery_budget,
+            )?;
             return Ok(cache.get(generation_id).cloned());
         };
         let base = catalog.base_generation.clone();
         drop(snapshot);
-        let cache = self.preload_published_lineage(base.as_ref(), Arc::clone(&cancellation))?;
+        let cache = self.preload_published_lineage(
+            base.as_ref(),
+            Arc::clone(&cancellation),
+            recovery_budget,
+        )?;
         let snapshot = self.snapshot()?;
         let recover: &PublishedBaseRecover<'_> =
             &|generation, _, _| Ok(cache.get(generation).cloned());
@@ -608,6 +738,7 @@ impl GraphVectorGenerationStoreV1 {
         &self,
         start: Option<&VectorGenerationIdV1>,
         cancellation: Arc<dyn GraphCancellation>,
+        recovery_budget: Duration,
     ) -> Result<
         BTreeMap<VectorGenerationIdV1, ScopedGenerationRecordsV1>,
         VectorGenerationStoreErrorV1,
@@ -623,7 +754,11 @@ impl GraphVectorGenerationStoreV1 {
             }
             chain.push(generation_id.clone());
             let snapshot = self
-                .load_published_generation_snapshot(&generation_id, Arc::clone(&cancellation))?
+                .load_published_generation_snapshot(
+                    &generation_id,
+                    Arc::clone(&cancellation),
+                    recovery_budget,
+                )?
                 .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                     BaseGenerationIncompatibilityV1::MissingPublished,
                 ))?;
@@ -633,7 +768,11 @@ impl GraphVectorGenerationStoreV1 {
         let mut cache = BTreeMap::new();
         for generation_id in chain.into_iter().rev() {
             let snapshot = self
-                .load_published_generation_snapshot(&generation_id, Arc::clone(&cancellation))?
+                .load_published_generation_snapshot(
+                    &generation_id,
+                    Arc::clone(&cancellation),
+                    recovery_budget,
+                )?
                 .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                     BaseGenerationIncompatibilityV1::MissingPublished,
                 ))?;
@@ -658,11 +797,14 @@ impl GraphVectorGenerationStoreV1 {
         &self,
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
+        recovery_budget: Duration,
     ) -> Result<Option<SemanticVectorVerifiedReadV1>, VectorGenerationStoreErrorV1> {
-        let authority = SemanticGraphExecutionAuthorityV1::new(
-            cancellation,
-            Instant::now() + GRAPH_OPERATION_DEADLINE,
-        );
+        // Recovering a published generation can re-derive its digest over every
+        // stored row, so the budget belongs to the phase that asked and each
+        // recovery starts fresh: a lineage walk is a sequence of independent
+        // whole-generation passes, and one must not spend the next one's.
+        let authority =
+            SemanticGraphExecutionAuthorityV1::new(cancellation, Instant::now() + recovery_budget);
         let (_, binding) = self.runtime.staging_binding();
         let scope = self.runtime.scope();
         let key = SemanticVectorPublishedGenerationKey {
@@ -707,57 +849,9 @@ impl GraphVectorGenerationStoreV1 {
         Ok(Some(SemanticVectorVerifiedReadV1::new(snapshot)))
     }
 
-    #[hotpath::measure(label = "usecases.store.begin_generation", future = true)]
-    pub async fn begin_generation(
-        &self,
-        plan: VectorGenerationPlanV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<VectorGenerationBeginOutcomeV1, VectorGenerationStoreErrorV1> {
-        self.begin_generation_records(plan, false, cancellation)
-    }
-
-    #[hotpath::measure(label = "usecases.store.rebuild_generation", future = true)]
-    pub async fn rebuild_generation(
-        &self,
-        plan: VectorGenerationPlanV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<VectorGenerationBeginOutcomeV1, VectorGenerationStoreErrorV1> {
-        self.begin_generation_records(plan, true, cancellation)
-    }
-
-    #[hotpath::measure(label = "usecases.store.cancel_generation", future = true)]
-    pub async fn cancel_generation(
-        &self,
-        build_id: &VectorGenerationBuildIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<bool, VectorGenerationStoreErrorV1> {
-        self.cancel_generation_records(build_id, cancellation)
-    }
-
-    #[hotpath::measure(label = "usecases.store.commit_batch", future = true)]
-    pub async fn commit_batch(
-        &self,
-        build_id: &VectorGenerationBuildIdV1,
-        expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
-        prepared: PreparedVectorGenerationV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
-        self.commit_batch_records(build_id, expected_checkpoint, prepared, cancellation)
-    }
-
-    #[hotpath::measure(label = "usecases.store.publish_generation", future = true)]
-    pub async fn publish_generation(
-        &self,
-        build_id: &VectorGenerationBuildIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
-        self.publish_generation_records(build_id, cancellation)
-    }
-
     /// Read one exact semantic generation from an already identity-selected
     /// verified physical snapshot.
-    #[hotpath::measure(label = "usecases.store.generation_snapshot", future = true)]
-    pub async fn generation_snapshot_for(
+    fn generation_snapshot_records(
         &self,
         generation_id: &VectorGenerationIdV1,
         embedding_key: &AdmittedEmbeddingProjectionKeyV1,
@@ -768,8 +862,11 @@ impl GraphVectorGenerationStoreV1 {
         let snapshot = self.snapshot()?;
         let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
         drop(snapshot);
-        let Some(records) =
-            self.read_cataloged_hydrating_published_bases(generation_id, cancellation)?
+        let Some(records) = self.read_cataloged_hydrating_published_bases(
+            generation_id,
+            cancellation,
+            GRAPH_OPERATION_DEADLINE,
+        )?
         else {
             return Ok(None);
         };
@@ -786,7 +883,7 @@ impl GraphVectorGenerationStoreV1 {
         }))
     }
 
-    pub async fn staged_checkpoint(
+    fn staged_checkpoint_records(
         &self,
         build_id: &VectorGenerationBuildIdV1,
         cancellation: Arc<dyn GraphCancellation>,
@@ -798,7 +895,7 @@ impl GraphVectorGenerationStoreV1 {
             .map(|records| records.map(|records| records.staged.checkpoint))
     }
 
-    pub async fn generation(
+    fn generation_records(
         &self,
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
@@ -806,12 +903,16 @@ impl GraphVectorGenerationStoreV1 {
         if self.optional_snapshot()?.is_none() {
             return Ok(None);
         }
-        self.read_cataloged_hydrating_published_bases(generation_id, cancellation)
-            .map(|records| records.map(|records| records.generation))
+        self.read_cataloged_hydrating_published_bases(
+            generation_id,
+            cancellation,
+            GRAPH_OPERATION_DEADLINE,
+        )
+        .map(|records| records.map(|records| records.generation))
     }
 
     /// Catalog/owner visibility only — does not hydrate resident vectors.
-    pub async fn published_generation_is_visible(
+    fn published_generation_visible_records(
         &self,
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
@@ -827,67 +928,6 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<u64, VectorGenerationStoreErrorV1> {
         read_state_metadata(&self.snapshot()?, cancellation).map(|metadata| metadata.revision)
-    }
-
-    #[hotpath::measure(label = "usecases.store.resident_plan", future = true)]
-    pub async fn verified_resident_plan(
-        &self,
-        expected_generation: &VectorGenerationIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<VerifiedVectorResidentPlanV1>, VectorGenerationStoreErrorV1> {
-        check_cancelled(cancellation.as_ref())?;
-        let snapshot = self.snapshot()?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
-        let generation =
-            read_generation_metadata(&snapshot, expected_generation, Arc::clone(&cancellation))?
-                .ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::Corrupt(
-                        "active semantic vector generation metadata is missing".to_owned(),
-                    )
-                })?;
-        let catalog = read_generation_catalog_entry(
-            &snapshot,
-            expected_generation,
-            Arc::clone(&cancellation),
-        )?
-        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
-            BaseGenerationIncompatibilityV1::MissingSnapshot,
-        ))?;
-        if &catalog.generation_id != expected_generation {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector generation catalog identity is inconsistent".to_owned(),
-            ));
-        }
-        let row_count = catalog.rows;
-        let dimensions = u64::from(generation.embedding_key.embedding_key().dimensions);
-        let vector_bytes = dimensions
-            .checked_mul(u64::try_from(size_of::<f32>()).map_err(storage_error)?)
-            .ok_or_else(resident_size_overflow)?;
-        let per_row = u64::try_from(size_of::<ResidentVectorRowV1>())
-            .map_err(storage_error)?
-            .checked_add(1_024)
-            .and_then(|bytes| bytes.checked_add(vector_bytes))
-            .ok_or_else(resident_size_overflow)?;
-        let retained_bytes = row_count
-            .checked_mul(per_row)
-            .ok_or_else(resident_size_overflow)?;
-        let hydration_peak_bytes = retained_bytes
-            .checked_mul(2)
-            .and_then(|bytes| {
-                row_count
-                    .checked_mul(4_096)
-                    .and_then(|overhead| bytes.checked_add(overhead))
-            })
-            .ok_or_else(resident_size_overflow)?;
-        drop(snapshot);
-        check_cancelled(cancellation.as_ref())?;
-        crate::hotpath_observe::vector_resident_reservation(retained_bytes, hydration_peak_bytes);
-        Ok(Some(VerifiedVectorResidentPlanV1 {
-            watermark: metadata.watermark,
-            generation_id: expected_generation.clone(),
-            retained_bytes,
-            hydration_peak_bytes,
-        }))
     }
 
     /// The persisted ANN index bound to one published generation, if the
@@ -950,5 +990,136 @@ impl GraphVectorGenerationStoreV1 {
             indexed: u64::try_from(vectors).map_err(storage_error)?,
             cancellation,
         }))
+    }
+}
+
+/// The async facade. Each method admits one operation and dispatches the whole
+/// of it — writer acquisition, statements, commit or rollback, and the state
+/// installs that follow — onto the blocking pool, then awaits the typed result.
+/// Nothing durable runs on a runtime worker, so a task holding an open write
+/// transaction stays pollable while another operation waits for the writer.
+impl GraphVectorGenerationStoreV1 {
+    #[hotpath::measure(label = "usecases.store.begin_generation", future = true)]
+    pub async fn begin_generation(
+        &self,
+        plan: VectorGenerationPlanV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<VectorGenerationBeginOutcomeV1, VectorGenerationStoreErrorV1> {
+        self.dispatch(move |state| state.begin_generation_records(plan, false, cancellation))
+            .await
+    }
+
+    #[hotpath::measure(label = "usecases.store.rebuild_generation", future = true)]
+    pub async fn rebuild_generation(
+        &self,
+        plan: VectorGenerationPlanV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<VectorGenerationBeginOutcomeV1, VectorGenerationStoreErrorV1> {
+        self.dispatch(move |state| state.begin_generation_records(plan, true, cancellation))
+            .await
+    }
+
+    #[hotpath::measure(label = "usecases.store.cancel_generation", future = true)]
+    pub async fn cancel_generation(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let build_id = build_id.clone();
+        self.dispatch(move |state| state.cancel_generation_records(&build_id, cancellation))
+            .await
+    }
+
+    #[hotpath::measure(label = "usecases.store.commit_batch", future = true)]
+    pub async fn commit_batch(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
+        prepared: PreparedVectorGenerationV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
+        let build_id = build_id.clone();
+        let expected_checkpoint = expected_checkpoint.cloned();
+        self.dispatch(move |state| {
+            state.commit_batch_records(
+                &build_id,
+                expected_checkpoint.as_ref(),
+                prepared,
+                cancellation,
+            )
+        })
+        .await
+    }
+
+    #[hotpath::measure(label = "usecases.store.publish_generation", future = true)]
+    pub async fn publish_generation(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        let build_id = build_id.clone();
+        self.dispatch(move |state| state.publish_generation_records(&build_id, cancellation))
+            .await
+    }
+
+    /// Read one exact semantic generation from an already identity-selected
+    /// verified physical snapshot. Read-only is not non-blocking: this
+    /// hydrates a whole published lineage through synchronous SQL.
+    #[hotpath::measure(label = "usecases.store.generation_snapshot", future = true)]
+    pub async fn generation_snapshot_for(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<VerifiedGraphVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
+        let generation_id = generation_id.clone();
+        let embedding_key = embedding_key.clone();
+        let source_generation = source_generation.clone();
+        let source_manifest_digest = source_manifest_digest.clone();
+        self.dispatch(move |state| {
+            state.generation_snapshot_records(
+                &generation_id,
+                &embedding_key,
+                &source_generation,
+                &source_manifest_digest,
+                cancellation,
+            )
+        })
+        .await
+    }
+
+    pub async fn staged_checkpoint(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<VectorProjectionCheckpointV1>, VectorGenerationStoreErrorV1> {
+        let build_id = build_id.clone();
+        self.dispatch(move |state| state.staged_checkpoint_records(&build_id, cancellation))
+            .await
+    }
+
+    pub async fn generation(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<super::PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        let generation_id = generation_id.clone();
+        self.dispatch(move |state| state.generation_records(&generation_id, cancellation))
+            .await
+    }
+
+    /// Catalog/owner visibility only — does not hydrate resident vectors.
+    pub async fn published_generation_is_visible(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let generation_id = generation_id.clone();
+        self.dispatch(move |state| {
+            state.published_generation_visible_records(&generation_id, cancellation)
+        })
+        .await
     }
 }

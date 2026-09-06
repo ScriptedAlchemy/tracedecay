@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code)] // shared test support: each suite binary compiles this module and uses a subset
 
 use tracedecay_tool_catalog::{
     ApplicationHandlerDescriptorV1, AuthorityRequirement, AvailabilityContract, BindingId,

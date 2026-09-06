@@ -65,10 +65,6 @@ impl LcmSensitiveRedactionV1 {
     pub fn patterns(&self) -> &[String] {
         &self.patterns
     }
-
-    pub fn was_redacted(&self) -> bool {
-        !self.patterns.is_empty()
-    }
 }
 
 pub fn redact_lcm_sensitive_payload(

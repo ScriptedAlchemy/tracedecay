@@ -1672,29 +1672,6 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    /// Returns an exact already-published runtime for a read-only facade.
-    ///
-    /// This does not revalidate or expose its retained writer authority. Any
-    /// later write still enters the ordinary actor-time authority gates.
-    pub fn retained_runtime_for_read(
-        &self,
-        key: &StoreRuntimeKey,
-    ) -> Option<StoreRuntimeClientLease> {
-        let state = self.lock_state();
-        match state.entries.get(key) {
-            Some(RegistryEntry::Ready(ready)) => ready.owner.issue_client_lease().ok(),
-            Some(
-                RegistryEntry::Opening(_)
-                | RegistryEntry::Retiring(_)
-                | RegistryEntry::Committing(_)
-                | RegistryEntry::Faulted(_)
-                | RegistryEntry::DurabilityUncertain(_)
-                | RegistryEntry::Evicting(_),
-            )
-            | None => None,
-        }
-    }
-
     pub(super) fn issue_client_lease_for_open(
         &self,
         key: &StoreRuntimeKey,

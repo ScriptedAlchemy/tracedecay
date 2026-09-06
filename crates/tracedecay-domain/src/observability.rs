@@ -469,38 +469,6 @@ pub struct HealthSnapshotObservedV1 {
     pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PerformanceMeasurementDescriptorV1 {
-    pub descriptor_revision: String,
-    pub metric: String,
-    pub unit: String,
-    pub eligible_population: String,
-    pub horizon: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct BenchmarkRunAggregateV1 {
-    pub descriptor: PerformanceMeasurementDescriptorV1,
-    pub eligible: u64,
-    pub observed: u64,
-    pub censored: u64,
-    pub unknown: u64,
-    pub p50: Option<f64>,
-    pub p95: Option<f64>,
-    pub p99: Option<f64>,
-    pub coverage: CoverageStateV1,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct PairedEffectEstimateV1 {
-    pub baseline_revision: String,
-    pub candidate_revision: String,
-    pub paired_samples: u64,
-    pub effect: Option<f64>,
-    pub unit: String,
-    pub coverage: CoverageStateV1,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PerformanceDispositionV1 {

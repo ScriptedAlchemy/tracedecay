@@ -23,9 +23,6 @@ pub const DAEMON_AUTHORITY_DIRECTORY: &str = "daemon-authority";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
 pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
-/// Legacy filename prefix used to recognize already-quarantined branch
-/// metadata as non-authoritative debris.
-pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const DURABLE_REMOVAL_TOMBSTONE_PREFIX: &str = ".tracedecay-deleted-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 

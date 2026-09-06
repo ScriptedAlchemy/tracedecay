@@ -204,11 +204,6 @@ pub fn acquire_shared_for_profile(profile_root: &Path, operation: &str) -> Resul
     acquire_shared_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
-/// Attempts to acquire a non-inherited shared lease without blocking.
-pub fn try_acquire_shared(operation: &str) -> Result<SharedLeaseAttempt> {
-    try_acquire_shared_at(&lifecycle_lock_path()?, operation)
-}
-
 pub fn try_acquire_shared_for_profile(
     profile_root: &Path,
     operation: &str,

@@ -48,17 +48,33 @@ impl DaemonInvocationService {
             .register_or_reconcile(
                 project_root.clone(),
                 |registered: &mut RegisteredObservabilityProducerV1| {
-                    registered
-                        .matches(
-                            &database,
-                            project_id.as_str(),
-                            DAEMON_OBSERVABILITY_PRODUCER_REVISION,
-                        )
-                        .then_some(())
-                        .ok_or_else(|| TraceDecayError::Config {
+                    if !registered.matches(
+                        &database,
+                        project_id.as_str(),
+                        DAEMON_OBSERVABILITY_PRODUCER_REVISION,
+                    ) {
+                        return Err(TraceDecayError::Config {
                             message:
                                 "a different observability producer is already mounted for this project"
                                     .to_owned(),
+                        });
+                    }
+                    // This remount resolved the store's configuration and
+                    // policy provenance again. Those are the root's own at its
+                    // own open time, so the incumbent alias re-stamps them:
+                    // otherwise a remount under a newer configuration would
+                    // keep stamping the revision frozen at the first mount for
+                    // the life of the daemon. Already-admitted observations
+                    // retain the provenance stamped when they were admitted.
+                    registered
+                        .restamp_provenance(
+                            configuration_revision.as_str(),
+                            policy_revision.as_str(),
+                        )
+                        .map_err(|reason| TraceDecayError::Config {
+                            message: format!(
+                                "project observability provenance could not be renewed: {reason}"
+                            ),
                         })
                 },
                 || async {

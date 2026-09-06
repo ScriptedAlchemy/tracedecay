@@ -392,10 +392,6 @@ impl AuthorizedTaskSessionExecutionRequestV1 {
     pub fn control(&self) -> &EvidenceLaneExecutionControlV1 {
         &self.control
     }
-
-    pub fn into_temporal(self) -> AuthorizedTemporalExecutionRequest {
-        self.temporal
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
