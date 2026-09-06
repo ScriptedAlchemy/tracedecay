@@ -1098,6 +1098,10 @@ pub enum ObservationBatchFallbackCause {
     IntraBatchIdentityCollision,
     IntraBatchSanitizationReceiptCollision,
     IntraBatchRetrievalAnchorAliasCollision,
+    /// A collision path that must compare-and-set against the durable source
+    /// frontier, while an earlier member of this batch has not made that
+    /// frontier durable yet.
+    IntraBatchDurableFrontier,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

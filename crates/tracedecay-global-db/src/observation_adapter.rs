@@ -421,6 +421,9 @@ impl GlobalDbObservationStore {
                         observation.payload_reference().digest().clone(),
                     ));
                 }
+                if let Some(fallback) = durable_frontier_owned_by_batch(&known_cursor) {
+                    return Err(fallback);
+                }
                 if let RefusalCoverageOutcome::NotAtFrontier { actual } = self
                     .record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
                     .await?
@@ -467,6 +470,9 @@ impl GlobalDbObservationStore {
                     ),
                     existing,
                 ));
+            }
+            if let Some(fallback) = durable_frontier_owned_by_batch(&known_cursor) {
+                return Err(fallback);
             }
             let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
                 identity.source().clone(),
@@ -1629,6 +1635,23 @@ enum RefusalCoverageOutcome {
     NotAtFrontier {
         actual: Option<ClaudeSourceCursorV1>,
     },
+}
+
+/// Whether an earlier member of this batch already published the source cursor
+/// this write would compare-and-set against.
+///
+/// The collision paths below read the *durable* frontier, but a published
+/// batch cursor only becomes durable when the batch submits. Replaying the
+/// batch as scalar writes lets each earlier write land first, instead of
+/// refusing the whole window as a cursor conflict and wedging the frontier.
+fn durable_frontier_owned_by_batch(
+    known_cursor: &Option<Option<ClaudeSourceCursorV1>>,
+) -> Option<ObservationStoreError> {
+    known_cursor
+        .is_some()
+        .then_some(ObservationStoreError::BatchRequiresScalarFallback {
+            cause: ObservationBatchFallbackCause::IntraBatchDurableFrontier,
+        })
 }
 
 fn refused_scan_frontier(
