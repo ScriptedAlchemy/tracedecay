@@ -75,33 +75,6 @@ pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
         || canonicalize_path_or_existing_parent(left) == canonicalize_path_or_existing_parent(right)
 }
 
-/// The filesystem identity a root is stored and compared under.
-///
-/// Existing ancestors are resolved so host aliases — macOS `/var` →
-/// `/private/var`, Windows `\\?\` verbatim vs native — collapse to one name.
-/// The result is spelled plainly so it can cross into file URLs, YAML, TOML,
-/// and child processes without those formats reinterpreting separators.
-#[must_use]
-pub fn canonical_root_identity(path: &Path) -> PathBuf {
-    plain_host_path(&canonicalize_path_or_existing_parent(path))
-}
-
-/// Whether `path` is spelled through `.` or `..`, including when a later
-/// normalize step would erase that spelling.
-///
-/// Authorization contracts that refuse traversal must inspect the caller's
-/// spelling before `canonicalize` or a lexical collapse can turn
-/// `root/../escape` into a sibling that looks in-bounds.
-#[must_use]
-pub fn has_traversal_spelling(path: &Path) -> bool {
-    path.components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-        || path.to_str().is_some_and(|text| {
-            text.split(['/', '\\'])
-                .any(|component| component == "." || component == "..")
-        })
-}
-
 /// Rewrites a Windows extended-length (`\\?\`) *disk* path to its ordinary
 /// form, so it can be handed to a tool that does not understand the verbatim
 /// prefix.
@@ -137,6 +110,17 @@ pub fn plain_host_path(path: &Path) -> PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+/// Spells every `git` argument plainly (see [`plain_host_path`]).
+///
+/// Arguments that are not verbatim disk paths — flags, refs, relative paths,
+/// every Unix argument — are returned unchanged, so a command builder can
+/// apply this to its whole argument list instead of guessing which positions
+/// carry a resolved path (`git worktree add <path>` refuses a `\\?\` root
+/// with "could not create leading directories ... Invalid argument").
+pub fn plain_git_args<'a>(args: &'a [&str]) -> impl Iterator<Item = PathBuf> + 'a {
+    args.iter().map(|arg| plain_host_path(Path::new(arg)))
 }
 
 /// Drops `.` and resolves `..` lexically, without touching the filesystem.
@@ -205,9 +189,8 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_root_identity, canonicalize_existing_prefix, collapse_relative_components,
-        has_traversal_spelling, normalize_source_edit_relative_path, plain_host_path,
-        same_canonical_path,
+        canonicalize_existing_prefix, collapse_relative_components,
+        normalize_source_edit_relative_path, plain_git_args, plain_host_path, same_canonical_path,
     };
     use std::path::{Path, PathBuf};
 
@@ -309,6 +292,30 @@ mod tests {
     }
 
     #[test]
+    fn git_argument_lists_only_rewrite_the_verbatim_disk_paths() {
+        let args = [
+            "worktree",
+            "add",
+            r"\\?\D:\a\_temp\tmp\.tmpiS0e8W-admission-wt",
+            "-b",
+            "feature/admission",
+            "src/lib.rs",
+        ];
+        assert_eq!(
+            plain_git_args(&args).collect::<Vec<_>>(),
+            [
+                "worktree",
+                "add",
+                r"D:\a\_temp\tmp\.tmpiS0e8W-admission-wt",
+                "-b",
+                "feature/admission",
+                "src/lib.rs",
+            ]
+            .map(PathBuf::from)
+        );
+    }
+
+    #[test]
     fn source_edit_paths_reject_everything_that_could_leave_the_worktree() {
         assert_eq!(
             normalize_source_edit_relative_path(Path::new("./src/lib.rs"))
@@ -321,25 +328,5 @@ mod tests {
                 "'{rejected}' must not be addressable"
             );
         }
-    }
-
-    #[test]
-    fn root_identity_is_plain_and_matches_a_caller_built_spelling() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let built = temp.path().join("project");
-        std::fs::create_dir(&built).expect("create project root");
-        let identity = canonical_root_identity(&built);
-
-        assert!(same_canonical_path(&identity, &built));
-        assert_eq!(identity, plain_host_path(&built.canonicalize().unwrap()));
-        assert!(!identity.to_string_lossy().starts_with(r"\\?\"));
-    }
-
-    #[test]
-    fn traversal_spelling_is_visible_before_lexical_collapse() {
-        assert!(has_traversal_spelling(Path::new("root/../escape.grafeo")));
-        assert!(has_traversal_spelling(Path::new(r"root\..\escape.grafeo")));
-        assert!(has_traversal_spelling(Path::new("root/./graph.grafeo")));
-        assert!(!has_traversal_spelling(Path::new("root/graph.grafeo")));
     }
 }

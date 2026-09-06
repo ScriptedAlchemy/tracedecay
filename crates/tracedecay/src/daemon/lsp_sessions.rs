@@ -55,9 +55,7 @@ pub(super) async fn cleanup_connection_lsp_sessions(
 }
 
 pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoot> {
-    let identity = tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
-    url::Url::from_file_path(&identity)
-        .or_else(|_| url::Url::from_file_path(project_path))
+    url::Url::from_file_path(project_path)
         .ok()
         .map(|uri| AdmittedRoot::new(uri.to_string()))
 }
