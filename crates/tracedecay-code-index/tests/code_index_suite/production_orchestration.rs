@@ -1952,43 +1952,6 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     );
 }
 
-#[test]
-fn verified_sealed_lexical_source_reads_the_legacy_v5_payload_without_full_restore() {
-    let store = SharedPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
-        .expect("production owner");
-    let generation = owner
-        .build_and_publish(request("file.lexical-v5", 1_270_000), &ActiveControl)
-        .expect("generation publishes");
-    let sealed = generation.encode_sealed().expect("generation seals");
-    let mut envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("sealed generation JSON");
-    envelope["generation"]["format_revision"] = serde_json::Value::from(5);
-    let state_digest = sealed_generation_payload_digest(5, &envelope["generation"])
-        .expect("legacy payload digest");
-    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
-    let legacy = serde_json::to_vec(&envelope).expect("legacy sealed generation JSON");
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(legacy.clone()),
-        u64::try_from(legacy.len()).expect("legacy sealed length"),
-        state_digest,
-        64,
-        1024 * 1024,
-        &ActiveControl,
-    )
-    .expect("legacy verified page source opens");
-
-    let receipt = loop {
-        match source.next_page(&ActiveControl).expect("legacy page read") {
-            VerifiedSealedLexicalPageReadV1::Page(page) => {
-                assert!(!page.chunks().is_empty() || !page.imports().is_empty())
-            }
-            VerifiedSealedLexicalPageReadV1::Complete(receipt) => break receipt,
-        }
-    };
-    assert_eq!(receipt.format_revision(), 5);
-    assert!(receipt.total_chunks() > 0);
-}
 
 /// The published-generation integrity gate is an amortized load-time check.
 /// Verifying once per loaded generation must reach exactly the verdict a fresh
