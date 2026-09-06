@@ -3,7 +3,9 @@ use tempfile::TempDir;
 use super::journey_test_support::git;
 use super::*;
 use crate::daemon::project_composition::ProductionProjectComposition;
-use tracedecay_code_index_runtime::code_index_scheduler::LatestCompleteCodeIndexV1;
+use tracedecay_code_index_runtime::code_index_scheduler::{
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
+};
 
 async fn open_project_composition(
     harness: &ProductionProjectCompositionHarnessV1,
@@ -55,11 +57,19 @@ async fn open_project_composition(
         .await
 }
 
+/// Open one project route and return the generation level it actually serves.
+///
+/// Symbol-level evidence exists only while the sealed generation is seated. A
+/// reopen whose retained revision-7 head recovered serves through the text
+/// projection and never replays its partitions to seat a second copy, so the
+/// probe is asserted here on the publishing open and the caller proves the
+/// reopen serves that same generation by its id.
 async fn open_project(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     instance: &str,
-) -> Result<(ProductionProjectComposition, LatestCompleteCodeIndexV1)> {
+    probe: &str,
+) -> Result<(ProductionProjectComposition, LatestCodeTextGenerationV1)> {
     let resources = harness
         .resources
         .as_ref()
@@ -78,19 +88,30 @@ async fn open_project(
             message: format!("capacity-journey code-index scope is invalid: {error:?}"),
         })?
     };
-    let latest = super::wait_for_production_composition_code_index(
+    super::wait_for_production_composition_code_index(
         &resources.invocation,
         &composition.canonical_project_path,
         &code_search_scope,
     )
-    .await?
-    .ok_or_else(|| TraceDecayError::Config {
-        message: format!(
-            "capacity-journey project '{}' has extractable sources but published no generation",
-            composition.canonical_project_path.display()
-        ),
-    })?;
-    Ok((composition, latest))
+    .await?;
+    let schedulers = &resources.invocation.code_index_schedulers;
+    if let Some(latest) = schedulers
+        .latest_complete_ready_for_scope(&code_search_scope)
+        .await
+    {
+        assert_generation_contains_probe(&latest, probe);
+        return Ok((composition, latest.text_generation_handle()));
+    }
+    let serving = schedulers
+        .latest_text_serving_for_scope(&code_search_scope)
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "capacity-journey project '{}' has extractable sources but published no generation",
+                composition.canonical_project_path.display()
+            ),
+        })?;
+    Ok((composition, serving))
 }
 
 async fn seed_project_sessions_pending_convergence(
@@ -271,12 +292,14 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     drop(initial_client);
 
     let mut replay_roots = Vec::new();
+    let mut seeded_generations = Vec::new();
     for (ordinal, project) in projects.iter().enumerate() {
         let probe = format!("project_{ordinal}_probe");
-        let (opened, latest) = open_project(&harness, project, &format!("initial-{ordinal}"))
-            .await
-            .expect("a settled sequential client must release capacity for the next project");
-        assert_generation_contains_probe(&latest, &probe);
+        let (opened, serving) =
+            open_project(&harness, project, &format!("initial-{ordinal}"), &probe)
+                .await
+                .expect("a settled sequential client must release capacity for the next project");
+        seeded_generations.push(serving.metadata().manifest().generation_id.clone());
         let graph = opened.server.cg().await;
         let replay_root = graph.hook_store_layout().data_root.clone();
         assert!(
@@ -319,18 +342,34 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
 
     for (ordinal, project) in projects.iter().enumerate() {
         let probe = format!("project_{ordinal}_probe");
-        let (opened, latest) = open_project(&harness, project, &format!("reopen-{ordinal}"))
-            .await
-            .expect("retired project must reopen through production composition");
-        let (cached, cached_latest) = open_project(&harness, project, &format!("cached-{ordinal}"))
-            .await
-            .expect("immediate reopen must reuse the cached project");
+        let (opened, serving) =
+            open_project(&harness, project, &format!("reopen-{ordinal}"), &probe)
+                .await
+                .expect("retired project must reopen through production composition");
+        let (cached, cached_serving) =
+            open_project(&harness, project, &format!("cached-{ordinal}"), &probe)
+                .await
+                .expect("immediate reopen must reuse the cached project");
         assert!(
             Arc::ptr_eq(&opened.server, &cached.server),
             "a route-local reopen must reuse the cached server"
         );
-        assert_generation_contains_probe(&latest, &probe);
-        assert_generation_contains_probe(&cached_latest, &probe);
+        // A reopen that recovered its retained revision-7 head serves through
+        // the text projection with the sealed slot deliberately unseated, so
+        // the probe symbol is not decodable here. Identity is the property
+        // this journey guards: the route must serve the very generation whose
+        // symbols carried this project's unique probe, never a neighbour's
+        // and never an empty one.
+        assert_eq!(
+            serving.metadata().manifest().generation_id,
+            seeded_generations[ordinal],
+            "reopening project {ordinal} must serve its own seeded generation"
+        );
+        assert_eq!(
+            cached_serving.metadata().manifest().generation_id,
+            seeded_generations[ordinal],
+            "the cached reopen of project {ordinal} must serve its own seeded generation"
+        );
         let graph = opened.server.cg().await;
         assert!(
             crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(
@@ -361,13 +400,21 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
         }
     }
     let (left, right) = tokio::join!(
-        open_project(&harness, &projects[0], "concurrent-left"),
-        open_project(&harness, &projects[1], "concurrent-right"),
+        open_project(&harness, &projects[0], "concurrent-left", "project_0_probe"),
+        open_project(&harness, &projects[1], "concurrent-right", "project_1_probe"),
     );
-    let (_left, left_latest) = left.expect("first concurrent uncached project admission");
-    let (_right, right_latest) = right.expect("second concurrent uncached project admission");
-    assert_generation_contains_probe(&left_latest, "project_0_probe");
-    assert_generation_contains_probe(&right_latest, "project_1_probe");
+    let (_left, left_serving) = left.expect("first concurrent uncached project admission");
+    let (_right, right_serving) = right.expect("second concurrent uncached project admission");
+    assert_eq!(
+        left_serving.metadata().manifest().generation_id,
+        seeded_generations[0],
+        "the first concurrent admission must serve its own seeded generation"
+    );
+    assert_eq!(
+        right_serving.metadata().manifest().generation_id,
+        seeded_generations[1],
+        "the second concurrent admission must serve its own seeded generation"
+    );
     let cached_owner_count = harness
         .resources
         .as_ref()
