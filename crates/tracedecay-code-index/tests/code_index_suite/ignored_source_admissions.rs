@@ -450,7 +450,7 @@ fn sealed_state_digest_changes_when_ignored_source_roster_changes() {
 }
 
 #[test]
-fn sealed_format_keeps_monolithic_history_beside_partitioned_revision_seven() {
+fn sealed_format_refuses_superseded_revisions_beside_partitioned_revision_seven() {
     assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
@@ -463,15 +463,21 @@ fn sealed_format_keeps_monolithic_history_beside_partitioned_revision_seven() {
             .expect("revision-six compatibility probe")
     );
 
-    let mut legacy = sealed_envelope(&generation);
-    legacy["generation"]["format_revision"] = Value::from(5);
-    let legacy = reseal_outer_state(legacy);
+    let mut superseded = sealed_envelope(&generation);
+    superseded["generation"]["format_revision"] = Value::from(5);
+    // No reseal: the revision gate fires ahead of any digest rule, so a
+    // superseded envelope is refused whatever its state digest says.
+    let superseded = serde_json::to_vec(&superseded).expect("superseded sealed-generation JSON");
     assert!(
-        CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&legacy)
+        !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&superseded)
             .expect("revision-five compatibility probe")
     );
-    CodeIndexPublishedGenerationV1::decode_sealed(&legacy)
-        .expect("revision-five generation remains readable");
+    let error = CodeIndexPublishedGenerationV1::decode_sealed(&superseded)
+        .expect_err("a superseded revision must be refused, never migrated");
+    assert!(
+        error.to_string().contains("will be rebuilt from source"),
+        "superseded revision reached the wrong rejection: {error}"
+    );
 
     for incompatible_revision in [4, 8] {
         let mut incompatible = sealed_envelope(&generation);

@@ -93,8 +93,9 @@ pub use partitioned_codec::{
 };
 mod sealed_codec;
 pub use sealed_codec::{
-    MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1,
-    sealed_generation_format_revision_is_compatible, sealed_generation_payload_digest,
+    MAX_SEALED_CODE_GENERATION_BYTES_V1, MINIMUM_SEALED_GENERATION_FORMAT_REVISION,
+    SEALED_GENERATION_FORMAT_REVISION_V1, sealed_generation_format_revision_is_compatible,
+    sealed_generation_payload_digest, superseded_sealed_generation_revision,
 };
 
 /// Current daemon chunker identity shared by production indexing and native
@@ -1325,6 +1326,15 @@ pub enum CodeIndexProductionErrorV1 {
     Projection(ProjectionPublicationErrorV1),
     #[error(transparent)]
     Publication(#[from] CodeIndexPublicationStoreErrorV1),
+    /// A sealed generation whose envelope revision this build no longer reads.
+    ///
+    /// A generation is a pure function of its source tree, so a superseded
+    /// envelope is refused rather than migrated: the daemon abstains from the
+    /// stale artifact and rebuilds it.
+    #[error(
+        "sealed generation format revision {0} predates this build; the generation will be rebuilt from source"
+    )]
+    SupersededSealedGenerationRevision(u32),
     #[error("code-index contract failed: {0}")]
     Contract(String),
     #[error("code-index parallel worker runtime failed: {0}")]

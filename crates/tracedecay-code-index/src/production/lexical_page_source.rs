@@ -11,8 +11,8 @@ use tracedecay_domain::ExactTechnicalTermV1;
 use crate::{capabilities::expected_seal_digest, intake::INTAKE_DIGEST_SEPARATOR};
 
 use super::sealed_codec::{
-    LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
-    MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION, PersistedFileGenerationArtifactsV1,
+    MINIMUM_SEALED_GENERATION_FORMAT_REVISION, MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION,
+    PersistedFileGenerationArtifactsV1, superseded_sealed_generation_revision,
 };
 use super::{FileGenerationArtifactsV1, *};
 
@@ -2566,11 +2566,13 @@ impl LayoutScanner {
                 "sealed generation format revision is missing".to_owned(),
             )
         })?;
-        if !matches!(
-            format_revision,
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION
-                | MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION
-        ) {
+        // A superseded envelope is refused, not scanned: the caller rebuilds
+        // the generation instead of falling through to another decoder that
+        // would report these bytes as corrupt.
+        if format_revision < MINIMUM_SEALED_GENERATION_FORMAT_REVISION {
+            return Err(superseded_sealed_generation_revision(format_revision));
+        }
+        if format_revision != MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation format revision is incompatible".to_owned(),
             ));

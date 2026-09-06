@@ -42,19 +42,12 @@ fn prior_sealed_generation_is_rejected_before_manifest_decode() {
         !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(prior)
             .expect("prior format probe")
     );
-    assert!(
-        CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(prior)
-            .expect("prior generation compatibility decode")
-            .is_none(),
-        "a caller that accepts incompatible durable state must not materialize it"
-    );
+    let error = CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(prior)
+        .expect_err("a caller that accepts incompatible durable state must not materialize it");
+    assert!(error.to_string().contains("will be rebuilt from source"));
     let error = CodeIndexPublishedGenerationV1::decode_sealed(prior)
         .expect_err("prior generation must require a rebuild");
-    assert!(
-        error
-            .to_string()
-            .contains("format revision is incompatible")
-    );
+    assert!(error.to_string().contains("will be rebuilt from source"));
 }
 
 #[test]

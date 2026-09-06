@@ -12,13 +12,25 @@ use sha2::{Digest, Sha256};
 use super::lexical_page_source::scan_layout;
 use super::*;
 
-/// The sealed-generation envelope revision this build writes.
-///
-/// Every reader that gates on the sealed format — the publication store, the
-/// worker probe, and code-generation retention — must gate on this one value.
-pub(super) const LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION: u32 = 5;
+/// The monolithic sealed-generation envelope revision. Every reader that
+/// gates on the monolithic format — the publication store, the worker probe,
+/// and code-generation retention — must gate on this one value.
 pub(super) const MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION: u32 = 6;
+/// The partitioned generation manifest revision, which the daemon publishes.
 pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 7;
+
+/// The oldest sealed envelope revision this build decodes. Anything below it
+/// is refused by [`superseded_sealed_generation_revision`] instead of being
+/// migrated — a generation is re-derivable from its source tree, so the
+/// daemon rebuilds rather than carrying a decoder per retired shape.
+pub const MINIMUM_SEALED_GENERATION_FORMAT_REVISION: u32 =
+    MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION;
+
+/// The typed refusal for a sealed generation this build no longer reads.
+pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {
+    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+}
+
 /// One bound, enforced on both sides of the sealed store: encoding refuses to
 /// publish a generation larger than this, and decoding refuses to admit one.
 /// The bound previously applied only to reads while publication happily wrote
@@ -40,9 +52,7 @@ fn admit_sealed_generation_len(len: u64) -> Result<(), CodeIndexProductionErrorV
 pub const fn sealed_generation_format_revision_is_compatible(revision: u32) -> bool {
     matches!(
         revision,
-        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION
-            | MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION
-            | SEALED_GENERATION_FORMAT_REVISION_V1
+        MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION | SEALED_GENERATION_FORMAT_REVISION_V1
     )
 }
 
@@ -51,10 +61,11 @@ pub fn sealed_generation_payload_digest<T: Serialize>(
     generation: &T,
 ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
     match format_revision {
-        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => canonical_sha256(generation)
-            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string())),
         MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION | SEALED_GENERATION_FORMAT_REVISION_V1 => {
             json_generation_bytes_and_digest(generation).map(|(_, digest)| digest)
+        }
+        revision if revision < MINIMUM_SEALED_GENERATION_FORMAT_REVISION => {
+            Err(superseded_sealed_generation_revision(revision))
         }
         _ => Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation format revision is incompatible".to_owned(),
@@ -77,23 +88,6 @@ pub(super) struct PersistedFileGenerationArtifactsRefV1<'a> {
     pub(super) artifacts: &'a CodeFileIndexArtifactsV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedPublishedGenerationV1 {
-    format_revision: CompatibleSealedFormatRevisionV1,
-    manifest: CodeGenerationManifestV1,
-    snapshot: SanitizedCodeSnapshotV1,
-    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
-    ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
-    ignored_source_admissions_digest: ManifestDigest,
-    files: Vec<PersistedFileGenerationArtifactsV1>,
-    lineage: Vec<SymbolLineageCandidateV1>,
-    coverage: CoverageSummaryV1,
-    capability: CodeIndexCapabilityManifestV1,
-    projection_request: ProjectionBatchRequestV1,
-    projection_receipt: ProjectionBatchReceiptV1,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CompatibleSealedFormatRevisionV1(pub(super) u32);
 
@@ -114,7 +108,11 @@ impl<'de> Deserialize<'de> for CompatibleSealedFormatRevisionV1 {
         let revision = u32::deserialize(deserializer)?;
         if !sealed_generation_format_revision_is_compatible(revision) {
             return Err(serde::de::Error::custom(
-                "sealed generation format revision is incompatible",
+                if revision < MINIMUM_SEALED_GENERATION_FORMAT_REVISION {
+                    superseded_sealed_generation_revision(revision).to_string()
+                } else {
+                    "sealed generation format revision is incompatible".to_owned()
+                },
             ));
         }
         Ok(Self(revision))
@@ -185,11 +183,6 @@ pub(super) struct StreamingPersistedPublishedGenerationV1 {
 struct StreamingSealedEnvelopeV1 {
     state_digest: ManifestDigest,
     generation: StreamingPersistedPublishedGenerationV1,
-}
-
-enum CompatibleSealedMaterializationV1 {
-    Streamed(StreamingPersistedPublishedGenerationV1),
-    Legacy(SealedPublishedGenerationEnvelopeV1),
 }
 
 /// Rebuild every file's parser-backed exact authority on the indexing pool,
@@ -329,13 +322,6 @@ struct PersistedPublishedGenerationRefV1<'a> {
     projection_receipt: &'a ProjectionBatchReceiptV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SealedPublishedGenerationEnvelopeV1 {
-    state_digest: ManifestDigest,
-    generation: PersistedPublishedGenerationV1,
-}
-
 #[derive(Deserialize)]
 struct SealedPublishedGenerationRawEnvelopeV1<'a> {
     state_digest: ManifestDigest,
@@ -353,20 +339,21 @@ struct PersistedPublishedGenerationFormatProbeV1 {
     format_revision: u32,
 }
 
-/// Materialize one sealed envelope with the fewest corpus-scale passes,
-/// returning `None` for incompatible format revisions.
+/// Materialize one sealed monolithic envelope with the fewest corpus-scale
+/// passes: `None` means the bytes belong to another decoder (a partitioned
+/// manifest), and a superseded revision is refused outright.
 ///
-/// The V1 happy path is exactly one boundary parse (isolating the payload
+/// The happy path is exactly one boundary parse (isolating the payload
 /// bytes), one payload digest, and one typed materialization. The standalone
-/// format probe used to re-scan the entire corpus-sized envelope before every
-/// decode; it now runs only when this single-pass decode cannot accept the
-/// bytes, where [`classify_unaccepted_envelope`] reproduces the historical
-/// probe-first outcomes exactly. The digest is computed and compared before
-/// the payload is materialized, so a corrupt V1 envelope is still rejected
-/// without building corpus-scale structures from unverified bytes.
+/// format probe runs only when that single-pass decode cannot accept the
+/// bytes, where [`classify_unaccepted_envelope`] decides whether the
+/// interrupting rejection is real or the bytes are simply not monolithic. The
+/// digest is computed and compared before the payload is materialized, so a
+/// corrupt envelope is still rejected without building corpus-scale
+/// structures from unverified bytes.
 fn materialize_compatible_envelope(
     bytes: &[u8],
-) -> Result<Option<CompatibleSealedMaterializationV1>, CodeIndexProductionErrorV1> {
+) -> Result<Option<StreamingPersistedPublishedGenerationV1>, CodeIndexProductionErrorV1> {
     let raw: SealedPublishedGenerationRawEnvelopeV1 = match hotpath::measure_block!(
         "code_index.generation.decode.raw_envelope_parse",
         serde_json::from_slice(bytes)
@@ -378,8 +365,7 @@ fn materialize_compatible_envelope(
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation decoding failed: {error}"
                 )),
-            )
-            .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy));
+            );
         }
     };
     let payload_digest = hotpath::measure_block!(
@@ -387,16 +373,15 @@ fn materialize_compatible_envelope(
         json_generation_digest(raw.generation.get().as_bytes())
     )?;
     if payload_digest != raw.state_digest {
-        // Expected under the legacy canonical-digest rule, corrupt under the
-        // V1 raw-bytes rule. The probe — never the digest — decides which, so
-        // the format-revision gate stays authoritative.
+        // Corrupt under the monolithic raw-bytes rule, but the probe — never
+        // the digest — decides which revision owns these bytes, so the
+        // format-revision gate stays authoritative.
         return classify_unaccepted_envelope(
             bytes,
             CodeIndexProductionErrorV1::Contract(
                 "sealed generation state digest does not match its payload".to_owned(),
             ),
-        )
-        .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy));
+        );
     }
     let streamed: Result<StreamingPersistedPublishedGenerationV1, _> = hotpath::measure_block!(
         "code_index.sealed_decode.persisted_materialization",
@@ -406,39 +391,28 @@ fn materialize_compatible_envelope(
         Ok(generation)
             if generation.format_revision.0 == MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION =>
         {
-            Ok(Some(CompatibleSealedMaterializationV1::Streamed(
-                generation,
-            )))
+            Ok(Some(generation))
         }
-        Ok(generation) if generation.format_revision.0 == SEALED_GENERATION_FORMAT_REVISION_V1 => {
-            Ok(None)
-        }
-        Ok(_) => {
-            // A compatible non-V1 revision whose raw payload bytes coincide
-            // with its canonical serialization: restore through the strict
-            // legacy envelope parse so envelope-level admission stays
-            // identical to the legacy reader.
-            decode_legacy_envelope(bytes)
-                .map(|envelope| Some(CompatibleSealedMaterializationV1::Legacy(envelope)))
-        }
+        // The only other admitted revision is the partitioned manifest, which
+        // this decoder does not own.
+        Ok(_) => Ok(None),
         Err(error) => classify_unaccepted_envelope(
             bytes,
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation payload decoding failed: {error}"
             )),
-        )
-        .map(|envelope| envelope.map(CompatibleSealedMaterializationV1::Legacy)),
+        ),
     }
 }
 
-/// Historical probe-first classification for bytes the single-pass V1 decode
-/// did not accept: a legacy revision restores through the strict legacy
-/// envelope parse, an incompatible revision is `Ok(None)`, and a V1 revision
-/// keeps the exact typed rejection that interrupted the decode.
+/// Probe-first classification for bytes the single-pass decode did not
+/// accept: a monolithic revision keeps the exact typed rejection that
+/// interrupted the decode, a superseded revision is refused so the caller
+/// rebuilds from source, and anything else abstains for another decoder.
 fn classify_unaccepted_envelope(
     bytes: &[u8],
-    v1_rejection: CodeIndexProductionErrorV1,
-) -> Result<Option<SealedPublishedGenerationEnvelopeV1>, CodeIndexProductionErrorV1> {
+    monolithic_rejection: CodeIndexProductionErrorV1,
+) -> Result<Option<StreamingPersistedPublishedGenerationV1>, CodeIndexProductionErrorV1> {
     let probe: SealedPublishedGenerationFormatProbeV1 = hotpath::measure_block!(
         "code_index.generation.decode.format_probe",
         serde_json::from_slice(bytes).map_err(|error| {
@@ -448,26 +422,12 @@ fn classify_unaccepted_envelope(
         })
     )?;
     match probe.generation.format_revision {
-        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
-            decode_legacy_envelope(bytes).map(Some)
+        MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION => Err(monolithic_rejection),
+        revision if revision < MINIMUM_SEALED_GENERATION_FORMAT_REVISION => {
+            Err(superseded_sealed_generation_revision(revision))
         }
-        MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION => Err(v1_rejection),
-        SEALED_GENERATION_FORMAT_REVISION_V1 => Ok(None),
         _ => Ok(None),
     }
-}
-
-fn decode_legacy_envelope(
-    bytes: &[u8],
-) -> Result<SealedPublishedGenerationEnvelopeV1, CodeIndexProductionErrorV1> {
-    hotpath::measure_block!(
-        "code_index.sealed_decode.persisted_materialization",
-        serde_json::from_slice(bytes).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation decoding failed: {error}"
-            ))
-        })
-    )
 }
 
 #[cfg(test)]
@@ -884,53 +844,9 @@ impl CodeIndexPublishedGenerationV1 {
         )?;
         crate::hotpath_observe::record_seal_bytes(admitted_len);
         match materialize_compatible_envelope(bytes)? {
-            Some(CompatibleSealedMaterializationV1::Streamed(generation)) => {
-                assemble_published_generation(generation).map(Some)
-            }
-            Some(CompatibleSealedMaterializationV1::Legacy(envelope)) => {
-                Self::assemble_legacy_envelope(envelope).map(Some)
-            }
+            Some(generation) => assemble_published_generation(generation).map(Some),
             None => Ok(None),
         }
-    }
-
-    fn assemble_legacy_envelope(
-        envelope: SealedPublishedGenerationEnvelopeV1,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let expected_digest = match envelope.generation.format_revision.0 {
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => sealed_generation_payload_digest(
-                LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
-                &envelope.generation,
-            )?,
-            MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION => envelope.state_digest.clone(),
-            _ => {
-                return Err(CodeIndexProductionErrorV1::Contract(
-                    "sealed generation format revision is incompatible".to_owned(),
-                ));
-            }
-        };
-        if expected_digest != envelope.state_digest {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation state digest does not match its payload".to_owned(),
-            ));
-        }
-        let streamed = StreamingPersistedPublishedGenerationV1 {
-            format_revision: envelope.generation.format_revision,
-            manifest: envelope.generation.manifest,
-            snapshot: envelope.generation.snapshot,
-            repository_parse_identity: envelope.generation.repository_parse_identity,
-            ignored_source_admissions: envelope.generation.ignored_source_admissions,
-            ignored_source_admissions_digest: envelope.generation.ignored_source_admissions_digest,
-            files: StreamingRestoredFilesV1 {
-                files: envelope.generation.files,
-            },
-            lineage: envelope.generation.lineage,
-            coverage: envelope.generation.coverage,
-            capability: envelope.generation.capability,
-            projection_request: envelope.generation.projection_request,
-            projection_receipt: envelope.generation.projection_receipt,
-        };
-        assemble_published_generation(streamed)
     }
 
     /// Stream one compatible sealed generation from a seekable reader without
@@ -981,10 +897,9 @@ impl CodeIndexPublishedGenerationV1 {
                 }
                 assemble_published_generation(envelope.generation).map(Some)
             }
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
-                let bytes = read_admitted_bytes(reader, admitted_len)?;
-                Self::decode_admitted_sealed_bytes_if_compatible(&bytes, admitted_len)
-            }
+            // Every other revision the layout scan admits belongs to the
+            // partitioned decoder; a superseded one never reaches here because
+            // `scan_layout` refuses it outright.
             _ => Ok(None),
         }
     }
@@ -1010,12 +925,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_gate_accepts_partitioned_revision_and_monolithic_history() {
+    fn format_gate_accepts_only_the_monolithic_and_partitioned_revisions() {
         assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
-        assert!(sealed_generation_format_revision_is_compatible(5));
+        assert_eq!(MINIMUM_SEALED_GENERATION_FORMAT_REVISION, 6);
         assert!(sealed_generation_format_revision_is_compatible(6));
         assert!(sealed_generation_format_revision_is_compatible(7));
-        assert!(!sealed_generation_format_revision_is_compatible(4));
+        assert!(!sealed_generation_format_revision_is_compatible(5));
         assert!(!sealed_generation_format_revision_is_compatible(8));
     }
 
@@ -1250,6 +1165,42 @@ mod tests {
                 Err(CodeIndexProductionErrorV1::Contract(message))
                     if message.contains("format revision is incompatible")
             ));
+        }
+    }
+
+    /// A superseded revision is refused with the typed rebuild error on every
+    /// classification path — never silently abstained like a revision this
+    /// decoder simply does not own, because abstention would hand the bytes to
+    /// the partitioned decoder and surface them as corruption.
+    #[test]
+    fn superseded_revision_is_refused_with_the_rebuild_error() {
+        let generation = format!(
+            "{{\"format_revision\":{}}}",
+            MINIMUM_SEALED_GENERATION_FORMAT_REVISION - 1
+        );
+        let matching = json_generation_digest(generation.as_bytes()).expect("fixture digest");
+        let mismatched = ManifestDigest::from_sha256_bytes(&[0; 32]).expect("fixture digest");
+
+        for state_digest in [matching, mismatched] {
+            let sealed = sealed_fixture(&state_digest, &generation);
+            for decoded in [
+                CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&sealed).err(),
+                CodeIndexPublishedGenerationV1::decode_sealed(&sealed).err(),
+            ] {
+                let error = decoded.expect("a superseded revision must be refused");
+                assert!(
+                    matches!(
+                        error,
+                        CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                            if revision == MINIMUM_SEALED_GENERATION_FORMAT_REVISION - 1
+                    ),
+                    "superseded revision reached the wrong rejection: {error}"
+                );
+                assert!(
+                    error.to_string().contains("will be rebuilt from source"),
+                    "superseded rejection must tell the operator it rebuilds: {error}"
+                );
+            }
         }
     }
 
