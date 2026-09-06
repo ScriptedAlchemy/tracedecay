@@ -327,19 +327,32 @@ impl SnapshotAdmissionRunner {
                                 });
                             }
                         };
-                        if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
-                            self.stats.messages_upserted =
-                                self.stats.messages_upserted.saturating_add(1);
-                            cursors.insert(
-                                source_identity.clone(),
-                                Some(outcome.receipt().committed_cursor().clone()),
-                            );
-                        } else {
-                            // A duplicate answers with the retained receipt,
-                            // whose cursor is the one the original commit wrote
-                            // rather than where the source now stands. Re-read
-                            // it instead of caching a stale chain link.
-                            cursors.remove(source_identity);
+                        match outcome.as_ref() {
+                            ObservationPersistOutcome::Committed(_) => {
+                                self.stats.messages_upserted =
+                                    self.stats.messages_upserted.saturating_add(1);
+                                cursors.insert(
+                                    source_identity.clone(),
+                                    Some(outcome.receipt().committed_cursor().clone()),
+                                );
+                            }
+                            ObservationPersistOutcome::CoveredDuplicate(_) => {
+                                // Covered duplicates keep exactly-once derived
+                                // effects but still advance the stream cursor
+                                // to the candidate frontier the write named.
+                                cursors.insert(
+                                    source_identity.clone(),
+                                    Some(outcome.receipt().committed_cursor().clone()),
+                                );
+                            }
+                            _ => {
+                                // Exact duplicates answer with the retained
+                                // receipt, whose cursor is the one the original
+                                // commit wrote rather than where the source now
+                                // stands. Re-read it instead of caching a stale
+                                // chain link.
+                                cursors.remove(source_identity);
+                            }
                         }
                         self.sessions.insert(record.session_id().to_owned());
                     }
@@ -437,14 +450,24 @@ impl SnapshotAdmissionRunner {
         match outcome {
             CaptureObservationOutcome::Persisted { outcome, .. }
             | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
-                if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
-                    self.stats.messages_upserted = self.stats.messages_upserted.saturating_add(1);
-                    cursors.insert(
-                        source_identity.clone(),
-                        Some(outcome.receipt().committed_cursor().clone()),
-                    );
-                } else {
-                    cursors.remove(source_identity);
+                match outcome.as_ref() {
+                    ObservationPersistOutcome::Committed(_) => {
+                        self.stats.messages_upserted =
+                            self.stats.messages_upserted.saturating_add(1);
+                        cursors.insert(
+                            source_identity.clone(),
+                            Some(outcome.receipt().committed_cursor().clone()),
+                        );
+                    }
+                    ObservationPersistOutcome::CoveredDuplicate(_) => {
+                        cursors.insert(
+                            source_identity.clone(),
+                            Some(outcome.receipt().committed_cursor().clone()),
+                        );
+                    }
+                    _ => {
+                        cursors.remove(source_identity);
+                    }
                 }
                 self.sessions.insert(record.session_id().to_owned());
             }

@@ -35,23 +35,13 @@ async fn parse_offset_for_path(
     db: &ProjectSessionTestRuntime,
     path: &std::path::Path,
 ) -> Option<ParseOffset> {
-    let path = path.to_string_lossy();
-    if let Some(offset) = db.get_parse_offset(path.as_ref()).await {
-        return Some(offset);
-    }
-
-    #[cfg(windows)]
-    {
-        let alternate = if path.contains('/') {
-            path.replace('/', "\\")
-        } else {
-            path.replace('\\', "/")
-        };
-        if alternate != path {
-            return db.get_parse_offset(&alternate).await;
+    for candidate in tracedecay_sessions::runtime::shared::path_identity_lookup_candidates(
+        path.to_string_lossy().as_ref(),
+    ) {
+        if let Some(offset) = db.get_parse_offset(&candidate).await {
+            return Some(offset);
         }
     }
-
     None
 }
 

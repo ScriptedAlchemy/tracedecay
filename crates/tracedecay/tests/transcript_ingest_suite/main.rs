@@ -28,4 +28,5 @@ mod hermes;
 mod kiro;
 mod provider_contract;
 mod restart_atomicity;
+mod source_identity;
 mod vibe;

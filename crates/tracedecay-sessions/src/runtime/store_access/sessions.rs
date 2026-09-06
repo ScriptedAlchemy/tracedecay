@@ -13,6 +13,7 @@ use tracedecay_lcm::retrieval_content::{
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
+use super::super::shared::path_identity_lookup_candidates;
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -36,6 +37,26 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
      WHERE requested.type = 'text'
        AND messages.provider = ?1
        AND messages.message_id = requested.value";
+
+/// Appends a project-scope predicate that treats path identity, not raw
+/// display text, as the lookup authority.
+fn push_project_identity_predicate(
+    sql: &mut String,
+    query_params: &mut Vec<Value>,
+    project_key: &str,
+) {
+    let candidates = path_identity_lookup_candidates(project_key);
+    let start = query_params.len() + 1;
+    let placeholders = (0..candidates.len())
+        .map(|index| format!("?{}", start + index))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = write!(
+        sql,
+        " AND (s.project_key IN ({placeholders}) OR s.project_path IN ({placeholders}))"
+    );
+    query_params.extend(candidates.into_iter().map(Value::Text));
+}
 
 fn session_db_operation_error(
     operation: &'static str,
@@ -572,12 +593,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_owned())];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         for term in &literal_terms {
             query_params.push(Value::Text(term.clone()));
@@ -679,12 +695,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .to_owned();
         let mut query_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -741,12 +752,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .to_owned();
         let mut legacy_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            legacy_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                legacy_sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                legacy_params.len()
-            );
+            push_project_identity_predicate(&mut legacy_sql, &mut legacy_params, project_key);
         }
         legacy_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -881,12 +887,7 @@ async fn search_workflow_facts(
     ];
     let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
     if let Some(project_key) = project_key {
-        query_params.push(Value::Text(project_key.to_owned()));
-        let _ = write!(
-            sql,
-            " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-            query_params.len()
-        );
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
     }
     let mut term_predicates = Vec::with_capacity(terms.len());
     for term in terms {
