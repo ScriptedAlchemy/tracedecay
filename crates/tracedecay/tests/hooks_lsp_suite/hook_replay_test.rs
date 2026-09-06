@@ -106,11 +106,24 @@ fn replays(root: &str) -> Vec<Replay> {
             })),
             tool_input_env: None,
         },
+        // Capture-only callbacks are decoded by the production native decoder,
+        // so their payloads must carry the host's documented Stop shape rather
+        // than the identity subset the response-capable hooks read.
         Replay {
             subcommand: "hook-codex-stop",
             agent: "codex",
             hook_name: "Stop",
-            stdin: Some(json!({ "session_id": "codex-s1", "cwd": root })),
+            stdin: Some(json!({
+                "session_id": "codex-s1",
+                "turn_id": "codex-t1",
+                "transcript_path": null,
+                "cwd": root,
+                "hook_event_name": "Stop",
+                "model": "gpt-5-codex",
+                "permission_mode": "acceptEdits",
+                "stop_hook_active": false,
+                "last_assistant_message": "done",
+            })),
             tool_input_env: None,
         },
         Replay {
@@ -136,7 +149,15 @@ fn replays(root: &str) -> Vec<Replay> {
             subcommand: "hook-cursor-stop",
             agent: "cursor",
             hook_name: "stop",
-            stdin: Some(json!({ "conversation_id": "cursor-s1", "cwd": root })),
+            stdin: Some(json!({
+                "hook_event_name": "stop",
+                "conversation_id": "cursor-s1",
+                "generation_id": "cursor-g1",
+                "model": "auto",
+                "status": "completed",
+                "loop_count": 1,
+                "cwd": root,
+            })),
             tool_input_env: None,
         },
         Replay {
@@ -144,6 +165,7 @@ fn replays(root: &str) -> Vec<Replay> {
             agent: "kiro",
             hook_name: "preToolUse",
             stdin: Some(json!({
+                "hook_event_name": "preToolUse",
                 "session_id": "kiro-s1",
                 "cwd": root,
                 "tool_name": "fsWrite",
@@ -166,6 +188,7 @@ fn replays(root: &str) -> Vec<Replay> {
             agent: "kiro",
             hook_name: "postToolUse",
             stdin: Some(json!({
+                "hook_event_name": "postToolUse",
                 "session_id": "kiro-s1",
                 "cwd": root,
                 "tool_name": "fsWrite",

@@ -425,11 +425,13 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         })
         .unwrap();
 
-        // Claude's response-capable PostToolUse handler resolves its project
-        // identity from the payload CWD rather than the process CWD. The
-        // recorded host fixture intentionally uses a portable workspace path,
-        // so bind this production-shaped payload to this test's enrollment.
-        let payload = if hook == "hook-claude-post-tool-use" {
+        // Claude's response-capable handlers resolve project identity from the
+        // payload CWD rather than the process CWD, and deliberately refuse to
+        // re-attribute a named-but-unknown directory to wherever the hook
+        // happens to run. The recorded host fixtures intentionally use a
+        // portable workspace path, so bind these production-shaped payloads to
+        // this test's enrollment.
+        let payload = if matches!(hook, "hook-claude-post-tool-use" | "hook-stop") {
             payload_with_enrolled_cwd(&payload, &project)
         } else {
             payload

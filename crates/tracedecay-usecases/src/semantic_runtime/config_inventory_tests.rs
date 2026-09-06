@@ -307,3 +307,85 @@ async fn project_inventory_survives_restart_and_foreign_project_churn() {
         SemanticConfigurationBackendErrorV1::Conflict
     );
 }
+
+/// A project that never committed a semantic retrieval state is authoritative
+/// absence, not an unavailable authority: the inventory reads as a complete,
+/// canonically empty corpus at revision 0. Retention depends on the
+/// distinction — an unreadable inventory retains every vector-bound source,
+/// while this proves no vector stage requires protection. The first
+/// configuration mutation advances the revision, so the empty receipt is
+/// rejected as stale from then on.
+#[tokio::test]
+async fn never_enrolled_project_reads_as_a_complete_empty_inventory() {
+    let directory = tempfile::tempdir().expect("temporary profile");
+    let project = ProjectId::new("project.inventory-absent").expect("project");
+    let scope = scope(&project, "repository.absent", "worktree.absent");
+    let runtime = RegisteredGlobalDbTestRuntime::profile(&directory.path().join("profile"))
+        .await
+        .expect("open profile database");
+    let store = ProductionSemanticRetrievalConfigurationStoreV1::open(
+        runtime.profile_database_arc(),
+        scope.clone(),
+    )
+    .expect("configuration store");
+
+    let page = store
+        .configuration_inventory_page(
+            &SemanticConfigurationInventoryPageRequestV1::first(8).expect("request"),
+        )
+        .await
+        .expect("a never-enrolled project reads as an empty corpus, not unavailable");
+    assert_eq!(page.scanned_scopes, 0);
+    assert_eq!(page.scanned_root_bindings, 0);
+    assert!(page.continuation.is_none());
+    let receipt = page.complete_receipt.expect("complete empty inventory");
+    assert_eq!(receipt.revision(), 0, "nothing was ever enrolled");
+    assert_eq!(receipt.scope_count(), 0);
+    assert_eq!(receipt.root_binding_count(), 0);
+
+    let roots = store
+        .configured_vector_roots_page(
+            &SemanticConfiguredVectorRootPageRequestV1::first(receipt.clone(), 8)
+                .expect("root request"),
+        )
+        .await
+        .expect("an empty inventory has a complete, empty configured-root corpus");
+    assert!(roots.roots.is_empty());
+    assert_eq!(
+        roots
+            .complete_receipt
+            .expect("complete empty roots")
+            .root_count(),
+        0,
+        "no configured vector root requires source protection"
+    );
+
+    let (pin, state) = initial_state("absent");
+    store
+        .install_initial_state(&pin, &state)
+        .await
+        .expect("first configuration mutation");
+    assert_eq!(
+        store
+            .configured_vector_roots_page(
+                &SemanticConfiguredVectorRootPageRequestV1::first(receipt, 8)
+                    .expect("stale root request"),
+            )
+            .await
+            .expect_err("the first mutation invalidates the empty receipt"),
+        SemanticConfigurationBackendErrorV1::Conflict
+    );
+    assert_eq!(
+        store
+            .configuration_inventory_page(
+                &SemanticConfigurationInventoryPageRequestV1::first(8).expect("fresh request"),
+            )
+            .await
+            .expect("fresh inventory")
+            .complete_receipt
+            .expect("complete inventory")
+            .revision(),
+        1,
+        "the first mutation advances the inventory revision"
+    );
+}

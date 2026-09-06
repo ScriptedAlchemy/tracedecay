@@ -161,6 +161,10 @@ struct GenerationStageContext {
     physical_namespace: GraphNamespace,
     dependency_namespaces: BTreeMap<crate::GraphProjectionIdentity, GraphNamespace>,
     dependency_digest: tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
+    /// Set when the resident rows are a released row set rather than the
+    /// ordered prefix the page pipeline builds, which makes the row-count
+    /// heuristic unusable for every page of this stage.
+    replay_every_page: bool,
 }
 
 struct GenerationStagePlan<'a> {
@@ -444,21 +448,24 @@ impl GraphDb {
         .map(|projection| projection.commit))
     }
 
-    /// Whether the shared staging container still holds native rows for this
-    /// generation. A leftover empty projection commit after row release is
-    /// not serving state — remount must still adopt the sealed store.
-    pub(crate) fn staging_generation_has_rows(
+    /// The native rows the shared staging container currently holds for this
+    /// generation. Recovery compares this with the manifest's own counts: a
+    /// leftover empty projection commit after a row release is not serving
+    /// state, and neither is a row set that is present but short — an
+    /// interrupted release proves nothing about the head it is supposed to
+    /// reproduce. Either way remount must adopt the sealed store.
+    pub(crate) fn staging_generation_rows(
         &self,
         locator: &GenerationLocator,
-    ) -> Result<bool, GraphDbError> {
+    ) -> Result<(usize, usize), GraphDbError> {
         let physical_namespace = locator.physical_namespace()?;
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        Ok(projection_node_counts(
+        projection_node_counts(
             database,
             &physical_namespace,
             &locator.projection.projection,
-        )? != (0, 0))
+        )
     }
 
     /// Proves a generation durably before its relational head can advance.
@@ -583,7 +590,7 @@ impl GraphDb {
         manifest.validate_checked(check)?;
         let identity = manifest.identity();
         let expected_row_counts = manifest.row_counts();
-        let context = GenerationStageContext {
+        let mut context = GenerationStageContext {
             locator: GenerationLocator::new(
                 identity.projection.clone(),
                 identity.generation.clone(),
@@ -591,6 +598,7 @@ impl GraphDb {
             physical_namespace: identity.physical_namespace()?,
             dependency_namespaces: self.require_exact_dependencies(&identity)?,
             dependency_digest: identity.dependency_closure_digest(check)?,
+            replay_every_page: false,
         };
         let restaging_sealed_only = self
             .wait_verified_generations_write()?
@@ -606,6 +614,8 @@ impl GraphDb {
             return Ok(GenerationStageOutcome::Reseated(commit));
         }
         let pages = generation_stage_pages(&manifest)?;
+        context.replay_every_page = self
+            .generation_stage_release_interrupted(&identity, expected, &context, &pages, check)?;
         let adopt_legacy_partial = self.has_exact_legacy_stage_prefix(
             &manifest,
             &identity,
@@ -648,6 +658,57 @@ impl GraphDb {
         }
         self.finalize_staged_generation(&identity, expected, &context, pages.last(), check)
             .map(GenerationStageOutcome::Applied)
+    }
+
+    /// Whether the resident rows are a released row set instead of the
+    /// ordered prefix the page pipeline builds.
+    ///
+    /// Releasing a sealed generation's duplicate staging rows deletes bounded
+    /// pages of arbitrary identities, so an interrupted release can leave a
+    /// projection whose remaining row count still reaches past an earlier
+    /// stage page's `range.end` while rows inside that page are gone. Every
+    /// durable page receipt promises its own range, so a receipted page whose
+    /// range ends beyond the resident count of its kind is durable proof that
+    /// the count no longer describes a prefix. The count heuristic in
+    /// [`Self::generation_stage_page_rows_present`] is then unusable for
+    /// *every* page of this stage -- the hole may sit anywhere -- and each
+    /// page is re-applied unconditionally instead. Re-applying a page whose
+    /// rows are still resident is an idempotent upsert of the exact same
+    /// canonical batch, and applying the pages in their pipeline order
+    /// restores the prefix invariant the predecessor check reads.
+    fn generation_stage_release_interrupted(
+        &self,
+        identity: &GraphGenerationManifestIdentity,
+        expected: &GraphRecoveredGenerationDigestV1,
+        context: &GenerationStageContext,
+        pages: &[GenerationStagePage],
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<bool, GraphDbError> {
+        check()?;
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let (entities, relations) = projection_node_counts(
+            database,
+            &context.physical_namespace,
+            &identity.projection.projection,
+        )?;
+        // A page that reaches furthest past the resident count is the
+        // cheapest witness, so scan from the last page backwards.
+        for page in pages.iter().rev() {
+            check()?;
+            let resident = match page.kind {
+                GenerationStagePageKind::Entities => entities,
+                GenerationStagePageKind::Relations => relations,
+            };
+            if resident < page.range.end
+                && Self::generation_stage_page_receipt_binds(
+                    database, identity, expected, context, page,
+                )?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn reseat_complete_staged_generation(
@@ -977,6 +1038,9 @@ impl GraphDb {
         context: &GenerationStageContext,
         page: &GenerationStagePage,
     ) -> Result<bool, GraphDbError> {
+        if context.replay_every_page {
+            return Ok(false);
+        }
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         Ok(
@@ -985,6 +1049,10 @@ impl GraphDb {
         )
     }
 
+    /// Only sound while the resident rows are the ordered prefix the page
+    /// pipeline builds. A released row set breaks that, which
+    /// [`Self::generation_stage_release_interrupted`] detects at stage entry
+    /// so every page is re-applied instead of consulting this count.
     fn generation_stage_page_rows_present(
         database: &grafeo_engine::GrafeoDB,
         context: &GenerationStageContext,
@@ -1061,9 +1129,16 @@ impl GraphDb {
                         && existing.commit.source_generation == identity.source_generation
                         && existing.commit.watermark == identity.watermark
                     {
-                        if Self::generation_stage_page_rows_present(database, context, page)? {
+                        if !context.replay_every_page
+                            && Self::generation_stage_page_rows_present(database, context, page)?
+                        {
                             return Ok(GraphBatchPlan::Settled(existing.commit, ()));
                         }
+                        // The receipt still binds this exact page to this
+                        // identity and recovered digest, so re-applying it is
+                        // a restage of the page's own rows, not the adoption
+                        // of a foreign prefix, and it must not file a second
+                        // publication record.
                         reuse_receipt = true;
                     } else {
                         return Err(self.sealed_write_refusal(&context.locator).unwrap_or(
@@ -3319,6 +3394,118 @@ mod tests {
         reopened_owner.close().unwrap();
     }
 
+    /// Two native stage pages plus one durable release page: the row count
+    /// left behind still reaches past the first page's `range.end`, so the
+    /// monotone count heuristic used to report that page applied and skip the
+    /// rows the release had already deleted out of it.
+    #[test]
+    fn persistent_reopen_restages_partially_released_generation_pages() {
+        assert_partial_release_replays(true);
+    }
+
+    #[test]
+    fn persistent_reopen_restages_owned_partially_released_generation_pages() {
+        assert_partial_release_replays(false);
+    }
+
+    fn assert_partial_release_replays(shared: bool) {
+        let temp = TempDir::new().unwrap();
+        // One full native page plus a second page wider than a single
+        // retirement transaction: after one durable release page the
+        // remaining rows still cover the first page's range.
+        let entity_count =
+            MAX_NATIVE_GENERATION_STAGE_MUTATIONS + 2 * MAX_VERIFIED_GENERATION_BATCH_MUTATIONS;
+        let manifest = GraphGenerationManifest::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("partial-release-replay").unwrap(),
+                GraphProjectionId::new("large").unwrap(),
+            ),
+            GraphGenerationId::new("generation-partial-release").unwrap(),
+            SourceGeneration::new("source-partial-release").unwrap(),
+            GraphWatermark::new("watermark-partial-release").unwrap(),
+            vec![],
+            (0..entity_count)
+                .map(|index| {
+                    GraphEntity::new(
+                        GraphEntityId::new(format!("entity:{index:06}")).unwrap(),
+                        BTreeSet::new(),
+                        BTreeMap::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            vec![],
+        )
+        .unwrap();
+        let pages = generation_stage_pages(&manifest).unwrap();
+        assert_eq!(pages.len(), 2);
+        let sealed = sealed_digest(&manifest);
+        let retained_manifest = arc_manifest(&manifest);
+        let (owner, database) = persistent_database(&temp);
+        database
+            .apply_generation_unverified_with_digest_observed(
+                Arc::clone(&retained_manifest),
+                &sealed,
+                &|| Ok(()),
+            )
+            .unwrap();
+
+        // Stop at the exact production release boundary: one bounded
+        // retirement transaction is durable and the original page receipts
+        // are all still filed, which is what an interrupted staging-row
+        // release leaves behind.
+        let (_, removed) = database
+            .delete_projection_page_checked(
+                &manifest.identity().physical_namespace().unwrap(),
+                &manifest.projection.projection,
+                &manifest.source_generation,
+                &manifest.watermark,
+                super::GenerationRetirementPageKind::Entities,
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert!(removed);
+        let remaining = database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap();
+        assert_eq!(
+            remaining,
+            (entity_count - MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, 0)
+        );
+        // The geometry the bug needs: the survivors still out-count the first
+        // page, so a count-only check calls that page applied.
+        assert!(remaining.0 >= pages[0].range.end);
+        drop(database);
+        owner.close().unwrap();
+
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        let replay_manifest = if shared {
+            Arc::clone(&retained_manifest)
+        } else {
+            retained_manifest
+        };
+        reopened
+            .apply_generation_unverified_with_digest_observed(replay_manifest, &sealed, &|| Ok(()))
+            .expect("a retained generation must replay after a partial durable row release");
+        assert_eq!(
+            reopened
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            manifest.row_counts(),
+            "every released row must be restaged, not skipped by a row count"
+        );
+        let (_, recovered) = reopened
+            .reopen_and_verify_existing_generation(
+                &manifest.identity(),
+                &sealed,
+                manifest.row_counts(),
+                &|| Ok(()),
+            )
+            .expect("replayed pages must restore the exact generation digest");
+        assert_eq!(recovered, sealed);
+        reopened_owner.close().unwrap();
+    }
+
     #[test]
     fn second_generation_apply_writes_instead_of_reseating_prior() {
         let temp = TempDir::new().unwrap();
@@ -3599,6 +3786,7 @@ mod tests {
             physical_namespace: identity.physical_namespace().unwrap(),
             dependency_namespaces: BTreeMap::new(),
             dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
         };
 
         let serial_started = Instant::now();
@@ -3675,6 +3863,7 @@ mod tests {
             physical_namespace: identity.physical_namespace().unwrap(),
             dependency_namespaces: database.require_exact_dependencies(&identity).unwrap(),
             dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
         };
         let started = Instant::now();
         database
@@ -3868,6 +4057,7 @@ mod tests {
                 .require_exact_dependencies(&manifest.identity())
                 .unwrap(),
             dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
         };
         for (index, legacy_page) in legacy_pages.iter().take(2).enumerate() {
             database

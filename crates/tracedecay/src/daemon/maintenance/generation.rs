@@ -8,13 +8,13 @@ use crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1;
 /// Vector generations converge before their source code generations can be
 /// collected. Scope deletion is admitted only from a complete
 /// post-convergence vector census. Code-generation retention still runs when
-/// vector retention failed: it resolves its own vector protection inventory
-/// and degrades to the offline protection set when the graph runtime is
-/// unavailable, so sealed files cannot grow without bound while the graph is
-/// dark. A daemon without a seated semantic runtime (the default-off state)
-/// takes the same offline sweep quietly — as an ordinary success, not a
-/// degraded retry loop — and an in-progress census defers the sweep until
-/// its exact pin set completes. A fresh full tick intentionally preserves this
+/// vector retention failed: it resolves its own vector protection inventory,
+/// and an unreadable inventory reports its degradation and collects nothing
+/// so a mounted activation lease keeps its exact source generation. A daemon
+/// without a seated semantic runtime (the default-off state) sweeps under the
+/// offline protection set quietly — as an ordinary success, not a degraded
+/// retry loop — and an in-progress census defers the sweep until its exact
+/// pin set completes. A fresh full tick intentionally preserves this
 /// ordered journey, including independent compaction. A semantic continuation
 /// returns after its owning phase, while a code-generation continuation runs
 /// the bounded semantic-vector page and the bounded code-generation unit —

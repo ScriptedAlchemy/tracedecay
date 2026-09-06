@@ -25,9 +25,9 @@ use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionGenerationV1,
     CodeGenerationRetentionReceiptV1, CodeGenerationRetentionTransactionV1, GENERATIONS_DIRECTORY,
     GRAPH_REPLAY_POOL_ACQUIRE_BUDGET, GRAPH_REPLAY_POOL_ACQUIRE_POLL, MAX_TRANSACTION_BYTES,
-    QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, TRANSACTION_FILE, TRANSACTION_SCHEMA,
-    observe_cancel, read_optional_active_pointer, storage, sync_directory, total_bytes,
-    validate_generation_file,
+    QUARANTINE_DIRECTORY, RECEIPT_SCHEMA, RECEIPTS_DIRECTORY, RETENTION_POINTER_WRITE_CONTEXT,
+    TRANSACTION_FILE, TRANSACTION_SCHEMA, observe_cancel, read_optional_active_pointer, storage,
+    sync_directory, total_bytes, validate_generation_file, write_active_pointer,
 };
 
 const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<CodeGenerationRetentionTransactionV1> =
@@ -101,6 +101,11 @@ pub(super) fn validate_transaction(
             "retention transaction active pointer does not match its receipt".to_owned(),
         ));
     }
+    // The journal carries the pre-collection pointer and the exact deleted
+    // set, so the post-rewrite pointer is derivable from it. Proving that
+    // derivation here means a journal that survives a crash can never be
+    // replayed into a pointer this transaction could not have published.
+    transaction.rewritten_pointer()?;
     let mut generation_ids = BTreeSet::new();
     let mut generation_files = BTreeSet::new();
     for generation in &transaction.receipt.deleted_generations {
@@ -758,7 +763,60 @@ pub(super) fn rollback_staged_transaction(
         withdraw_generations_from_graph_replay_pool(store_root, transaction, pool_root)?;
     }
     graph_replay_release::remove_events(store_root, &transaction.receipt)?;
+    // Files first, pointer second. Restoring the index while the generations
+    // were still quarantined would publish a pointer naming missing files,
+    // which is the exact unsafe state this transaction exists to avoid; the
+    // reverse order is safe at every intermediate crash point because a
+    // rewritten pointer names a strict subset of what is on disk.
+    restore_pointer_for_rollback(store_root, transaction)?;
     remove_empty_stage_root(&stage_root)
+}
+
+/// Put the pre-collection `generation_index` back after a rolled-back unit.
+///
+/// Only a store still carrying this transaction's own rewrite is restored: a
+/// publish that landed while the unit was interrupted owns the pointer, and
+/// its index already excludes whatever it chose to exclude.
+fn restore_pointer_for_rollback(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let (Some(rewritten), Some(active)) = (
+        transaction.rewritten_pointer()?,
+        transaction.active_pointer.as_ref(),
+    ) else {
+        return Ok(());
+    };
+    if read_optional_active_pointer(store_root)? != Some(rewritten) {
+        return Ok(());
+    }
+    write_active_pointer(
+        store_root,
+        "code-generation-retention-index-rollback",
+        active,
+    )
+}
+
+/// Finish the durable index rewrite a committed unit may have crashed before.
+///
+/// The rewrite precedes the unlink, so a durable receipt normally implies a
+/// rewritten pointer. Re-applying it when the store still carries the
+/// pre-collection pointer keeps recovery order-independent instead of leaving
+/// an index that names generations the receipt already released.
+fn complete_pointer_rewrite(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let (Some(rewritten), Some(active)) = (
+        transaction.rewritten_pointer()?,
+        transaction.active_pointer.as_ref(),
+    ) else {
+        return Ok(());
+    };
+    if read_optional_active_pointer(store_root)?.as_ref() != Some(active) {
+        return Ok(());
+    }
+    write_active_pointer(store_root, RETENTION_POINTER_WRITE_CONTEXT, &rewritten)
 }
 
 pub(super) fn cleanup_committed_transaction(
@@ -791,6 +849,7 @@ pub(super) fn cleanup_committed_transaction_under_graph_replay_pool_lock(
     graph_replay_pool_lock: Option<&GraphReplayPoolLockV1>,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
     ensure_transaction_liveness(store_root, transaction, vector_readable_sources)?;
+    complete_pointer_rewrite(store_root, transaction)?;
     if let Some(pool_lock) = graph_replay_pool_lock {
         verify_committed_graph_replay_pool_state(store_root, transaction, pool_lock)?;
     }

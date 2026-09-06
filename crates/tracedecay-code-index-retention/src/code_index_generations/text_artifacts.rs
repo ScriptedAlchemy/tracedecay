@@ -504,9 +504,14 @@ pub(super) fn verify_unreferenced_completed_text_artifact(
     Ok(())
 }
 
+/// `active_pointer` is the pointer the store carries *now*, which is not
+/// `plan.active_pointer` when generation retention rewrote the durable index
+/// earlier in the same pass. The compare-and-swap below and the receipt's
+/// index digest must both read that current value.
 pub(super) fn execute_text_artifact_retention_under_store_lock(
     store_root: &Path,
     plan: &CodeGenerationRetentionPlanV1,
+    active_pointer: Option<&DurablePublicationPointerV1>,
     completed_at: UtcMicros,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<
@@ -520,10 +525,15 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
     let deleted_artifacts = plan.collectable_text_artifacts.clone();
-    let receipt = build_text_artifact_receipt(plan, deleted_artifacts.clone(), completed_at)?;
+    let receipt = build_text_artifact_receipt(
+        plan,
+        active_pointer,
+        deleted_artifacts.clone(),
+        completed_at,
+    )?;
     let transaction = CodeTextArtifactRetentionTransactionV1 {
         schema: TEXT_ARTIFACT_TRANSACTION_SCHEMA.to_owned(),
-        active_pointer: plan.active_pointer.clone(),
+        active_pointer: active_pointer.cloned(),
         receipt: receipt.clone(),
     };
     persist_text_artifact_transaction(store_root, &transaction)?;
@@ -884,12 +894,11 @@ pub(super) fn clear_text_artifact_transaction(
 
 pub(super) fn build_text_artifact_receipt(
     plan: &CodeGenerationRetentionPlanV1,
+    active_pointer: Option<&DurablePublicationPointerV1>,
     deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
     completed_at: UtcMicros,
 ) -> Result<CodeTextArtifactRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
-    let active_generation_index_digest = plan
-        .active_pointer
-        .as_ref()
+    let active_generation_index_digest = active_pointer
         .map(|pointer| {
             pointer.generation_index_digest.as_deref().ok_or_else(|| {
                 CodeGenerationRetentionErrorV1::UnsafeState(

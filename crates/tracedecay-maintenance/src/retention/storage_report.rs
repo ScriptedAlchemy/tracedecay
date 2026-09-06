@@ -1133,19 +1133,19 @@ mod tests {
             .unwrap();
     }
 
-    /// A full pass over a directory mutated mid-iteration must miss nothing
-    /// and stay bounded.
+    /// A full pass over a directory mutated mid-iteration must miss nothing,
+    /// repeat nothing, and terminate.
     ///
-    /// Repeat-freedom is deliberately *not* asserted. `read_project_directory_page`
-    /// resumes with `seekdir` on a `telldir` cookie, and its own SAFETY note
-    /// records the contract: a cookie invalidated by a concurrent mutation may
-    /// yield a repeated page. APFS does exactly that, while glibc happens not
-    /// to — so a no-repeats assertion tested the platform, not the contract.
-    /// Deduplicating inside the reader would require carrying every name seen
-    /// so far, which is the unbounded state paging exists to avoid, so the
-    /// tolerance stays in the contract and both consumers absorb it: orphan
-    /// collection re-checks each candidate before acting, and the storage
-    /// report may double-count a directory in one page's estimate.
+    /// `read_project_directory_page` resumes on a project-directory *name*,
+    /// not on a `telldir` cookie, so the pass is exact rather than
+    /// best-effort: pages walk ascending name order, an entry that existed for
+    /// the whole pass is returned exactly once, and an entry deleted or
+    /// created mid-pass can only fall on the side of the cursor its name puts
+    /// it on. The cost of that order is one directory pass per page — the only
+    /// alternatives are per-pass state that a restart invalidates or a name set
+    /// proportional to the directory — so the accounting bound below is per
+    /// page, and the expensive per-store work each page drives stays bounded by
+    /// the page limit.
     #[test]
     fn project_directory_pages_cover_every_entry_within_a_bounded_pass() {
         for page_size in [64, 256] {
@@ -1163,10 +1163,12 @@ mod tests {
             let mut observed = BTreeSet::new();
             let mut entries_scanned = 0usize;
             let mut returned = 0usize;
+            let mut pages = 0usize;
             let mut first_page = true;
             loop {
                 let page =
                     list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
+                pages = pages.saturating_add(1);
                 entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
                 for (name, _) in page.directories {
                     returned = returned.saturating_add(1);
@@ -1184,31 +1186,36 @@ mod tests {
                 }
             }
 
-            let expected_without_removed = expected
+            // `proj_0500` sorts past the first page for both page sizes, so it
+            // is removed before it is reached and never returned;
+            // `proj_foreign_added` sorts after every `proj_0…` name, so it is
+            // created before it is reached and always is.
+            let mut expected_after_mutation = expected
                 .iter()
                 .filter(|name| name.as_str() != "proj_0500")
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            assert!(
-                observed.is_superset(&expected_without_removed),
-                "page size {page_size} skipped an original directory"
+            expected_after_mutation.insert("proj_foreign_added".to_owned());
+            assert_eq!(
+                observed, expected_after_mutation,
+                "page size {page_size} did not cover the mutated directory exactly"
             );
-            // A replay is permitted, an unbounded one is not: the whole pass
-            // must still cost within a constant factor of the directory.
-            assert!(
-                returned <= (expected.len() + 1).saturating_mul(2),
-                "page size {page_size} returned {returned} entries for {} directories",
-                expected.len()
+            assert_eq!(
+                returned,
+                observed.len(),
+                "page size {page_size} returned a directory twice"
             );
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            // Each page reads the directory once to select the next ordered
+            // slice, so the pass stays bounded by pages × directory size and
+            // cannot degrade into an unbounded rescan loop.
             assert!(
-                entries_scanned <= expected.len() + 1,
-                "page size {page_size} rescanned entries: {entries_scanned}"
+                entries_scanned <= pages.saturating_mul(expected.len().saturating_add(2)),
+                "page size {page_size} rescanned entries: {entries_scanned} over {pages} pages"
             );
-            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-            assert!(
-                entries_scanned <= (expected.len() + 1).saturating_mul(2),
-                "page size {page_size} rescanned directory or inventory entries: {entries_scanned}"
+            assert_eq!(
+                pages,
+                observed.len().div_ceil(page_size),
+                "page size {page_size} did not converge in one page per ordered slice"
             );
             assert!(
                 entries_scanned >= observed.len(),
@@ -1240,6 +1247,10 @@ mod tests {
         assert_eq!(restarted.next_cursor, None);
     }
 
+    /// Ordered paging reads the directory once per page, so a full pass is
+    /// `pages × directory` raw entries. This measures that the wall-clock cost
+    /// of the cheap name read stays negligible next to the bounded per-store
+    /// work each page drives.
     #[test]
     #[ignore = "manual filesystem scaling measurement"]
     fn project_directory_paging_measurements_are_linear() {
@@ -1260,9 +1271,11 @@ mod tests {
                 let mut cursor = String::new();
                 let mut entries_scanned = 0usize;
                 let mut observed = 0usize;
+                let mut pages = 0usize;
                 loop {
                     let page =
                         list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
+                    pages = pages.saturating_add(1);
                     entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
                     observed = observed.saturating_add(page.directories.len());
                     let Some(next_cursor) = page.next_cursor else {
@@ -1273,15 +1286,10 @@ mod tests {
                 let elapsed = started.elapsed();
 
                 assert_eq!(observed, directory_count);
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
-                assert_eq!(entries_scanned, directory_count);
-                #[cfg(not(any(
-                    all(target_os = "linux", target_env = "gnu"),
-                    target_os = "macos"
-                )))]
-                assert_eq!(entries_scanned, directory_count.saturating_mul(2));
+                assert_eq!(pages, directory_count.div_ceil(page_size));
+                assert_eq!(entries_scanned, directory_count.saturating_mul(pages));
                 eprintln!(
-                    "directories={directory_count} page_size={page_size} \
+                    "directories={directory_count} page_size={page_size} pages={pages} \
                      entries_scanned={entries_scanned} elapsed={elapsed:?}"
                 );
             }
