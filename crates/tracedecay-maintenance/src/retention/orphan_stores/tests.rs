@@ -1851,6 +1851,299 @@ fn committed_journal_recovery_removes_the_exact_quarantine() {
     );
 }
 
+async fn prepare_registered_quarantine(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    project_id: &str,
+    store_id: &str,
+    payload: &[u8],
+) -> (PathBuf, PathBuf) {
+    let data_root = seed_store(
+        db,
+        profile_root,
+        project_id,
+        store_id,
+        &profile_root.join("missing-project-root"),
+        1_700_000_000,
+    )
+    .await;
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let row = db
+        .try_list_store_instances_for_project(project_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.store_id == store_id)
+        .unwrap();
+    let expected = capture_store_content_fence(profile_root, &data_root).unwrap();
+    let quarantine = quarantine_store_for_verified_collection_controlled(
+        profile_root,
+        &data_root,
+        &expected,
+        QuarantineKindV1::Registered,
+        project_id,
+        store_id,
+        Some(QuarantineRegistryFenceV1 {
+            store_relpath: row.store_relpath,
+            created_at: row.created_at,
+            last_write_at: row.last_write_at,
+        }),
+        unbounded_collection_control(),
+    )
+    .unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach a verified registered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    (data_root, quarantine_path)
+}
+
+#[tokio::test]
+async fn empty_plan_restores_registered_quarantine_when_exact_row_remains() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"exact registered bytes survive a pre-commit crash";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_restore",
+        "store_registered_restore",
+        payload,
+    )
+    .await;
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert!(!quarantine_path.exists());
+    assert_eq!(
+        db.try_list_store_instances_for_project("proj_registered_restore")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn stale_registered_retirement_marker_cannot_override_exact_row() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"the exact registry row remains the commit authority";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_stale_marker",
+        "store_registered_stale_marker",
+        payload,
+    )
+    .await;
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.retired")),
+        [],
+    )
+    .unwrap();
+
+    assert_eq!(
+        recover_existing_store_quarantine(&profile_root, &data_root).unwrap(),
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            failure: None,
+        }],
+        "registered named recovery has no database authority to consume the marker"
+    );
+    assert_eq!(
+        std::fs::read(quarantine_path.join("payload.bin")).unwrap(),
+        payload
+    );
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert!(!quarantine_path.exists());
+    assert_eq!(
+        db.try_list_store_instances_for_project("proj_registered_stale_marker")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn empty_plan_removes_registered_quarantine_when_exact_row_is_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"exact registered bytes retire after the database commit";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_remove",
+        "store_registered_remove",
+        payload,
+    )
+    .await;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "DELETE FROM store_instances
+                 WHERE project_id = ?1 AND store_id = ?2
+                   AND store_relpath = ?3 AND created_at = ?4
+                   AND last_write_at IS ?5",
+                tracedecay_runtime_core::db::engine::params![
+                    "proj_registered_remove",
+                    "store_registered_remove",
+                    "stores/store_registered_remove",
+                    1_700_000_000i64,
+                    Some(1_700_000_000i64)
+                ],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert!(
+        db.try_list_store_instances_for_project("proj_registered_remove")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn empty_plan_retains_registered_quarantine_when_row_fence_changed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"changed registry authority cannot consume these bytes";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_changed",
+        "store_registered_changed",
+        payload,
+    )
+    .await;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE store_instances SET last_write_at = ?3
+                 WHERE project_id = ?1 AND store_id = ?2",
+                tracedecay_runtime_core::db::engine::params![
+                    "proj_registered_changed",
+                    "store_registered_changed",
+                    1_700_000_001i64
+                ],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert_eq!(
+        outcome.errors,
+        vec![CollectionFailure {
+            store_id: "store_registered_changed".to_owned(),
+            kind: CollectionFailureKind::RegistryChanged,
+        }]
+    );
+    assert_eq!(
+        outcome.recovery_receipts,
+        vec![CollectionRecoveryReceipt {
+            store_id: "store_registered_changed".to_owned(),
+            original_path: data_root.clone(),
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            action: CollectionRecoveryAction::RetainedForRecovery,
+        }]
+    );
+    assert!(!data_root.exists());
+    assert_eq!(
+        std::fs::read(quarantine_path.join("payload.bin")).unwrap(),
+        payload
+    );
+    let rows = db
+        .try_list_store_instances_for_project("proj_registered_changed")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].last_write_at, Some(1_700_000_001));
+    assert_eq!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn registered_recovery_completes_without_fabricating_collection_totals() {
     let tmp = tempfile::TempDir::new().unwrap();
