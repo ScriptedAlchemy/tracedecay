@@ -2,14 +2,23 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tracedecay_domain::VectorGenerationIdV1;
-use tracedecay_graph_db::GraphCancellation;
+use tracedecay_graph_db::{
+    GraphCancellation, SemanticVectorRetentionAction, SemanticVectorRetentionStep,
+    SemanticVectorRetirementReservation,
+};
 use tracedecay_store::{
-    SemanticVectorSourceGenerationId, SemanticVectorStageCensusCursor, StoreShardIdV1,
+    SemanticVectorCodeScopeHash, SemanticVectorPublishedGenerationDependencyLookup,
+    SemanticVectorSourceGenerationId, SemanticVectorSourceScopeBindingLookup,
+    SemanticVectorStageCensusCursor, SemanticVectorStageCensusRevision, StoreShardIdV1,
 };
 
 use super::persistence::map_graph_error;
-use super::{GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreStateV1};
-use crate::semantic_runtime::SemanticGraphExecutionAuthorityV1;
+use super::{
+    GRAPH_OPERATION_DEADLINE, GraphVectorGenerationStoreStateV1, GraphVectorGenerationStoreV1,
+};
+use crate::semantic_runtime::{
+    SemanticGraphExecutionAuthorityV1, SemanticVectorRetentionAuthorizationV1,
+};
 use crate::store::vector_generations::VectorGenerationStoreErrorV1;
 
 fn operation_authority(
@@ -19,47 +28,42 @@ fn operation_authority(
 }
 
 impl GraphVectorGenerationStoreStateV1 {
-    #[hotpath::measure(label = "usecases.store.reserve_generation")]
-    pub fn reserve_one_generation(
+    fn reserve_one_generation_records(
         &self,
         after: Option<SemanticVectorStageCensusCursor>,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionStep, VectorGenerationStoreErrorV1>
-    {
+    ) -> Result<SemanticVectorRetentionStep, VectorGenerationStoreErrorV1> {
         let authority = operation_authority(cancellation);
         self.runtime
             .reserve_one_generation(after, &authority)
             .map_err(map_graph_error)
     }
 
-    #[hotpath::measure(label = "usecases.store.finalize_generation")]
-    pub fn finalize_reserved_generation(
+    fn finalize_reserved_generation_records(
         &self,
-        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
-        authorization: &crate::semantic_runtime::SemanticVectorRetentionAuthorizationV1,
+        reservation: SemanticVectorRetirementReservation,
+        authorization: &SemanticVectorRetentionAuthorizationV1,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<tracedecay_graph_db::SemanticVectorRetentionAction, VectorGenerationStoreErrorV1>
-    {
+    ) -> Result<SemanticVectorRetentionAction, VectorGenerationStoreErrorV1> {
         let authority = operation_authority(cancellation);
         self.runtime
             .finalize_reserved_generation(reservation, authorization, &authority)
             .map_err(map_graph_error)
     }
 
-    #[hotpath::measure(label = "usecases.store.release_generation")]
-    pub fn release_reserved_generation(
+    fn release_reserved_generation_records(
         &self,
-        reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
+        reservation: SemanticVectorRetirementReservation,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
         self.runtime
             .release_reserved_generation(reservation)
             .map_err(map_graph_error)
     }
 
-    pub fn source_generation_is_live(
+    fn source_generation_is_live_records(
         &self,
         generation: &SemanticVectorSourceGenerationId,
-        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        expected_revision: SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
         let authority = operation_authority(cancellation);
@@ -68,10 +72,10 @@ impl GraphVectorGenerationStoreStateV1 {
             .map_err(map_graph_error)
     }
 
-    pub fn source_scope_is_live(
+    fn source_scope_is_live_records(
         &self,
         source_scope: &StoreShardIdV1,
-        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        expected_revision: SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
         let authority = operation_authority(cancellation);
@@ -80,24 +84,22 @@ impl GraphVectorGenerationStoreStateV1 {
             .map_err(map_graph_error)
     }
 
-    pub fn published_generation_dependency(
+    fn published_generation_dependency_records(
         &self,
         generation: &VectorGenerationIdV1,
-        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        expected_revision: SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<
-        tracedecay_store::SemanticVectorPublishedGenerationDependencyLookup,
-        VectorGenerationStoreErrorV1,
-    > {
+    ) -> Result<SemanticVectorPublishedGenerationDependencyLookup, VectorGenerationStoreErrorV1>
+    {
         let authority = operation_authority(cancellation);
         self.runtime
             .published_generation_dependency(generation, expected_revision, &authority)
             .map_err(map_graph_error)
     }
 
-    pub fn validate_project_census_revision(
+    fn validate_project_census_revision_records(
         &self,
-        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        expected_revision: SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
         let authority = operation_authority(cancellation);
@@ -106,26 +108,23 @@ impl GraphVectorGenerationStoreStateV1 {
             .map_err(map_graph_error)
     }
 
-    pub fn source_scope_binding(
+    fn source_scope_binding_records(
         &self,
-        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
-        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        code_scope_hash: &SemanticVectorCodeScopeHash,
+        expected_revision: SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<
-        tracedecay_store::SemanticVectorSourceScopeBindingLookup,
-        VectorGenerationStoreErrorV1,
-    > {
+    ) -> Result<SemanticVectorSourceScopeBindingLookup, VectorGenerationStoreErrorV1> {
         let authority = operation_authority(cancellation);
         self.runtime
             .source_scope_binding(code_scope_hash, expected_revision, &authority)
             .map_err(map_graph_error)
     }
 
-    pub fn remove_source_scope_binding(
+    fn remove_source_scope_binding_records(
         &self,
-        code_scope_hash: &tracedecay_store::SemanticVectorCodeScopeHash,
-        source_scope: &tracedecay_store::StoreShardIdV1,
-        expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+        code_scope_hash: &SemanticVectorCodeScopeHash,
+        source_scope: &StoreShardIdV1,
+        expected_revision: SemanticVectorStageCensusRevision,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
         let authority = operation_authority(cancellation);
@@ -137,5 +136,128 @@ impl GraphVectorGenerationStoreStateV1 {
                 &authority,
             )
             .map_err(map_graph_error)
+    }
+}
+
+impl GraphVectorGenerationStoreV1 {
+    #[hotpath::measure(label = "usecases.store.reserve_generation", future = true)]
+    pub async fn reserve_one_generation(
+        &self,
+        after: Option<SemanticVectorStageCensusCursor>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<SemanticVectorRetentionStep, VectorGenerationStoreErrorV1> {
+        self.dispatch(move |state| state.reserve_one_generation_records(after, cancellation))
+            .await
+    }
+
+    #[hotpath::measure(label = "usecases.store.finalize_generation", future = true)]
+    pub async fn finalize_reserved_generation(
+        &self,
+        reservation: SemanticVectorRetirementReservation,
+        authorization: &SemanticVectorRetentionAuthorizationV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<SemanticVectorRetentionAction, VectorGenerationStoreErrorV1> {
+        let authorization = authorization.clone();
+        self.dispatch(move |state| {
+            state.finalize_reserved_generation_records(reservation, &authorization, cancellation)
+        })
+        .await
+    }
+
+    #[hotpath::measure(label = "usecases.store.release_generation", future = true)]
+    pub async fn release_reserved_generation(
+        &self,
+        reservation: SemanticVectorRetirementReservation,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        self.dispatch(move |state| state.release_reserved_generation_records(reservation))
+            .await
+    }
+
+    pub async fn source_generation_is_live(
+        &self,
+        generation: &SemanticVectorSourceGenerationId,
+        expected_revision: SemanticVectorStageCensusRevision,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let generation = generation.clone();
+        self.dispatch(move |state| {
+            state.source_generation_is_live_records(&generation, expected_revision, cancellation)
+        })
+        .await
+    }
+
+    pub async fn source_scope_is_live(
+        &self,
+        source_scope: &StoreShardIdV1,
+        expected_revision: SemanticVectorStageCensusRevision,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let source_scope = source_scope.clone();
+        self.dispatch(move |state| {
+            state.source_scope_is_live_records(&source_scope, expected_revision, cancellation)
+        })
+        .await
+    }
+
+    pub async fn published_generation_dependency(
+        &self,
+        generation: &VectorGenerationIdV1,
+        expected_revision: SemanticVectorStageCensusRevision,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<SemanticVectorPublishedGenerationDependencyLookup, VectorGenerationStoreErrorV1>
+    {
+        let generation = generation.clone();
+        self.dispatch(move |state| {
+            state.published_generation_dependency_records(
+                &generation,
+                expected_revision,
+                cancellation,
+            )
+        })
+        .await
+    }
+
+    pub async fn validate_project_census_revision(
+        &self,
+        expected_revision: SemanticVectorStageCensusRevision,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        self.dispatch(move |state| {
+            state.validate_project_census_revision_records(expected_revision, cancellation)
+        })
+        .await
+    }
+
+    pub async fn source_scope_binding(
+        &self,
+        code_scope_hash: &SemanticVectorCodeScopeHash,
+        expected_revision: SemanticVectorStageCensusRevision,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<SemanticVectorSourceScopeBindingLookup, VectorGenerationStoreErrorV1> {
+        let code_scope_hash = code_scope_hash.clone();
+        self.dispatch(move |state| {
+            state.source_scope_binding_records(&code_scope_hash, expected_revision, cancellation)
+        })
+        .await
+    }
+
+    pub async fn remove_source_scope_binding(
+        &self,
+        code_scope_hash: &SemanticVectorCodeScopeHash,
+        source_scope: &StoreShardIdV1,
+        expected_revision: SemanticVectorStageCensusRevision,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let code_scope_hash = code_scope_hash.clone();
+        let source_scope = source_scope.clone();
+        self.dispatch(move |state| {
+            state.remove_source_scope_binding_records(
+                &code_scope_hash,
+                &source_scope,
+                expected_revision,
+                cancellation,
+            )
+        })
+        .await
     }
 }

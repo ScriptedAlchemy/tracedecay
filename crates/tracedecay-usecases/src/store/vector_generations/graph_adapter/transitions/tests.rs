@@ -34,9 +34,8 @@ use tracedecay_store::{
 
 use super::{post_commit_publication_settlement_error, semantic_stage_source_identity};
 use crate::semantic_runtime::{
-    RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
-    SemanticVectorGraphScopeV1, SemanticVectorRetentionAuthorizationV1,
-    VerifiedSemanticVectorGraphRuntimeV1,
+    RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
+    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
 use crate::store::vector_generations::graph_adapter::{
@@ -157,7 +156,9 @@ async fn same_binding_store_preserves_an_active_pending_stage() {
     let (first_plan, first_prepared, first_descriptor) =
         prepared_generation(&first_source, "chunk.superseded", 'a', &embedding);
     let first_retained = graph.retained(&first_source).unwrap();
-    let first_store = GraphVectorGenerationStoreV1::open(&first_retained).unwrap();
+    let first_store = GraphVectorGenerationStoreV1::open(&first_retained)
+        .await
+        .unwrap();
     first_store.configure_stage(first_descriptor).unwrap();
     let first_build = match first_store
         .begin_generation(first_plan, Arc::clone(&cancellation))
@@ -179,21 +180,16 @@ async fn same_binding_store_preserves_an_active_pending_stage() {
         .await
         .unwrap();
     let first_stage = first_store
-        .pending
-        .lock()
-        .unwrap()
-        .get(&first_build)
-        .unwrap()
-        .stage
-        .plan
-        .key
-        .clone();
+        .pending_stage_key(&first_build)
+        .expect("pending first stage");
     drop(first_store);
 
     let (second_plan, _second_prepared, second_descriptor) =
         prepared_generation(&second_source, "chunk.current", 'b', &embedding);
     let second_retained = graph.retained(&second_source).unwrap();
-    let second_store = GraphVectorGenerationStoreV1::open(&second_retained).unwrap();
+    let second_store = GraphVectorGenerationStoreV1::open(&second_retained)
+        .await
+        .unwrap();
     second_store.configure_stage(second_descriptor).unwrap();
     let error = second_store
         .begin_generation(second_plan, Arc::clone(&cancellation))
@@ -238,7 +234,7 @@ async fn staged_publication(
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, prepared, descriptor) = prepared_generation(
         &source,
         &format!("chunk.{label}"),
@@ -265,7 +261,7 @@ async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
     let (_graph, mut store, build, source) =
         staged_publication("background-publication", 'c', &cancellation).await;
     let probe = Arc::new(PublicationAuthorityProbeRuntime::wrapping(Arc::clone(
-        &store.runtime,
+        store.runtime(),
     )));
     store.replace_runtime(probe);
 
@@ -292,7 +288,7 @@ async fn verify_pass_outlasting_the_interactive_deadline_still_publishes() {
         // is already spent before the install phase starts.
         simulated_verify_elapsed: Some(2 * GRAPH_OPERATION_DEADLINE),
         recover_snapshot_gate: Mutex::new(None),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
 
@@ -318,7 +314,7 @@ async fn publication_cancelled_during_verify_reports_typed_cancellation() {
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancel_during_verify: Some(cancellation_flag),
         recover_snapshot_gate: Mutex::new(None),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
 
@@ -341,7 +337,7 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, _, descriptor) = prepared_generation(
         &source,
         "chunk.background-begin",
@@ -352,7 +348,7 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         require_background_begin: true,
         recover_snapshot_gate: Mutex::new(None),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
 
@@ -391,14 +387,14 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, _, descriptor) =
         prepared_generation(&source, "chunk.begin-cancelled", 'e', &admitted_embedding());
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancellation_to_trip: Some(cancellation_flag),
         recover_snapshot_gate: Mutex::new(None),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
 
@@ -447,7 +443,7 @@ async fn read_only_snapshot_recovery_leaves_the_only_runtime_worker_free() {
     });
 
     let started = Instant::now();
-    let store = GraphVectorGenerationStoreV1::read_only(&retained);
+    let store = GraphVectorGenerationStoreV1::read_only(&retained).await;
     let elapsed = started.elapsed();
     heartbeat.abort();
 
@@ -487,7 +483,7 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, _, descriptor) = prepared_generation(
         &source,
         "chunk.writer-contention",
@@ -499,7 +495,7 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         begin_gate: Mutex::new(Some(gate)),
         recover_snapshot_gate: Mutex::new(None),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
 

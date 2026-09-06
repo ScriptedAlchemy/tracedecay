@@ -505,6 +505,7 @@ async fn prior_daemon_pending_stage_is_adopted_and_replacement_publishes() {
     let (first_plan, first_prepared, first_descriptor) =
         prepared_generation(&source, "chunk.before-restart", 'a');
     let first_store = GraphVectorGenerationStoreV1::open(&first_retained)
+        .await
         .expect("open first semantic vector store");
     first_store
         .configure_stage(first_descriptor)
@@ -572,6 +573,7 @@ async fn prior_daemon_pending_stage_is_adopted_and_replacement_publishes() {
     let (replacement_plan, replacement_prepared, replacement_descriptor) =
         prepared_generation(&source, "chunk.after-restart", 'b');
     let replacement_store = GraphVectorGenerationStoreV1::open(&cancellation_retained)
+        .await
         .expect("open restarted semantic vector store");
     replacement_store
         .configure_stage(replacement_descriptor)
