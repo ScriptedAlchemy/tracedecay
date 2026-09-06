@@ -6,10 +6,9 @@
 //! native file revision, and a SHA-256 digest of every byte through that
 //! cursor.
 //!
-//! Unix can trust an unchanged native identity, length, mtime, and ctime.
-//! Other revisions validate the full verified prefix before serving or
-//! scanning only an appended delta. Every lookup and scan uses one open file
-//! handle, whose revision is checked again before parsed models are committed.
+//! Every cached prefix is content-validated from the one open file handle
+//! before serving or scanning only an appended delta. The handle's revision is
+//! checked again before parsed models are committed.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -88,9 +87,6 @@ struct ParentDispatchEntry {
 }
 
 enum LookupPlan {
-    ServeCached {
-        model: Option<String>,
-    },
     RefreshObserved {
         model: Option<String>,
     },
@@ -159,10 +155,6 @@ impl ParentDispatchIndex {
             }
         };
         match plan {
-            LookupPlan::ServeCached { model } => {
-                self.touch(parent_path);
-                (model, DispatchScanReceipt::EMPTY)
-            }
             LookupPlan::RefreshObserved { model } => {
                 if let Some(entry) = self.entries.get_mut(parent_path) {
                     entry.revision = revision;
@@ -215,29 +207,13 @@ impl ParentDispatchIndex {
                 resume_digest: ResumeDigest::new(),
             });
         }
-        #[cfg(unix)]
-        if entry.revision == revision {
-            if let Some(model) = entry.models.get(agent_id) {
-                return Ok(LookupPlan::ServeCached {
-                    model: Some(model.clone()),
-                });
-            }
-            if revision.len <= entry.verified_cursor {
-                return Ok(LookupPlan::ServeCached { model: None });
-            }
-            // Unverified trailing bytes (a partial frame) must be re-read even
-            // when metadata is unchanged; the complete prefix stays trusted.
-            return Ok(LookupPlan::Scan {
-                start: entry.verified_cursor,
-                reset: false,
-                resume_digest: entry.resume_digest.clone(),
-            });
-        }
         let verified_cursor = entry.verified_cursor;
         let expected = entry.resume_digest.witness(verified_cursor);
         let cached = entry.models.get(agent_id).cloned();
         let (resume_digest, _) = jsonl_prefix_digest(file, verified_cursor)?;
         if resume_digest.witness(verified_cursor) == expected {
+            // Unverified trailing bytes (a partial frame) are re-read after
+            // validating the complete prefix, even when metadata is unchanged.
             if revision.len > verified_cursor {
                 Ok(LookupPlan::Scan {
                     start: verified_cursor,
