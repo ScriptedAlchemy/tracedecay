@@ -1912,11 +1912,19 @@ async fn load_condensation_candidates(
                 AND availability.availability = 'available'
                LEFT JOIN source_order ON source_order.node_id = n.node_id
                WHERE n.provider = ?1 AND n.session_id = ?2
+                 -- Fail closed only while a raw revision's invalidation
+                 -- closure is partially applied: the walk enqueues
+                 -- `summary_node` work exactly when it has already staled at
+                 -- least one summary and has more to visit. Queued-but-
+                 -- unstarted work (only `raw_message` rows, which every
+                 -- protection revision seeds) leaves a consistent view.
                  AND NOT EXISTS (
                    SELECT 1
-                   FROM lcm_summary_convergence_dirty_raw dirty
-                   WHERE dirty.provider = n.provider
-                     AND dirty.session_id = n.session_id
+                   FROM lcm_summary_convergence_invalidation_work partial
+                   WHERE partial.provider = n.provider
+                     AND partial.session_id = n.session_id
+                     AND partial.source_kind = 'summary_node'
+                     AND partial.state = 'pending'
                  )
                  AND NOT EXISTS (
                    SELECT 1
