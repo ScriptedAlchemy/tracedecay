@@ -473,7 +473,7 @@ async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
         .expect("refresh should prepare");
     let handle = tokio::spawn(async move {
         prepared
-            .collect_diagnostics(std::time::Duration::from_millis(500))
+            .collect_diagnostics_with_timeouts(phase_gated_fake_lsp_timeouts())
             .await
     });
     control
@@ -585,7 +585,7 @@ with open({counter_path:?}, "a", encoding="utf-8") as f:
 
     let first_refresh = tokio::spawn(async move {
         first
-            .collect_diagnostics(std::time::Duration::from_millis(500))
+            .collect_diagnostics_with_timeouts(phase_gated_fake_lsp_timeouts())
             .await
     });
     let write_acquired = control.wait_for("write-acquired").await;

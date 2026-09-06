@@ -170,6 +170,22 @@ fn loaded_runner_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
     )
 }
 
+// A phase-gated refresh must outlive the spawn its barrier waits on. The
+// default budget derived from a 500ms quiet window gives initialize 3s, and a
+// starved macOS runner can take longer than that to start /usr/bin/python3;
+// a refresh that gave up there killed the fake before it could reach its
+// phase, so the barrier then waited out its own deadline (#896). The quiet
+// window itself stays short.
+fn phase_gated_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
+    let quiet = std::time::Duration::from_millis(500);
+    lsp::client::LspRefreshTimeouts::new(
+        quiet + FAKE_LSP_START_TIMEOUT,
+        FAKE_LSP_START_TIMEOUT,
+        FAKE_LSP_START_TIMEOUT,
+        quiet,
+    )
+}
+
 #[test]
 fn analyzer_lifecycle_is_project_scoped_and_preserves_failure_evidence() {
     let root = AdmittedRoot::new("file:///project");
