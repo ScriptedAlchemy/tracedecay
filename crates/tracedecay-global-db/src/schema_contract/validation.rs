@@ -6,6 +6,7 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEX_DESCENDING_COLUMNS, INDEXES, Index, REGISTRY_TABLE_NAMES,
+    SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX, SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY,
     SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3, TABLES, Table,
 };
 use super::pragma::{
@@ -276,16 +277,21 @@ fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) ->
             })
 }
 
-fn validate_indexes_for_table(
-    table: &str,
-    actual: &[ActualIndex],
-) -> tracedecay_domain::errors::Result<()> {
-    let expected = INDEXES
+fn contract_indexes_for_table(table: &str) -> Vec<&'static Index> {
+    INDEXES
         .iter()
         .filter(|contract| contract.table.eq_ignore_ascii_case(table))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn validate_indexes_for_table(
+    table_contract: &Table,
+    expected: &[&Index],
+    actual: &[ActualIndex],
+) -> tracedecay_domain::errors::Result<()> {
+    let table = table_contract.name;
     let mut matched_actual = vec![false; actual.len()];
-    for contract in &expected {
+    for contract in expected {
         let Some(actual_index) = actual
             .iter()
             .enumerate()
@@ -303,13 +309,10 @@ fn validate_indexes_for_table(
         };
         matched_actual[actual_index] = true;
     }
-    let table_contract = TABLES
-        .iter()
-        .find(|contract| contract.name.eq_ignore_ascii_case(table));
     if expected
         .iter()
         .all(|contract| !contract.origin.eq_ignore_ascii_case("pk"))
-        && let Some(primary_key_columns) = table_contract.and_then(primary_key_index_columns)
+        && let Some(primary_key_columns) = primary_key_index_columns(table_contract)
     {
         let Some(actual_index) = actual.iter().enumerate().position(|(index, actual)| {
             !matched_actual[index] && primary_key_index_matches(actual, &primary_key_columns)
@@ -462,7 +465,11 @@ async fn validate_contracts(
             )
         })?;
         validate_table(contract, actual)?;
-        validate_indexes_for_table(contract.name, &actual.indexes)?;
+        validate_indexes_for_table(
+            contract,
+            &contract_indexes_for_table(contract.name),
+            &actual.indexes,
+        )?;
     }
     Ok(())
 }
@@ -478,6 +485,32 @@ pub async fn validate_released_v3_temporal_projection_receipt_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
     validate_contracts(conn, &[&SESSION_TEMPORAL_PROJECTION_RECEIPTS_V3]).await
+}
+
+/// Validates the exact v4 `session_relation_receipts` shape persisted before
+/// receipt recovery: the final columns minus the recovery columns, and the
+/// final index inventory minus the recovery-due index.
+pub async fn validate_session_relation_receipts_without_recovery_contract(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<()> {
+    let contract = &SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY;
+    let metadata = read_table_metadata(conn, &[contract.name]).await?;
+    let actual = metadata.get(contract.name).ok_or_else(|| {
+        global_db_operation_message(
+            OPERATION,
+            format!("table '{}' metadata is unavailable", contract.name),
+        )
+    })?;
+    validate_table(contract, actual)?;
+    let expected = contract_indexes_for_table(contract.name)
+        .into_iter()
+        .filter(|index| {
+            index.name.is_none_or(|name| {
+                !name.eq_ignore_ascii_case(SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX)
+            })
+        })
+        .collect::<Vec<_>>();
+    validate_indexes_for_table(contract, &expected, &actual.indexes)
 }
 
 pub async fn validate_session_graph_publication_schema_contract(

@@ -9,6 +9,7 @@ use tracedecay_temporal_query::ranking::RankingCandidate;
 mod relations;
 
 use super::cursors::*;
+use super::queries::partial_summary_invalidation_exists;
 use super::rows::*;
 use super::{MAX_SUMMARY_SOURCES_PER_RECORD, RECORD_OPERATION};
 use relations::{
@@ -782,14 +783,14 @@ impl RecordModeSql {
                    AND copy_current.current_occurrence_id = target.occurrence_id"
                     .to_string(),
                 copy_predicate: "1 = 1".to_string(),
-                summary_predicate: "availability.availability = 'available'
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM lcm_summary_convergence_dirty_raw AS dirty
-                        WHERE dirty.provider =
-                            json_extract(n.publication_json, '$.provider')
-                          AND dirty.session_id = n.session_id
-                    )"
+                summary_predicate: concat!(
+                    "availability.availability = 'available'
+                    AND NOT ",
+                    partial_summary_invalidation_exists!(
+                        "json_extract(n.publication_json, '$.provider')",
+                        "n.session_id"
+                    )
+                )
                 .to_string(),
             },
             TemporalModeV1::AsOf { .. } => Self {

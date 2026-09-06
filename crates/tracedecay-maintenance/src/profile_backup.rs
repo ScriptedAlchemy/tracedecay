@@ -22,7 +22,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, sha256_hex};
-use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
 
 #[path = "profile_backup/error.rs"]
 mod error;
@@ -894,6 +894,22 @@ fn copy_verified_file(
             ))
         })?;
     }
+    copy_private_file(source, destination)?;
+    verify_file(destination, expected)
+}
+
+/// Copies one backup artifact byte-for-byte, keeps it private to the current
+/// user, and syncs it.
+///
+/// `fs::copy` carries the Unix mode across but not the Windows DACL: the copy
+/// inherits its destination directory's ACEs, and the private record readers
+/// (`profile-identity.json` on both the backup and the rehearsed profile)
+/// refuse that shape. Tightening after the copy gives every host the same
+/// owner-private artifact.
+pub(super) fn copy_private_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), ProfileBackupError> {
     fs::copy(source, destination).map_err(|error| {
         ProfileBackupError::unavailable(format!(
             "copy backup file '{}' to '{}': {error}",
@@ -901,8 +917,13 @@ fn copy_verified_file(
             destination.display()
         ))
     })?;
-    sync_file(destination)?;
-    verify_file(destination, expected)
+    set_owner_private_file_mode(destination).map_err(|error| {
+        ProfileBackupError::unavailable(format!(
+            "restrict backup file '{}': {error}",
+            destination.display()
+        ))
+    })?;
+    sync_file(destination)
 }
 
 fn verify_file(path: &Path, expected: &ProfileBackupEntry) -> Result<(), ProfileBackupError> {

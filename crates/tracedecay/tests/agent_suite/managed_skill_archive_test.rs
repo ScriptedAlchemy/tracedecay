@@ -9,6 +9,7 @@ fn draft() -> ManagedSkillDraft {
         id: "repo-hygiene".to_string(),
         title: "Repository hygiene".to_string(),
         summary: "Keep repository maintenance guidance current.".to_string(),
+        routing_description: "Keep repository maintenance guidance current.".to_string(),
         category: "maintenance".to_string(),
         targets: vec![SkillInstallTarget::Cursor, SkillInstallTarget::Codex],
         body_markdown: "Use focused checks before changing generated files.".to_string(),
