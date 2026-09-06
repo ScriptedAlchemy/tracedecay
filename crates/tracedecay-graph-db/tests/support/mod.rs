@@ -230,7 +230,7 @@ fn binding() -> StoreRuntimeBindingV1 {
 }
 
 /// Windows CI exports this to the whole shard as a speed knob. No production
-/// graph or SQLite backend currently reads it; durability fixtures still
+/// graph or `SQLite` backend currently reads it; durability fixtures still
 /// unset it so a green run cannot be mistaken for production durability proof.
 pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
 pub const GRAPH_CRASH_CHILD_ROOT_ENV: &str = "TRACEDECAY_GRAPH_CRASH_CHILD_ROOT";
