@@ -1125,10 +1125,12 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let orphan_digest = hex::encode(Sha256::digest(orphan_bytes));
     let orphan_pack = segment_root.join(format!("segment-{orphan_digest}.json"));
     std::fs::write(&orphan_pack, orphan_bytes).expect("write committed orphan evidence pack");
+    // A rollback reserve of one holds the single superseded generation; the
+    // pointer index it is still named by would not.
     let orphan_report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        1,
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(8_000_000),
         None,
@@ -1136,7 +1138,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     .expect("sweep committed orphan without collecting a generation");
     assert!(
         orphan_report.deleted_generations.is_empty(),
-        "both pointer-addressable generations must remain retained"
+        "the rollback reserve must retain the superseded generation"
     );
     assert!(
         !orphan_pack.exists(),
@@ -1156,7 +1158,9 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
         );
     }
 
-    remove_historical_pointer_entries(store.path());
+    // Without that reserve the same generation is collectable while the
+    // pointer still names it, and its segments part by whether the active
+    // generation reuses them.
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
@@ -1571,12 +1575,17 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     );
 }
 
+/// Membership of the durable `generation_index` is a referential-integrity
+/// check, not a liveness mark: a published store keeps the active generation
+/// and the newest `rollback_floor` superseded generations, and everything older
+/// is collectable while the pointer still names it.
 #[test]
-fn code_generation_retention_preserves_every_pointer_addressable_generation() {
+fn code_generation_retention_keeps_only_the_rollback_floor_reserve() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
+
+    const ROLLBACK_FLOOR: usize = 2;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -1585,28 +1594,44 @@ fn code_generation_retention_preserves_every_pointer_addressable_generation() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        ROLLBACK_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(49),
         None,
     )
     .expect("apply retention");
 
-    assert!(report.plan.collectable_generations.is_empty());
-    assert!(report.deleted_generations.is_empty());
+    let (collected, reserved) = generations.split_at(generations.len() - ROLLBACK_FLOOR - 1);
+    assert_eq!(
+        report
+            .deleted_generations
+            .iter()
+            .map(|generation| generation.generation_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        collected
+            .iter()
+            .map(CodeGenerationId::as_str)
+            .collect::<BTreeSet<_>>(),
+        "everything older than the active generation and its rollback reserve is collectable"
+    );
+    let reserved = reserved
+        .iter()
+        .map(CodeGenerationId::as_str)
+        .collect::<BTreeSet<_>>();
     let reopened = scheduler(
         &fixture,
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    for generation in generations {
-        assert!(
+    for generation in &generations {
+        assert_eq!(
             reopened
                 .publication
-                .load_generation(&generation)
-                .expect("read pointer-addressable generation")
+                .load_generation(generation)
+                .expect("read retained generation")
                 .is_some(),
-            "retention must preserve every generation still named by the pointer"
+            reserved.contains(generation.as_str()),
+            "only the active generation and the rollback reserve survive collection"
         );
     }
 }
@@ -1654,12 +1679,17 @@ fn sealed_replay_binding_resolves_an_exact_superseded_generation() {
     ));
 }
 
+/// The durable index bounds the pointer's own history, and a collection pass
+/// bounds its batch; neither bound is the other's. One pass takes its whole
+/// batch from the oldest end no matter which of those generations the index
+/// still names, and every collected id leaves the index with them.
 #[test]
-fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
+fn one_bounded_pass_collects_clean_and_dirty_superseded_generations() {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        DurablePublicationPointerV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
-        MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, run_code_generation_retention,
+        DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+        MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
+        run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -1704,21 +1734,23 @@ fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
         UtcMicros(50),
         None,
     )
-    .expect("collect generations evicted from bounded history");
-    assert_eq!(
-        report.deleted_generations.len(),
-        generations.len() - pointer.generation_index.len()
-    );
+    .expect("collect superseded generations in one bounded pass");
+    let collected = report
+        .deleted_generations
+        .iter()
+        .map(|generation| generation.generation_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(collected.len(), MAX_CODE_GENERATION_RETENTION_BATCH_V1);
 
     let reopened = scheduler(
         &fixture,
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    let retained = pointer
-        .generation_index
+    let retained = generations
         .iter()
-        .map(|entry| entry.generation_id.as_str())
+        .map(CodeGenerationId::as_str)
+        .filter(|generation| !collected.contains(generation))
         .collect::<BTreeSet<_>>();
     for generation in &generations {
         assert_eq!(
@@ -1728,14 +1760,26 @@ fn bounded_pointer_history_collects_evicted_clean_and_dirty_generations() {
                 .expect("read bounded generation")
                 .is_some(),
             retained.contains(generation.as_str()),
-            "only pointer-addressable generations may survive collection"
+            "one bounded pass collects its whole batch and nothing else"
         );
     }
     assert_eq!(
         std::fs::read_dir(store.path().join("code-generations-v1"))
             .expect("list retained generations")
             .count(),
-        pointer.generation_index.len()
+        retained.len()
+    );
+    let rewritten: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+            .expect("read rewritten publication pointer"),
+    )
+    .expect("decode rewritten publication pointer");
+    assert!(
+        rewritten
+            .generation_index
+            .iter()
+            .all(|entry| retained.contains(entry.generation_id.as_str())),
+        "the durable index may never name a generation this pass unlinked"
     );
 }
 
@@ -2268,9 +2312,9 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     let mut pointer: tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
             .expect("decode publication pointer");
-    // Every generation stays pointer-addressable — this test is about census
-    // cost at scale, not about a collectable backlog — so each index entry's
-    // recorded size must match its sparsely grown file.
+    // The pointer's index is a referential-integrity check the census still
+    // validates, so each entry's recorded size must match its sparsely grown
+    // file even though membership no longer holds a generation live.
     for entry in &mut pointer.generation_index {
         entry.size_bytes = ONE_GIB;
     }
@@ -2296,9 +2340,14 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     .expect("metadata-only census must not depend on re-hashing gigabytes");
 
     assert_eq!(plan.superseded_generations.len(), 3);
+    assert_eq!(plan.collectable_generations.len(), 3);
     assert!(
         plan.superseded_generation_bytes() >= 3 * ONE_GIB,
         "the census must report the real footprint, not a budgeted subset"
+    );
+    assert!(
+        plan.collectable_generation_bytes() >= 3 * ONE_GIB,
+        "the backlog the finding reports is the real footprint too"
     );
 
     let record = CodeGenerationRetentionRecordV1 {
@@ -2318,7 +2367,13 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
         finding.finding().coverage().is_complete(),
         "a byte budget must not downgrade coverage the census actually achieved"
     );
-    assert!(finding.finding().state().is_healthy_complete());
+    // Complete coverage of a real backlog, not health: pointer membership no
+    // longer holds these three superseded generations live, so the finding a
+    // complete census produces at this size is the backlog itself.
+    assert_eq!(
+        finding.finding().state(),
+        tracedecay_application::doctor::DoctorEvidenceStateV1::Stale
+    );
 }
 
 struct MixedAnchorReverseRerankExecutorV1;
