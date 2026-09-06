@@ -153,28 +153,6 @@ where
         Self { storage }
     }
 
-    /// Whether an admitted or quarantined Work placement holds the exact
-    /// canonical target root for this Work authority.
-    pub fn has_target_holder(
-        &self,
-        context: &RequestContext,
-        root: &str,
-    ) -> Result<bool, ApplicationProblem> {
-        let authority = work_authority(context)?;
-        self.has_target_holder_for_authority(&authority, root)
-    }
-
-    pub fn has_target_holder_for_authority(
-        &self,
-        authority: &WorkAuthority,
-        root: &str,
-    ) -> Result<bool, ApplicationProblem> {
-        self.storage
-            .target_holder(authority, root)
-            .map(|holder| holder.is_some())
-            .map_err(storage_problem)
-    }
-
     /// Cleanup-only exact-scope census, intentionally independent of the
     /// current caller's actor and policy lineage.
     pub fn has_target_holder_in_exact_repository_root(
