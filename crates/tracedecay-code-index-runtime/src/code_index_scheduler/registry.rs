@@ -3811,6 +3811,33 @@ impl CodeIndexSchedulerRegistryV1 {
                     // another retained-recovery Noop.
                     worker_wake.notify_one();
                 }
+                // A recovered revision-7 verified head already serves its
+                // native graph from the retained text owner, and that owner
+                // is the authority every graph route reads. Preparing the
+                // same generation again buys nothing but the O(store)
+                // partition replay the verified-head recovery exists to
+                // avoid: the decoder reloads the active generation, and the
+                // seat that follows is a second copy of what already serves.
+                // Restarts of a partitioned manifest therefore answer complete
+                // demands through the text projection and leave the sealed
+                // slot unseated, exactly as `sealed_decode_count() == 0`
+                // requires. A publication seats its own product as usual, and
+                // a legacy (non-partitioned) owner still takes the seat.
+                if prepare_graph
+                    && !published_pass
+                    && graph_already_serves
+                    && graph_text
+                        .as_ref()
+                        .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest)
+                {
+                    prepare_graph = false;
+                    tracing::debug!(
+                        event = "code_index_graph_seat_skipped",
+                        reason = "verified_head_already_serves",
+                        "the recovered revision-7 head already serves; the sealed generation \
+                         is not replayed to seat a second copy of it"
+                    );
+                }
                 let mut result = match source_result {
                     Ok(mut outcome) if prepare_graph => {
                         let graph_scheduler = Arc::clone(&worker_scheduler);
