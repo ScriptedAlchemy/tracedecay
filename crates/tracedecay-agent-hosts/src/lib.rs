@@ -10,8 +10,7 @@
 //! A handful of root-owned runtimes cannot become a dependency edge (Hook
 //! daemon/identity composition, the Codex app-server backend, and the
 //! registered database's canonical project key). Those are
-//! [`crate::ports`] slots the root fills at startup (`src/runtime_ports.rs`);
-//! each degrades to a documented inert answer when unregistered.
+//! [`crate::ports`] slots the root fills at startup (`src/runtime_ports.rs`).
 //! The MCP tool catalog is no longer among them: `tracedecay-mcp` owns it and
 //! sits below this crate, so installers read it directly and an unavailable
 //! catalog is a typed error rather than an empty allowlist.

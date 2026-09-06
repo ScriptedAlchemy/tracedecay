@@ -8,9 +8,11 @@
 //!
 //! Three shapes appear below, and the choice between them is not stylistic:
 //!
-//! - **Registered ports.** Behaviour backed by root-owned runtime is a
-//!   function pointer the root registers at startup. Every such port degrades
-//!   to a documented inert answer when the root never registers.
+//! - **A required composition handle.** [`hook_runtime::HookRuntimeV1`] is one
+//!   value carrying every root-owned capability a hook path needs. The root
+//!   installs it whole; a process that never did is a bootstrap failure that
+//!   every reader reports as such, rather than nine slots each answering with
+//!   a plausible production value.
 //! - **Direct reads of a lower owner.** [`mcp_tools`] and [`pricing`] name the
 //!   crate that owns the data. Neither was ever a root-only capability once
 //!   the split settled, and inverting them cost real safety: an unregistered
