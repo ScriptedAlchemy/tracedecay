@@ -318,6 +318,102 @@ async fn wait_for_settled_semantic_generation(
     .expect("production semantic generation did not settle")
 }
 
+/// The generation this root serves, with the source content it sealed.
+///
+/// This walks the same complete-seat-then-text-owner ladder as
+/// `CodeIndexSchedulerRegistryV1::latest_generation_id`, because that resolver
+/// answers an identity only and the journey needs the content that identity
+/// sealed; the registry's content-bearing resolver
+/// (`current_serving_generation_for_scope`) is scope-shaped while the journey
+/// holds a project root.
+async fn serving_source_identity(
+    schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    project: &Path,
+) -> Option<(
+    tracedecay_domain::CodeGenerationId,
+    tracedecay_domain::ContentDigest,
+)> {
+    if let Some(seated) = schedulers
+        .serving_code_scope(project)
+        .await
+        .and_then(|serving| serving.serving_generation)
+    {
+        return Some((
+            seated.manifest().generation_id.clone(),
+            seated.snapshot().content_identity.clone(),
+        ));
+    }
+    let text = schedulers.latest_text_serving_for_root(project).await?;
+    Some((
+        text.metadata().manifest().generation_id.clone(),
+        text.metadata().snapshot().content_identity.clone(),
+    ))
+}
+
+/// Wait until this scope serves the same sealed source content as `expected`,
+/// and answer with the identity it is serving.
+///
+/// Generation identity is minted per publication:
+/// `GenerationPlanner::next_generation_id` hashes the parent generation and its
+/// publication fence into the identity (see
+/// `crates/tracedecay-code-index/src/generations.rs`), so returning the
+/// worktree to an earlier commit always seals a *new* identity over the earlier
+/// content and can never reproduce the previous one. The level the product
+/// guarantees across a rollback is the sealed source content, and that is
+/// exactly the level readiness is proven at: `semantic_source_coherence` decides
+/// compatibility from the chunk corpus and carries a `ProvenSourceContent` arm
+/// precisely for coherent vectors whose source generation id differs from the
+/// serving one.
+async fn wait_for_restored_source_content(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    expected: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    label: &str,
+) -> tracedecay_domain::CodeGenerationId {
+    let schedulers = &harness
+        .resources
+        .as_ref()
+        .expect("live harness")
+        .invocation
+        .code_index_schedulers;
+    let expected_content = expected.snapshot().content_identity.clone();
+    let restored = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some((generation_id, content)) =
+                serving_source_identity(schedulers, project).await
+                && content == expected_content
+            {
+                return generation_id;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    match restored {
+        Ok(generation_id) => generation_id,
+        Err(_) => {
+            // The complete seat and the text owner are separate slots, and a
+            // stale complete seat outranks a current text owner in the
+            // resolver. Name all three in the same moment so a timeout says
+            // which slot never moved instead of only that the wait expired.
+            let seat = schedulers
+                .serving_code_scope(project)
+                .await
+                .and_then(|serving| serving.serving_generation)
+                .map(|generation| generation.manifest().generation_id.clone());
+            let text = schedulers
+                .latest_text_serving_for_root(project)
+                .await
+                .map(|latest| latest.metadata().manifest().generation_id.clone());
+            let resolved = schedulers.latest_generation_id(project).await;
+            panic!(
+                "{label} did not restore: expected source content {expected_content}, \
+                 complete seat {seat:?}, text owner {text:?}, resolved {resolved:?}"
+            );
+        }
+    }
+}
+
 pub(super) async fn evaluate_native_profile(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
@@ -990,20 +1086,9 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
             .await
     );
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while resources
-            .invocation
-            .code_index_schedulers
-            .latest_generation_id(&project)
-            .await
-            .as_ref()
-            != Some(&first_code_id)
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("G1 code generation did not restore");
+    let rollback_code_id =
+        wait_for_restored_source_content(&harness, &project, &first_code, "G1 source content")
+            .await;
     set_semantic_profile(
         &harness,
         &project,
@@ -1020,7 +1105,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         rollback_runtime["state"]["receipt"]["activated_generation"],
         json!(first_vector.generation_id())
     );
-    assert_code_generation_unchanged(&harness, &project, &first_code_id).await;
+    assert_code_generation_unchanged(&harness, &project, &rollback_code_id).await;
     assert_eq!(
         graph_bytes(&generations).await,
         graph_before_activation,
@@ -1035,7 +1120,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     );
     assert_eq!(
         rolled_back_query["code_generation"],
-        json!(first_code.manifest().generation_id)
+        json!(rollback_code_id)
     );
 
     git(
@@ -1049,20 +1134,9 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
             .await
     );
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while resources
-            .invocation
-            .code_index_schedulers
-            .latest_generation_id(&project)
-            .await
-            .as_ref()
-            != Some(&second_code_id)
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("G2 code generation did not restore");
+    let retry_code_id =
+        wait_for_restored_source_content(&harness, &project, &second_code, "G2 source content")
+            .await;
     let core_before_failure = search(&harness, &project, false).await;
     assert_ne!(core_before_failure["semantic"]["status"], "complete");
     assert!(
@@ -1102,7 +1176,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         Some(selection(first_profile, &artifact_digest, &artifact_path)),
     )
     .await;
-    assert_code_generation_unchanged(&harness, &project, &second_code_id).await;
+    assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
     let core_during_failure = search(&harness, &project, false).await;
     assert_eq!(
         core_during_failure["query_fallback_digest"], core_before_failure["query_fallback_digest"],
@@ -1149,15 +1223,12 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         recovered_status["state"]["receipt"]["activated_generation"],
         json!(second_vector.generation_id())
     );
-    assert_eq!(
-        recovered["code_generation"],
-        json!(second_code.manifest().generation_id)
-    );
+    assert_eq!(recovered["code_generation"], json!(retry_code_id));
     assert_eq!(
         graph_bytes(&generations).await,
         graph_before_activation,
         "exact retry must restore routing without graph publication"
     );
-    assert_code_generation_unchanged(&harness, &project, &second_code_id).await;
+    assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
     harness.shutdown().await;
 }
