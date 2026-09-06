@@ -47,6 +47,7 @@ use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
     ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
     ResidentMemoryReservationV1, detected_process_resident_memory_limit_v1,
+    sampled_process_resident_bytes_v1,
 };
 use tracedecay_usecases::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -69,7 +70,7 @@ use crate::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
             CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
             CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
-            CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+            CodeIndexInterruptionV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
             CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
             SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
@@ -108,7 +109,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_code_generation_store_lock,
     attach_verified_text_artifact_under_lock, code_text_artifact_path, code_text_artifacts_root,
     durable_generation_index_digest, retain_bounded_generation_index,
-    withdraw_verified_text_artifact_under_lock,
+    try_acquire_code_generation_store_lock, withdraw_verified_text_artifact_under_lock,
 };
 use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 
@@ -1366,6 +1367,34 @@ impl DaemonCodeIndexPublicationStoreV1 {
         });
     }
 
+    fn read_retained_partitioned_segment(
+        &self,
+        identity: &DurableSealedCodeGenerationIdentityV1,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let root = self
+            .active_path
+            .parent()
+            .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
+        let _lock = try_acquire_code_generation_store_lock(root)
+            .map_err(Self::unavailable)?
+            .ok_or_else(|| Self::unavailable("sealed lexical source generation store is busy"))?;
+        let pointer = self.read_publication_pointer()?;
+        if !pointer.as_ref().is_some_and(|pointer| {
+            pointer.generation_index.iter().any(|entry| {
+                entry.generation_file == identity.locator
+                    && entry.state_digest == identity.digest.as_str()
+                    && entry.size_bytes == identity.size_bytes
+            })
+        }) {
+            return Err(CodeIndexProductionErrorV1::Interrupted(
+                CodeIndexInterruptionV1::Cancelled,
+            ));
+        }
+        self.read_partitioned_segment(request, buffer)
+    }
+
     #[hotpath::measure(label = "code_index.generation.decode.segment")]
     fn read_partitioned_segment(
         &self,
@@ -2098,13 +2127,11 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         if self.undecoded_active_expectation.is_some() {
             return Ok(None);
         }
-        Ok(self
-            .load_active_shared()?
-            .map(|generation| generation.as_ref().clone()))
+        self.load_active_shared()
     }
 
     #[hotpath::measure(label = "code_index.generation.publish")]
@@ -3347,7 +3374,10 @@ fn map_sealed_page_source_error(error: CodeIndexProductionErrorV1) -> RetrievalP
         CodeIndexProductionErrorV1::Interrupted(
             crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
         ) => RetrievalPortError::BudgetExceeded,
-        CodeIndexProductionErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
+        CodeIndexProductionErrorV1::Contract(detail)
+        | CodeIndexProductionErrorV1::Publication(
+            CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail),
+        ) => RetrievalPortError::Contract(detail),
         error => RetrievalPortError::AuthorityUnavailable(error.to_string()),
     }
 }
@@ -3394,9 +3424,11 @@ impl DaemonCodeTextArtifactStoreV1 {
         &self.store_root
     }
 
-    /// Reserve one artifact memory ceiling through the process authority.
-    /// A denial (after one bounded reclaim pass) is a typed unavailability,
-    /// never a silent unreserved allocation.
+    /// Reserve one artifact memory ceiling plus the freshly observed process
+    /// live set not already represented by reservations for this admission.
+    /// This closes the gap between the modeled ledger and decoded generations
+    /// before the artifact allocates; the retained guard is shrunk back to the
+    /// component's own ceiling once admission-time growth has completed.
     fn reserve_resident_memory(
         &self,
         generation_id: &CodeGenerationId,
@@ -3413,6 +3445,38 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
+        let snapshot = self.resident_memory.snapshot();
+        let observed_bytes = sampled_process_resident_bytes_v1().map_or(0, |observed| {
+            self.resident_memory
+                .pressure()
+                .publish_observed_resident_bytes(observed)
+                .observed_bytes()
+                .unwrap_or(observed)
+        });
+        let unmodeled_live_bytes = observed_bytes.saturating_sub(snapshot.used_bytes);
+        let admission_watermark = self
+            .resident_memory
+            .pressure()
+            .high_watermark_bytes()
+            .min(snapshot.limit_bytes);
+        let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
+        let accounted = requested
+            .get()
+            .checked_add(unmodeled_live_bytes)
+            .and_then(|bytes| bytes.checked_add(watermark_headroom))
+            .and_then(NonZeroU64::new)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "text-artifact resident-memory accounting overflowed".to_owned(),
+                )
+            })?;
+        hotpath::gauge!("query.artifact.admission.observed_resident_bytes")
+            .set(observed_bytes as f64);
+        hotpath::gauge!("query.artifact.admission.unmodeled_live_bytes")
+            .set(unmodeled_live_bytes as f64);
+        hotpath::gauge!("query.artifact.admission.requested_growth_bytes")
+            .set(requested.get() as f64);
+        hotpath::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
         self.resident_memory
             .reserve(
                 ResidentMemoryKeyV1 {
@@ -3421,7 +3485,7 @@ impl DaemonCodeTextArtifactStoreV1 {
                     generation_id: generation_id.clone(),
                     component,
                 },
-                requested,
+                accounted,
             )
             .map_err(|_| RetrievalPortError::BudgetExceeded)
     }
@@ -3632,12 +3696,15 @@ impl DaemonCodeTextArtifactStoreV1 {
                     ));
                 }
                 let manifest = File::open(path).map_err(text_artifact_unavailable)?;
+                let publication = self.publication.clone();
+                let source_identity = identity.clone();
                 VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
                     manifest,
                     &manifest_bytes,
                     identity.digest.clone(),
-                    |digest, expected_size, buffer| {
-                        self.publication.read_partitioned_segment(
+                    move |digest, expected_size, buffer| {
+                        publication.read_retained_partitioned_segment(
+                            &source_identity,
                             SealedGenerationSegmentReadV1::Whole {
                                 digest,
                                 size_bytes: expected_size,
@@ -3704,12 +3771,15 @@ impl DaemonCodeTextArtifactStoreV1 {
                 }
                 progress(identity.size_bytes, identity.size_bytes);
                 let manifest = File::open(&path).map_err(text_artifact_unavailable)?;
+                let publication = self.publication.clone();
+                let source_identity = identity.clone();
                 VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
                     manifest,
                     &manifest_bytes,
                     identity.digest.clone(),
-                    |digest, expected_size, buffer| {
-                        self.publication.read_partitioned_segment(
+                    move |digest, expected_size, buffer| {
+                        publication.read_retained_partitioned_segment(
+                            &source_identity,
                             SealedGenerationSegmentReadV1::Whole {
                                 digest,
                                 size_bytes: expected_size,
@@ -5091,6 +5161,10 @@ impl LatestCodeTextGenerationV1 {
             &sealed_identity,
             control,
         )?;
+        // The builder and source are gone, so its transient reservation no
+        // longer owns bytes. Release it before sampling the reader admission;
+        // the reader guard then carries the still-live unmodeled baseline.
+        drop(build_reservation);
         let reader_reservation = store.reserve_resident_memory(
             &self.metadata.manifest().generation_id,
             "code-text-artifact-reader",
@@ -5108,20 +5182,35 @@ impl LatestCodeTextGenerationV1 {
         .map_err(map_text_artifact_error)?;
         self.install_artifact_owners(reader, reader_reservation)?;
         self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
-        drop(build_reservation);
         Ok(true)
     }
 
     fn install_artifact_owners(
         &self,
         reader: CodeLexicalArtifactReaderV1,
-        reader_reservation: ResidentMemoryReservationV1,
+        mut reader_reservation: ResidentMemoryReservationV1,
     ) -> Result<(), RetrievalPortError> {
         if reader.retained_owned_bytes() > CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 {
             return Err(RetrievalPortError::Contract(
                 "text-artifact reader exceeded its admitted resident-memory ceiling".to_owned(),
             ));
         }
+        reader_reservation
+            .shrink_to(
+                u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1).map_err(
+                    |error| {
+                        RetrievalPortError::Contract(format!(
+                            "text-artifact reader ceiling exceeds u64: {error}"
+                        ))
+                    },
+                )?,
+            )
+            .map_err(|error| {
+                RetrievalPortError::Contract(format!(
+                    "text-artifact reader reservation could not release its admission baseline: \
+                     {error}"
+                ))
+            })?;
         let authority = exact_serving_authority()?;
         let exact = ExactLane::new(authority.clone(), reader.exact_adapter(authority));
         let hydration = reader.clone();
