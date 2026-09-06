@@ -6,6 +6,7 @@
 //! a clean answer when an upstream analyzer is unavailable.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::diagnostics::{GatewayDiagnostic, LspPosition};
 use crate::gateway::{
@@ -26,6 +27,15 @@ pub const MAX_ANALYZER_RESTARTS: u8 = 3;
 /// stop, so only useful service counts, measured on the events the lane
 /// already raises rather than a timer or a poll.
 pub const ANALYZER_REQUESTS_PROVING_STABILITY: u8 = 3;
+/// How long an incarnation must have been `Ready` before the requests it
+/// served forgive its restart budget. Served count alone bounds nothing:
+/// `start → answer three requests in a millisecond → crash` reset the counter
+/// on every restart, so an analyzer dying continuously was respawned forever —
+/// a slower crash loop than the one reaching `Ready` forgave, but still not a
+/// restart *rate* bound. Survival is what the budget is about, so the reset
+/// needs both. Measured from the `Ready` event's timestamp to the served
+/// request's, on the events this lane already raises: no timer, no poll.
+pub const ANALYZER_UPTIME_PROVING_STABILITY: Duration = Duration::from_secs(30);
 pub const MAX_DIAGNOSTIC_OPERATION_ID_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,6 +128,10 @@ pub struct AnalyzerSupervisor {
     attempt: u32,
     /// Requests served by the incarnation `attempt` started.
     served_requests: u8,
+    /// When the incarnation `attempt` started reached `Ready`. Paired with
+    /// `served_requests` it bounds the restart rate: a process must both do
+    /// useful work and survive to forgive the budget.
+    ready_at: Option<Instant>,
 }
 
 impl AnalyzerSupervisor {
@@ -129,6 +143,7 @@ impl AnalyzerSupervisor {
             last_failure: None,
             attempt: 0,
             served_requests: 0,
+            ready_at: None,
         }
     }
 
@@ -174,6 +189,17 @@ impl AnalyzerSupervisor {
         root: &AdmittedRoot,
         event: AnalyzerEvent,
     ) -> Result<AnalyzerState, AnalyzerTransitionError> {
+        self.apply_at(root, event, Instant::now())
+    }
+
+    /// `apply` with the observation time supplied, so the healthy-interval
+    /// rule is exercised without sleeping.
+    fn apply_at(
+        &mut self,
+        root: &AdmittedRoot,
+        event: AnalyzerEvent,
+        now: Instant,
+    ) -> Result<AnalyzerState, AnalyzerTransitionError> {
         if !self.owns(root) {
             return Err(AnalyzerTransitionError::RootMismatch {
                 expected: self.root.clone(),
@@ -195,6 +221,7 @@ impl AnalyzerSupervisor {
             ) => {
                 self.attempt = self.attempt.wrapping_add(1);
                 self.served_requests = 0;
+                self.ready_at = None;
                 AnalyzerState::Starting
             }
             // Spawned and initialized. This is where the process the budget is
@@ -203,17 +230,23 @@ impl AnalyzerSupervisor {
             // `start → initialize → Ready → crash` restart forever.
             (AnalyzerState::Starting, AnalyzerEvent::Ready) => {
                 self.served_requests = 0;
+                self.ready_at = Some(now);
                 AnalyzerState::Ready
             }
-            // One request served by this incarnation. Enough of them is the
-            // only demonstrated stability observable from the events this lane
-            // already raises, and it is the only thing that forgives the
-            // budget — so a transient failure years into a healthy daemon does
-            // not land on a counter left over from a recovered one, while a
-            // process that keeps dying still exhausts.
+            // One request served by this incarnation. Useful service across a
+            // healthy interval is the only demonstrated stability observable
+            // from the events this lane already raises, and it is the only
+            // thing that forgives the budget — so a transient failure years
+            // into a healthy daemon does not land on a counter left over from
+            // a recovered one, while a process that keeps dying still
+            // exhausts, however many requests it answers on the way down.
             (AnalyzerState::Ready, AnalyzerEvent::Ready) => {
                 self.served_requests = self.served_requests.saturating_add(1);
-                if self.served_requests >= ANALYZER_REQUESTS_PROVING_STABILITY {
+                if self.served_requests >= ANALYZER_REQUESTS_PROVING_STABILITY
+                    && self.ready_at.is_some_and(|ready_at| {
+                        now.saturating_duration_since(ready_at) >= ANALYZER_UPTIME_PROVING_STABILITY
+                    })
+                {
                     self.restart_attempts = 0;
                 }
                 AnalyzerState::Ready
@@ -827,13 +860,59 @@ mod tests {
         // has spawned, not proven anything.
         assert_eq!(supervisor.restart_attempts(), 1);
 
-        // Serving requests is what proves it. Once this incarnation has, the
-        // budget is forgiven, so a transient failure much later in a daemon's
-        // life cannot land on a counter left over from a recovered one.
+        // Serving requests over a healthy interval is what proves it. Once
+        // this incarnation has, the budget is forgiven, so a transient failure
+        // much later in a daemon's life cannot land on a counter left over
+        // from a recovered one.
+        let mut clock = Instant::now() + ANALYZER_UPTIME_PROVING_STABILITY;
         for _ in 0..ANALYZER_REQUESTS_PROVING_STABILITY {
-            supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
+            supervisor
+                .apply_at(&root, AnalyzerEvent::Ready, clock)
+                .unwrap();
+            clock += Duration::from_millis(1);
         }
         assert_eq!(supervisor.restart_attempts(), 0);
+    }
+
+    /// Demonstrated service alone is not a restart *rate* bound: three
+    /// requests answered in a blink is throughput, not survival, and
+    /// forgiving the budget on the count alone let
+    /// `start → answer three → crash` erase the crash before it on every
+    /// restart, so an analyzer dying continuously was respawned forever. The
+    /// incarnation must also have been `Ready` for
+    /// `ANALYZER_UPTIME_PROVING_STABILITY`.
+    #[test]
+    fn a_fast_crash_loop_serving_requests_still_exhausts_the_restart_budget() {
+        let root = AdmittedRoot::new("file:///project");
+        let mut supervisor = AnalyzerSupervisor::new(root.clone());
+
+        let mut clock = Instant::now();
+        let mut state = AnalyzerState::AwaitingStart;
+        for _ in 0..MAX_ANALYZER_RESTARTS {
+            supervisor
+                .apply_at(&root, AnalyzerEvent::StartRequested, clock)
+                .unwrap();
+            supervisor
+                .apply_at(&root, AnalyzerEvent::Ready, clock)
+                .unwrap();
+            // Past the served-request threshold, but the whole incarnation
+            // lives well inside the healthy interval.
+            for _ in 0..=ANALYZER_REQUESTS_PROVING_STABILITY {
+                clock += ANALYZER_UPTIME_PROVING_STABILITY / 10;
+                supervisor
+                    .apply_at(&root, AnalyzerEvent::Ready, clock)
+                    .unwrap();
+            }
+            state = supervisor
+                .apply_at(&root, AnalyzerEvent::Crashed, clock)
+                .unwrap();
+        }
+
+        assert_eq!(state, AnalyzerState::Exhausted);
+        assert_eq!(
+            supervisor.failure_evidence(),
+            Some(("analyzer-crashed", "Analyzer process exited unexpectedly."))
+        );
     }
 
     /// The budget counts consecutive failures, and forgiving it on `Ready`
