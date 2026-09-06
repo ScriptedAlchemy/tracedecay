@@ -580,6 +580,12 @@ mod projectless_admission_tests {
     /// pinned authority differ by exactly this much on every connection; on
     /// Linux the symlink has to be made explicitly to reproduce it.
     fn linked_profile_root(temp: &std::path::Path) -> (PathBuf, PathBuf) {
+        // The retained profile root is whatever admission canonicalized, so the
+        // fixture's own base has to be canonical before anything is joined onto
+        // it; on macOS `tempfile` hands back the `/var` spelling of
+        // `/private/var` and every expectation built from it names a path the
+        // daemon never pinned.
+        let temp = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(temp);
         let real_root = temp.join("real").join(".tracedecay");
         std::fs::create_dir_all(&real_root).expect("create profile root");
         {
