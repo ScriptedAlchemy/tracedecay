@@ -401,7 +401,12 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     }
     let (left, right) = tokio::join!(
         open_project(&harness, &projects[0], "concurrent-left", "project_0_probe"),
-        open_project(&harness, &projects[1], "concurrent-right", "project_1_probe"),
+        open_project(
+            &harness,
+            &projects[1],
+            "concurrent-right",
+            "project_1_probe"
+        ),
     );
     let (_left, left_serving) = left.expect("first concurrent uncached project admission");
     let (_right, right_serving) = right.expect("second concurrent uncached project admission");

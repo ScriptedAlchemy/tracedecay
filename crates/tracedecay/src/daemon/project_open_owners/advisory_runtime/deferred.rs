@@ -128,10 +128,12 @@ async fn try_mount(
             // checkout. Feedback, session and LSP availability must not wait
             // on full code-index publication: take that recovered level,
             // which carries the same sealed snapshot this owner reads.
-            None => invocation
-                .code_index_schedulers
-                .latest_text_serving_for_scope(&state.scope)
-                .await,
+            None => {
+                invocation
+                    .code_index_schedulers
+                    .latest_text_serving_for_scope(&state.scope)
+                    .await
+            }
         },
     };
     let Some(indexed) = indexed else {
