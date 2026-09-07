@@ -5,12 +5,13 @@
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::cline_like::{ClineLikeSource, ui_messages_source_key};
 use tracedecay_sessions::runtime::cursor::ingest_cursor_transcript_event;
-use tracedecay_sessions::runtime::native_ingest_source_identity;
 
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
+use crate::codex::write_codex_rollout_with_structured_events;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
@@ -92,13 +93,59 @@ async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources()
         ui_cursor.source(),
         "Cline API and UI streams must stay independently ordered"
     );
+    let provider = ProviderId::new("cline").unwrap();
+    let session = SessionId::new(session_id).unwrap();
+    let expected_api =
+        ObservationSourceIdentityV1::for_provider(provider.clone(), session.clone()).unwrap();
+    let expected_ui = ObservationSourceIdentityV1::for_provider_source(
+        provider,
+        session,
+        SessionId::new(ui_key).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(api_cursor.source(), &expected_api);
+    assert_eq!(ui_cursor.source(), &expected_ui);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn codex_registered_ingest_uses_the_host_v2_source_identity() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let session_id = "codex-source-v2";
+    write_codex_rollout_with_structured_events(&home, &project, session_id);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+
+    let expected =
+        tracedecay_sessions::runtime::codex::codex_observation_source_v2(session_id).unwrap();
+    let cursor = db
+        .runtime()
+        .project_observation_source_cursor_for_test(&expected)
+        .await
+        .unwrap()
+        .expect("Codex v2 source cursor");
+    assert_eq!(cursor.source(), &expected);
+
+    let legacy = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("codex").unwrap(),
+        SessionId::new(session_id).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        native_ingest_source_identity("cline", session_id, None).unwrap(),
-        api_cursor.source().clone()
-    );
-    assert_eq!(
-        native_ingest_source_identity("cline", session_id, Some(&ui_key)).unwrap(),
-        ui_cursor.source().clone()
+        db.runtime()
+            .project_observation_source_cursor_for_test(&legacy)
+            .await
+            .unwrap(),
+        None,
+        "the pre-v2 provider/session identity must remain unused"
     );
 }
 
@@ -141,7 +188,11 @@ async fn cursor_search_uses_path_identity_for_the_selected_project() {
         ingest_cursor_transcript_event(&event.to_string(), &runtime.facade(), project_id).await;
     assert_eq!(stats.messages_upserted, 2);
 
-    let source = native_ingest_source_identity("cursor", "cursor-session", None).unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("cursor-session").unwrap(),
+    )
+    .unwrap();
     let cursor = runtime
         .project_observation_source_cursor_for_test(&source)
         .await

@@ -4,7 +4,7 @@ use std::path::Path;
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
+    ObservationSourceRangeV1, RetentionClass,
 };
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
@@ -575,16 +575,7 @@ pub fn snapshot_source_identity_for(
     session_id: &str,
     source_key: Option<&str>,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    let provider = ProviderId::new(provider)?;
-    let session_id = SessionId::new(session_id.to_string())?;
-    Ok(match source_key {
-        Some(source_key) => ObservationSourceIdentityV1::for_provider_source(
-            provider,
-            session_id,
-            SessionId::new(source_key.to_string())?,
-        )?,
-        None => ObservationSourceIdentityV1::for_provider(provider, session_id)?,
-    })
+    crate::runtime::native_ingest_source_identity(provider, session_id, source_key)
 }
 
 #[allow(clippy::too_many_arguments)]

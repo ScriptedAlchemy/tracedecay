@@ -15,8 +15,8 @@ use tracedecay_capture::cursor::{
 #[cfg(test)]
 use tracedecay_domain::CanonicalObservationFactV1;
 use tracedecay_domain::{
-    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, ProjectId, ProviderId, RetentionClass, SessionId,
+    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceRangeV1,
+    ProjectId, RetentionClass,
 };
 use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, cursor_model_string, dispatch_text, is_subagent_dispatch_tool,
@@ -31,6 +31,7 @@ use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations, namespace_replacement_message_ids, preflight_and_parse_new,
 };
+use crate::runtime::native_ingest_source_identity;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
     append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
@@ -198,10 +199,7 @@ fn admit_cursor_jsonl_observations<'a>(
         let native_session_id = subagent
             .as_ref()
             .map_or(parent_session_id, |(session_id, _)| session_id.as_str());
-        let source = ObservationSourceIdentityV1::for_provider(
-            ProviderId::new("cursor")?,
-            SessionId::new(native_session_id.to_owned())?,
-        )?;
+        let source = native_ingest_source_identity("cursor", native_session_id, None)?;
         let request = JsonlObservationAdmissionRequest::new(
             "cursor",
             path,

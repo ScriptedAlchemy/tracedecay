@@ -807,6 +807,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             2,
             "{provider}: initial durable message cardinality"
         );
+        let usage_fact_count = db.observation_fact_count("uncorrelated_usage").await;
+        assert_eq!(
+            usage_fact_count, 1,
+            "{provider}: initial usage fact cardinality"
+        );
         let prefix_cursor = observation_source_cursor(&db, provider, &session_id, &project)
             .await
             .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
@@ -835,6 +840,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             observation_source_cursor(&replay, provider, &session_id, &project).await,
             Some(prefix_cursor.clone()),
             "{provider}: frontier unchanged on restart"
+        );
+        assert_eq!(
+            replay.observation_fact_count("uncorrelated_usage").await,
+            usage_fact_count,
+            "{provider}: exact restart must not duplicate usage"
         );
 
         // Replacement with an extra durable turn, interrupted by projection failure.
@@ -886,6 +896,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             "{provider}: API replacement leaves the UI stream frontier untouched"
         );
         assert_eq!(
+            replay.observation_fact_count("uncorrelated_usage").await,
+            usage_fact_count,
+            "{provider}: covered API replacement must not duplicate UI usage"
+        );
+        assert_eq!(
             replay.session_message_count().await.unwrap(),
             2,
             "{provider}: failed projection preserves prior durable cardinality"
@@ -926,6 +941,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
                 .messages_upserted,
             0,
             "{provider}: post-recovery replay"
+        );
+        assert_eq!(
+            recovered.observation_fact_count("uncorrelated_usage").await,
+            usage_fact_count,
+            "{provider}: recovery replay must not duplicate usage"
         );
     }
 }
