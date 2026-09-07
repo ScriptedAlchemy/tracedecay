@@ -1033,6 +1033,64 @@ async fn test_malformed_json() {
 }
 
 // ---------------------------------------------------------------------------
+// 11b. test_foreign_protocol_version_is_rejected_before_dispatch
+// ---------------------------------------------------------------------------
+
+/// The envelope rule is enforced once at the transport boundary: a frame
+/// whose `jsonrpc` is not exactly `"2.0"` is answered with `InvalidRequest`
+/// carrying its id and never reaches the handler, so it cannot execute a tool
+/// or enter request accounting. Malformed JSON stays `ParseError`
+/// (`test_malformed_json`).
+#[tokio::test]
+async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
+    let (server, _dir) = setup_server().await;
+    let stats_view = std::sync::Arc::clone(&server);
+    let status_call = |envelope: Value| {
+        let mut frame = envelope;
+        frame["method"] = json!("tools/call");
+        frame["params"] = json!({"name": "tracedecay_status", "arguments": {}});
+        serde_json::to_string(&frame).unwrap()
+    };
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            status_call(json!({"jsonrpc": "1.0", "id": 501})),
+            status_call(json!({"jsonrpc": 2.0, "id": 502})),
+            status_call(json!({"id": 503})),
+            serde_json::to_string(&json!({
+                "jsonrpc": "1.0",
+                "method": "notifications/initialized"
+            }))
+            .unwrap(),
+            jsonrpc_request(json!(504), "ping", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(responses.len(), 5, "{responses:?}");
+    for id in [501, 502, 503] {
+        let rejected = response_with_id(&responses, json!(id));
+        assert_eq!(rejected["error"]["code"], -32600, "{rejected}");
+        assert!(rejected["result"].is_null(), "{rejected}");
+    }
+    let rejected_notification = response_with_id(&responses, Value::Null);
+    assert_eq!(
+        rejected_notification["error"]["code"], -32600,
+        "{rejected_notification}"
+    );
+    let ping = response_with_id(&responses, json!(504));
+    assert!(ping["error"].is_null(), "{ping}");
+
+    let stats = stats_view.server_stats_json().await;
+    assert_eq!(stats["total_requests"], 1, "only the ping is work: {stats}");
+    assert_eq!(stats["tool_calls"], 0, "{stats}");
+    assert!(
+        stats["method_call_counts"].get("tools/call").is_none(),
+        "{stats}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 12. test_blank_lines_skipped
 // ---------------------------------------------------------------------------
 

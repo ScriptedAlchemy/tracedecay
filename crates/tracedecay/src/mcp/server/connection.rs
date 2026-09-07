@@ -282,7 +282,7 @@ impl QueuedRequestLine {
     fn new(line: String) -> Self {
         let parsed = hotpath::measure_block!(
             "mcp.server.connection.queued_decode",
-            serde_json::from_str::<JsonRpcRequest>(line.trim())
+            JsonRpcRequest::decode(line.trim())
         );
         let request = parsed.as_ref().ok();
         let request_id = request.and_then(|request| request.id.clone());
@@ -677,7 +677,7 @@ impl McpServer {
                     };
                     let parsed = hotpath::measure_block!(
                         "mcp.server.connection.inflight_decode",
-                        serde_json::from_str::<JsonRpcRequest>(line.trim())
+                        JsonRpcRequest::decode(line.trim())
                     );
                     if let Ok(notification) = &parsed
                         && matches!(
@@ -1071,9 +1071,9 @@ impl McpServer {
                 continue;
             }
 
-            let parsed: std::result::Result<JsonRpcRequest, _> = hotpath::measure_block!(
+            let parsed = hotpath::measure_block!(
                 "mcp.server.connection.decode",
-                serde_json::from_str(&line)
+                JsonRpcRequest::decode(&line)
             );
             if let Ok(notification) = &parsed
                 && matches!(
@@ -1231,11 +1231,7 @@ impl McpServer {
                             response
                         }
                     }
-                    Err(e) => Some(JsonRpcResponse::error(
-                        Value::Null,
-                        ErrorCode::ParseError,
-                        format!("failed to parse JSON-RPC request: {e}"),
-                    )),
+                    Err(error) => Some(error.into_response()),
                 }
             };
 
@@ -2301,6 +2297,28 @@ mod cancellable_queue_tests {
         assert!(
             queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
         );
+    }
+
+    #[test]
+    fn queued_line_with_foreign_protocol_version_carries_no_request_metadata() {
+        let tools_call = |version: serde_json::Value| {
+            serde_json::json!({
+                "jsonrpc": version,
+                "id": "1",
+                "method": "tools/call",
+                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
+            })
+            .to_string()
+        };
+        let accepted = QueuedRequestLine::new(tools_call(serde_json::json!("2.0")));
+        assert_eq!(accepted.request_id, Some(serde_json::json!("1")));
+        assert!(accepted.independent_read);
+        assert!(accepted.cancellable_request_id.is_some());
+
+        let rejected = QueuedRequestLine::new(tools_call(serde_json::json!("1.0")));
+        assert_eq!(rejected.request_id, None);
+        assert!(!rejected.independent_read);
+        assert!(rejected.cancellable_request_id.is_none());
     }
 
     #[test]

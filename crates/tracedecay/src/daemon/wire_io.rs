@@ -186,6 +186,43 @@ mod wire_bound_tests {
     }
 
     #[tokio::test]
+    async fn rmcp_broker_transport_rejects_foreign_protocol_version_with_request_id() {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let mut transport = BrokerStreamTransport::new(server);
+
+        client
+            .write_all(b"{\"jsonrpc\":\"1.0\",\"id\":\"v1\",\"method\":\"ping\"}\n")
+            .await
+            .expect("foreign version frame");
+        client
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+            .await
+            .expect("valid frame");
+        client.flush().await.expect("flush");
+
+        let recovered = Transport::<rmcp::RoleServer>::receive(&mut transport)
+            .await
+            .expect("valid frame after invalid envelope");
+        let recovered = serde_json::to_value(recovered).expect("serialize received message");
+        assert_eq!(recovered["id"], serde_json::json!(1));
+
+        let mut client = tokio::io::BufReader::new(client);
+        let mut line = String::new();
+        client
+            .read_line(&mut line)
+            .await
+            .expect("rejection response");
+        let response: serde_json::Value =
+            serde_json::from_str(&line).expect("invalid request JSON response");
+        assert_eq!(response["id"], serde_json::json!("v1"));
+        assert_eq!(response["error"]["code"], serde_json::json!(-32600));
+    }
+
+    #[tokio::test]
     async fn daemon_routed_rmcp_serves_initialize_tools_unknown_and_cancel() {
         let (cg, _dir, _pin) = crate::mcp::server::writer_test_support::init_indexed_repo().await;
         let mcp = crate::mcp::McpServer::new(cg, None).await;

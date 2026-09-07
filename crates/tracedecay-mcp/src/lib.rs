@@ -86,7 +86,9 @@ pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
     map_transcript_ingest_error,
 };
-pub use jsonrpc::{ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport};
+pub use jsonrpc::{
+    ErrorCode, JsonRpcDecodeError, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
+};
 pub use lifecycle::{McpConnectionLifecyclePort, McpLifecycleDrainFuture, McpRequestActivity};
 pub use project_access::registered_project_reader_tool_names;
 pub use tool_call_deadline::{
