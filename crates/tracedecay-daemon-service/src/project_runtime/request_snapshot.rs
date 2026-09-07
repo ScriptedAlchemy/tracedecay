@@ -281,6 +281,61 @@ mod tests {
         assert_eq!(mounted.project_id, project_id);
     }
 
+    #[tokio::test]
+    async fn captured_admission_cannot_cross_into_another_registered_root() {
+        let registry = ProjectRuntimeRegistryV1::default();
+        let alias = PathBuf::from("/projects/admitted-alias");
+        let admitted = PathBuf::from("/projects/admitted-root");
+        let foreign = PathBuf::from("/projects/foreign-root");
+        let admitted_project = ProjectId::new("project.admitted-root").expect("project id");
+        registry
+            .register(
+                admitted.clone(),
+                DaemonAdvisoryCycleInvocationOwner::new(
+                    admitted_project.clone(),
+                    Arc::new(UnavailableAdvisoryCycle),
+                ),
+            )
+            .await
+            .expect("admitted owner registration");
+        registry
+            .register(
+                foreign.clone(),
+                DaemonAdvisoryCycleInvocationOwner::new(
+                    ProjectId::new("project.foreign-root").expect("project id"),
+                    Arc::new(UnavailableAdvisoryCycle),
+                ),
+            )
+            .await
+            .expect("foreign owner registration");
+        let admission = registry
+            .admit_request(&alias, Some(&admitted))
+            .expect("capture admitted alias");
+
+        assert!(admission.covers(&registry, &alias));
+        assert!(!admission.covers(&registry, &foreign));
+        assert!(
+            !registry
+                .request_runtimes_with_admission(&foreign, &admission)
+                .is_admitted(),
+            "the admitted root cached on A must not make an unrelated B look covered"
+        );
+
+        registry.lock_root_fences().quiesced.insert(foreign.clone());
+        assert!(
+            !registry
+                .request_runtimes_with_admission(&foreign, &admission)
+                .is_admitted(),
+            "an A lease must not bypass B's root fence"
+        );
+        let snapshot = registry.request_runtimes_with_admission(&alias, &admission);
+        assert_eq!(snapshot.resolved_root.as_deref(), Some(admitted.as_path()));
+        assert_eq!(
+            snapshot.advisory_cycle.expect("admitted owner").project_id,
+            admitted_project
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn captured_admission_does_not_follow_a_retargeted_alias() {

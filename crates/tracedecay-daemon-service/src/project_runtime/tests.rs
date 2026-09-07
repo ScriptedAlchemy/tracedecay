@@ -1134,6 +1134,15 @@ async fn stale_publication_failure_cannot_poison_a_newer_ready_attempt() {
     let stale = registry
         .begin_publication(&project)
         .expect("first publication attempt");
+    let quiescence = registry
+        .quiesce_roots(&BTreeSet::from([project.clone()]))
+        .await
+        .expect("retire the first runtime under a replacement fence");
+    drop(quiescence);
+    registry
+        .publish(project.clone(), TestFirst(2))
+        .await
+        .expect("replacement runtime");
     let current = registry
         .begin_publication(&project)
         .expect("replacement publication attempt");
