@@ -31,7 +31,8 @@
   "notes": "Blast radius: place_order (caller) and pricing_test (covering test).",
   "expected_skill": "assessing-impact",
   "allowed_skills": [
-    "assessing-impact"
+    "assessing-impact",
+    "find-impact"
   ],
   "max_tracedecay_calls": 6
 }

@@ -1284,7 +1284,6 @@ pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
 }
 
 /// Authored routing examples are proposal input, not measured adoption results.
-#[cfg(feature = "test-transport")]
 pub(crate) fn skill_routing_validation(skill_id: &str) -> Value {
     json!([
         {

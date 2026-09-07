@@ -326,6 +326,7 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
         privacy_domain: privacy_domain.clone(),
         privacy_key_epoch: 7,
         parent_generation: None,
+        source_commitments: None,
         seal: GenerationSealV1 {
             expected_digest: digest('b'),
             sealed_at: UtcMicros(1_000_000),

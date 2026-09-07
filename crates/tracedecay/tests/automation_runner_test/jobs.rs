@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use tokio::sync::Barrier;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
+
 use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 use tracedecay_automation_runtime::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, evaluate_and_record_scheduler_skip,
@@ -1166,7 +1169,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_manual_job_triggers_do_not_double_execute() {
     struct SlowBackend {
         calls: AtomicUsize,
@@ -1195,40 +1198,51 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     let profile_root = temp.path().join("profile");
-    fs::create_dir_all(&profile_root).unwrap();
+    let lock_dir = dashboard_root.join("automation_locks");
+    PrivateStoreIo::create_dir_all_durable(&profile_root).unwrap();
+    PrivateStoreIo::create_dir_all_durable(&lock_dir).unwrap();
     let job = sample_job("concurrent-job");
     let config = enabled_job_config();
     let backend = SlowBackend {
         calls: AtomicUsize::new(0),
     };
+    let barrier = Barrier::new(2);
 
     let (first, second) = tokio::join!(
-        run_user_job_with_backend(
-            &dashboard_root,
-            &config,
-            &backend,
-            &job,
-            UserJobRunOptions {
-                trigger: AutomationTrigger::Dashboard,
-                run_id: Some("concurrent-run-1".to_string()),
-                profile_root: Some(profile_root.clone()),
-                project_root: None,
-                occurrence_anchor_run_id: None,
-            },
-        ),
-        run_user_job_with_backend(
-            &dashboard_root,
-            &config,
-            &backend,
-            &job,
-            UserJobRunOptions {
-                trigger: AutomationTrigger::ManualCli,
-                run_id: Some("concurrent-run-2".to_string()),
-                profile_root: Some(profile_root),
-                project_root: None,
-                occurrence_anchor_run_id: None,
-            },
-        )
+        async {
+            barrier.wait().await;
+            run_user_job_with_backend(
+                &dashboard_root,
+                &config,
+                &backend,
+                &job,
+                UserJobRunOptions {
+                    trigger: AutomationTrigger::Dashboard,
+                    run_id: Some("concurrent-run-1".to_string()),
+                    profile_root: Some(profile_root.clone()),
+                    project_root: None,
+                    occurrence_anchor_run_id: None,
+                },
+            )
+            .await
+        },
+        async {
+            barrier.wait().await;
+            run_user_job_with_backend(
+                &dashboard_root,
+                &config,
+                &backend,
+                &job,
+                UserJobRunOptions {
+                    trigger: AutomationTrigger::ManualCli,
+                    run_id: Some("concurrent-run-2".to_string()),
+                    profile_root: Some(profile_root.clone()),
+                    project_root: None,
+                    occurrence_anchor_run_id: None,
+                },
+            )
+            .await
+        }
     );
     let runs = [first.unwrap(), second.unwrap()];
     let delivered = runs

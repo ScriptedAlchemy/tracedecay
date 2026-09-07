@@ -26,6 +26,7 @@ use super::identity::{
     SymbolOccurrenceId,
 };
 use super::language::EdgeAuthorityV1;
+use super::search::CodeGenerationSourceCommitmentsV1;
 
 /// One receipt-bound sanitized repository snapshot — the only legal intake.
 /// Carries repository, checkout, worktree, ref, source revision,
@@ -196,6 +197,11 @@ pub struct CodeGenerationManifestV1 {
     pub privacy_domain: PrivacyDomainId,
     pub privacy_key_epoch: u64,
     pub parent_generation: Option<CodeGenerationId>,
+    /// Source identities computed after canonical chunk materialization and
+    /// authenticated by `seal.expected_digest`. `None` exists only while the
+    /// production planner is materializing that source or when historical
+    /// bytes predate source commitments; published readers reject it typed.
+    pub source_commitments: Option<CodeGenerationSourceCommitmentsV1>,
     pub seal: GenerationSealV1,
 }
 
@@ -218,6 +224,7 @@ struct CodeGenerationManifestWireV1 {
     privacy_domain: PrivacyDomainId,
     privacy_key_epoch: u64,
     parent_generation: Option<CodeGenerationId>,
+    source_commitments: Option<CodeGenerationSourceCommitmentsV1>,
     seal: GenerationSealV1,
 }
 
@@ -244,6 +251,7 @@ impl<'de> Deserialize<'de> for CodeGenerationManifestV1 {
             privacy_domain: wire.privacy_domain,
             privacy_key_epoch: wire.privacy_key_epoch,
             parent_generation: wire.parent_generation,
+            source_commitments: wire.source_commitments,
             seal: wire.seal,
         };
         if needs_legacy_migration {
@@ -381,6 +389,9 @@ impl CodeGenerationManifestV1 {
         self.sanitizer_revision.validate()?;
         self.chunker_revision.validate()?;
         self.privacy_domain.validate()?;
+        if let Some(commitments) = &self.source_commitments {
+            commitments.validate()?;
+        }
         self.seal.expected_digest.validate()?;
         self.seal.planner.validate()?;
         match generation_identity_kind(&self.generation_id)? {
@@ -550,6 +561,7 @@ mod tests {
             privacy_domain: id("privacy.fixture"),
             privacy_key_epoch: 1,
             parent_generation: Some(id("generation.v1.aaaaaaaa.00000001")),
+            source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: id(&digest('d')),
                 sealed_at: UtcMicros(20),

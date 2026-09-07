@@ -6,7 +6,7 @@ use std::sync::{
 use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::{
-    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros,
+    BrainId, LocatorDigest, ProjectId, RefId, RepositoryId, UserProfileId, UtcMicros,
     VectorGenerationIdV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_store::{
@@ -242,6 +242,85 @@ fn begin_exact_replay_conflict_and_interruption_are_typed() {
         Err(SemanticVectorStagingStoreError::Interrupted(
             RuntimeInterruptionV1::Cancelled
         ))
+    );
+}
+
+#[test]
+fn historical_branch_source_binding_refuses_checkout_rebinding_with_both_tuples() {
+    let fixture = Fixture::new();
+    let plan = plan(
+        &fixture,
+        "historical-branch-binding",
+        chunk_manifest("chunk.historical-branch-binding"),
+    );
+    let historical_scope = StoreShardIdV1::code(
+        BrainId::new("brain.fixture").unwrap(),
+        UserProfileId::new("profile.fixture").unwrap(),
+        ProjectId::new("project.fixture").unwrap(),
+        RepositoryId::new("repository.fixture").unwrap(),
+        CodeShardScopeV1::Branch {
+            worktree_id: WorktreeId::new("worktree.fixture").unwrap(),
+            ref_id: RefId::new("refs/heads/main").unwrap(),
+        },
+    );
+    let shard_json = serde_json::to_string(&fixture.binding.shard_id).unwrap();
+    let historical_scope_json = serde_json::to_string(&historical_scope).unwrap();
+    let requested_scope_json = serde_json::to_string(&plan.source_scope).unwrap();
+    fixture
+        .handle
+        .execute(
+            ExactSqlStatement::new(
+                "INSERT INTO semantic_vector_source_scope_bindings (
+                    shard_id,code_scope_hash,source_scope
+                 ) VALUES (?1,?2,?3)"
+                    .to_owned(),
+                vec![
+                    ExactSqlValue::Text(shard_json.clone()),
+                    ExactSqlValue::Text(plan.code_scope_hash.as_str().to_owned()),
+                    ExactSqlValue::Text(historical_scope_json.clone()),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let (control, probe) = operation("historical-branch-binding.begin");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let error = fixture
+        .storage()
+        .begin_stage(&plan, &context)
+        .expect_err("a historical branch binding must require an explicit rebuild");
+    assert_eq!(
+        error,
+        SemanticVectorStagingStoreError::Corrupt(format!(
+            "semantic vector code scope has a conflicting durable source binding: requested \
+             (code_scope_hash={}, source_scope={requested_scope_json}) matched \
+             (code_scope_hash={}, source_scope={historical_scope_json})",
+            plan.code_scope_hash.as_str(),
+            plan.code_scope_hash.as_str(),
+        ))
+    );
+
+    let rows = fixture
+        .handle
+        .query(
+            ExactSqlStatement::new(
+                "SELECT source_scope FROM semantic_vector_source_scope_bindings
+                 WHERE shard_id=?1 AND code_scope_hash=?2"
+                    .to_owned(),
+                vec![
+                    ExactSqlValue::Text(shard_json),
+                    ExactSqlValue::Text(plan.code_scope_hash.as_str().to_owned()),
+                ],
+            )
+            .unwrap(),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(
+        rows.rows[0].values,
+        vec![ExactSqlValue::Text(historical_scope_json)]
     );
 }
 

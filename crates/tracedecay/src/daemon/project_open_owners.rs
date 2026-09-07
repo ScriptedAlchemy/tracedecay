@@ -61,7 +61,9 @@ mod source_edit_owner;
 mod work_grant_tests;
 
 pub(crate) use advisory_runtime::ProjectOpenDependentOwnerState;
-pub(super) use advisory_runtime::register_project_open_dependent_owners;
+pub(super) use advisory_runtime::{
+    register_project_open_dependent_owners, spawn_semantic_owner_registration,
+};
 pub(crate) use automation_effect_recovery::reconcile_project_open_automation_effects;
 pub(crate) use code_index_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
@@ -1234,7 +1236,7 @@ fn classify_initial_semantic_activation_restore(
 }
 
 #[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]
-async fn register_semantic_activation_owner(
+async fn register_semantic_configuration_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     server: &McpServer,
@@ -1539,36 +1541,54 @@ async fn register_semantic_activation_owner(
             "no genuinely evaluated optional-stage profile is published"
         );
     }
-    install_semantic_activation_runtime_owner(
-        invocation,
-        project_root,
-        Arc::clone(graph.configuration_runtime()),
-        scope,
-    )
-    .await
+    Ok(())
 }
 
-/// Complete activation ownership after the deferred code-index mount creates
-/// the production semantic runtime on a fresh store.
+pub(super) struct SemanticOwnerInstallFailureV1 {
+    reason: tracedecay_application::doctor::SemanticOwnerDegradedReasonV1,
+    detail: String,
+}
+
+impl SemanticOwnerInstallFailureV1 {
+    fn new(
+        reason: tracedecay_application::doctor::SemanticOwnerDegradedReasonV1,
+        detail: String,
+    ) -> Self {
+        Self { reason, detail }
+    }
+
+    pub(super) fn into_state(self) -> tracedecay_application::doctor::SemanticOwnerStateV1 {
+        tracedecay_application::doctor::SemanticOwnerStateV1::Degraded {
+            reason: self.reason,
+            detail: self.detail,
+        }
+    }
+}
+
+/// Complete activation ownership after the production semantic runtime and
+/// canonical configuration runtime are both registered.
 #[hotpath::measure(label = "daemon.project.activate.semantic_runtime", future = true)]
 pub(super) async fn install_semantic_activation_runtime_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     scope: ResolvedScope,
-) -> Result<()> {
+) -> std::result::Result<bool, SemanticOwnerInstallFailureV1> {
     let Some(inspector) =
         tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
     else {
-        return Ok(());
+        return Ok(false);
     };
     let configuration_store =
         tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
             configuration_runtime.registered_database(),
             scope,
         )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic retrieval configuration store unavailable: {error}"),
+        .map_err(|error| {
+            SemanticOwnerInstallFailureV1::new(
+                tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::ConfigurationStoreUnavailable,
+                format!("semantic retrieval configuration store unavailable: {error}"),
+            )
         })?;
     let observer = invocation
         .query_activation_registrar(project_root, configuration_runtime.registered_database());
@@ -1583,10 +1603,38 @@ pub(super) async fn install_semantic_activation_runtime_owner(
     );
     let owner = invocation
         .configuration_runtime_registrar()
-        .install_semantic_activation_owner(project_root, candidate, lifecycle_events)
-        .await?;
-    configuration_runtime.install_semantic_runtime(owner)?;
-    Ok(())
+        .install_semantic_activation_owner(
+            project_root,
+            Arc::clone(&candidate),
+            lifecycle_events,
+        )
+        .await
+        .map_err(|error| {
+            SemanticOwnerInstallFailureV1::new(
+                tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::ActivationOwnerRegistrationRefused,
+                error.to_string(),
+            )
+        })?;
+    if let Err(error) = configuration_runtime.install_semantic_runtime(Arc::clone(&owner)) {
+        if Arc::ptr_eq(&owner, &candidate)
+            && !invocation
+                .configuration_runtime_registrar()
+                .remove_semantic_activation_owner_if_current(project_root, &candidate)
+                .await
+        {
+            return Err(SemanticOwnerInstallFailureV1::new(
+                tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::PartialRegistrationCleanupFailed,
+                format!(
+                    "semantic activation coordinator installation failed and its partial owner could not be removed: {error}"
+                ),
+            ));
+        }
+        return Err(SemanticOwnerInstallFailureV1::new(
+            tracedecay_application::doctor::SemanticOwnerDegradedReasonV1::ConfigurationRuntimeInstallationRefused,
+            error.to_string(),
+        ));
+    }
+    Ok(true)
 }
 
 #[hotpath::measure(label = "daemon.project.activate.lsp", future = true)]

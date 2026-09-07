@@ -86,13 +86,13 @@ impl CodeIndexAtomicPublicationPort for ArtifactPublicationStore {
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .active
             .lock()
             .expect("artifact publication lock")
             .get(scope)
-            .map(|generation| generation.as_ref().clone()))
+            .map(Arc::clone))
     }
 
     fn publish_atomically(

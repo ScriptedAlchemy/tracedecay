@@ -1,12 +1,7 @@
 //! Shared session/steering context builders.
 
-use std::path::Path;
-
 #[cfg(test)]
 use serde_json::Value;
-
-use crate::ports::hook_runtime::HookRuntimeV1;
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Model-invocable skills that Cursor ships in its `skills/` directory.
 pub use crate::agents::cursor::CURSOR_PLUGIN_SKILLS;
@@ -240,30 +235,6 @@ pub fn cursor_staleness_hint(age_secs: i64) -> String {
     } else {
         format!("last indexed {}d ago", age / 86_400)
     }
-}
-
-/// Result-preserving status lookup for latency-sensitive hooks that must
-/// distinguish an unavailable daemon from a healthy index with no signals.
-pub(super) async fn cursor_index_signals_for_root_result(
-    runtime: &HookRuntimeV1,
-    root: &Path,
-) -> crate::errors::Result<(Option<String>, Option<u64>)> {
-    let status = super::daemon_tool_json(
-        runtime,
-        Some(root),
-        "tracedecay_status",
-        serde_json::json!({ "format": "json" }),
-    )
-    .await?;
-    let last = status
-        .get("last_updated")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0);
-    let staleness = (last > 0).then(|| cursor_staleness_hint(current_timestamp() - last));
-    let tokens_saved = status
-        .get("tokens_saved")
-        .and_then(serde_json::Value::as_u64);
-    Ok((staleness, tokens_saved))
 }
 
 #[cfg(test)]
