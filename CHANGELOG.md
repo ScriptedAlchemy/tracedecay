@@ -950,6 +950,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(store)* classify Windows `ERROR_LOCK_VIOLATION` (33) as typed lock
+  contention at the graph-replay pool and quarantine decision locks. One
+  non-blocking acquire still runs before an expired held-lock deadline
+  becomes `GraphReplayPoolBusy`, so directory/symlink UnsafeState can win
+  and busy deferrals stay typed instead of Storage/Unavailable
+  ([#918](https://github.com/ScriptedAlchemy/tracedecay/issues/918)).
+
 ### Removed
 
 - *(cli)* for the explicit 0.1.0 breaking release, remove the shipped
