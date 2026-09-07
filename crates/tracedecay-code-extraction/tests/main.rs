@@ -12,6 +12,7 @@ mod batch;
 mod c;
 #[cfg(feature = "lang-cobol")]
 mod cobol;
+mod complexity_budget;
 mod cpp;
 mod csharp;
 #[cfg(feature = "lang-dart")]

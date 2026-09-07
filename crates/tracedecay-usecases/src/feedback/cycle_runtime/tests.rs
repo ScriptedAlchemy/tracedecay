@@ -15,11 +15,12 @@ use tracedecay_domain::feedback::{
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
-    CommitId, ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId, HostInstanceId,
-    LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
-    RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SessionId, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
-    SymbolOccurrenceId, UtcMicros, WorktreeId,
+    CommitId, ComplexityAnalysisV1, ContentDigest, EdgeAuthorityV1, FileIdentityDigest,
+    FileOccurrenceId, HostInstanceId, LanguageDescriptorRevision, LanguageId, ManifestDigest,
+    PolicyRevisionId, ProjectId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
+    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SessionId,
+    SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UtcMicros,
+    WorktreeId,
 };
 use tracedecay_graph_db::NeverCancelled;
 
@@ -128,6 +129,7 @@ fn impact_reader() -> CodeGraphInteractiveReader {
                 branches: 0,
                 loops: 0,
                 max_nesting: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 line_span: 1,
                 start_line: 1,
                 signature: None,

@@ -5,7 +5,7 @@ use crate::{
     common::local_node_id,
     complexity::{CPP_COMPLEXITY, count_complexity},
     traversal::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind},
-    types::{Edge, EdgeKind, Node, NodeKind, Visibility},
+    types::{ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, Visibility},
 };
 
 impl CppExtractor {
@@ -76,6 +76,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -156,6 +157,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -218,6 +220,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -353,6 +356,7 @@ impl CppExtractor {
                 unsafe_blocks: metrics.unsafe_blocks,
                 unchecked_calls: metrics.unchecked_calls,
                 assertions: metrics.assertions,
+                complexity_analysis: metrics.analysis,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
@@ -403,6 +407,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -461,6 +466,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -521,6 +527,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -583,6 +590,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

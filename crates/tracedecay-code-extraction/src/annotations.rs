@@ -1,7 +1,9 @@
 use tree_sitter::Node as TsNode;
 
 use crate::common::local_node_id;
-use crate::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility};
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+};
 
 pub(crate) trait AnnotationEmitterState {
     fn extract_annotation_name(&self, annotation_node: TsNode<'_>) -> String;
@@ -57,6 +59,7 @@ pub(crate) fn emit_annotation_usage<S: AnnotationEmitterState>(
         unsafe_blocks: 0,
         unchecked_calls: 0,
         assertions: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         updated_at: state.timestamp(),
         parent_id: None,
     });

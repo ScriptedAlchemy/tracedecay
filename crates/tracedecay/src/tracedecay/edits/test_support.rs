@@ -22,11 +22,11 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-    CodeSearchChunkGrainV1, CodeSearchChunkV1, ComponentVersion, ContentDigest, FileIdentityDigest,
-    FileOccurrenceId, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId,
-    ProjectId, RepositoryId, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
-    SymbolOccurrenceId, UtcMicros, WorktreeId,
+    CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1, ComponentVersion,
+    ContentDigest, FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision, LanguageId,
+    ManifestDigest, PolicyRevisionId, ProjectId, RepositoryId, SanitizedCodeFileV1,
+    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_query::{
@@ -178,6 +178,7 @@ pub(super) fn fixture_symbol_code_graph(
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span,
             start_line,
             signature: symbol_source.lines().next().map(str::to_owned),

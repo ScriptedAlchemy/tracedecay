@@ -27,6 +27,9 @@ pub struct VerifiedHealthSnapshotV1 {
     pub max_chain: usize,
     pub ideal_chain: usize,
     pub complexity_files: usize,
+    /// Symbols whose complexity counters were left out of the per-file
+    /// complexity because their bounded walk did not cover the body.
+    pub incomplete_complexity_symbols: usize,
     pub modularity_components: usize,
     pub dead_count: usize,
     pub total_fns: usize,
@@ -58,6 +61,10 @@ pub async fn compute_verified_health_snapshot(
         .map(|aggregate| aggregate.complexity)
         .collect::<Vec<_>>();
     let complexity_files = complexity_values.len();
+    let incomplete_complexity_symbols = aggregates
+        .iter()
+        .map(|aggregate| aggregate.incomplete_complexity_symbols)
+        .sum::<usize>();
     let total_fns = aggregates
         .iter()
         .map(|aggregate| aggregate.function_methods)
@@ -106,6 +113,7 @@ pub async fn compute_verified_health_snapshot(
         max_chain: depth_result.max_depth,
         ideal_chain: depth_result.ideal_depth,
         complexity_files,
+        incomplete_complexity_symbols,
         modularity_components,
         dead_count,
         total_fns,

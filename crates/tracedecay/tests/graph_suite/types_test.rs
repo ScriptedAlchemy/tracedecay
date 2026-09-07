@@ -1,5 +1,6 @@
 use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 fn make_node(id: &str, name: &str) -> Node {
@@ -22,6 +23,7 @@ fn make_node(id: &str, name: &str) -> Node {
         loops: 0,
         returns: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         unsafe_blocks: 0,
         unchecked_calls: 0,
         assertions: 0,

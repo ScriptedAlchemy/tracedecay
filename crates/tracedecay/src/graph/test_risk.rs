@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::code_intelligence::NodeKind;
@@ -24,7 +24,10 @@ pub struct TestRiskEntry {
     pub name: String,
     pub file: String,
     pub line: u32,
-    pub complexity: u32,
+    /// `None` when `complexity_analysis` reports the bounded walk did not
+    /// cover the body; `risk` then weighs the lower-bound counters.
+    pub complexity: Option<u32>,
+    pub complexity_analysis: ComplexityAnalysisV1,
     pub fan_in: usize,
     pub has_test: bool,
     pub attribution_method: &'static str,
@@ -72,6 +75,7 @@ struct RiskEntry {
     file: String,
     line: u32,
     complexity: u32,
+    complexity_analysis: ComplexityAnalysisV1,
     fan_in: usize,
     attribution_method: TestAttributionMethod,
     attribution_depth: Option<usize>,
@@ -91,7 +95,11 @@ impl RiskEntry {
             name: self.name,
             file: self.file,
             line: self.line,
-            complexity: self.complexity,
+            complexity: self
+                .complexity_analysis
+                .is_complete()
+                .then_some(self.complexity),
+            complexity_analysis: self.complexity_analysis,
             fan_in: self.fan_in,
             has_test,
             attribution_method: self.attribution_method.as_str(),
@@ -217,6 +225,7 @@ pub(crate) async fn analyze_test_risk(
                 file: n.file.clone(),
                 line: n.line,
                 complexity,
+                complexity_analysis: n.complexity_analysis,
                 fan_in,
                 attribution_method,
                 attribution_depth,
@@ -293,7 +302,7 @@ pub(crate) async fn analyze_test_risk(
                 excluded: excluded_count,
             },
             confidence: "static_lower_bound",
-            confidence_note: "coverage_pct is a depth-3 static attribution lower bound over the admitted generation; complexity uses extraction-attested branches, loops, and maximum nesting; direct_unit is strongest, while closure retains higher residual risk.",
+            confidence_note: "coverage_pct is a depth-3 static attribution lower bound over the admitted generation; complexity uses extraction-attested branches, loops, and maximum nesting, and is null (with risk weighing lower-bound counters) when complexity_analysis reports an incomplete walk; direct_unit is strongest, while closure retains higher residual risk.",
         },
     })
 }
@@ -304,7 +313,9 @@ struct VerifiedTestSymbol {
     qualified_name: String,
     file: String,
     line: u32,
+    /// A lower bound when `complexity_analysis` is not complete.
     complexity: u32,
+    complexity_analysis: ComplexityAnalysisV1,
     callable: bool,
     skip_test_coverage: bool,
 }
@@ -355,6 +366,7 @@ pub(crate) fn verified_test_evidence(
                 .branches
                 .saturating_add(metadata.loops)
                 .saturating_add(metadata.max_nesting),
+            complexity_analysis: metadata.complexity_analysis,
             callable: NodeKind::from_str(&metadata.kind)
                 .is_some_and(|kind| kind.is_callable_kind()),
             skip_test_coverage: metadata.skip_test_coverage,

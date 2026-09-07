@@ -183,6 +183,7 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
         unsafe_blocks: metrics.unsafe_blocks,
         unchecked_calls: metrics.unchecked_calls,
         assertions: metrics.assertions,
+        complexity_analysis: metrics.analysis,
         updated_at: state.timestamp,
         parent_id: None,
     };

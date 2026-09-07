@@ -19,9 +19,9 @@ use tracedecay_domain::{
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-    CodeSearchChunkId, EdgeAuthorityV1, FileIdentityDigest, LanguageDescriptorRevision,
-    PolicyRevisionId, RelationEdgeKindV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeSearchChunkId, ComplexityAnalysisV1, EdgeAuthorityV1, FileIdentityDigest,
+    LanguageDescriptorRevision, PolicyRevisionId, RelationEdgeKindV1, SanitizerRevision,
+    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_graph_query::{
@@ -163,6 +163,7 @@ pub(super) fn hermetic_ci_code_graph(
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: 1,
             start_line: u32::try_from(source[..start].lines().count() + 1)
                 .expect("fixture CI start line"),

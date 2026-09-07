@@ -321,10 +321,11 @@ mod tests {
     use super::*;
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-        ContentDigest, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1, FileIdentityDigest,
-        FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-        PrivacyDomainId, SanitizerRevision, SensitivityDecision, SourceSpan, SymbolIdentityDigest,
+        ComplexityAnalysisV1, ContentDigest, EmbeddingDeviceClassV1, EmbeddingMetricV1,
+        EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingTruncationSideV1, FileIdentityDigest, FileOccurrenceId,
+        LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, PrivacyDomainId,
+        SanitizerRevision, SensitivityDecision, SourceSpan, SymbolIdentityDigest,
     };
 
     const BATCH_SIZE: u32 = 8;
@@ -396,6 +397,7 @@ mod tests {
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: 1,
             start_line: 0,
             signature: Some("fn get(&self, key: u32) -> Option<u32>".to_owned()),

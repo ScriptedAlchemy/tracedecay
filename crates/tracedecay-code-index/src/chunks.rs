@@ -20,9 +20,9 @@ use tracedecay_code_extraction::ExtractionArtifactV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CodeSearchChunkV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind, ExactTechnicalTermKindV1,
-    ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest, FileOccurrenceId,
-    LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
+    CodeSearchChunkV1, ComplexityAnalysisV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest,
+    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
     RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
     SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef, ValidatedCodeFileV1,
     canonical_sha256, classify_technical_token, split_subtokens, technical_tokens,
@@ -723,6 +723,7 @@ struct SymbolRow {
     branches: u32,
     loops: u32,
     max_nesting: u32,
+    complexity_analysis: ComplexityAnalysisV1,
     line_span: u32,
     start_line: u32,
     signature: Option<String>,
@@ -1257,6 +1258,7 @@ impl DeterministicCodeChunker {
             branches: u32,
             loops: u32,
             max_nesting: u32,
+            complexity_analysis: ComplexityAnalysisV1,
             line_span: u32,
             start_line: u32,
             signature: Option<String>,
@@ -1282,6 +1284,7 @@ impl DeterministicCodeChunker {
                     branches: node.branches,
                     loops: node.loops,
                     max_nesting: node.max_nesting,
+                    complexity_analysis: node.complexity_analysis,
                     line_span: node
                         .end_line
                         .saturating_sub(node.start_line)
@@ -1360,6 +1363,7 @@ impl DeterministicCodeChunker {
                 branches: node.branches,
                 loops: node.loops,
                 max_nesting: node.max_nesting,
+                complexity_analysis: node.complexity_analysis,
                 line_span: node.line_span,
                 start_line: node.start_line,
                 signature: node.signature.clone(),
@@ -1405,6 +1409,7 @@ impl DeterministicCodeChunker {
                 branches: row.branches,
                 loops: row.loops,
                 max_nesting: row.max_nesting,
+                complexity_analysis: row.complexity_analysis,
                 line_span: row.line_span,
                 start_line: row.start_line,
                 signature: row.signature.clone(),
@@ -2282,6 +2287,7 @@ mod tests {
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: source[start..end].lines().count() as u32,
             start_line: source[..start].matches('\n').count() as u32,
             signature: None,
@@ -3451,6 +3457,58 @@ pub fn real_symbol() {}
                 .collect::<BTreeSet<_>>()
         };
         assert_eq!(identities(&reformatted), identities(&artifacts));
+    }
+
+    /// A body larger than the extractor's traversal budget reaches this path
+    /// as an incomplete analysis: the lineage record carries the state and
+    /// offers no exact counters, while ordinary bodies stay exact.
+    #[test]
+    fn incomplete_complexity_walk_reaches_lineage_records_as_unavailable_counters() {
+        let mut source = String::from("pub fn huge(mut x: u64) -> u64 {\n");
+        for _ in 0..tracedecay_code_extraction::complexity::TRAVERSAL_BUDGET / 4 {
+            source.push_str("    x += 1;\n");
+        }
+        source.push_str("    if x > 3 { return x; }\n    x\n}\n\npub fn small(x: u64) -> u64 {\n    if x > 3 { return x; }\n    x\n}\n");
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let record = |name: &str| {
+            artifacts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.qualified_name == format!("src/lib.rs::{name}"))
+                .unwrap_or_else(|| panic!("{name} lineage record"))
+        };
+
+        let huge = record("huge");
+        assert_eq!(
+            huge.complexity_analysis,
+            ComplexityAnalysisV1::TraversalBudgetExhausted
+        );
+        assert_eq!(
+            huge.exact_complexity(),
+            None,
+            "an incomplete walk must not surface counters as exact"
+        );
+        let wire = serde_json::to_value(huge).expect("lineage record");
+        assert_eq!(
+            wire["complexity_analysis"],
+            serde_json::json!("traversal_budget_exhausted")
+        );
+
+        let small = record("small");
+        assert_eq!(small.complexity_analysis, ComplexityAnalysisV1::Complete);
+        let exact = small.exact_complexity().expect("complete walk is exact");
+        assert_eq!((exact.branches, exact.max_nesting), (1, 2));
+        assert!(
+            serde_json::to_value(small)
+                .expect("lineage record")
+                .get("complexity_analysis")
+                .is_none(),
+            "complete records keep their pinned wire shape"
+        );
     }
 
     #[test]

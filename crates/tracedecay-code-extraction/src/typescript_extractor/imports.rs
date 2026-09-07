@@ -6,7 +6,9 @@ use crate::extraction_artifact::{
     ExtractedImportEvidenceV1, ImportModuleKindV1, ImportNamespaceV1,
 };
 use crate::traversal::find_direct_child_by_kind;
-use crate::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility};
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+};
 
 use super::ExtractionState;
 
@@ -48,6 +50,7 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         unsafe_blocks: 0,
         unchecked_calls: 0,
         assertions: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         updated_at: state.timestamp,
         parent_id: None,
     });
