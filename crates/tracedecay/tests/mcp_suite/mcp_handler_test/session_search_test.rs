@@ -379,22 +379,34 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
         1
     );
 
-    let refusal = expect_tool_error(
-        handle_tool_call(
-            &cg,
-            "tracedecay_message_search",
-            json!({
-                "query": "🚨 :: --",
-                "limit": 1,
-            }),
-            None,
-            None,
-        )
-        .await,
+    // A literal without a maintained-index token cannot be admitted through
+    // the FTS prefilter, so the exact channel is a measured empty set: the
+    // search stays bounded and answers zero results, never a budget refusal.
+    let tokenless = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "🚨 :: --",
+            "limit": 1,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("an exact query without a maintained-index token is a valid empty search");
+    let tokenless_envelope: Value = serde_json::from_str(extract_text(&tokenless.value))
+        .expect("token-free retained evidence envelope");
+    let tokenless_payload = tokenless_envelope
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&tokenless_envelope);
+    assert_eq!(
+        tokenless_payload["outcome"], "complete_zero",
+        "{tokenless_payload}"
     );
-    assert!(
-        refusal.contains("application.retained.budget-refused"),
-        "an exact query without a maintained-index token must still refuse: {refusal}"
+    assert_eq!(
+        tokenless_payload["results"],
+        Value::Array(Vec::new()),
+        "{tokenless_payload}"
     );
 }
 
