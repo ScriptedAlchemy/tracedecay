@@ -183,7 +183,7 @@ async fn cancelled_lexical_scan_releases_the_search_permit_to_the_next_request()
     // Deterministic rendezvous: the scan itself reports when it reaches its
     // first checkpoint holding the permit. The timeout only bounds a failure
     // in which the scan never consults the control while it holds the permit.
-    tokio::time::timeout(Duration::from_secs(60), admission.scan_paused.notified())
+    tokio::time::timeout(Duration::from_mins(1), admission.scan_paused.notified())
         .await
         .expect("the lexical scan must consult the request control while holding the permit");
 
