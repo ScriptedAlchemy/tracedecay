@@ -43,7 +43,7 @@ pub(super) async fn dispatch_analytics(
         options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
         options
             .session_authorities
-            .project_registered
+            .project
             .map(RegisteredGlobalDbLeaseV1::as_ref),
         deadline,
         cancellation,
