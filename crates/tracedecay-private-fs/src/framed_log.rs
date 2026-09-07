@@ -416,8 +416,18 @@ fn replace_existing_with_backup(
     Ok(replacement.to_path_buf())
 }
 
+/// Atomically renames `source` onto `destination` without ever replacing an
+/// occupied destination name.
+///
+/// An occupied destination fails with `AlreadyExists` and keeps its bytes.
+/// Platforms without a no-replace primitive fail closed with `Unsupported`:
+/// retaining bytes is always preferable to risking a replacement.
+pub fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    platform_rename_noreplace(source, destination)
+}
+
 #[cfg(target_os = "linux")]
-fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -442,7 +452,7 @@ fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -460,7 +470,7 @@ fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
+fn platform_rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "atomic no-replace rename is unsupported on this platform",
@@ -468,7 +478,7 @@ fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
 
