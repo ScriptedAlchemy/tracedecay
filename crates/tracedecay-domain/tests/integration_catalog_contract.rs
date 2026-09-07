@@ -390,6 +390,15 @@ fn stock_host_capability_matrix_is_sole_capability_authority() {
                 HostCapabilityV1::Cli,
             ]
         );
+        for (index, record) in view.capabilities().iter().enumerate() {
+            assert_eq!(
+                record.capability.row_index(),
+                index,
+                "{:?} row order is the index authority for {:?}",
+                view.host(),
+                record.capability
+            );
+        }
         assert_eq!(
             view.capabilities(),
             catalog.stock_host_capabilities(view.host())

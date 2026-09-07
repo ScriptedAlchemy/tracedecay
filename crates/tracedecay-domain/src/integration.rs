@@ -110,6 +110,21 @@ pub enum HostCapabilityV1 {
     Cli,
 }
 
+impl HostCapabilityV1 {
+    /// Position of this capability in every stock host capability row.
+    /// [`canonical_stock_host_capabilities`] emits rows in exactly this order,
+    /// so indexing a row by it is total and needs no fallback state.
+    pub const fn row_index(self) -> usize {
+        match self {
+            Self::Lsp => 0,
+            Self::NativeDiagnostics => 1,
+            Self::Hooks => 2,
+            Self::Mcp => 3,
+            Self::Cli => 4,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostCapabilityUnavailableReasonV1 {
