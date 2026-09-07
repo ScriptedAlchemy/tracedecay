@@ -417,6 +417,11 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(limit),
             ],
         ),
+        // The exact literal is admitted through the maintained FTS index before
+        // `instr` verifies it. A literal without an indexable token (`!!!`,
+        // `🚨 :: --`) is an empty FTS phrase, which FTS5 resolves to EOF: zero
+        // rows through the index and no retained-row text scan. That is a
+        // measured empty channel, not a budget refusal.
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
             ROOT_EXACT_CANDIDATE_QUERY,
             vec![
@@ -425,7 +430,7 @@ pub(super) async fn query_candidate_clause(
                 })?,
                 provider,
                 SqlValue::Text(clause.value.clone()),
-                SqlValue::Text(exact_fts_phrase(&clause.value)?),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -795,16 +800,6 @@ fn fts_any_terms(value: &str) -> String {
         .join(" OR ")
 }
 
-fn exact_fts_phrase(value: &str) -> Result<String, TemporalPortError> {
-    value
-        .chars()
-        .any(char::is_alphanumeric)
-        .then(|| fts_phrase(value))
-        .ok_or(TemporalPortError::BudgetExceeded {
-            resource: "exact candidate lexical prefilter",
-        })
-}
-
 pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortError> {
     let start_seconds = parse_rfc3339_timestamp(&format!("{value}T00:00:00Z"))
         .ok_or_else(|| read_message(CANDIDATE_OPERATION, "invalid ISO date candidate"))?;
@@ -866,16 +861,6 @@ pub(super) fn require_candidate_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn exact_queries_without_a_searchable_fts_token_refuse_typed() {
-        assert_eq!(
-            exact_fts_phrase("🚨 :: --"),
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "exact candidate lexical prefilter",
-            })
-        );
-    }
 
     #[test]
     fn lexical_terms_share_one_or_query() {
