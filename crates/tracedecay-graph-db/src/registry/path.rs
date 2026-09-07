@@ -51,10 +51,7 @@ pub(super) fn canonical_graph_database_file(path: &Path) -> Result<PathBuf, Grap
             "canonical graph database filename must end in .grafeo",
         ));
     }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
+    if has_traversal_spelling(path) {
         return Err(GraphDbError::invalid(
             "canonical graph database path must not be spelled through '.' or '..'",
         ));
@@ -85,8 +82,22 @@ pub(super) fn canonical_graph_database_file(path: &Path) -> Result<PathBuf, Grap
     }
 }
 
+/// Refuses `.` / `..` in the caller's spelling before canonicalize can erase
+/// it. `Path::components` is the usual check; the raw-separator scan catches
+/// a Windows `root\..\file` that some hosts collapse before ParentDir appears.
+fn has_traversal_spelling(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        || path.to_str().is_some_and(|text| {
+            text.split(['/', '\\'])
+                .any(|component| component == "." || component == "..")
+        })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use tempfile::tempdir;
 
     use super::{canonical_graph_database_file, inspect_graph_database_file};
@@ -174,6 +185,10 @@ mod tests {
 
         assert!(matches!(
             canonical_graph_database_file(&root.join("..").join("graph.grafeo")).unwrap_err(),
+            GraphDbError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            canonical_graph_database_file(Path::new(r"root\..\graph.grafeo")).unwrap_err(),
             GraphDbError::InvalidRequest { .. }
         ));
     }

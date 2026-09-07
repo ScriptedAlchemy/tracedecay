@@ -4,17 +4,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use url::Url;
 
 use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_project_root};
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
-use super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use super::client::{LspDocument, LspRefreshTimeouts, file_uri};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
 use super::host_ownership::HostAnalyzerOwnership;
 use super::settings::CodeDiagnosticsSettings;
+use crate::AdmittedRoot;
 mod refresh;
 mod semantic_authority;
+mod shared_client;
 #[cfg(test)]
 #[path = "broker/tests.rs"]
 mod tests;
@@ -27,6 +28,7 @@ pub use refresh::{
 pub use semantic_authority::StdioLspSemanticAuthority;
 #[cfg(test)]
 pub(crate) use semantic_authority::{analyzer_start_failure, semantic_operation_outcome};
+use shared_client::SharedAnalyzerClient;
 
 /// Normalized code diagnostic shared by the LSP broker and dashboard API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,7 +198,7 @@ pub struct DiagnosticBroker {
     adapters: Vec<LspAdapterDefinition>,
     settings: CodeDiagnosticsSettings,
     diagnostics: Vec<CodeDiagnostic>,
-    clients: BTreeMap<LspSessionKey, Arc<Mutex<Option<StdioLspClient>>>>,
+    clients: BTreeMap<LspSessionKey, Arc<SharedAnalyzerClient>>,
     engine_overrides: BTreeMap<String, EngineState>,
     engine_errors: BTreeMap<String, String>,
     refresh_epochs: BTreeMap<String, u64>,
@@ -362,7 +364,11 @@ impl DiagnosticBroker {
         timeouts: LspRefreshTimeouts,
     ) -> Result<Option<Arc<StdioLspSemanticAuthority>>> {
         let root_uri = root_uri.into();
-        self.validate_semantic_scope(&workspace_root, &root_uri)?;
+        // Keyed by the canonical root, exactly as `prepare_refresh` keys its
+        // batches: the point of the shared slot is that both lanes reach one
+        // process, and a textually different spelling of the same root would
+        // mint a second one.
+        let workspace_root = self.validate_semantic_scope(&workspace_root, &root_uri)?;
         if self.host_retained_analyzer(language).is_some() {
             // Semantic requests share the same stdio client slot as refreshes,
             // so answering one here would start the very analyzer process the
@@ -383,10 +389,12 @@ impl DiagnosticBroker {
             command: command.clone(),
             workspace_root: workspace_root.clone(),
         };
-        let client = self
+        let shared = self
             .clients
             .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .or_insert_with(|| {
+                SharedAnalyzerClient::new(AdmittedRoot::new(file_uri(&workspace_root)))
+            })
             .clone();
         Ok(Some(StdioLspSemanticAuthority::from_shared_client(
             command,
@@ -395,7 +403,7 @@ impl DiagnosticBroker {
             workspace_root,
             root_uri,
             timeouts,
-            client,
+            shared,
         )))
     }
 
@@ -593,7 +601,9 @@ impl DiagnosticBroker {
                 let client = self
                     .clients
                     .entry(session_key)
-                    .or_insert_with(|| Arc::new(Mutex::new(None)))
+                    .or_insert_with(|| {
+                        SharedAnalyzerClient::new(AdmittedRoot::new(file_uri(&workspace_root)))
+                    })
                     .clone();
                 RefreshBatch {
                     workspace_root,
@@ -678,7 +688,11 @@ impl DiagnosticBroker {
                 self.engine_errors.insert(language.clone(), message.clone());
                 self.engine_overrides
                     .insert(language.clone(), failure.state);
-                self.remove_language_clients(&language);
+                // The failed batch already released its client
+                // (`collect_refresh_batch`), and the semantic lane holds this
+                // same slot: dropping the entry would hand the next refresh a
+                // second slot, and a second analyzer process, while the
+                // semantic lane kept restarting the first.
                 Err(TraceDecayError::Config { message })
             }
         }
@@ -753,7 +767,7 @@ impl DiagnosticBroker {
         );
     }
 
-    fn validate_semantic_scope(&self, workspace_root: &Path, root_uri: &str) -> Result<()> {
+    fn validate_semantic_scope(&self, workspace_root: &Path, root_uri: &str) -> Result<PathBuf> {
         let project_root =
             self.project_root
                 .canonicalize()
@@ -781,7 +795,7 @@ impl DiagnosticBroker {
                 message: "analyzer root URI does not match the admitted project root".to_owned(),
             });
         }
-        Ok(())
+        Ok(workspace_root)
     }
 
     fn clear_language(&mut self, language: &str) {
