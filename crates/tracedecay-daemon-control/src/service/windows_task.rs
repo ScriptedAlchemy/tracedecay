@@ -2469,10 +2469,15 @@ mod tests {
             profile_root_from_task_xml(&restored),
             Some(PathBuf::from("C:/profiles/stable & exact"))
         );
-        assert_eq!(
-            action.arguments,
-            r#"daemon run --profile-root "C:/profiles/stable & exact""#
-        );
+        // The action text is wire data for Task Scheduler, so it is asserted
+        // byte-exactly. On Windows `render_task_xml_for` fully qualifies the
+        // profile root, which spells it with the native separator; the Unix
+        // arm renders the fixture text verbatim.
+        #[cfg(windows)]
+        let expected_arguments = r#"daemon run --profile-root "C:\profiles\stable & exact""#;
+        #[cfg(not(windows))]
+        let expected_arguments = r#"daemon run --profile-root "C:/profiles/stable & exact""#;
+        assert_eq!(action.arguments, expected_arguments);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

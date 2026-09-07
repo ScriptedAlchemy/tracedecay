@@ -603,6 +603,17 @@ mod tests {
         )
         .expect("PATH candidate should resolve");
 
+        // Windows spells the candidate with the `PATHEXT` suffix it probed
+        // (`.EXE`), which the case-insensitive filesystem accepts for the
+        // on-disk `git.exe`; the two are one executable, so compare the file
+        // they name rather than the bytes. Unix has no such aliasing.
+        #[cfg(windows)]
+        assert!(
+            crate::path_safety::same_canonical_path(Path::new(&resolved), &executable),
+            "resolved {resolved:?} must name the fixture executable {}",
+            executable.display()
+        );
+        #[cfg(not(windows))]
         assert_eq!(resolved, executable.into_os_string());
     }
 
