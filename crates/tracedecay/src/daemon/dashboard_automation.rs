@@ -12,6 +12,7 @@ use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
 use tracedecay_automation_runtime::automation::config::{
     AutomationConfig, from_configuration_snapshot,
 };
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, apply_managed_skill_update, archive_managed_skill, disable_managed_skill,
     load_managed_skill, managed_skill_dir, preview_managed_skill_update, restore_managed_skill,
@@ -21,6 +22,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger,
 };
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
+use tracedecay_automation_runtime::ports::project_runtime::ProjectRuntime as _;
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonInvocationService;
@@ -240,6 +242,7 @@ fn dashboard_managed_skill_command_port(
             execute_serialized_dashboard_automation(&writer, move || async move {
                 let cg = project_resolver(invocation.project_root.clone()).await?;
                 execute_dashboard_managed_skill_command(
+                    &cg.host_io(),
                     &profile_root,
                     cg.project_root(),
                     invocation.command,
@@ -482,6 +485,7 @@ async fn execute_dashboard_automation_run(
 
 #[hotpath::measure(label = "daemon.dashboard.automation.skill", future = true)]
 async fn execute_dashboard_managed_skill_command(
+    host_io: &HostIo,
     profile_root: &Path,
     project_root: &Path,
     command: DashboardManagedSkillCommandV1,
@@ -553,7 +557,7 @@ async fn execute_dashboard_managed_skill_command(
                 .map_err(|error| managed_skill_lifecycle_error(profile_root, &id, error))?
         }
     };
-    let deployment = deploy_managed_skills_to_project(profile_root, project_root);
+    let deployment = deploy_managed_skills_to_project(host_io, profile_root, project_root);
     Ok(DashboardManagedSkillCommandOutcomeV1 { skill, deployment })
 }
 

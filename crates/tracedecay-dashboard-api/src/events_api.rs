@@ -945,6 +945,7 @@ pub(crate) async fn dashboard_state_fixture(
 
     let state = DashboardState {
         build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        host_io: crate::test_support::fixture_host_io(),
         project_id: Some(project_identity.as_str().to_owned()),
         resolved_scope: crate::scope::resolve_dashboard_scope(
             &project_root,
