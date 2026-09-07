@@ -31,6 +31,8 @@ mod summarizer;
 pub mod summary_convergence;
 #[cfg(test)]
 mod summary_convergence_tests;
+#[cfg(test)]
+mod test_support;
 pub mod types;
 pub mod util;
 
