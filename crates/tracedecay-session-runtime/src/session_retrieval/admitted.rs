@@ -18,6 +18,7 @@ use tracedecay_session_memory::session::{
     TaskSessionRetrievalOutcomeV1,
 };
 use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
+use tracedecay_sessions::serving::SessionProjectionServingStatus;
 use tracedecay_store::StoreShardScopeV1;
 
 use super::contract::{
@@ -154,6 +155,14 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
             )
         })
     }
+
+    /// The refresh worker's serving state for this root — current, still
+    /// converging history, or without a worker — so diagnostics can name the
+    /// state a pending projection is in. `None` when no worker serves the
+    /// root at all.
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        None
+    }
 }
 
 /// Scope-bound terminal used when a project has no mounted session-retrieval
@@ -209,6 +218,12 @@ impl Drop for SessionRetrievalInFlightObservation {
 }
 
 impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        self.refresh_status
+            .as_deref()
+            .map(|status| status.serving_status())
+    }
+
     fn retrieve_admitted<'a>(
         &'a self,
         context: &'a RequestContext,
