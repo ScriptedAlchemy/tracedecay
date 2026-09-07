@@ -298,6 +298,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     // the project store, and only then does the daemon mount a project LCM
     // authority. Enrollment alone leaves the route reporting `unavailable`.
     crate::common::initialize_tracedecay_cli_project(&home, &project);
+    crate::common::stop_managed_daemon(&home);
     let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
