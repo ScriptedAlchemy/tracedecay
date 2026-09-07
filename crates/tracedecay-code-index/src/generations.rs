@@ -331,6 +331,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             privacy_domain: self.privacy_domain.clone(),
             privacy_key_epoch: self.privacy_key_epoch,
             parent_generation,
+            source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: placeholder_digest(),
                 sealed_at,
