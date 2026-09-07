@@ -1053,106 +1053,12 @@ fn copy_compact_and_close(
     // writer queues, so one corpus-length read guard here turned every
     // concurrent write *and every reader arriving behind it* — memory-graph
     // publication, fact and journey reads — into a build-length stall.
-    let mut endpoint_cache = EndpointIdentityCache::default();
-    let mut relation_rows = Vec::new();
-    relation_rows
-        .try_reserve_exact(relation_locators.len())
-        .map_err(|_| GraphDbError::unavailable("sealed relation copy set is too large"))?;
-    // Endpoint entities living in dependency generations, keyed by the
-    // dependency projection so each copy batch stays namespace-exact.
-    let mut dependency_endpoints: BTreeMap<
-        GraphProjectionIdentity,
-        BTreeMap<GraphEntityId, GraphEntity>,
-    > = BTreeMap::new();
-    hotpath::measure_block!("graph_db.sealed_store.copy.load_relations", {
-        for chunk in relation_locators.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
-            let guard = source.read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            let store = database.graph_store();
-            for (_, locator) in chunk {
-                check()?;
-                let stored =
-                    load_relation_by_locator_cached(store.as_ref(), *locator, &mut endpoint_cache)?;
-                let from =
-                    recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?;
-                let to =
-                    recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?;
-                for endpoint in [&from, &to] {
-                    if endpoint.projection == identity.projection {
-                        continue;
-                    }
-                    let dependency_namespace = dependency_namespaces
-                        .get(&endpoint.projection)
-                        .ok_or_else(|| GraphDbError::Corrupt {
-                            message: "sealed copy relation escapes its dependency closure"
-                                .to_owned(),
-                        })?;
-                    let copies = dependency_endpoints
-                        .entry(endpoint.projection.clone())
-                        .or_default();
-                    if !copies.contains_key(&endpoint.identity) {
-                        let entity =
-                            load_entity(database, dependency_namespace, &endpoint.identity)?
-                                .ok_or_else(|| GraphDbError::Corrupt {
-                                    message: "sealed copy dependency endpoint disappeared"
-                                        .to_owned(),
-                                })?;
-                        copies.insert(endpoint.identity.clone(), entity.entity);
-                    }
-                }
-                let relation = GraphGenerationRelation::new(
-                    stored.relation.identity,
-                    from,
-                    to,
-                    stored.relation.kind,
-                    stored.relation.properties,
-                )?;
-                relation_rows.push(relation);
-            }
-        }
-        Ok::<(), GraphDbError>(())
-    })?;
-    drop(endpoint_cache);
     let entity_count = entity_nodes.len();
-    let relation_count = relation_rows.len();
-    let mut saw_bytes_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_bytes(&relation.properties));
-    let mut saw_vector_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_vectors(&relation.properties));
+    let relation_count = relation_locators.len();
+    let mut saw_bytes_property = false;
+    let mut saw_vector_property = false;
 
-    // 1. Dependency endpoint copies, so cross-generation edges resolve.
-    hotpath::measure_block!("graph_db.sealed_store.copy.dependency_endpoints", {
-        for (projection, copies) in dependency_endpoints {
-            let namespace = dependency_namespaces
-                .get(&projection)
-                .cloned()
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: "sealed copy dependency namespace disappeared".to_owned(),
-                })?;
-            let mut pager =
-                SealedCopyPager::new(namespace, projection.projection.clone(), identity);
-            for (_, entity) in copies {
-                check()?;
-                saw_bytes_property |= properties_carry_bytes(&entity.properties);
-                saw_vector_property |= properties_carry_vectors(&entity.properties);
-                let live_bytes = entity_copy_live_bytes(&entity);
-                pager.push(
-                    &sealed,
-                    &fresh,
-                    GraphMutation::UpsertEntity(entity),
-                    None,
-                    live_bytes,
-                    check,
-                )?;
-            }
-            pager.flush(&sealed, &fresh, check)?;
-        }
-        Ok::<(), GraphDbError>(())
-    })?;
-
-    // 2. The generation's own entities, in recovered-digest order.
+    // 1. The generation's own entities, in recovered-digest order.
     let mut pager = SealedCopyPager::new(
         physical_namespace.clone(),
         identity.projection.projection.clone(),
@@ -1193,50 +1099,149 @@ fn copy_compact_and_close(
         }
         pager.flush(&sealed, &fresh, check)
     })?;
+    drop(entity_nodes);
 
-    // 3. The generation's relations, with exact endpoint namespaces.
+    // 2. The generation's relations, streamed one guard-bounded chunk at a
+    // time so the copy never holds the whole relation set decoded in memory
+    // (2.2 M rows materialized here alongside two resident row stores was the
+    // graph-phase RSS peak). Each chunk's endpoints that live in dependency
+    // generations are copied and applied *before* the chunk's rows enter the
+    // relation pager, so every edge's endpoints exist by the time its page
+    // applies, whichever later chunk that page spans.
+    let mut endpoint_cache = EndpointIdentityCache::default();
+    let mut copied_dependency_endpoints: BTreeSet<(GraphProjectionIdentity, GraphEntityId)> =
+        BTreeSet::new();
+    let mut dependency_pagers: BTreeMap<GraphProjectionIdentity, SealedCopyPager> = BTreeMap::new();
     let mut pager = SealedCopyPager::new(
         physical_namespace.clone(),
         identity.projection.projection.clone(),
         identity,
     );
     hotpath::measure_block!("graph_db.sealed_store.copy.relations", {
-        for relation in relation_rows {
-            check()?;
-            let live_bytes = relation_copy_live_bytes(&relation);
-            let from_namespace = if relation.from.projection == identity.projection {
-                physical_namespace.clone()
-            } else {
-                dependency_namespaces
-                    .get(&relation.from.projection)
-                    .cloned()
-                    .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "sealed copy relation source escapes its closure".to_owned(),
-                    })?
-            };
-            let to_namespace = if relation.to.projection == identity.projection {
-                physical_namespace.clone()
-            } else {
-                dependency_namespaces
-                    .get(&relation.to.projection)
-                    .cloned()
-                    .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "sealed copy relation target escapes its closure".to_owned(),
-                    })?
-            };
-            let identity_key = relation.identity.clone();
-            let storage = relation.storage_relation()?;
-            pager.push(
-                &sealed,
-                &fresh,
-                GraphMutation::UpsertRelation(storage),
-                Some((identity_key, (from_namespace, to_namespace))),
-                live_bytes,
-                check,
-            )?;
+        for chunk in relation_locators.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
+            let mut loaded = Vec::with_capacity(chunk.len());
+            let mut endpoint_copies: Vec<(GraphProjectionIdentity, GraphEntity)> = Vec::new();
+            {
+                let guard = source.read_guard()?;
+                let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+                let store = database.graph_store();
+                for (_, locator) in chunk {
+                    check()?;
+                    let stored = load_relation_by_locator_cached(
+                        store.as_ref(),
+                        *locator,
+                        &mut endpoint_cache,
+                    )?;
+                    let from =
+                        recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?;
+                    let to =
+                        recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?;
+                    for endpoint in [&from, &to] {
+                        if endpoint.projection == identity.projection {
+                            continue;
+                        }
+                        let dependency_namespace = dependency_namespaces
+                            .get(&endpoint.projection)
+                            .ok_or_else(|| GraphDbError::Corrupt {
+                                message: "sealed copy relation escapes its dependency closure"
+                                    .to_owned(),
+                            })?;
+                        let key = (endpoint.projection.clone(), endpoint.identity.clone());
+                        if copied_dependency_endpoints.contains(&key) {
+                            continue;
+                        }
+                        let entity =
+                            load_entity(database, dependency_namespace, &endpoint.identity)?
+                                .ok_or_else(|| GraphDbError::Corrupt {
+                                    message: "sealed copy dependency endpoint disappeared"
+                                        .to_owned(),
+                                })?;
+                        copied_dependency_endpoints.insert(key);
+                        endpoint_copies.push((endpoint.projection.clone(), entity.entity));
+                    }
+                    loaded.push(GraphGenerationRelation::new(
+                        stored.relation.identity,
+                        from,
+                        to,
+                        stored.relation.kind,
+                        stored.relation.properties,
+                    )?);
+                }
+            }
+            hotpath::measure_block!("graph_db.sealed_store.copy.dependency_endpoints", {
+                for (projection, entity) in endpoint_copies {
+                    check()?;
+                    saw_bytes_property |= properties_carry_bytes(&entity.properties);
+                    saw_vector_property |= properties_carry_vectors(&entity.properties);
+                    let live_bytes = entity_copy_live_bytes(&entity);
+                    let dependency_pager = match dependency_pagers.entry(projection) {
+                        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            let namespace = dependency_namespaces
+                                .get(entry.key())
+                                .cloned()
+                                .ok_or_else(|| GraphDbError::Corrupt {
+                                    message: "sealed copy dependency namespace disappeared"
+                                        .to_owned(),
+                                })?;
+                            let projection = entry.key().projection.clone();
+                            entry.insert(SealedCopyPager::new(namespace, projection, identity))
+                        }
+                    };
+                    dependency_pager.push(
+                        &sealed,
+                        &fresh,
+                        GraphMutation::UpsertEntity(entity),
+                        None,
+                        live_bytes,
+                        check,
+                    )?;
+                }
+                for dependency_pager in dependency_pagers.values_mut() {
+                    dependency_pager.flush(&sealed, &fresh, check)?;
+                }
+                Ok::<(), GraphDbError>(())
+            })?;
+            for relation in loaded {
+                check()?;
+                saw_bytes_property |= properties_carry_bytes(&relation.properties);
+                saw_vector_property |= properties_carry_vectors(&relation.properties);
+                let live_bytes = relation_copy_live_bytes(&relation);
+                let from_namespace = if relation.from.projection == identity.projection {
+                    physical_namespace.clone()
+                } else {
+                    dependency_namespaces
+                        .get(&relation.from.projection)
+                        .cloned()
+                        .ok_or_else(|| GraphDbError::Corrupt {
+                            message: "sealed copy relation source escapes its closure".to_owned(),
+                        })?
+                };
+                let to_namespace = if relation.to.projection == identity.projection {
+                    physical_namespace.clone()
+                } else {
+                    dependency_namespaces
+                        .get(&relation.to.projection)
+                        .cloned()
+                        .ok_or_else(|| GraphDbError::Corrupt {
+                            message: "sealed copy relation target escapes its closure".to_owned(),
+                        })?
+                };
+                let identity_key = relation.identity.clone();
+                let storage = relation.storage_relation()?;
+                pager.push(
+                    &sealed,
+                    &fresh,
+                    GraphMutation::UpsertRelation(storage),
+                    Some((identity_key, (from_namespace, to_namespace))),
+                    live_bytes,
+                    check,
+                )?;
+            }
         }
         pager.flush(&sealed, &fresh, check)
     })?;
+    drop(endpoint_cache);
 
     // Finalization: exactly like native staging, an empty batch binds the
     // dependency-closure digest to the projection commit — the recovered
