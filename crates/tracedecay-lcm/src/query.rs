@@ -1042,7 +1042,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::test_support::sqlite_vm_steps;
+    use crate::test_support::{self, sqlite_vm_steps};
 
     struct CountingQuery<'a> {
         inner: &'a TestConnection,
@@ -1104,6 +1104,9 @@ mod tests {
         )
         .await
         .expect("session schema");
+        conn.execute_batch(test_support::SESSION_GENERATION_SCHEMA)
+            .await
+            .expect("session generation schema");
         schema::ensure_lcm_schema(&conn).await.expect("LCM schema");
         conn.execute(
             "INSERT INTO sessions(provider, session_id, project_key, project_path)
@@ -1112,6 +1115,7 @@ mod tests {
         )
         .await
         .expect("session fixture");
+        test_support::seed_active_generation(&conn, "session-a").await;
         (temp, conn)
     }
 
@@ -1947,6 +1951,7 @@ mod tests {
         )
         .await
         .expect("summary node");
+        test_support::mark_summary_available(conn, "session-a", node_id).await;
         for (ordinal, source) in sources.iter().enumerate() {
             let (source_kind, source_id) = match source {
                 LcmSourceRef::RawMessage { store_id } => ("raw_message", store_id.to_string()),
@@ -2097,6 +2102,8 @@ mod tests {
         )
         .await
         .expect("foreign child node");
+        test_support::seed_active_generation(&conn, "session-foreign").await;
+        test_support::mark_summary_available(&conn, "session-foreign", "child-foreign").await;
         insert_query_test_summary(&conn, "node-owned", 1, "orchard owned summary", 100, &[]).await;
         insert_query_test_summary(
             &conn,

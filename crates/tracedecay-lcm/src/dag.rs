@@ -671,7 +671,7 @@ mod lineage_tests {
 
     use super::*;
     use crate::schema;
-    use crate::test_support::sqlite_vm_steps;
+    use crate::test_support::{self, sqlite_vm_steps};
 
     const PROVIDER: &str = "cursor";
 
@@ -747,21 +747,13 @@ mod lineage_tests {
                 project_key TEXT NOT NULL,
                 project_path TEXT NOT NULL,
                 PRIMARY KEY(provider, session_id)
-             );
-             CREATE TABLE session_temporal_generations (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                state TEXT NOT NULL
-             );
-             CREATE TABLE session_summary_availability (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                summary_id TEXT NOT NULL,
-                availability TEXT NOT NULL
              );",
         )
         .await
-        .expect("session and generation schema");
+        .expect("session schema");
+        conn.execute_batch(test_support::SESSION_GENERATION_SCHEMA)
+            .await
+            .expect("session generation schema");
         schema::ensure_lcm_schema(&conn).await.expect("lcm schema");
         conn.execute(
             "INSERT INTO sessions(provider, session_id, project_key, project_path)
@@ -770,13 +762,7 @@ mod lineage_tests {
         )
         .await
         .expect("session row");
-        conn.execute(
-            "INSERT INTO session_temporal_generations(session_id, generation, state)
-             VALUES (?1, 1, 'active')",
-            params![session_id],
-        )
-        .await
-        .expect("active generation");
+        test_support::seed_active_generation(&conn, session_id).await;
         (temp, conn)
     }
 

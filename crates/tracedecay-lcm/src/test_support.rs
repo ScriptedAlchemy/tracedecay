@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::engine::{TestConnection, Value, params};
 
 fn sqlite_value(value: &Value) -> rusqlite::types::Value {
     match value {
@@ -50,4 +50,46 @@ pub(crate) fn sqlite_vm_steps(database_path: &Path, sql: &str, values: &[Value])
         .progress_handler(1, None::<fn() -> bool>)
         .expect("clear SQLite VM progress handler");
     steps.load(Ordering::Relaxed)
+}
+
+/// The session-temporal tables LCM summary reads join against. They are owned
+/// by `tracedecay-session-temporal-store`, which this crate cannot depend on,
+/// so unit fixtures declare the columns the lineage and availability queries
+/// touch and seed one active generation per session.
+pub(crate) const SESSION_GENERATION_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS session_temporal_generations (
+    session_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    state TEXT NOT NULL
+ );
+ CREATE TABLE IF NOT EXISTS session_summary_availability (
+    session_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    summary_id TEXT NOT NULL,
+    availability TEXT NOT NULL
+ );";
+
+/// Generation every fixture session is active in.
+pub(crate) const FIXTURE_GENERATION: i64 = 1;
+
+pub(crate) async fn seed_active_generation(conn: &TestConnection, session_id: &str) {
+    conn.execute(
+        "INSERT INTO session_temporal_generations(session_id, generation, state)
+         VALUES (?1, ?2, 'active')",
+        params![session_id, FIXTURE_GENERATION],
+    )
+    .await
+    .expect("active generation");
+}
+
+/// Publish `node_id` as available in the fixture generation; summary reads
+/// join on this row, so a seeded node without it is invisible by design.
+pub(crate) async fn mark_summary_available(conn: &TestConnection, session_id: &str, node_id: &str) {
+    conn.execute(
+        "INSERT INTO session_summary_availability(session_id, generation, summary_id, availability)
+         VALUES (?1, ?2, ?3, 'available')",
+        params![session_id, FIXTURE_GENERATION, node_id],
+    )
+    .await
+    .expect("summary availability");
 }
