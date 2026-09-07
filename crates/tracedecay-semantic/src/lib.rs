@@ -71,6 +71,7 @@ mod runtime_query;
 mod runtime_service;
 mod semantic_evaluation;
 pub mod session_pool;
+pub use model_catalog::{CatalogErrorV1, admit_production_model_selection};
 // Test-support constructors. Dependent crates opt in through `test-helpers`
 // exactly like the query kernel's `*_for_test` surface.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -79,6 +80,8 @@ pub use model_catalog::production_fastembed_catalog;
 pub use model_catalog::{
     CatalogedEmbeddingBackendV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1,
 };
+#[cfg(not(any(test, feature = "test-helpers")))]
+use model_catalog::{CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use model_lifecycle::ModelMemberSourceV1;
 pub use model_lifecycle::{
@@ -136,6 +139,73 @@ type FastEmbedArtifactLoaderV1 = Box<
 
 pub struct LoadedSemanticArtifactV1(Arc<AdmittedProjectionArtifactV1>);
 
+/// The lifecycle facts a loadable semantic artifact is built from: the
+/// cataloged model and the verified install it was published from.
+///
+/// This is the single authority for which lifecycle states are loadable.
+/// Exactly `Installed | Loading | Indexing | Ready` carry verified bytes on
+/// disk; `SelectedNotDownloaded`, `Downloading`, and `Verifying` do not yet,
+/// and `Failed` never does even though it retains model id, revision, and
+/// artifact digest. Every other state — and an absent state — is the same
+/// typed artifact refusal, so the three `LoadedSemanticArtifactV1` paths
+/// cannot drift apart on admissibility or catalog lookup.
+struct LoadableLifecycleArtifactV1<'a> {
+    model: &'a CatalogedFastEmbedModelV1,
+    install_path: PathBuf,
+}
+
+impl<'a> LoadableLifecycleArtifactV1<'a> {
+    fn resolve(
+        lifecycle: &'a SemanticModelLifecycleOwnerV1,
+    ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
+        Self::from_state(lifecycle.status().state, lifecycle.catalog())
+    }
+
+    fn from_state(
+        state: Option<SemanticModelLifecycleStateV1>,
+        catalog: &'a FastEmbedModelCatalogV1,
+    ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
+        let (model_id, install_path) = match state {
+            Some(
+                SemanticModelLifecycleStateV1::Installed {
+                    model_id,
+                    install_path,
+                    ..
+                }
+                | SemanticModelLifecycleStateV1::Loading {
+                    model_id,
+                    install_path,
+                    ..
+                }
+                | SemanticModelLifecycleStateV1::Indexing {
+                    model_id,
+                    install_path,
+                    ..
+                }
+                | SemanticModelLifecycleStateV1::Ready {
+                    model_id,
+                    install_path,
+                    ..
+                },
+            ) => (model_id, install_path),
+            Some(
+                SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. }
+                | SemanticModelLifecycleStateV1::Downloading { .. }
+                | SemanticModelLifecycleStateV1::Verifying { .. }
+                | SemanticModelLifecycleStateV1::Failed { .. },
+            )
+            | None => return Err(SemanticRuntimeScheduleFailureV1::Artifact),
+        };
+        let model = catalog
+            .get(&model_id)
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        Ok(Self {
+            model,
+            install_path,
+        })
+    }
+}
+
 impl LoadedSemanticArtifactV1 {
     pub fn from_lifecycle(
         lifecycle: &SemanticModelLifecycleOwnerV1,
@@ -143,40 +213,10 @@ impl LoadedSemanticArtifactV1 {
         resources: SemanticResourceCeilings,
         document_composition: EmbeddingDocumentCompositionV1,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
-        let status = lifecycle.status();
-        let state = status
-            .state
-            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
-        let (model_id, install_path) = match state {
-            SemanticModelLifecycleStateV1::Installed {
-                model_id,
-                install_path,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Loading {
-                model_id,
-                install_path,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Indexing {
-                model_id,
-                install_path,
-                ..
-            }
-            | SemanticModelLifecycleStateV1::Ready {
-                model_id,
-                install_path,
-                ..
-            } => (model_id, install_path),
-            _ => return Err(SemanticRuntimeScheduleFailureV1::Artifact),
-        };
-        let model = lifecycle
-            .catalog()
-            .get(&model_id)
-            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        let loadable = LoadableLifecycleArtifactV1::resolve(lifecycle)?;
         let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
-            model,
-            &install_path,
+            loadable.model,
+            &loadable.install_path,
             manifest.chunker_revision.clone(),
             manifest.privacy_domain.clone(),
             manifest.privacy_key_epoch,
@@ -192,25 +232,11 @@ impl LoadedSemanticArtifactV1 {
         projection: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
         resources: SemanticResourceCeilings,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
-        let status = lifecycle.status();
-        let state = status
-            .state
-            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
-        let install_path = match &state {
-            SemanticModelLifecycleStateV1::Installed { install_path, .. }
-            | SemanticModelLifecycleStateV1::Loading { install_path, .. }
-            | SemanticModelLifecycleStateV1::Indexing { install_path, .. }
-            | SemanticModelLifecycleStateV1::Ready { install_path, .. } => install_path,
-            _ => return Err(SemanticRuntimeScheduleFailureV1::Artifact),
-        };
-        let model = lifecycle
-            .catalog()
-            .get(state.model_id())
-            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        let loadable = LoadableLifecycleArtifactV1::resolve(lifecycle)?;
         let key = projection.embedding_key();
         let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
-            model,
-            install_path.as_path(),
+            loadable.model,
+            &loadable.install_path,
             key.chunker_revision.clone(),
             key.privacy_domain.clone(),
             key.privacy_key_epoch,
@@ -226,6 +252,9 @@ impl LoadedSemanticArtifactV1 {
         Ok(Self(Arc::new(authority)))
     }
 
+    /// Projection identity for the loadable lifecycle model. Needs no install
+    /// bytes, but the model must still be in a loadable state: identity is
+    /// only meaningful for an artifact this owner could actually serve.
     pub fn lifecycle_projection(
         lifecycle: &SemanticModelLifecycleOwnerV1,
         manifest: &tracedecay_domain::CodeGenerationManifestV1,
@@ -233,25 +262,9 @@ impl LoadedSemanticArtifactV1 {
         document_composition: EmbeddingDocumentCompositionV1,
     ) -> Result<tracedecay_domain::AdmittedEmbeddingProjectionKeyV1, SemanticRuntimeScheduleFailureV1>
     {
-        let status = lifecycle.status();
-        let state = status
-            .state
-            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
-        if !matches!(
-            state,
-            SemanticModelLifecycleStateV1::Installed { .. }
-                | SemanticModelLifecycleStateV1::Loading { .. }
-                | SemanticModelLifecycleStateV1::Indexing { .. }
-                | SemanticModelLifecycleStateV1::Ready { .. }
-        ) {
-            return Err(SemanticRuntimeScheduleFailureV1::Artifact);
-        }
-        let model = lifecycle
-            .catalog()
-            .get(state.model_id())
-            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
+        let loadable = LoadableLifecycleArtifactV1::resolve(lifecycle)?;
         AdmittedProjectionArtifactV1::lifecycle_projection(
-            model,
+            loadable.model,
             manifest.chunker_revision.clone(),
             manifest.privacy_domain.clone(),
             manifest.privacy_key_epoch,
@@ -1319,6 +1332,174 @@ where
             Some(reason) => Err(reason),
             None => Ok(encoded),
         }
+    }
+}
+
+#[cfg(test)]
+mod loadable_lifecycle_tests {
+    use std::path::PathBuf;
+
+    use tracedecay_semantic_contracts::{
+        DEFAULT_FASTEMBED_MODEL_ID, SemanticModelLifecycleStateV1, SemanticResourceCeilings,
+    };
+
+    use super::model_catalog::FastEmbedModelCatalogV1;
+    use super::model_lifecycle::SemanticModelLifecycleOwnerV1;
+    use super::session_pool::test_support;
+    use super::{
+        LoadableLifecycleArtifactV1, LoadedSemanticArtifactV1, SemanticRuntimeScheduleFailureV1,
+    };
+
+    const INSTALL_PATH: &str = "/installs/semantic-model";
+
+    /// Every lifecycle state for `model_id`, paired with whether a loadable
+    /// artifact may be built from it. Only the four verified-install states
+    /// are loadable; `Failed` retains full model identity and still is not.
+    fn every_lifecycle_state(model_id: &str) -> Vec<(SemanticModelLifecycleStateV1, bool)> {
+        let model_id = model_id.to_owned();
+        let revision = "516f4baf13dec4ddddda8631e019b5737c8bc250".to_owned();
+        let artifact_digest = "a".repeat(64);
+        let install_path = PathBuf::from(INSTALL_PATH);
+        vec![
+            (
+                SemanticModelLifecycleStateV1::SelectedNotDownloaded {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                },
+                false,
+            ),
+            (
+                SemanticModelLifecycleStateV1::Downloading {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                    bytes_received: 1,
+                    bytes_total: 2,
+                },
+                false,
+            ),
+            (
+                SemanticModelLifecycleStateV1::Verifying {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                },
+                false,
+            ),
+            (
+                SemanticModelLifecycleStateV1::Installed {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                    install_path: install_path.clone(),
+                },
+                true,
+            ),
+            (
+                SemanticModelLifecycleStateV1::Loading {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                    install_path: install_path.clone(),
+                },
+                true,
+            ),
+            (
+                SemanticModelLifecycleStateV1::Indexing {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                    install_path: install_path.clone(),
+                    completed_units: 1,
+                    total_units: 2,
+                },
+                true,
+            ),
+            (
+                SemanticModelLifecycleStateV1::Ready {
+                    model_id: model_id.clone(),
+                    revision: revision.clone(),
+                    artifact_digest: artifact_digest.clone(),
+                    install_path,
+                },
+                true,
+            ),
+            (
+                SemanticModelLifecycleStateV1::Failed {
+                    model_id,
+                    revision,
+                    artifact_digest,
+                    detail: "runtime load failed".to_owned(),
+                    retryable: true,
+                },
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn exactly_the_verified_install_states_of_a_cataloged_model_are_loadable() {
+        let catalog = FastEmbedModelCatalogV1::production();
+        for (state, loadable) in every_lifecycle_state(DEFAULT_FASTEMBED_MODEL_ID) {
+            let label = format!("{state:?}");
+            match LoadableLifecycleArtifactV1::from_state(Some(state), &catalog) {
+                Ok(resolved) => {
+                    assert!(loadable, "{label} must not be loadable");
+                    assert_eq!(resolved.model.model_id, DEFAULT_FASTEMBED_MODEL_ID);
+                    assert_eq!(
+                        resolved.install_path,
+                        PathBuf::from(INSTALL_PATH),
+                        "{label} must surface its own install path"
+                    );
+                }
+                Err(failure) => {
+                    assert!(!loadable, "{label} must be loadable: {failure}");
+                    assert_eq!(failure, SemanticRuntimeScheduleFailureV1::Artifact);
+                }
+            }
+        }
+        // A verified install of a model the catalog no longer serves is not
+        // loadable either: admissibility and catalog lookup are one decision.
+        for (state, _) in every_lifecycle_state("NotARealModel") {
+            let label = format!("{state:?}");
+            assert_eq!(
+                LoadableLifecycleArtifactV1::from_state(Some(state), &catalog).err(),
+                Some(SemanticRuntimeScheduleFailureV1::Artifact),
+                "{label} names an uncataloged model"
+            );
+        }
+        assert_eq!(
+            LoadableLifecycleArtifactV1::from_state(None, &catalog).err(),
+            Some(SemanticRuntimeScheduleFailureV1::Artifact)
+        );
+    }
+
+    /// The public constructors consult the same projection: a real owner in
+    /// `SelectedNotDownloaded` is refused with the typed artifact failure
+    /// before any install bytes are read.
+    #[test]
+    fn constructors_refuse_a_selected_but_not_downloaded_owner() {
+        let root = tempfile::tempdir().expect("lifecycle root");
+        let owner =
+            SemanticModelLifecycleOwnerV1::open_default(root.path()).expect("lifecycle owner");
+        assert!(matches!(
+            owner.status().state,
+            Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
+        ));
+        assert!(matches!(
+            LoadableLifecycleArtifactV1::resolve(&owner),
+            Err(SemanticRuntimeScheduleFailureV1::Artifact)
+        ));
+        let projection = test_support::authority().projection().clone();
+        assert!(matches!(
+            LoadedSemanticArtifactV1::from_lifecycle_projection(
+                &owner,
+                &projection,
+                SemanticResourceCeilings::default(),
+            ),
+            Err(SemanticRuntimeScheduleFailureV1::Artifact)
+        ));
     }
 }
 

@@ -188,7 +188,17 @@ fn semantic_config_retains_profile_and_resource_validation_failures() {
     config.resources.max_threads = 0;
     assert!(config.validate().is_err());
 
+    // Model-id validation here is structural only; catalog membership is
+    // admitted by the production catalog in `tracedecay-semantic`.
     config.resources = SemanticResourceCeilings::default();
+    config.selected_model = Some(String::new());
+    assert!(config.validate().is_err());
+    config.selected_model = Some("x".repeat(129));
+    assert!(config.validate().is_err());
+    config.selected_model = Some("NotARealModel".to_owned());
+    assert!(config.validate().is_ok());
+
+    config.selected_model = SemanticConfig::default().selected_model;
     config.active_profile = Some(SemanticProfileSelection {
         profile_id: "fixture".to_owned(),
         accepted_profile_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))

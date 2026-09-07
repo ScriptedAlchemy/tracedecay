@@ -268,6 +268,11 @@ fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<S
             ))
         })?,
     };
+    // Structural only: this crate is catalog-free. Membership of
+    // `selected_model` is admitted at the configuration write boundary and
+    // again by the lifecycle owner on selection, so a persisted id the
+    // catalog no longer serves degrades semantics without blocking exact,
+    // lexical, or graph retrieval behind an unpublishable configuration.
     semantic.validate()?;
     Ok(semantic)
 }

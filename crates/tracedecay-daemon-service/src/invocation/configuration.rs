@@ -548,7 +548,7 @@ pub(super) fn requires_coordinated_semantic_profile_transition(
     current_active || requested_active
 }
 
-fn semantic_profile_transition(
+pub(super) fn semantic_profile_transition(
     mutation: &DirectConfigurationMutation,
 ) -> Result<Option<Option<SemanticProfileSelection>>, ConfigurationError> {
     match mutation {
@@ -567,6 +567,17 @@ fn semantic_profile_transition(
             })?;
             semantic.validate().map_err(|_| {
                 ConfigurationError::validation_message("semantic runtime configuration is invalid")
+            })?;
+            // Structural validation above is provider-free; catalog membership
+            // of the selected model is admitted here, at the write boundary,
+            // so an unknown id never reaches the durable configuration.
+            tracedecay_semantic::admit_production_model_selection(
+                semantic.selected_model.as_deref(),
+            )
+            .map_err(|error| {
+                ConfigurationError::validation_message(format!(
+                    "semantic runtime configuration is invalid: {error}"
+                ))
             })?;
             Ok(Some(semantic.active_profile))
         }
