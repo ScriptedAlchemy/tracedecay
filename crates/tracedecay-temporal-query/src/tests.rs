@@ -44,6 +44,7 @@ struct FakeReadPort {
     records: Vec<TemporalRecord>,
     candidate_pages: AtomicUsize,
     record_pages: AtomicUsize,
+    observed_record_candidates: AtomicUsize,
     max_candidate_page_items: AtomicUsize,
     observed_candidate_field_cap: AtomicUsize,
     observed_candidate_page_bytes: AtomicUsize,
@@ -59,6 +60,7 @@ impl FakeReadPort {
             records,
             candidate_pages: AtomicUsize::new(0),
             record_pages: AtomicUsize::new(0),
+            observed_record_candidates: AtomicUsize::new(0),
             max_candidate_page_items: AtomicUsize::new(0),
             observed_candidate_field_cap: AtomicUsize::new(0),
             observed_candidate_page_bytes: AtomicUsize::new(0),
@@ -118,12 +120,14 @@ impl TemporalReadPort for FakeReadPort {
     fn produce_temporal_record_page<'a>(
         &'a self,
         _snapshot: &'a TemporalExecutionSnapshot,
-        _candidates: &'a [RankingCandidate],
+        candidates: &'a [RankingCandidate],
         request: PageRequest,
         sink: &'a mut TemporalRecordPageSink<'_>,
     ) -> PortFuture<'a, PageStatus> {
         Box::pin(async move {
             self.record_pages.fetch_add(1, Ordering::SeqCst);
+            self.observed_record_candidates
+                .store(candidates.len(), Ordering::SeqCst);
             let start = page_start(&request).min(self.records.len());
             let end = start
                 .saturating_add(request.page_item_limit())
@@ -576,6 +580,11 @@ fn candidate_export_projects_lossless_temporal_evidence_without_hydration() {
         );
         assert_eq!(batch.coverage.examined, 3);
         assert!(batch.continuation.is_some());
+        assert_eq!(
+            port.observed_record_candidates.load(Ordering::SeqCst),
+            2,
+            "duplicate ranking lanes must resolve one temporal record per stable anchor"
+        );
         let first = batch
             .evidence_by_occurrence
             .values()
