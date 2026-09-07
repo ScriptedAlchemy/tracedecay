@@ -64,7 +64,7 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
 
 #[tokio::test]
 async fn linked_worktree_default_converges_into_existing_snapshot() {
-    let (_directory, runtime, root) = global_setup().await;
+    let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).unwrap();
     let mut effective_values = root.snapshot.effective_values.clone();
     let mut provenance = root.snapshot.provenance.clone();
