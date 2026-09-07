@@ -21,7 +21,7 @@ const load = loadModule.default;
 const lint = lintModule.default;
 
 function usage() {
-  console.error("usage: scripts/lint-commit-range.sh <base> <head>");
+  console.error("usage: node scripts/lint-commit-range.mjs --repository <path> <base> <head>");
   process.exit(2);
 }
 

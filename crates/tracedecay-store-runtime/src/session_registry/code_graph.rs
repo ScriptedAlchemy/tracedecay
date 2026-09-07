@@ -23,14 +23,14 @@ use tracedecay_store::{
     GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
     GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
-    GraphPublicationReplayRecordV1, GraphPublicationStoreErrorV1, GraphPublicationStoreV1,
-    GraphReplayAppendOutcomeV1, GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome, SemanticVectorStageKey,
-    SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
-    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
-    SemanticVectorStageResumeOutcome, SemanticVectorStagingStore, StoreShardIdV1,
+    GraphPublicationReplayRecordV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
+    GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt,
+    SemanticVectorStageCancelOutcome, SemanticVectorStageKey, SemanticVectorStagePlan,
+    SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
+    SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome,
+    SemanticVectorStagingStore, StoreShardIdV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
@@ -828,7 +828,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         };
         match storage
             .replay(&publication_key, &context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
         {
             GraphPublicationReplayLookupV1::Active(journaled) => {
                 if requested_replay(journaled.publication.expected_prior_head.clone())?
@@ -840,7 +840,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 }
                 let head = storage
                     .verified_head(&relational_projection, &context)
-                    .map_err(map_publication_error)?;
+                    .map_err(GraphDbError::from)?;
                 if head
                     .as_ref()
                     .is_some_and(|head| head.key == publication_key)
@@ -882,7 +882,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         }
         let prior = storage
             .verified_head(&relational_projection, &context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         let mut replay = requested_replay(prior)?;
         // Same ordered-journal recovery as the sealed code-generation path: a
         // predecessor journaled by an interrupted publisher can only land
@@ -892,7 +892,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         loop {
             match storage
                 .append_replay(&replay, &context)
-                .map_err(map_publication_error)?
+                .map_err(GraphDbError::from)?
             {
                 GraphReplayAppendOutcomeV1::Appended(_)
                 | GraphReplayAppendOutcomeV1::ExactReplay(_)
@@ -907,7 +907,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                     publish_journaled(&mut storage, &pending.publication.key)?;
                     let prior = storage
                         .verified_head(&relational_projection, &context)
-                        .map_err(map_publication_error)?;
+                        .map_err(GraphDbError::from)?;
                     replay = requested_replay(prior)?;
                 }
                 GraphReplayAppendOutcomeV1::VerifiedHeadConflict { actual } => {
@@ -992,7 +992,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
         // `recover_semantic_vector_projection`).
         if storage
             .verified_head(&relational_projection, &context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
             .is_none()
         {
             return Ok(None);
@@ -1369,7 +1369,7 @@ impl RetainedCodeGraphRuntimeV1 {
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let head = storage
             .verified_head(&relational_projection, &context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
             .ok_or_else(|| GraphDbError::unavailable("code graph has no verified head"))?;
         if head.key != expected_key {
             return Err(GraphDbError::conflict(
@@ -1378,7 +1378,7 @@ impl RetainedCodeGraphRuntimeV1 {
         }
         let replay = match storage
             .replay(&expected_key, &context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
         {
             GraphPublicationReplayLookupV1::Active(replay) => replay,
             GraphPublicationReplayLookupV1::Retired(_)
@@ -1607,12 +1607,12 @@ impl RetainedCodeGraphRuntimeV1 {
         }
         match storage
             .replay(&prepared.publication_key, context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
         {
             GraphPublicationReplayLookupV1::Active(journaled) => {
                 let head = storage
                     .verified_head(&prepared.relational_projection, context)
-                    .map_err(map_publication_error)?;
+                    .map_err(GraphDbError::from)?;
                 if head
                     .as_ref()
                     .is_some_and(|head| head.key == prepared.publication_key)
@@ -1943,7 +1943,7 @@ impl RetainedCodeGraphRuntimeV1 {
                         drop(staged_bundle);
                         let pending = match storage
                             .replay(&prepared.publication_key, context)
-                            .map_err(map_publication_error)?
+                            .map_err(GraphDbError::from)?
                         {
                             GraphPublicationReplayLookupV1::Active(pending) => pending,
                             // The row moved while the resume ran; the append
@@ -1994,7 +1994,7 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         let prior = storage
             .verified_head(&prepared.relational_projection, context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         let mut replay = build_replay(prior)?;
         // The relational journal is an ordered log: a replay journaled by an
         // interrupted publisher blocks every later sequence until it lands,
@@ -2024,7 +2024,7 @@ impl RetainedCodeGraphRuntimeV1 {
                         }
                         None => storage
                             .append_replay(&replay, context)
-                            .map_err(map_publication_error),
+                            .map_err(GraphDbError::from),
                     }
                 )
             }?;
@@ -2066,7 +2066,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     }
                     let prior = storage
                         .verified_head(&prepared.relational_projection, context)
-                        .map_err(map_publication_error)?;
+                        .map_err(GraphDbError::from)?;
                     replay = build_replay(prior)?;
                 }
                 GraphReplayAppendOutcomeV1::VerifiedHeadConflict { actual } => {
@@ -2251,7 +2251,7 @@ impl RetainedCodeGraphRuntimeV1 {
             |registration, storage, context| {
                 if storage
                     .verified_head(&relational_projection, context)
-                    .map_err(map_publication_error)?
+                    .map_err(GraphDbError::from)?
                     .is_none()
                 {
                     return Ok(None);
@@ -2705,7 +2705,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
             let page = storage
                 .projection_page(&request, &context)
-                .map_err(map_publication_error)?;
+                .map_err(GraphDbError::from)?;
             let Some(projection) = page.projections.into_iter().next() else {
                 return Ok(None);
             };
@@ -3091,24 +3091,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// `mount_worktree_with_graph_runtime` needs.
     pub fn code_graph_seat_port(self: &Arc<Self>) -> Arc<dyn CodeGraphSeatRuntimePortV1> {
         Arc::clone(self) as Arc<dyn CodeGraphSeatRuntimePortV1>
-    }
-}
-
-fn map_publication_error(error: GraphPublicationStoreErrorV1) -> GraphDbError {
-    match error {
-        GraphPublicationStoreErrorV1::InvalidRequest(error) => {
-            GraphDbError::invalid(error.to_string())
-        }
-        GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::Cancelled) => {
-            GraphDbError::Cancelled
-        }
-        GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
-            GraphDbError::DeadlineExceeded
-        }
-        GraphPublicationStoreErrorV1::Infrastructure => {
-            GraphDbError::unavailable("relational graph publication authority is unavailable")
-        }
-        GraphPublicationStoreErrorV1::Corrupt(message) => GraphDbError::Corrupt { message },
     }
 }
 

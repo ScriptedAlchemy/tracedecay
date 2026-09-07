@@ -1,6 +1,7 @@
 use std::fmt;
 
 use thiserror::Error;
+use tracedecay_store::runtime::{GraphPublicationStoreErrorV1, RuntimeInterruptionV1};
 
 /// Named graph-operation budget that was exhausted.
 ///
@@ -120,6 +121,26 @@ pub enum GraphDbError {
     DurabilityUncertain { message: String },
     #[error("graph database is closed")]
     Closed,
+}
+
+impl From<GraphPublicationStoreErrorV1> for GraphDbError {
+    fn from(error: GraphPublicationStoreErrorV1) -> Self {
+        match error {
+            GraphPublicationStoreErrorV1::InvalidRequest(error) => {
+                GraphDbError::invalid(error.to_string())
+            }
+            GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::Cancelled) => {
+                GraphDbError::Cancelled
+            }
+            GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
+                GraphDbError::DeadlineExceeded
+            }
+            GraphPublicationStoreErrorV1::Infrastructure => {
+                GraphDbError::unavailable("relational graph publication authority is unavailable")
+            }
+            GraphPublicationStoreErrorV1::Corrupt(message) => GraphDbError::Corrupt { message },
+        }
+    }
 }
 
 impl GraphDbError {

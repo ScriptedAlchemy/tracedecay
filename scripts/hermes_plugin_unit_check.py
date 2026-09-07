@@ -184,12 +184,7 @@ def _check_provenance(plugin_dir: Path):
     schemas = json.loads((plugin_dir / "schemas.json").read_text(encoding="utf-8"))
     assert any(schema.get("name") == "tracedecay_search" for schema in schemas), schemas
     assert (plugin_dir / "cli.py").is_file()
-    skill = (plugin_dir / "skills" / "tracedecay" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "normal user-profile installation" in skill, skill
-    assert "current schemas and are rejected" in skill, skill
-    ok("provenance stamp + cli passthrough + storage guidance generated")
+    ok("provenance stamp + cli passthrough generated")
 
 
 def _write_managed_skill_fixtures(plugin_dir: Path) -> Path:

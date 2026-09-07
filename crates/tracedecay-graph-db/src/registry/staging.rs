@@ -12,7 +12,7 @@ use tracedecay_store::{
     SemanticVectorStagingStoreError, SemanticVectorWriterFence,
 };
 
-use super::publication_support::{check_all, map_publication_error, require_publication_binding};
+use super::publication_support::{check_all, require_publication_binding};
 use super::{GraphDbRegistration, GraphDbRegistry};
 use crate::generation_runtime::GenerationContentsDeletion;
 use crate::{GraphCommit, GraphDbError, GraphWriteBatch, VerifiedGraphCommit};
@@ -298,11 +298,11 @@ impl GraphDbRegistry {
         }
         let actual_head = authority
             .verified_head(&batch_key.stage.projection, context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         if actual_head != record.plan.expected_prior_verified_head
             || authority
                 .pending_replay(&batch_key.stage.projection, context)
-                .map_err(map_publication_error)?
+                .map_err(GraphDbError::from)?
                 .is_some()
         {
             return Err(GraphDbError::conflict(
@@ -555,7 +555,7 @@ impl GraphDbRegistry {
         }
         match authority
             .replay(&intent.publication_key, context)
-            .map_err(super::publication_support::map_publication_error)?
+            .map_err(GraphDbError::from)?
         {
             GraphPublicationReplayLookupV1::Active(replay)
                 if replay.publication.key == intent.publication_key
@@ -672,7 +672,7 @@ fn require_active_stage_replay(
         })?;
     match authority
         .replay(&intent.publication_key, context)
-        .map_err(map_publication_error)?
+        .map_err(GraphDbError::from)?
     {
         GraphPublicationReplayLookupV1::Active(replay) => Ok(replay),
         GraphPublicationReplayLookupV1::Retired(_) => Err(GraphDbError::conflict(
@@ -692,11 +692,11 @@ fn require_unpublished_stage(
     if !matches!(
         authority
             .replay(&record.plan.publication_key, context)
-            .map_err(map_publication_error)?,
+            .map_err(GraphDbError::from)?,
         GraphPublicationReplayLookupV1::Missing
     ) || authority
         .verified_head(&record.plan.key.projection, context)
-        .map_err(map_publication_error)?
+        .map_err(GraphDbError::from)?
         .is_some_and(|head| head.key == record.plan.publication_key)
     {
         return Err(GraphDbError::conflict("staging.require_unpublished_stage"));

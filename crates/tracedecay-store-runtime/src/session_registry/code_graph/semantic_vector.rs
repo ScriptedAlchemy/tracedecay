@@ -324,7 +324,7 @@ impl RetainedCodeGraphRuntimeV1 {
         self.semantic_operation(cancellation, deadline, "head", |_registration, context| {
             authority
                 .verified_head(&projection, context)
-                .map_err(map_publication_error)
+                .map_err(GraphDbError::from)
         })
     }
 

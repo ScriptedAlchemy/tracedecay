@@ -9,9 +9,6 @@
 //! Rust grammar, replacing their bytes with spaces while preserving newlines
 //! and total byte length so 1-based line indexing stays valid.
 //!
-//! Masking is opt-in per node set (`mask_comments` / `mask_strings`) because
-//! `tracedecay_todos` deliberately scans comment text and must never be masked.
-//!
 //! ## Format-capture carry-over
 //! Rust's formatting macros accept implicit captures — `println!("{name}")`
 //! references the binding `name`, so `name` is a real use of that identifier.
@@ -26,16 +23,10 @@
 
 use tree_sitter::{Node as TsNode, Parser};
 
-/// Which node sets a masking pass blanks, and whether implicit format captures
-/// survive string masking.
+/// Whether implicit format captures survive comment and string masking.
 #[derive(Clone, Copy, Debug)]
 pub struct MaskOptions {
-    /// Blank `line_comment` / `block_comment` node ranges.
-    pub mask_comments: bool,
-    /// Blank `string_literal` / `raw_string_literal` / `char_literal` ranges.
-    pub mask_strings: bool,
     /// Keep `{identifier}` captures inside a formatting macro's format string.
-    /// Only meaningful when `mask_strings` is set.
     pub preserve_format_captures: bool,
 }
 
@@ -43,8 +34,6 @@ impl MaskOptions {
     /// Mask comments and string/char literals, preserving implicit format
     /// captures. This is the behaviour the `unused_imports` scan depends on.
     pub const UNUSED_IMPORTS: Self = Self {
-        mask_comments: true,
-        mask_strings: true,
         preserve_format_captures: true,
     };
 
@@ -52,8 +41,6 @@ impl MaskOptions {
     /// call and unsafe-block detection). Captures are irrelevant here, so they
     /// are blanked with the rest of the string.
     pub const CODE_SCAN: Self = Self {
-        mask_comments: true,
-        mask_strings: true,
         preserve_format_captures: false,
     };
 }
@@ -65,7 +52,8 @@ pub fn masked_rust_source(source: &str) -> String {
     masked_rust_source_with(source, MaskOptions::UNUSED_IMPORTS)
 }
 
-/// Returns a copy of `source` with the node sets selected by `opts` blanked.
+/// Returns a copy of `source` with comments and string/char literals blanked.
+/// `opts` controls whether implicit format captures survive.
 /// Blanked bytes become ASCII spaces; newlines and total byte length are
 /// preserved so line/byte indexing over the result stays valid.
 ///
@@ -73,19 +61,16 @@ pub fn masked_rust_source(source: &str) -> String {
 /// returned unmasked — a defensive fallback that only trades masking for the
 /// pre-existing false-positive risk on that one file.
 pub fn masked_rust_source_with(source: &str, opts: MaskOptions) -> String {
-    if !opts.mask_comments && !opts.mask_strings {
-        return source.to_string();
-    }
     let Some(tree) = parse(source) else {
         return source.to_string();
     };
     let src = source.as_bytes();
     let mut spans = Vec::new();
-    collect_spans(tree.root_node(), src, opts, &mut spans);
+    collect_spans(tree.root_node(), src, &mut spans);
     spans.sort_by_key(|span| span.start);
 
     let mut out = src.to_vec();
-    if opts.preserve_format_captures && opts.mask_strings {
+    if opts.preserve_format_captures {
         blank_with_format_captures(src, &mut out, &spans);
     } else {
         for span in &spans {
@@ -116,11 +101,11 @@ struct MaskSpan {
     format_string_candidate: bool,
 }
 
-/// Pre-order walk collecting comment and string/char literal spans selected by
-/// `opts`. Matched nodes are not descended into: their whole range is recorded
+/// Pre-order walk collecting comment and string/char literal spans.
+/// Matched nodes are not descended into: their whole range is recorded
 /// and their children (`string_content`, `doc_comment`, …) must not be split
 /// out separately.
-fn collect_spans(node: TsNode<'_>, src: &[u8], opts: MaskOptions, out: &mut Vec<MaskSpan>) {
+fn collect_spans(node: TsNode<'_>, src: &[u8], out: &mut Vec<MaskSpan>) {
     let kind = node.kind();
     let is_comment = matches!(kind, "line_comment" | "block_comment");
     let is_string = matches!(
@@ -128,7 +113,7 @@ fn collect_spans(node: TsNode<'_>, src: &[u8], opts: MaskOptions, out: &mut Vec<
         "string_literal" | "raw_string_literal" | "char_literal"
     );
 
-    if (is_comment && opts.mask_comments) || (is_string && opts.mask_strings) {
+    if is_comment || is_string {
         let start = node.start_byte();
         let end = node.end_byte().min(src.len());
         if start < end {
@@ -146,7 +131,7 @@ fn collect_spans(node: TsNode<'_>, src: &[u8], opts: MaskOptions, out: &mut Vec<
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
-            collect_spans(cursor.node(), src, opts, out);
+            collect_spans(cursor.node(), src, out);
             if !cursor.goto_next_sibling() {
                 break;
             }
