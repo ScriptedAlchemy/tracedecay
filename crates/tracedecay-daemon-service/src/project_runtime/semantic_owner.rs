@@ -29,7 +29,6 @@ pub struct SemanticOwnerRegistrationSignalsV1 {
 struct SemanticOwnerRegistrationSignalsInnerV1 {
     state: watch::Sender<SemanticOwnerStateV1>,
     configuration_ready: watch::Sender<bool>,
-    production_runtime_ready: watch::Sender<bool>,
     cancellation: CancellationToken,
 }
 
@@ -42,12 +41,10 @@ impl SemanticOwnerRegistrationSignalsV1 {
             ],
         });
         let (configuration_ready, _) = watch::channel(false);
-        let (production_runtime_ready, _) = watch::channel(false);
         Self {
             inner: Arc::new(SemanticOwnerRegistrationSignalsInnerV1 {
                 state,
                 configuration_ready,
-                production_runtime_ready,
                 cancellation: CancellationToken::new(),
             }),
         }
@@ -69,16 +66,8 @@ impl SemanticOwnerRegistrationSignalsV1 {
         self.inner.configuration_ready.send_replace(true);
     }
 
-    pub fn mark_production_runtime_ready(&self) {
-        self.inner.production_runtime_ready.send_replace(true);
-    }
-
     pub fn subscribe_configuration_ready(&self) -> watch::Receiver<bool> {
         self.inner.configuration_ready.subscribe()
-    }
-
-    pub fn subscribe_production_runtime_ready(&self) -> watch::Receiver<bool> {
-        self.inner.production_runtime_ready.subscribe()
     }
 
     pub fn cancellation(&self) -> CancellationToken {
@@ -116,16 +105,8 @@ impl RegisteredSemanticOwnerTaskV1 {
         self.inner.signals.mark_configuration_runtime_ready();
     }
 
-    pub fn mark_production_runtime_ready(&self) {
-        self.inner.signals.mark_production_runtime_ready();
-    }
-
     pub fn subscribe_configuration_ready(&self) -> watch::Receiver<bool> {
         self.inner.signals.subscribe_configuration_ready()
-    }
-
-    pub fn subscribe_production_runtime_ready(&self) -> watch::Receiver<bool> {
-        self.inner.signals.subscribe_production_runtime_ready()
     }
 
     pub fn cancellation(&self) -> CancellationToken {

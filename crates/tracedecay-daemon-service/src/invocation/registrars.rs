@@ -778,15 +778,6 @@ impl DaemonSemanticOwnerRuntimeRegistrar {
             )
             .await
     }
-
-    pub fn mark_production_runtime_ready(&self, project_root: &Path) -> bool {
-        self.service
-            .project_runtimes
-            .read_now::<RegisteredSemanticOwnerTaskV1, _, _>(project_root, |registered| {
-                registered.mark_production_runtime_ready();
-            })
-            .is_some()
-    }
 }
 
 #[derive(Clone)]

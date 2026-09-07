@@ -488,6 +488,7 @@ async fn production_project_server_inner(
         &route_registered,
         project_database_is_read_only,
     )?;
+    let (semantic_runtime_ready, semantic_runtime_readiness) = tokio::sync::watch::channel(false);
     let code_index_mount = code_index_activation_mount(CodeIndexActivationMountInputs {
         invocation: invocation.clone(),
         project_id: code_search_project_id.clone(),
@@ -503,6 +504,7 @@ async fn production_project_server_inner(
         cancellation: route_cancellation.clone(),
         graph_runtime: Arc::clone(&graph_runtime),
         graph_publication_database: Arc::new(cg.db().clone()),
+        semantic_runtime_ready,
         profile_id: cg.store_runtime_registry().profile_id().clone(),
     });
     let code_index_hint_sink = code_index_activation_hint_sink(
@@ -741,6 +743,7 @@ async fn production_project_server_inner(
             canonical_project_path.to_path_buf(),
             Arc::clone(cg.configuration_runtime()),
             code_search_scope.clone(),
+            semantic_runtime_readiness,
             Arc::clone(&route_registered),
             route_cancellation.clone(),
         ))

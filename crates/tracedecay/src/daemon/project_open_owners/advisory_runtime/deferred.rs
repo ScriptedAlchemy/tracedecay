@@ -59,6 +59,7 @@ pub(in crate::daemon) async fn spawn_semantic_owner_registration(
     project_root: PathBuf,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     scope: tracedecay_application::ResolvedScope,
+    mut production_runtime_ready: tokio::sync::watch::Receiver<bool>,
     route_registered: Arc<AtomicBool>,
     route_cancellation: CancellationToken,
 ) -> Result<()> {
@@ -66,14 +67,8 @@ pub(in crate::daemon) async fn spawn_semantic_owner_registration(
         .semantic_owner_runtime_registrar()
         .register(&project_root)
         .await?;
-    if tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(&project_root)
-        .is_some()
-    {
-        registration.mark_production_runtime_ready();
-    }
     let task_signals = registration.signals();
     let mut configuration_ready = task_signals.subscribe_configuration_ready();
-    let mut production_runtime_ready = task_signals.subscribe_production_runtime_ready();
     let task_cancellation = task_signals.cancellation();
     let task_project_root = project_root.clone();
     let task_invocation = invocation.clone();

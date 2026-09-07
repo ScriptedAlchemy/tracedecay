@@ -27,6 +27,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
+    pub(super) semantic_runtime_ready: tokio::sync::watch::Sender<bool>,
     pub(super) profile_id: tracedecay_domain::configuration::UserProfileId,
 }
 
@@ -52,6 +53,7 @@ pub(super) fn code_index_activation_mount(
         cancellation,
         graph_runtime,
         graph_publication_database,
+        semantic_runtime_ready,
         profile_id,
     } = inputs;
     let mount: code_index_scheduler::CodeIndexActivationMountV1 = Arc::new(move || {
@@ -68,6 +70,7 @@ pub(super) fn code_index_activation_mount(
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
+        let semantic_runtime_ready = semantic_runtime_ready.clone();
         let profile_id = profile_id.clone();
         Box::pin(hotpath::future!(
             async move {
@@ -108,9 +111,7 @@ pub(super) fn code_index_activation_mount(
                 )
                 .is_some()
                 {
-                    let _owner_observed = invocation
-                        .semantic_owner_runtime_registrar()
-                        .mark_production_runtime_ready(&project_root);
+                    semantic_runtime_ready.send_replace(true);
                 }
 
                 // Query authority depends on the first sealed generation, but
