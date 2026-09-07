@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
 
-use super::super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use super::super::client::{LspDocument, LspRefreshError, LspRefreshTimeouts, StdioLspClient};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
-use super::shared_client::SharedAnalyzerClient;
+use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
 use super::{CodeDiagnostic, EngineState};
 use crate::AnalyzerEvent;
 
@@ -203,12 +203,12 @@ async fn collect_refresh_batch(
     _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
     let shared = batch.client;
-    let mut client_slot = shared.client().lock().await;
-    let (use_of_analyzer, mut client) = if let Some(client) = client_slot.take() {
-        (
-            RefreshUseOfAnalyzer::new(&shared, shared.current_attempt()),
-            client,
-        )
+    let mut client_slot = shared
+        .client()
+        .await
+        .map_err(|error| RefreshFailure::crashed(&error))?;
+    let mut use_of_analyzer = if let Some(client) = client_slot.take() {
+        RefreshUseOfAnalyzer::new(&shared, client_slot, shared.current_attempt(), Some(client))
     } else {
         // Restart exhaustion is a stable health state
         // (`MAX_ANALYZER_RESTARTS`), not an invitation for this lane to
@@ -218,8 +218,8 @@ async fn collect_refresh_batch(
                 "analyzer '{command}' is retired: restart budget exhausted"
             )));
         };
-        let use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, attempt);
-        let client = match StdioLspClient::start_with_timeouts(
+        let mut use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, client_slot, attempt, None);
+        use_of_analyzer.client = match StdioLspClient::start_with_timeouts(
             &command,
             &args,
             &batch.workspace_root,
@@ -227,9 +227,9 @@ async fn collect_refresh_batch(
         )
         .await
         {
-            Ok(client) => client,
+            Ok(client) => Some(client),
             Err(error) => {
-                use_of_analyzer.conclude(AnalyzerEvent::StartupFailed);
+                use_of_analyzer.retire(AnalyzerEvent::StartupFailed);
                 return Err(RefreshFailure::crashed(&error));
             }
         };
@@ -240,25 +240,27 @@ async fn collect_refresh_batch(
                 "analyzer '{command}' start was superseded"
             )));
         }
-        (use_of_analyzer, client)
+        use_of_analyzer
     };
-    match client
-        .collect_document_diagnostics(&project_root, batch.documents, timeouts)
-        .await
-    {
+    let result = match use_of_analyzer.client.as_mut() {
+        Some(client) => {
+            client
+                .collect_document_diagnostics(&project_root, batch.documents, timeouts)
+                .await
+        }
+        None => Err(LspRefreshError::Transport {
+            message: format!("analyzer '{command}' client slot was empty"),
+        }),
+    };
+    match result {
         Ok(diagnostics) => {
-            use_of_analyzer.conclude(AnalyzerEvent::Ready);
-            *client_slot = Some(client);
+            use_of_analyzer.restore(AnalyzerEvent::Ready);
             Ok((ordinal, diagnostics))
         }
         Err(error) => {
-            // The client is dropped here, which stops the process: a refresh
-            // that ended without a publication may have left the stream
-            // mid-frame, and the lane cannot tell a silent analyzer from a dead
-            // one at this boundary.
-            use_of_analyzer.conclude(AnalyzerEvent::Retired);
-            drop(client);
-            Err(RefreshFailure::crashed(&error))
+            let failure = RefreshFailure::client(&error);
+            use_of_analyzer.retire(error.analyzer_event());
+            Err(failure)
         }
     }
 }
@@ -271,20 +273,37 @@ async fn collect_refresh_batch(
 /// serve its replacement on the retired attempt.
 struct RefreshUseOfAnalyzer<'a> {
     shared: &'a SharedAnalyzerClient,
+    client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+    client: Option<StdioLspClient>,
     attempt: u32,
     concluded: bool,
 }
 
 impl<'a> RefreshUseOfAnalyzer<'a> {
-    fn new(shared: &'a SharedAnalyzerClient, attempt: u32) -> Self {
+    fn new(
+        shared: &'a SharedAnalyzerClient,
+        client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+        attempt: u32,
+        client: Option<StdioLspClient>,
+    ) -> Self {
         Self {
             shared,
+            client_slot,
+            client,
             attempt,
             concluded: false,
         }
     }
 
-    fn conclude(mut self, event: AnalyzerEvent) {
+    fn restore(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+        if let Some(client) = self.client.take() {
+            self.client_slot.replace(client);
+        }
+    }
+
+    fn retire(mut self, event: AnalyzerEvent) {
         self.concluded = true;
         self.shared.record(self.attempt, event);
     }
@@ -294,6 +313,9 @@ impl Drop for RefreshUseOfAnalyzer<'_> {
     fn drop(&mut self) {
         if !self.concluded {
             self.shared.record(self.attempt, AnalyzerEvent::Retired);
+        }
+        if let Some(client) = self.client.take() {
+            self.client_slot.retire(client);
         }
     }
 }
@@ -305,6 +327,17 @@ pub(crate) struct RefreshFailure {
 }
 
 impl RefreshFailure {
+    fn client(error: &LspRefreshError) -> Self {
+        Self {
+            state: if error.is_policy_retirement() {
+                EngineState::Available
+            } else {
+                EngineState::Crashed
+            },
+            message: error.to_string(),
+        }
+    }
+
     fn crashed(error: &TraceDecayError) -> Self {
         Self::crashed_message(error.to_string())
     }

@@ -100,7 +100,7 @@ impl StdioLspSemanticAuthority {
     pub async fn upstream_capabilities(
         &self,
     ) -> std::result::Result<UpstreamCapabilities, TraceDecayError> {
-        let mut slot = self.inner.shared.client().lock().await;
+        let mut slot = self.inner.shared.client().await?;
         if let Some(client) = slot.as_ref() {
             return Ok(client.upstream_capabilities());
         }
@@ -122,9 +122,10 @@ impl StdioLspSemanticAuthority {
             Ok(client) => {
                 let capabilities = client.upstream_capabilities();
                 if self.inner.shared.mark_ready(attempt).is_none() {
+                    slot.retire(client);
                     return Err(TraceDecayError::Unavailable);
                 }
-                *slot = Some(client);
+                slot.replace(client);
                 Ok(capabilities)
             }
             Err(error) => {
@@ -212,9 +213,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                         detail: None,
                     }
                 }
-                slot = inner.shared.client().lock() => {
-                    let mut slot = slot;
-                    if slot.is_none()
+                slot = inner.shared.client() => {
+                    let mut slot = match slot {
+                        Ok(slot) => slot,
+                        Err(error) => {
+                            inner.operations.lock().await.remove(&key);
+                            return analyzer_start_failure(&error);
+                        }
+                    };
+                    if slot.as_ref().is_none()
                         && let Some(outcome) = inner
                             .shared
                             .is_terminal()
@@ -253,6 +260,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 // start, so its client is not the session's
                                 // analyzer. Drop it rather than installing it
                                 // over the replacement's.
+                                slot.retire(client);
                                 inner.operations.lock().await.remove(&key);
                                 return analyzer_event_outcome(AnalyzerEvent::Cancelled);
                             };
@@ -286,13 +294,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             // Reusing the client would make every later request
                             // parse from the middle of a message, so retire it
                             // alongside the transport failures.
-                            if !matches!(
+                            if matches!(
                                 &result,
                                 Err(LspSemanticRequestError::Transport { .. }
                                     | LspSemanticRequestError::InvalidResponse { .. }
                                     | LspSemanticRequestError::Cancelled)
                             ) {
-                                *slot = Some(client);
+                                slot.retire(client);
+                            } else {
+                                slot.replace(client);
                             }
                             match &result {
                                 Ok(_)
@@ -451,7 +461,16 @@ mod tests {
         authority.inner.shared.mark_ready(attempt).expect("ready");
         assert_eq!(authority.analyzer_readiness().state(), AnalyzerState::Ready);
         // A Ready supervisor over an empty client slot.
-        assert!(authority.inner.shared.client().lock().await.is_none());
+        assert!(
+            authority
+                .inner
+                .shared
+                .client()
+                .await
+                .unwrap()
+                .as_ref()
+                .is_none()
+        );
 
         let session_root = AdmittedRoot::authorized(
             "file:///project",
@@ -588,7 +607,7 @@ mod tests {
         // Exactly what a live start looks like from outside: its owner holds
         // the shared client lock, and the supervisor is `Starting` on its
         // attempt.
-        let held = authority.inner.shared.client().lock().await;
+        let held = authority.inner.shared.client().await.unwrap();
         let live = authority.inner.shared.begin_start().expect("live attempt");
 
         let joining = tokio::spawn({
