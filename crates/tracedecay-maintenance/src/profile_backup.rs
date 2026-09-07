@@ -14,7 +14,7 @@
 
 use std::{
     cell::Cell,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -1042,14 +1042,7 @@ fn sha256_file(path: &Path) -> Result<String, ProfileBackupError> {
 }
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), ProfileBackupError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
+    let mut file = tracedecay_private_fs::create_private_file(path).map_err(|error| {
         ProfileBackupError::unavailable(format!("create '{}': {error}", path.display()))
     })?;
     file.write_all(bytes).map_err(|error| {
@@ -1083,7 +1076,23 @@ fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
     })
 }
 
-#[cfg(not(unix))]
+/// Windows analogue of the 0700 mode above: the rehearsal staging directory
+/// was created by this attempt moments ago, so re-owning it and installing the
+/// protected current-user DACL is the same "make our own new directory
+/// private" step, not a repair of foreign material.
+#[cfg(windows)]
+fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
+    tracedecay_private_fs::make_private_directory(path)
+        .map(drop)
+        .map_err(|error| {
+            ProfileBackupError::unavailable(format!(
+                "restrict directory '{}': {error}",
+                path.display()
+            ))
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn restrict_private_directory(_path: &Path) -> Result<(), ProfileBackupError> {
     Ok(())
 }

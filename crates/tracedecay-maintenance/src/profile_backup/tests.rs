@@ -111,6 +111,20 @@ fn complete_backup_rehearses_from_restored_isolated_copy() {
         fs::read(profile.join("user-memory.db")).unwrap()
     );
     assert!(!restore.join("user-memory.db-wal").exists());
+
+    // Byte equality is not enough: the restored record must be admitted by the
+    // same strict private reader the daemon opens it with, which on Windows
+    // means the copy carries the protected current-user DACL, not the ACEs the
+    // restore directory would have let a plain copy inherit.
+    for root in [&backup, &restore] {
+        let record = tracedecay_runtime_core::storage::read_existing_profile_identity_record(
+            &root.join("profile-identity.json"),
+        )
+        .unwrap()
+        .expect("copied profile identity record is present");
+        assert_eq!(record.brain_id.as_str(), FIXTURE_BRAIN_ID);
+        assert_eq!(record.profile_id.as_str(), FIXTURE_PROFILE_ID);
+    }
 }
 
 fn released_store_manifest(
