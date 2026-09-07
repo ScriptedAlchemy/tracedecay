@@ -9,9 +9,16 @@ on:
 permissions:
   contents: read
 
+# One run per pull request (or per pushed ref). A newer push to a
+# feature-branch pull request supersedes the run in flight: its verdict is for
+# a head nobody can merge any more, and letting it finish only holds runners
+# the current head is waiting for. Pull requests into `master` (the integration
+# delivery and release PRs) keep every run to completion: their heads move
+# often as child work lands, and a verdict for a slightly older tip is still
+# the evidence those merges are judged by. `push` runs are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref != 'master' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -98,6 +105,7 @@ jobs:
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
@@ -147,6 +155,7 @@ jobs:
     name: Release Version Drift
     if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -189,6 +198,7 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -599,6 +609,7 @@ jobs:
     if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
     needs: [windows-test-shard, scope-gate]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check Windows shards
         run: |
@@ -613,6 +624,7 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -727,6 +739,7 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
