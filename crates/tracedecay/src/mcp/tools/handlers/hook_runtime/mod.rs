@@ -68,7 +68,7 @@ pub async fn handle_hook_runtime(
             accounting_receipt(cg, required_project_db(session_authorities)?).await?
         }
         "hook_v2_admit" | "hook_v2_guidance_lookup" => {
-            hook_v2_admit(cg, &args, action, required_project_db(session_authorities)?).await?
+            hook_v2_admit(cg, &args, action, session_authorities).await?
         }
         "hook_v2_scout_prepare" => hook_v2_scout_prepare(cg, &args).await?,
         "hook_v2_delivery_receipt" => hook_v2_delivery_receipt(cg, &args).await?,

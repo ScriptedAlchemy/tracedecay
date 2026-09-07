@@ -131,4 +131,3 @@ test-helpers = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }

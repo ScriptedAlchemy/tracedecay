@@ -254,7 +254,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
-    use tracedecay_private_fs::background_cpu::install_process_background_cpu;
+    use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
     use super::*;
 
@@ -376,11 +376,14 @@ mod tests {
         );
     }
 
+    /// Weighted semantic units and one-unit index work meter against one
+    /// authority from inside their pools. The authority is local to this
+    /// test, so nothing process-wide is installed.
     #[test]
     fn concurrent_index_and_semantic_units_share_width_and_both_progress() {
-        let authority =
-            install_process_background_cpu(NonZeroUsize::new(4).expect("nonzero background width"))
-                .expect("background CPU authority");
+        let authority = Arc::new(ProcessBackgroundCpuV1::new(
+            NonZeroUsize::new(4).expect("nonzero background width"),
+        ));
         let maximum = Arc::new(AtomicUsize::new(0));
         let index_completed = Arc::new(AtomicUsize::new(0));
         let semantic_completed = Arc::new(AtomicUsize::new(0));
@@ -404,15 +407,12 @@ mod tests {
                 };
                 if semantic {
                     install(|| {
-                        tracedecay_code_index::parallelism::with_background_cpu_permits(
-                            DEFAULT_INTRA_THREADS as usize,
-                            operation,
-                        );
+                        authority.with_permits(DEFAULT_INTRA_THREADS as usize, operation);
                     })
                     .expect("semantic shared operation");
                 } else {
                     tracedecay_code_index::parallelism::install(|| {
-                        tracedecay_code_index::parallelism::with_background_cpu_permit(operation);
+                        authority.with_permit(operation);
                     })
                     .expect("code-index shared operation");
                 }

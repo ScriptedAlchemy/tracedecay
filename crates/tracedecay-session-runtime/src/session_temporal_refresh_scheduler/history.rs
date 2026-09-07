@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_application::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_usecases::observation::ObservationCancellation;
 
 pub type SessionHistoricalIngestPass<'a> =
@@ -66,6 +67,7 @@ pub struct ProjectSessionHistoricalIngestor {
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
     codex_consumer: String,
     codex_registered: AtomicBool,
 }
@@ -78,6 +80,7 @@ impl ProjectSessionHistoricalIngestor {
         project_id: tracedecay_domain::ProjectId,
         transcript_source_home: Option<PathBuf>,
         codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+        background_cpu: Arc<ProcessBackgroundCpuV1>,
     ) -> Self {
         let source_home = transcript_source_home
             .as_deref()
@@ -98,6 +101,7 @@ impl ProjectSessionHistoricalIngestor {
             transcript_source_home,
             cancellation: ObservationCancellation::default(),
             codex_discovery,
+            background_cpu,
             codex_consumer,
             codex_registered: AtomicBool::new(true),
         }
@@ -114,7 +118,8 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
+                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone())
+                    .with_background_cpu(Arc::clone(&self.background_cpu));
             let pass = Box::pin(
                 tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation_and_codex_state(
                     self.profile_identity.brain_id(),
@@ -158,6 +163,7 @@ pub struct ProfileSessionHistoricalIngestor {
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
     codex_consumer: String,
     codex_registered: AtomicBool,
 }
@@ -169,6 +175,7 @@ impl ProfileSessionHistoricalIngestor {
         profile_identity: Arc<dyn ProfileIdentityReadPort>,
         transcript_source_home: Option<PathBuf>,
         codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+        background_cpu: Arc<ProcessBackgroundCpuV1>,
     ) -> Self {
         let source_home = transcript_source_home
             .as_deref()
@@ -188,6 +195,7 @@ impl ProfileSessionHistoricalIngestor {
             transcript_source_home,
             cancellation: ObservationCancellation::default(),
             codex_discovery,
+            background_cpu,
             codex_consumer,
             codex_registered: AtomicBool::new(true),
         }
@@ -222,9 +230,11 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
+                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone())
+                    .with_background_cpu(Arc::clone(&self.background_cpu));
             let registry_authority =
-                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone());
+                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone())
+                    .with_background_cpu(Arc::clone(&self.background_cpu));
             let pass = Box::pin(
                 tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db_and_codex_state(
                     self.profile_identity.brain_id(),

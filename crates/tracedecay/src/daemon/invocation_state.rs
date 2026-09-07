@@ -105,32 +105,56 @@ impl DaemonInvocationState {
     /// Mount the profile-owned background-worker plan before any projectless
     /// session or host-admission work can start. The exact `ProfileSessions`
     /// shard is the persisted user-profile authority; project configuration
-    /// must never win this process-wide installation by opening first.
+    /// must never win this process-wide installation by opening first. The
+    /// returned receipt carries the one process background CPU authority the
+    /// plan installed, already mounted into session preparation.
     #[hotpath::skip]
-    pub(crate) async fn install_profile_worker_plan(
+    pub(super) async fn install_profile_worker_plan(
         &self,
+        store_administration: &StoreAdministration,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
-    ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
+    ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
         let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
             database, profile_id,
         )
         .await?;
-        self.install_worker_selection(configured)
+        self.install_worker_selection(store_administration, configured)
+    }
+
+    /// Fixture composition for tests that drive a bare invocation state:
+    /// installs the profile worker plan through a store administration bound
+    /// to `profile_identity`, exactly as bootstrap does, so the plan's
+    /// preparation resources are mounted alongside it.
+    #[cfg(test)]
+    pub(crate) async fn install_profile_worker_plan_for_test(
+        &self,
+        profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
+        database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
+        let profile_id = profile_identity.profile_id().clone();
+        let store_administration =
+            StoreAdministration::default().with_profile_identity(profile_identity);
+        self.install_profile_worker_plan(&store_administration, database, &profile_id)
+            .await
     }
 
     /// Charge one already-resolved worker selection against this daemon's own
-    /// resident-memory authority. Keeping the arithmetic here means the
-    /// persisted-profile path and any other admitted caller install the exact
-    /// same plan for the same selection instead of re-deriving the available
-    /// byte budget from a second estimator.
-    pub(crate) fn install_worker_selection(
+    /// resident-memory authority, then mount the process resources session
+    /// preparation meters against — that same resident-memory authority and
+    /// the background CPU authority the plan installed — into the store
+    /// administration's session runtimes. Keeping both steps here means the
+    /// persisted-profile path, the production harness, and every in-process
+    /// test engine install the exact same plan for the same selection and can
+    /// never install a plan without its preparation resources.
+    pub(super) fn install_worker_selection(
         &self,
+        store_administration: &StoreAdministration,
         configured: tracedecay_domain::configuration::CodeIndexWorkerSelectionV1,
-    ) -> Result<tracedecay_domain::configuration::CodeIndexWorkerStatusV1> {
+    ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
         let resident_memory = self.code_index_schedulers.process_resident_memory();
         let resident_snapshot = resident_memory.snapshot();
-        tracedecay_code_index::parallelism::install_worker_plan(
+        let installed = tracedecay_code_index::parallelism::install_worker_plan(
             configured,
             resident_snapshot
                 .limit_bytes
@@ -138,7 +162,16 @@ impl DaemonInvocationState {
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("code-index worker plan refused: {error}"),
-        })
+        })?;
+        store_administration
+            .configure_codex_preparation_resources(
+                resident_memory,
+                Arc::clone(&installed.background_cpu),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to configure Codex preparation resources: {error}"),
+            })?;
+        Ok(installed)
     }
 
     #[hotpath::skip]

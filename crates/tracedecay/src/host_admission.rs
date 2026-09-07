@@ -7,7 +7,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use tracedecay_code_index::parallelism::install_worker_plan;
 use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
-use tracedecay_private_fs::background_cpu::process_background_cpu;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
@@ -96,35 +96,34 @@ static SESSION_CAPTURE_TEST_RESIDENT_MEMORY: LazyLock<Arc<ProcessResidentMemoryV
     });
 
 /// Installs the process worker plan (and with it the background CPU
-/// authority) that host-admission capture requires. Production installs it
-/// during daemon worker-plan admission, which these fixtures never run;
-/// without it every observation capture is refused with
-/// `background_cpu_unavailable`. Going through `install_worker_plan` — the
-/// same authority production and the scheduler's test fallback use — keeps
-/// the background CPU width consistent with any later worker-plan install in
-/// the same test process instead of poisoning it with an ad-hoc width.
-pub(crate) fn ensure_process_background_cpu_authority() -> Result<()> {
-    if process_background_cpu().is_none() {
-        let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
-        if let Err(error) = install_worker_plan(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            memory.limit_bytes.saturating_sub(memory.used_bytes),
-        ) && process_background_cpu().is_none()
-        {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "host-admission test runtime could not install the worker plan: {error}"
-                ),
-            });
-        }
-    }
+/// authority) that host-admission capture requires and returns that
+/// authority for injection. Production installs it during daemon worker-plan
+/// admission, which these fixtures never run; without it every observation
+/// capture is refused with `background_cpu_unavailable`. Going through
+/// `install_worker_plan` — the same authority production and the scheduler's
+/// test fallback use — keeps the background CPU width consistent with any
+/// later worker-plan install in the same test process instead of poisoning
+/// it with an ad-hoc width.
+pub(crate) fn ensure_process_background_cpu_authority() -> Result<Arc<ProcessBackgroundCpuV1>> {
+    let memory = SESSION_CAPTURE_TEST_RESIDENT_MEMORY.snapshot();
+    let installed = install_worker_plan(
+        CodeIndexWorkerSelectionV1::Automatic {},
+        memory.limit_bytes.saturating_sub(memory.used_bytes),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("host-admission test runtime could not install the worker plan: {error}"),
+    })?;
     CodexDiscoveryHub::default()
-        .configure_preparation_resources(Arc::clone(&SESSION_CAPTURE_TEST_RESIDENT_MEMORY))
+        .configure_preparation_resources(
+            Arc::clone(&SESSION_CAPTURE_TEST_RESIDENT_MEMORY),
+            Arc::clone(&installed.background_cpu),
+        )
         .map_err(|error| TraceDecayError::Config {
             message: format!(
                 "host-admission test runtime could not install JSONL preparation resources: {error}"
             ),
-        })
+        })?;
+    Ok(installed.background_cpu)
 }
 
 /// Registered host-admission fixture assembled by the composition root.
@@ -142,6 +141,7 @@ pub struct HostAdmissionTestRuntimeV1 {
     profile_registered: RegisteredGlobalDbLeaseV1,
     project_registered: Option<RegisteredGlobalDbLeaseV1>,
     session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
     _database_scope: DaemonDatabaseScope,
 }
 
@@ -245,6 +245,7 @@ impl HostAdmissionTestRuntimeV1 {
             profile_registered: self.profile_registered.clone(),
             project_registered: Some(registered),
             session_registry: Arc::clone(&self.session_registry),
+            background_cpu: Arc::clone(&self.background_cpu),
             _database_scope: database_scope,
         })
     }
@@ -255,7 +256,7 @@ impl HostAdmissionTestRuntimeV1 {
         // registered product runtime (handshakes, initialize payloads);
         // test processes only ever register the canonical fixture.
         crate::product_runtime::register_fixture_product_runtime();
-        ensure_process_background_cpu_authority()?;
+        let background_cpu = ensure_process_background_cpu_authority()?;
         prepare_host_admission_test_profile_root(&profile_root)?;
         if let Some((project_root, project_id)) = project.as_ref() {
             prepare_host_admission_test_project_root(project_root, project_id)?;
@@ -347,6 +348,7 @@ impl HostAdmissionTestRuntimeV1 {
             profile_registered,
             project_registered,
             session_registry,
+            background_cpu,
             _database_scope: database_scope,
         })
     }
@@ -933,6 +935,7 @@ impl HostAdmissionTestRuntimeV1 {
                 );
         context.profile_root = Some(profile_root);
         context.profile_identity = Some(std::sync::Arc::new(profile_identity));
+        context.background_cpu = Some(Arc::clone(&self.background_cpu));
         context.host_admission_test_runtime = Some(self);
         Ok(context)
     }
@@ -1009,23 +1012,31 @@ impl HostAdmissionTestRuntimeV1 {
         }
     }
 
+    /// The process background CPU authority this runtime's worker plan
+    /// installed, for compositions that inject it themselves.
+    #[doc(hidden)]
+    pub fn background_cpu(&self) -> Arc<ProcessBackgroundCpuV1> {
+        Arc::clone(&self.background_cpu)
+    }
+
     pub fn facade(&self) -> HostAdmissionFacade<'_> {
-        match (self.project_id.as_ref(), self.project_registered.as_ref()) {
-            (Some(project_id), Some(project_registered)) => HostAdmissionFacade::new(
+        let authorities = match (self.project_id.as_ref(), self.project_registered.as_ref()) {
+            (Some(project_id), Some(project_registered)) => {
                 HostAdmissionAuthorities::registered_for_project(
                     self.brain_id.clone(),
                     self.profile_id.clone(),
                     project_id.clone(),
                     project_registered,
                 )
-                .with_profile_registered(self.profile_id.clone(), self.profile_registered.as_ref()),
-            ),
-            _ => HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+                .with_profile_registered(self.profile_id.clone(), self.profile_registered.as_ref())
+            }
+            _ => HostAdmissionAuthorities::for_profile(
                 self.brain_id.clone(),
                 self.profile_id.clone(),
                 self.profile_registered.as_ref(),
-            )),
-        }
+            ),
+        };
+        HostAdmissionFacade::new(authorities.with_background_cpu(Arc::clone(&self.background_cpu)))
     }
 
     /// Initializes a project graph through this retained registered runtime.

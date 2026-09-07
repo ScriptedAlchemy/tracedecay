@@ -12,6 +12,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use super::{
@@ -33,6 +34,7 @@ pub struct SessionSyncProjectContext {
     project_sessions_locator: VerifiedStoreLocatorV1,
     pub(super) user_sessions: RegisteredGlobalDbLeaseV1,
     pub registry: RegisteredGlobalDbLeaseV1,
+    pub(super) background_cpu: Arc<ProcessBackgroundCpuV1>,
     pub(super) project_refresh:
         crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(super) user_refresh: crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
@@ -307,6 +309,7 @@ impl DaemonSessionSyncService {
             project_sessions_locator,
             user_sessions: config.user_sessions,
             registry: config.registry,
+            background_cpu: config.background_cpu,
             project_refresh: config.project_refresh,
             user_refresh: config.user_refresh,
         });

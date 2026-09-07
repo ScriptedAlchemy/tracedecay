@@ -898,6 +898,18 @@ async fn production_project_server_inner(
             let host_admission_broker = Some(
                 Box::pin(store_administration.host_admission_broker(&session_db)).await?,
             );
+            // Session ingest prepares captures under the one process background
+            // CPU authority the bootstrap worker plan installed and mounted
+            // into the refresh schedulers; project open without it is a
+            // composition defect, not a degraded mode.
+            let background_cpu = store_administration
+                .session_temporal_refresh_schedulers()
+                .background_cpu()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message:
+                        "process background CPU authority was not mounted during daemon bootstrap"
+                            .to_owned(),
+                })?;
             let project_session_refresh_wake = Box::pin(
                 store_administration
                     .session_temporal_refresh_schedulers()
@@ -913,6 +925,7 @@ async fn production_project_server_inner(
                         store_administration
                             .session_temporal_refresh_schedulers()
                             .codex_discovery(),
+                        Arc::clone(&background_cpu),
                     )),
                 ),
             )
@@ -931,6 +944,7 @@ async fn production_project_server_inner(
                         store_administration
                             .session_temporal_refresh_schedulers()
                             .codex_discovery(),
+                        Arc::clone(&background_cpu),
                     )),
                 ),
             )
@@ -947,6 +961,7 @@ async fn production_project_server_inner(
                     project_sessions: session_db.clone(),
                     user_sessions: user_session_db.clone(),
                     registry: registry_db.clone(),
+                    background_cpu: Arc::clone(&background_cpu),
                     startup_import: cg.get_config().sync.session_start_sync,
                     project_refresh: project_session_refresh_wake.clone(),
                     user_refresh: user_session_refresh_wake.clone(),
@@ -1017,6 +1032,7 @@ async fn production_project_server_inner(
                         profile_sessions: user_session_db,
                     },
                     host_admission_broker,
+                    background_cpu,
                     project_session_refresh_wake,
                     user_session_refresh_wake,
                     session_sync_service,

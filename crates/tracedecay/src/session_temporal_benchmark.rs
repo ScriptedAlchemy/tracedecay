@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -724,13 +725,14 @@ fn measurement_result(source_identity: Value, measurement: Value) -> Value {
 /// memory handle fails closed), so this delegates to the same helper
 /// `HostAdmissionTestRuntimeV1` uses instead of racing it with a
 /// benchmark-private handle.
-fn ensure_admission_resource_authorities() {
+fn ensure_admission_resource_authorities()
+-> Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1> {
     crate::host_admission::ensure_process_background_cpu_authority()
-        .expect("install process capture authorities for the benchmark");
+        .expect("install process capture authorities for the benchmark")
 }
 
 async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition> {
-    ensure_admission_resource_authorities();
+    let background_cpu = ensure_admission_resource_authorities();
     let env = IsolatedBenchmarkEnv::enter("session-temporal-")?;
     let project = env.path().join("project");
     fs::create_dir_all(&project).map_err(|error| format!("create project: {error}"))?;
@@ -764,12 +766,15 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         .await
         .map_err(|error| format!("mount benchmark project sessions: {error}"))?;
     let root_sessions = root_relation_fixture::session_ids(repetition)?;
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        brain_id,
-        profile_id.clone(),
-        project_id.clone(),
-        registered.as_ref(),
-    ));
+    let admission = HostAdmissionFacade::new(
+        HostAdmissionAuthorities::for_project(
+            brain_id,
+            profile_id.clone(),
+            project_id.clone(),
+            registered.as_ref(),
+        )
+        .with_background_cpu(background_cpu),
+    );
     for session_id in &root_sessions {
         let rollout = write_codex_rollout(env.home(), &project, session_id.as_str())?;
         codex::try_admit_codex_jsonl_observations_for_project_with_admission(

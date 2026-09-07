@@ -2684,6 +2684,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     // fails with "profile code-index worker plan was not installed".
     super::super::DaemonInvocationState::default()
         .install_worker_selection(
+            &store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install portable broker profile worker plan");

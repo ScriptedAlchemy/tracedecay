@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
+use super::super::SessionAuthorities;
 use super::context_scout::{
     admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,
     hook_v2_native_context_scout_lifecycle, lookup_hook_v2_delivery_claim,
@@ -17,6 +19,7 @@ use super::envelope::{
     daemon_mint_hook_v2_envelope, hook_now, hook_v2_envelope, hook_v2_family_label,
     hook_v2_lifecycle_range, hook_v2_native_session_id, hook_v2_requires_producer_work,
 };
+use super::required_project_db;
 
 pub(super) enum HookV2BindingAdmission {
     Bound(tracedecay_hooks::HookConfigurationSnapshotV1),
@@ -268,7 +271,8 @@ pub(crate) async fn admit_hook_v2_envelope(
     native_session_id: Option<SessionId>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
-    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, now).await
+    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, None, now)
+        .await
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
@@ -278,6 +282,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     native_session_id: Option<SessionId>,
     native_lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
     project_sessions: Option<&RegisteredGlobalDb>,
+    background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
     let provider_envelope = envelope;
@@ -315,6 +320,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         };
         if !admit_native_context_scout_lifecycle(
             project_sessions,
+            background_cpu,
             provider,
             native_lifecycle,
             range,
@@ -472,8 +478,9 @@ pub(super) async fn hook_v2_admit(
     cg: &TraceDecay,
     args: &Value,
     action: &str,
-    project_sessions: &RegisteredGlobalDb,
+    session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
+    let project_sessions = required_project_db(session_authorities.clone())?;
     let envelope = hook_v2_envelope(args, action)?;
     let now = hook_now();
     let native_session_id = hook_v2_native_session_id(args, &envelope);
@@ -485,6 +492,7 @@ pub(super) async fn hook_v2_admit(
             native_session_id,
             native_lifecycle,
             Some(project_sessions),
+            session_authorities.background_cpu.as_ref(),
             now,
         )
         .await

@@ -14,9 +14,7 @@ use tracedecay_domain::{
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-use tracedecay_private_fs::background_cpu::{
-    ProcessBackgroundCpuV1, install_process_background_cpu, process_background_cpu,
-};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::privacy::{
     ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
@@ -31,11 +29,12 @@ use super::*;
 const BATCH_PROVIDER: &str = "claude";
 const BATCH_SIZE: usize = 8;
 
+/// An isolated authority per facade: nothing here is process-global, so a
+/// test that saturates its width cannot gate a sibling test.
 fn background_cpu_for_host_admission_test() -> Arc<ProcessBackgroundCpuV1> {
-    process_background_cpu().unwrap_or_else(|| {
-        install_process_background_cpu(NonZeroUsize::new(4).expect("nonzero test CPU width"))
-            .expect("install canonical background CPU authority")
-    })
+    Arc::new(ProcessBackgroundCpuV1::new(
+        NonZeroUsize::new(4).expect("nonzero test CPU width"),
+    ))
 }
 
 fn committed_transactions(database: &tracedecay_global_db::RegisteredGlobalDb) -> u64 {
@@ -55,16 +54,28 @@ fn profile_facade<'a>(
     HostAdmissionFacade<'a>,
     &'a tracedecay_global_db::RegisteredGlobalDb,
 ) {
-    let _background_cpu = background_cpu_for_host_admission_test();
+    profile_facade_with_background_cpu(runtime, background_cpu_for_host_admission_test())
+}
+
+fn profile_facade_with_background_cpu<'a>(
+    runtime: &'a HostAdmissionTestRuntimeV1,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
+) -> (
+    HostAdmissionFacade<'a>,
+    &'a tracedecay_global_db::RegisteredGlobalDb,
+) {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("registered profile database");
     let shard = &database.binding().shard_id;
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
-        shard.brain_id.clone(),
-        shard.profile_id.clone(),
-        database,
-    ));
+    let facade = HostAdmissionFacade::new(
+        HostAdmissionAuthorities::for_profile(
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+            database,
+        )
+        .with_background_cpu(background_cpu),
+    );
     (facade, database)
 }
 
@@ -199,8 +210,8 @@ async fn production_facade_preparation_waits_for_shared_background_cpu() {
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
         .unwrap();
-    let (facade, _) = profile_facade(&runtime);
     let authority = background_cpu_for_host_admission_test();
+    let (facade, _) = profile_facade_with_background_cpu(&runtime, Arc::clone(&authority));
     let permits = (0..authority.width().get())
         .map(|_| authority.acquire())
         .collect::<Vec<_>>();

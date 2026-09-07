@@ -20,6 +20,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
@@ -67,6 +68,7 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_lifecycle")]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
+    background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
     provider: ProviderId,
     lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
     range: ObservationSourceRangeV1,
@@ -126,12 +128,18 @@ pub(super) async fn admit_native_context_scout_lifecycle(
             Err(_) => return false,
         };
     let binding = sessions.binding();
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::registered_for_project(
+    let authorities = HostAdmissionAuthorities::registered_for_project(
         binding.shard_id.brain_id.clone(),
         binding.shard_id.profile_id.clone(),
         project_id,
         sessions,
-    ));
+    );
+    let facade = HostAdmissionFacade::new(match background_cpu {
+        Some(background_cpu) => {
+            authorities.with_background_cpu(std::sync::Arc::clone(background_cpu))
+        }
+        None => authorities,
+    });
     let expected_cursor = match facade.get_source_cursor(&source, &scope).await {
         Ok(None) => None,
         Ok(Some(cursor))

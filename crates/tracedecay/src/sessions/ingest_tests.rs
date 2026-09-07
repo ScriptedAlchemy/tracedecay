@@ -50,8 +50,14 @@ struct IngestTestRuntime {
 }
 
 impl IngestTestRuntime {
+    /// Observation capture refuses to run without the process background-CPU
+    /// authority that daemon startup installs; the fixture injects the same
+    /// one the production worker plan uses.
     fn authority(&self) -> GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1> {
+        let background_cpu = crate::host_admission::ensure_process_background_cpu_authority()
+            .expect("install fixture worker plan authority");
         GlobalDbSessionIngestAuthority::new(self.database.clone())
+            .with_background_cpu(background_cpu)
     }
 }
 
@@ -599,10 +605,6 @@ async fn run_bounded_project_pass(
     provider: Option<SessionProvider>,
     bounds: IngestPassBounds,
 ) -> TranscriptIngestOutcome {
-    // Observation capture refuses to run without the process background-CPU
-    // authority that daemon startup installs; the fixture installs the same
-    // one the production worker plan uses.
-    crate::host_admission::ensure_process_background_cpu_authority().unwrap();
     let authority = runtime.authority();
     let shard = runtime.database.binding().shard_id.clone();
     let cancellation = ObservationCancellation::default();
