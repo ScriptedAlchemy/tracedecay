@@ -22,7 +22,7 @@ use tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1
 use crate::code_graph_seat::CodeGraphSeatRuntimePortV1;
 use tracedecay_usecases::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticRuntimeFuture, SemanticVectorGraphErrorV1,
-    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1,
+    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1, SemanticVectorOperationTaskOwnerV1,
     SemanticVectorRetentionAuthorizationV1,
 };
 
@@ -193,13 +193,16 @@ async fn converge_one_project_vector_generation(
             return ProjectSemanticVectorRetentionStep::Denied(message);
         }
     };
-    let store = match GraphVectorGenerationStoreV1::read_only(&retained) {
+    let store = match GraphVectorGenerationStoreV1::read_only(&retained).await {
         Ok(store) => store,
         Err(error) => {
             return ProjectVectorRetentionFailure::from(error).retention_step();
         }
     };
-    let step = match store.reserve_one_generation(after, Arc::clone(retained.cancellation())) {
+    let step = match store
+        .reserve_one_generation(after, Arc::clone(retained.cancellation()))
+        .await
+    {
         Ok(step) => step,
         Err(error) => {
             return ProjectVectorRetentionFailure::from(error).retention_step();
@@ -224,7 +227,7 @@ async fn converge_one_project_vector_generation(
     let configuration_receipt = match complete_configuration_inventory(configuration).await {
         Ok(receipt) => receipt,
         Err(failure) => {
-            if let Err(error) = release_vector_reservation(&store, reservation.take()) {
+            if let Err(error) = release_vector_reservation(&store, reservation.take()).await {
                 return ProjectVectorRetentionFailure::from(error).retention_step();
             }
             return failure.retention_step();
@@ -241,16 +244,17 @@ async fn converge_one_project_vector_generation(
     {
         Ok(receipt) => receipt,
         Err(failure) => {
-            if let Err(error) = release_vector_reservation(&store, reservation.take()) {
+            if let Err(error) = release_vector_reservation(&store, reservation.take()).await {
                 return ProjectVectorRetentionFailure::from(error).retention_step();
             }
             return failure.retention_step();
         }
     };
-    if let Err(error) =
-        store.validate_project_census_revision(census.revision, Arc::clone(retained.cancellation()))
+    if let Err(error) = store
+        .validate_project_census_revision(census.revision, Arc::clone(retained.cancellation()))
+        .await
     {
-        if let Err(release_error) = release_vector_reservation(&store, reservation.take()) {
+        if let Err(release_error) = release_vector_reservation(&store, reservation.take()).await {
             return ProjectVectorRetentionFailure::from(release_error).retention_step();
         }
         return ProjectVectorRetentionFailure::from(error).retention_step();
@@ -264,7 +268,7 @@ async fn converge_one_project_vector_generation(
         .await
     {
         Ok(true) => {
-            if let Err(error) = store.release_reserved_generation(reservation) {
+            if let Err(error) = store.release_reserved_generation(reservation).await {
                 return ProjectVectorRetentionFailure::from(error).retention_step();
             }
             census.action = tracedecay_graph_db::SemanticVectorRetentionAction::Retained(candidate);
@@ -279,23 +283,28 @@ async fn converge_one_project_vector_generation(
             ) {
                 Ok(authorization) => authorization,
                 Err(SemanticVectorGraphErrorV1::Unavailable(message)) => {
-                    if let Err(error) = release_vector_reservation(&store, Some(reservation)) {
+                    if let Err(error) = release_vector_reservation(&store, Some(reservation)).await
+                    {
                         return ProjectVectorRetentionFailure::from(error).retention_step();
                     }
                     return ProjectSemanticVectorRetentionStep::Unavailable(message);
                 }
                 Err(SemanticVectorGraphErrorV1::Rejected(message)) => {
-                    if let Err(error) = release_vector_reservation(&store, Some(reservation)) {
+                    if let Err(error) = release_vector_reservation(&store, Some(reservation)).await
+                    {
                         return ProjectVectorRetentionFailure::from(error).retention_step();
                     }
                     return ProjectSemanticVectorRetentionStep::Denied(message);
                 }
             };
-            match store.finalize_reserved_generation(
-                reservation,
-                &authorization,
-                Arc::clone(retained.cancellation()),
-            ) {
+            match store
+                .finalize_reserved_generation(
+                    reservation,
+                    &authorization,
+                    Arc::clone(retained.cancellation()),
+                )
+                .await
+            {
                 Ok(action) => {
                     census.action = action;
                     ProjectSemanticVectorRetentionStep::Ready(census)
@@ -304,7 +313,8 @@ async fn converge_one_project_vector_generation(
             }
         }
         Err(error) => {
-            if let Err(release_error) = release_vector_reservation(&store, Some(reservation)) {
+            if let Err(release_error) = release_vector_reservation(&store, Some(reservation)).await
+            {
                 return ProjectVectorRetentionFailure::from(release_error).retention_step();
             }
             ProjectVectorRetentionFailure::from_configuration(error).retention_step()
@@ -312,12 +322,12 @@ async fn converge_one_project_vector_generation(
     }
 }
 
-fn release_vector_reservation(
+async fn release_vector_reservation(
     store: &GraphVectorGenerationStoreV1,
     reservation: Option<tracedecay_graph_db::SemanticVectorRetirementReservation>,
 ) -> Result<(), tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1> {
     if let Some(reservation) = reservation {
-        store.release_reserved_generation(reservation)?;
+        store.release_reserved_generation(reservation).await?;
     }
     Ok(())
 }
@@ -355,17 +365,20 @@ pub async fn project_vector_source_generation_is_live(
                 return ProjectSemanticVectorSourceLiveness::Denied(error.to_string());
             }
         };
-    let store = match GraphVectorGenerationStoreV1::read_only(&retained) {
+    let store = match GraphVectorGenerationStoreV1::read_only(&retained).await {
         Ok(store) => store,
         Err(error) => {
             return ProjectVectorRetentionFailure::from(error).source_liveness();
         }
     };
-    match store.source_generation_is_live(
-        &generation,
-        expected_revision,
-        Arc::clone(retained.cancellation()),
-    ) {
+    match store
+        .source_generation_is_live(
+            &generation,
+            expected_revision,
+            Arc::clone(retained.cancellation()),
+        )
+        .await
+    {
         Ok(live) => ProjectSemanticVectorSourceLiveness::Ready(live),
         Err(error) => ProjectVectorRetentionFailure::from(error).source_liveness(),
     }
@@ -401,17 +414,20 @@ pub async fn project_vector_code_scope_is_live(
             return ProjectSemanticVectorCodeScopeLiveness::Denied(message);
         }
     };
-    let store = match GraphVectorGenerationStoreV1::read_only(&retained) {
+    let store = match GraphVectorGenerationStoreV1::read_only(&retained).await {
         Ok(store) => store,
         Err(error) => {
             return ProjectVectorRetentionFailure::from(error).code_scope_liveness();
         }
     };
-    let source_scope = match store.source_scope_binding(
-        &code_scope_hash,
-        expected_revision,
-        Arc::clone(retained.cancellation()),
-    ) {
+    let source_scope = match store
+        .source_scope_binding(
+            &code_scope_hash,
+            expected_revision,
+            Arc::clone(retained.cancellation()),
+        )
+        .await
+    {
         Ok(tracedecay_store::SemanticVectorSourceScopeBindingLookup::Exact(scope)) => scope,
         Ok(tracedecay_store::SemanticVectorSourceScopeBindingLookup::Missing) => {
             return ProjectSemanticVectorCodeScopeLiveness::Missing;
@@ -425,11 +441,14 @@ pub async fn project_vector_code_scope_is_live(
             return ProjectVectorRetentionFailure::from(error).code_scope_liveness();
         }
     };
-    match store.source_scope_is_live(
-        &source_scope,
-        expected_revision,
-        Arc::clone(retained.cancellation()),
-    ) {
+    match store
+        .source_scope_is_live(
+            &source_scope,
+            expected_revision,
+            Arc::clone(retained.cancellation()),
+        )
+        .await
+    {
         Ok(live) => ProjectSemanticVectorCodeScopeLiveness::Ready { source_scope, live },
         Err(error) => ProjectVectorRetentionFailure::from(error).code_scope_liveness(),
     }
@@ -466,18 +485,21 @@ pub async fn remove_project_vector_code_scope_binding(
             return ProjectSemanticVectorSourceLiveness::Denied(message);
         }
     };
-    let store = match GraphVectorGenerationStoreV1::read_only(&retained) {
+    let store = match GraphVectorGenerationStoreV1::read_only(&retained).await {
         Ok(store) => store,
         Err(error) => {
             return ProjectVectorRetentionFailure::from(error).source_liveness();
         }
     };
-    match store.remove_source_scope_binding(
-        &code_scope_hash,
-        source_scope,
-        expected_revision,
-        Arc::clone(retained.cancellation()),
-    ) {
+    match store
+        .remove_source_scope_binding(
+            &code_scope_hash,
+            source_scope,
+            expected_revision,
+            Arc::clone(retained.cancellation()),
+        )
+        .await
+    {
         Ok(removed) => ProjectSemanticVectorSourceLiveness::Ready(removed),
         Err(error) => ProjectVectorRetentionFailure::from(error).source_liveness(),
     }
@@ -517,7 +539,7 @@ pub async fn project_vector_readable_sources(
             return ProjectVectorReadableSources::Denied(message);
         }
     };
-    let store = match GraphVectorGenerationStoreV1::read_only(&retained) {
+    let store = match GraphVectorGenerationStoreV1::read_only(&retained).await {
         Ok(store) => store,
         Err(error) => return ProjectVectorRetentionFailure::from(error).readable_sources(),
     };
@@ -554,6 +576,7 @@ pub struct DaemonSemanticVectorGraphProviderV1 {
     schedulers: CodeIndexSchedulerRegistryV1,
     runtime: Arc<dyn CodeGraphSeatRuntimePortV1>,
     project_database: Arc<tracedecay_runtime_core::db::Database>,
+    operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
 }
 
 impl DaemonSemanticVectorGraphProviderV1 {
@@ -563,6 +586,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
         schedulers: CodeIndexSchedulerRegistryV1,
         runtime: Arc<dyn CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
+        operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
     ) -> Self {
         Self {
             project_id,
@@ -570,6 +594,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
             schedulers,
             runtime,
             project_database,
+            operation_task_owner,
         }
     }
 
@@ -650,7 +675,13 @@ impl DaemonSemanticVectorGraphProviderV1 {
         .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))?;
         let _ = lease.semantic_vector_staging_binding();
         let runtime = lease.into_semantic_vector_runtime(semantic_scope);
-        Ok(RetainedSemanticVectorGraphV1::new(runtime, cancellation))
+        Ok(
+            RetainedSemanticVectorGraphV1::new_with_operation_task_owner(
+                runtime,
+                cancellation,
+                Arc::clone(&self.operation_task_owner),
+            ),
+        )
     }
 }
 

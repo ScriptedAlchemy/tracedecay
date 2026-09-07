@@ -304,7 +304,11 @@ impl RemoteRecoveryPublicationContextV1 {
         )
         .await?;
         let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-        let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?;
+        let database = RegisteredGlobalDbOwnerV1::admit_and_attach_with_operation_task_owner(
+            database,
+            Arc::clone(&self.operation_task_owner),
+        )
+        .await?;
         let graph_open_task_key = format!("{shard_id:?}");
         let (graph, store_target) =
             super::super::code_graph::graph_attachment::open_session_relation_owner(
@@ -902,6 +906,7 @@ mod tests {
             registry.registry.clone(),
             registry.graph_registry.clone(),
             Arc::clone(&registry.graph_lifecycle_cancelled),
+            Arc::clone(&registry.semantic_vector_operation_task_owner),
             profile_pin,
             registry.project_owners.clone(),
             Arc::clone(&registry.remote_replay_transaction),

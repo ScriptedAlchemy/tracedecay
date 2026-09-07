@@ -49,6 +49,29 @@ async fn files_for_session(
         .expect("files response")
 }
 
+async fn wait_for_exact_interactive_graph_ready(
+    engine: &DaemonEngine,
+    scope: &tracedecay_application::ResolvedScope,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = engine
+                .invocation
+                .code_index_schedulers
+                .latest_complete_ready_for_scope(scope)
+                .await
+            {
+                if latest.interactive_graph_store().is_ok() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("exact interactive graph readiness timed out");
+}
+
 /// One committed repository at `<root>/primary` plus a linked worktree at
 /// `<root>/linked` whose checkout differs from the primary's: the primary
 /// owns `README.md` and `primary.rs`, the linked worktree owns `linked.rs`,
@@ -232,6 +255,15 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // writer lane it can never use, and still be resolving at reopen and
     // shutdown. Assert the admission is exact to the route — the primary
     // shares this store and stays admitted.
+    let project_id = tracedecay_domain::ProjectId::new(
+        linked_graph
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("admitted routes carry a project identity"),
+    )
+    .expect("project id");
     for (route, expected) in [
         (
             &linked,
@@ -242,15 +274,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted,
         ),
     ] {
-        let project_id = tracedecay_domain::ProjectId::new(
-            linked_graph
-                .store_layout()
-                .identity
-                .project_id
-                .clone()
-                .expect("admitted routes carry a project identity"),
-        )
-        .expect("project id");
         let scope = tracedecay_code_index_runtime::resolved_scope_for_project(route, &project_id)
             .expect("route scope");
         assert_eq!(
@@ -263,6 +286,9 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             route.display()
         );
     }
+    let primary_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&primary, &project_id)
+            .expect("primary route scope");
 
     let linked_session_id = "session.linked-worktree-follow-up";
     notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
@@ -287,6 +313,10 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // listing — with its own census, never the linked worktree's sources.
     let primary_session_id = "session.primary-route-follow-up";
     notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
+    // `project_server` may publish `code_index=warming`; require the exact
+    // route's interactive graph to be ready so this assertion tests routing
+    // rather than catalog activation timing.
+    wait_for_exact_interactive_graph_ready(&engine, &primary_scope).await;
     let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
     let primary_text = files_listing_text(&primary_listing);
     assert!(primary_text.contains("indexed files"), "{primary_text}");

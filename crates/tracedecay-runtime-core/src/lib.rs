@@ -92,6 +92,7 @@ pub mod git_repository;
 pub mod lifecycle_lease;
 pub mod memory;
 pub mod monitor_ring;
+pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
@@ -108,6 +109,7 @@ pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
 pub mod weak_registry;
+pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
 pub mod work_topology;

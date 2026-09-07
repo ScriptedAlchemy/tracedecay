@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, oneshot};
 
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
@@ -13,6 +13,8 @@ use tracedecay_graph_db::{
     GraphPropertyName, GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT,
     VectorMetric, VectorSearchRequest,
 };
+#[cfg(test)]
+use tracedecay_store::SemanticVectorStageKey;
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
     SemanticVectorChunkId, SemanticVectorChunkManifestAccumulator,
@@ -23,7 +25,7 @@ use tracedecay_store::{
 
 use crate::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
-    VerifiedSemanticVectorGraphRuntimeV1,
+    SemanticVectorOperationTaskOwnerV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 
 use super::{
@@ -91,8 +93,9 @@ impl VectorPublicationPhaseV1 {
 /// rolls back before returning. That work is owned here, behind one `Arc`, so
 /// the async facade can hand a whole operation to the blocking pool instead of
 /// running it on a runtime worker.
-pub struct GraphVectorGenerationStoreStateV1 {
+struct GraphVectorGenerationStoreStateV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
     snapshot: Mutex<Option<SemanticVectorVerifiedReadV1>>,
     descriptor: Mutex<Option<SemanticVectorStageDescriptorV1>>,
     pending: Mutex<BTreeMap<VectorGenerationBuildIdV1, PendingSemanticVectorBuildV1>>,
@@ -101,16 +104,6 @@ pub struct GraphVectorGenerationStoreStateV1 {
 pub struct GraphVectorGenerationStoreV1 {
     state: Arc<GraphVectorGenerationStoreStateV1>,
     admission: Arc<Semaphore>,
-}
-
-/// The synchronous surface stays reachable by name on the store itself, so the
-/// callers that are already outside an async context keep calling it directly.
-impl std::ops::Deref for GraphVectorGenerationStoreV1 {
-    type Target = GraphVectorGenerationStoreStateV1;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
 }
 
 /// One durable operation per store may be in flight. The operations contend on
@@ -409,15 +402,18 @@ impl SemanticAnnServingIndexV1 {
 }
 
 impl GraphVectorGenerationStoreV1 {
-    pub fn open(
+    pub async fn open(
         retained: &RetainedSemanticVectorGraphV1,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
         let cancellation = Arc::clone(retained.cancellation());
-        let store = Self::read_only(retained)?;
-        check_cancelled(cancellation.as_ref())?;
-        if store.optional_snapshot()?.is_some() {
-            store.verify_existing_state(cancellation)?;
-        }
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            Arc::clone(&cancellation),
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
+        let store = Self::from_retained(retained);
+        store
+            .dispatch(move |state| state.open_records(&authority, cancellation))
+            .await?;
         Ok(store)
     }
 
@@ -425,24 +421,64 @@ impl GraphVectorGenerationStoreV1 {
     /// [`Self::open`] this never installs or verifies the projection: a graph
     /// that has never published a semantic-vector generation reads as "no
     /// vectors" on the identity-filtered read surface.
-    pub fn read_only(
+    pub async fn read_only(
         retained: &RetainedSemanticVectorGraphV1,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
-        let runtime = Arc::clone(retained.runtime());
+        let cancellation = Arc::clone(retained.cancellation());
         let authority = SemanticGraphExecutionAuthorityV1::new(
-            Arc::clone(retained.cancellation()),
+            cancellation,
             Instant::now() + GRAPH_OPERATION_DEADLINE,
         );
-        let snapshot = runtime
-            .recover_verified_snapshot(&authority)
-            .map_err(map_graph_error)?
-            .map(SemanticVectorVerifiedReadV1::new);
-        Ok(Self::from_state(GraphVectorGenerationStoreStateV1 {
-            runtime,
-            snapshot: Mutex::new(snapshot),
-            descriptor: Mutex::new(None),
-            pending: Mutex::new(BTreeMap::new()),
-        }))
+        let store = Self::from_retained(retained);
+        store
+            .dispatch(move |state| state.read_only_records(&authority))
+            .await?;
+        Ok(store)
+    }
+
+    /// Recover the one verified physical graph generation bound to a stable
+    /// semantic generation identity. Serving callers use the configured
+    /// semantic pin here; graph head order is never an activation authority.
+    pub async fn read_only_generation(
+        retained: &RetainedSemanticVectorGraphV1,
+        generation_id: &VectorGenerationIdV1,
+    ) -> Result<Option<Self>, VectorGenerationStoreErrorV1> {
+        let cancellation = Arc::clone(retained.cancellation());
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            cancellation,
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
+        let generation_id = generation_id.clone();
+        let store = Self::from_retained(retained);
+        let found = store
+            .dispatch(move |state| state.read_only_generation_records(&generation_id, &authority))
+            .await?;
+        Ok(found.then_some(store))
+    }
+
+    pub fn configure_stage(
+        &self,
+        descriptor: SemanticVectorStageDescriptorV1,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        self.state.configure_stage(descriptor)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime(&self) -> &Arc<dyn VerifiedSemanticVectorGraphRuntimeV1> {
+        &self.state.runtime
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_stage_key(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+    ) -> Option<SemanticVectorStageKey> {
+        self.state
+            .pending
+            .lock()
+            .expect("semantic vector pending build lock")
+            .get(build_id)
+            .map(|pending| pending.stage.plan.key.clone())
     }
 
     /// Swap the graph runtime of a store no operation has been dispatched
@@ -457,70 +493,21 @@ impl GraphVectorGenerationStoreV1 {
             .runtime = runtime;
     }
 
+    fn from_retained(retained: &RetainedSemanticVectorGraphV1) -> Self {
+        Self::from_state(GraphVectorGenerationStoreStateV1 {
+            runtime: Arc::clone(retained.runtime()),
+            operation_task_owner: Arc::clone(retained.operation_task_owner()),
+            snapshot: Mutex::new(None),
+            descriptor: Mutex::new(None),
+            pending: Mutex::new(BTreeMap::new()),
+        })
+    }
+
     fn from_state(state: GraphVectorGenerationStoreStateV1) -> Self {
         Self {
             state: Arc::new(state),
             admission: Arc::new(Semaphore::new(STORE_OPERATION_ADMISSION)),
         }
-    }
-
-    /// Recover the one verified physical graph generation bound to a stable
-    /// semantic generation identity. Serving callers use the configured
-    /// semantic pin here; graph head order is never an activation authority.
-    pub fn read_only_generation(
-        retained: &RetainedSemanticVectorGraphV1,
-        generation_id: &VectorGenerationIdV1,
-    ) -> Result<Option<Self>, VectorGenerationStoreErrorV1> {
-        let runtime = Arc::clone(retained.runtime());
-        let authority = SemanticGraphExecutionAuthorityV1::new(
-            Arc::clone(retained.cancellation()),
-            Instant::now() + GRAPH_OPERATION_DEADLINE,
-        );
-        let (_, binding) = runtime.staging_binding();
-        let scope = runtime.scope();
-        let key = SemanticVectorPublishedGenerationKey {
-            projection: GraphProjectionIdentityV1 {
-                shard_id: binding.shard_id.clone(),
-                namespace: GraphNamespaceV1::new(scope.projection().namespace.as_str())
-                    .map_err(storage_error)?,
-                projection: GraphProjectionIdV1::new(scope.projection().projection.as_str())
-                    .map_err(storage_error)?,
-            },
-            semantic_generation_id: generation_id.clone(),
-        };
-        let (record, verified_head) = match runtime
-            .published_semantic_generation(&key, &authority)
-            .map_err(map_graph_error)?
-        {
-            SemanticVectorPublishedGenerationLookup::Missing => return Ok(None),
-            SemanticVectorPublishedGenerationLookup::Published {
-                record,
-                verified_head,
-            } => (record, verified_head),
-        };
-        if record.plan.semantic_generation_id != *generation_id
-            || record.plan.publication_key != verified_head.key
-        {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "published semantic mapping returned foreign generation evidence".to_owned(),
-            ));
-        }
-        let snapshot = runtime
-            .recover_verified_generation(&verified_head.key, &authority)
-            .map_err(map_graph_error)?;
-        if snapshot.verified_head() != verified_head.as_ref() {
-            return Err(map_graph_error(GraphDbError::conflict_observed(
-                "usecases.store.read_only_generation.verified_head",
-                format!("verified_head={verified_head:?}"),
-                format!("verified_head={:?}", snapshot.verified_head()),
-            )));
-        }
-        Ok(Some(Self::from_state(GraphVectorGenerationStoreStateV1 {
-            runtime,
-            snapshot: Mutex::new(Some(SemanticVectorVerifiedReadV1::new(snapshot))),
-            descriptor: Mutex::new(None),
-            pending: Mutex::new(BTreeMap::new()),
-        })))
     }
 
     /// Admit one operation, then hand the whole of it to the blocking pool.
@@ -550,22 +537,50 @@ impl GraphVectorGenerationStoreV1 {
                 )
             })?;
         let state = Arc::clone(&self.state);
-        settle_blocking(tokio::task::spawn_blocking(move || {
-            let outcome = operation(state.as_ref());
-            drop(permit);
-            outcome
-        }))
-        .await?
+        let operation_task_owner = Arc::clone(&state.operation_task_owner);
+        let (result_tx, result_rx) = oneshot::channel();
+        if !operation_task_owner.retain(async move {
+            let blocking_child = tokio::task::spawn_blocking(move || {
+                // State pins the graph/database lifetime, while the permit
+                // prevents a successor until this child has settled.
+                let outcome = operation(state.as_ref());
+                drop(state);
+                drop(permit);
+                outcome
+            });
+            let joined = blocking_child.await;
+            if let Err(detached) = result_tx.send(joined)
+                && let Err(error) = detached
+            {
+                tracing::error!(
+                    event = "semantic_vector_operation_detached_join_failed",
+                    error = %error,
+                    panic = error.is_panic(),
+                    "detached semantic vector operation failed while lifecycle ownership settled it"
+                );
+            }
+        }) {
+            return Err(VectorGenerationStoreErrorV1::Unavailable(
+                "semantic vector operation settlement admission is closed".to_owned(),
+            ));
+        }
+        // Caller cancellation only drops this receiver. The lifecycle owner
+        // continues joining the started blocking child and retains its state
+        // and admission permit until the child has settled.
+        let joined = result_rx
+            .await
+            .map_err(|_| VectorGenerationStoreErrorV1::Cancelled)?;
+        settle_blocking_join(joined)?
     }
 }
 
-/// Await one dispatched blocking job. A panic inside the job stays a panic on
-/// the caller, exactly as the synchronous call it replaced; only a runtime
-/// shutdown that drops the job answers as cancellation.
-async fn settle_blocking<T>(
-    handle: tokio::task::JoinHandle<T>,
+/// Settle one blocking child for a still-live caller. A panic inside it stays
+/// a panic, exactly as the synchronous call it replaced; only runtime shutdown
+/// cancellation answers as typed cancellation.
+fn settle_blocking_join<T>(
+    joined: Result<T, tokio::task::JoinError>,
 ) -> Result<T, VectorGenerationStoreErrorV1> {
-    match handle.await {
+    match joined {
         Ok(outcome) => Ok(outcome),
         Err(error) => match error.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),
@@ -575,7 +590,78 @@ async fn settle_blocking<T>(
 }
 
 impl GraphVectorGenerationStoreStateV1 {
-    pub fn configure_stage(
+    fn open_records(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        self.read_only_records(authority)?;
+        check_cancelled(cancellation.as_ref())?;
+        if self.optional_snapshot()?.is_some() {
+            self.verify_existing_state(cancellation)?;
+        }
+        Ok(())
+    }
+
+    fn read_only_records(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        self.refresh_snapshot(authority)?;
+        Ok(())
+    }
+
+    fn read_only_generation_records(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let (_, binding) = self.runtime.staging_binding();
+        let scope = self.runtime.scope();
+        let key = SemanticVectorPublishedGenerationKey {
+            projection: GraphProjectionIdentityV1 {
+                shard_id: binding.shard_id.clone(),
+                namespace: GraphNamespaceV1::new(scope.projection().namespace.as_str())
+                    .map_err(storage_error)?,
+                projection: GraphProjectionIdV1::new(scope.projection().projection.as_str())
+                    .map_err(storage_error)?,
+            },
+            semantic_generation_id: generation_id.clone(),
+        };
+        let (record, verified_head) = match self
+            .runtime
+            .published_semantic_generation(&key, authority)
+            .map_err(map_graph_error)?
+        {
+            SemanticVectorPublishedGenerationLookup::Missing => return Ok(false),
+            SemanticVectorPublishedGenerationLookup::Published {
+                record,
+                verified_head,
+            } => (record, verified_head),
+        };
+        if record.plan.semantic_generation_id != *generation_id
+            || record.plan.publication_key != verified_head.key
+        {
+            return Err(VectorGenerationStoreErrorV1::Corrupt(
+                "published semantic mapping returned foreign generation evidence".to_owned(),
+            ));
+        }
+        let snapshot = self
+            .runtime
+            .recover_verified_generation(&verified_head.key, authority)
+            .map_err(map_graph_error)?;
+        if snapshot.verified_head() != verified_head.as_ref() {
+            return Err(map_graph_error(GraphDbError::conflict_observed(
+                "usecases.store.read_only_generation.verified_head",
+                format!("verified_head={verified_head:?}"),
+                format!("verified_head={:?}", snapshot.verified_head()),
+            )));
+        }
+        self.install_snapshot(snapshot)?;
+        Ok(true)
+    }
+
+    fn configure_stage(
         &self,
         descriptor: SemanticVectorStageDescriptorV1,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
@@ -923,28 +1009,18 @@ impl GraphVectorGenerationStoreStateV1 {
         Ok(read_generation_catalog_entry(&snapshot, generation_id, cancellation)?.is_some())
     }
 
-    pub fn verified_revision(
+    fn verified_revision_records(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<u64, VectorGenerationStoreErrorV1> {
         read_state_metadata(&self.snapshot()?, cancellation).map(|metadata| metadata.revision)
     }
 
-    /// The persisted ANN index bound to one published generation, if the
-    /// store holds a populated one.
-    ///
-    /// `serving_chunks` is the caller's complete serving row set; it maps
-    /// index hits back to chunk identities. `Ok(None)` is the typed absence:
-    /// no index was ever built for this generation's vector property, or it
-    /// reopened empty. Coverage against the serving row count is the
-    /// caller's check via [`SemanticAnnServingIndexV1::indexed`], because the
-    /// index covers only this generation's own staged vectors — never rows
-    /// reused from base generations.
-    pub fn ann_serving_index<'a>(
+    fn ann_serving_index_records(
         &self,
         generation_id: &VectorGenerationIdV1,
         embedding_key: &AdmittedEmbeddingProjectionKeyV1,
-        serving_chunks: impl IntoIterator<Item = &'a CodeSearchChunkId>,
+        serving_chunks: &[CodeSearchChunkId],
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<SemanticAnnServingIndexV1>, VectorGenerationStoreErrorV1> {
         check_cancelled(cancellation.as_ref())?;
@@ -1119,6 +1195,45 @@ impl GraphVectorGenerationStoreV1 {
         let generation_id = generation_id.clone();
         self.dispatch(move |state| {
             state.published_generation_visible_records(&generation_id, cancellation)
+        })
+        .await
+    }
+
+    pub async fn verified_revision(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<u64, VectorGenerationStoreErrorV1> {
+        self.dispatch(move |state| state.verified_revision_records(cancellation))
+            .await
+    }
+
+    /// The persisted ANN index bound to one published generation, if the
+    /// store holds a populated one.
+    ///
+    /// `serving_chunks` is the caller's complete serving row set; it maps
+    /// index hits back to chunk identities. `Ok(None)` is the typed absence:
+    /// no index was ever built for this generation's vector property, or it
+    /// reopened empty. Coverage against the serving row count is the
+    /// caller's check via [`SemanticAnnServingIndexV1::indexed`], because the
+    /// index covers only this generation's own staged vectors — never rows
+    /// reused from base generations.
+    pub async fn ann_serving_index<'a>(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        serving_chunks: impl IntoIterator<Item = &'a CodeSearchChunkId>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<SemanticAnnServingIndexV1>, VectorGenerationStoreErrorV1> {
+        let generation_id = generation_id.clone();
+        let embedding_key = embedding_key.clone();
+        let serving_chunks = serving_chunks.into_iter().cloned().collect::<Vec<_>>();
+        self.dispatch(move |state| {
+            state.ann_serving_index_records(
+                &generation_id,
+                &embedding_key,
+                &serving_chunks,
+                cancellation,
+            )
         })
         .await
     }

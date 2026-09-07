@@ -189,8 +189,9 @@ async fn publish_vector_generation(
         .graph_for_current()
         .await
         .expect("retained current persistent vector graph");
-    let store =
-        GraphVectorGenerationStoreV1::open(&retained).expect("open vector generation store");
+    let store = GraphVectorGenerationStoreV1::open(&retained)
+        .await
+        .expect("open vector generation store");
     let prepared = prepared_vector(source);
     store
         .configure_stage(
@@ -509,8 +510,9 @@ async fn semantic_writer_contention_preserves_bootstrap_and_route_shutdown_progr
         }),
         Arc::clone(retained.cancellation()),
     );
-    let store =
-        GraphVectorGenerationStoreV1::open(&probed).expect("open semantic vector generation store");
+    let store = GraphVectorGenerationStoreV1::open(&probed)
+        .await
+        .expect("open semantic vector generation store");
     let prepared = prepared_vector(&source);
     store
         .configure_stage(
@@ -674,6 +676,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         .expect("persistent vector graph");
     let activation_lease =
         GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_generation)
+            .await
             .expect("read exact activation generation")
             .expect("published activation generation");
     drop(retained);
@@ -1039,6 +1042,7 @@ async fn vector_generation_exists(
         .await
         .expect("current semantic vector graph");
     GraphVectorGenerationStoreV1::read_only_generation(&retained, generation)
+        .await
         .expect("read exact semantic vector generation")
         .is_some()
 }

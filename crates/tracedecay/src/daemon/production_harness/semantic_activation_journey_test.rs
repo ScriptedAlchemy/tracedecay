@@ -218,7 +218,7 @@ pub(super) async fn wait_for_semantic_generation(
                 continue;
             };
             let Ok(Some(store)) =
-                GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_id)
+                GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_id).await
             else {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
@@ -838,6 +838,7 @@ async fn graph_bytes(
     let mut snapshots = Vec::new();
     for (code, retained, vector_id) in generations {
         let store = GraphVectorGenerationStoreV1::read_only_generation(retained, vector_id)
+            .await
             .expect("read exact vector generation")
             .expect("published vector generation");
         let generation = store
@@ -865,6 +866,7 @@ async fn graph_bytes(
             vector_id.clone(),
             store
                 .verified_revision(Arc::clone(retained.cancellation()))
+                .await
                 .expect("verified semantic graph revision"),
             head,
             generation.generation_id().clone(),

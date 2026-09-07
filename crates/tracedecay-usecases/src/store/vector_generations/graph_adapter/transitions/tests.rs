@@ -4,6 +4,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
 use tracedecay_domain::{
     BrainId, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkId, ContentDigest, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
@@ -35,7 +36,8 @@ use tracedecay_store::{
 use super::{post_commit_publication_settlement_error, semantic_stage_source_identity};
 use crate::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
-    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
+    SemanticVectorOperationTaskOwnerV1, SemanticVectorRetentionAuthorizationV1,
+    VerifiedSemanticVectorGraphRuntimeV1,
 };
 use crate::store::vector_generations::graph_adapter::evaluation_runtime::IsolatedSemanticEvaluationGraphV1;
 use crate::store::vector_generations::graph_adapter::{
@@ -156,7 +158,9 @@ async fn same_binding_store_preserves_an_active_pending_stage() {
     let (first_plan, first_prepared, first_descriptor) =
         prepared_generation(&first_source, "chunk.superseded", 'a', &embedding);
     let first_retained = graph.retained(&first_source).unwrap();
-    let first_store = GraphVectorGenerationStoreV1::open(&first_retained).unwrap();
+    let first_store = GraphVectorGenerationStoreV1::open(&first_retained)
+        .await
+        .unwrap();
     first_store.configure_stage(first_descriptor).unwrap();
     let first_build = match first_store
         .begin_generation(first_plan, Arc::clone(&cancellation))
@@ -178,21 +182,16 @@ async fn same_binding_store_preserves_an_active_pending_stage() {
         .await
         .unwrap();
     let first_stage = first_store
-        .pending
-        .lock()
-        .unwrap()
-        .get(&first_build)
-        .unwrap()
-        .stage
-        .plan
-        .key
-        .clone();
+        .pending_stage_key(&first_build)
+        .expect("pending first stage");
     drop(first_store);
 
     let (second_plan, _second_prepared, second_descriptor) =
         prepared_generation(&second_source, "chunk.current", 'b', &embedding);
     let second_retained = graph.retained(&second_source).unwrap();
-    let second_store = GraphVectorGenerationStoreV1::open(&second_retained).unwrap();
+    let second_store = GraphVectorGenerationStoreV1::open(&second_retained)
+        .await
+        .unwrap();
     second_store.configure_stage(second_descriptor).unwrap();
     let error = second_store
         .begin_generation(second_plan, Arc::clone(&cancellation))
@@ -237,7 +236,7 @@ async fn staged_publication(
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, prepared, descriptor) = prepared_generation(
         &source,
         &format!("chunk.{label}"),
@@ -264,7 +263,7 @@ async fn corpus_scaled_publication_uses_fresh_background_authority_per_phase() {
     let (_graph, mut store, build, source) =
         staged_publication("background-publication", 'c', &cancellation).await;
     let probe = Arc::new(PublicationAuthorityProbeRuntime::wrapping(Arc::clone(
-        &store.runtime,
+        store.runtime(),
     )));
     store.replace_runtime(probe);
 
@@ -290,7 +289,8 @@ async fn verify_pass_outlasting_the_interactive_deadline_still_publishes() {
         // Twice the interactive deadline: enough that a shared 30s authority
         // is already spent before the install phase starts.
         simulated_verify_elapsed: Some(2 * GRAPH_OPERATION_DEADLINE),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        recover_snapshot_gate: Mutex::new(None),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
 
@@ -315,7 +315,8 @@ async fn publication_cancelled_during_verify_reports_typed_cancellation() {
         staged_publication("cancelled-verify", 'b', &cancellation).await;
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancel_during_verify: Some(cancellation_flag),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        recover_snapshot_gate: Mutex::new(None),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
 
@@ -338,7 +339,7 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, _, descriptor) = prepared_generation(
         &source,
         "chunk.background-begin",
@@ -348,7 +349,8 @@ async fn corpus_scaled_generation_begin_uses_background_authority() {
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         require_background_begin: true,
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        recover_snapshot_gate: Mutex::new(None),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
 
@@ -387,13 +389,14 @@ async fn generation_begin_releases_on_lifecycle_cancellation_during_snapshot_ref
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, _, descriptor) =
         prepared_generation(&source, "chunk.begin-cancelled", 'e', &admitted_embedding());
     store.configure_stage(descriptor).unwrap();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         cancellation_to_trip: Some(cancellation_flag),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        recover_snapshot_gate: Mutex::new(None),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
 
@@ -415,7 +418,7 @@ async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup(
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, prepared, descriptor) = prepared_generation(
         &source,
         "chunk.retired-after-lookup",
@@ -447,7 +450,9 @@ async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup(
     let error = match GraphVectorGenerationStoreV1::read_only_generation(
         &historical,
         &publication.generation_id,
-    ) {
+    )
+    .await
+    {
         Err(error) => error,
         Ok(_) => panic!("a retired graph generation must not be served from stale mapping"),
     };
@@ -462,6 +467,122 @@ async fn historical_mapping_still_requires_a_live_generation_lease_after_lookup(
 /// Stands in for `EXACT_SQL_TRANSACTION_IDLE_LIMIT`, shrunk so the test fails
 /// in seconds instead of parking for the real abandoned-transaction lease.
 const WRITER_GATE_LEASE: Duration = Duration::from_secs(2);
+
+/// #915: snapshot recovery must isolate its synchronous graph operation from
+/// the sole runtime worker so the task holding the writer can release it.
+#[tokio::test(flavor = "current_thread")]
+async fn read_only_snapshot_recovery_leaves_the_only_runtime_worker_free() {
+    let source = CodeGenerationId::new("code-generation.read-only-contention").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let (release, gate) = std::sync::mpsc::channel();
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        recover_snapshot_gate: Mutex::new(Some(gate)),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(retained.runtime()))
+    });
+    let retained = RetainedSemanticVectorGraphV1::new(probe, Arc::clone(retained.cancellation()));
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let heartbeat_ticks = Arc::clone(&ticks);
+    let heartbeat = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let holder = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release.send(()).is_ok()
+    });
+
+    let started = Instant::now();
+    let store = GraphVectorGenerationStoreV1::read_only(&retained).await;
+    let elapsed = started.elapsed();
+    heartbeat.abort();
+
+    assert!(
+        store.is_ok(),
+        "read-only recovery must be released by the holder, never by the lease expiry"
+    );
+    assert!(
+        holder.await.unwrap(),
+        "the transaction holder must still run and release snapshot recovery"
+    );
+    assert!(
+        ticks.load(Ordering::SeqCst) > 0,
+        "the single runtime worker must keep ticking while snapshot recovery waits"
+    );
+    assert!(
+        elapsed < WRITER_GATE_LEASE,
+        "read-only recovery must not wait out the lease: {elapsed:?}"
+    );
+}
+
+/// A caller abort only detaches its typed result receiver. The daemon-owned
+/// settlement task must still join the unabortable blocking child before graph
+/// lifecycle shutdown may proceed.
+#[tokio::test(flavor = "current_thread")]
+async fn aborted_read_only_cannot_outlive_operation_owner_shutdown() {
+    let source = CodeGenerationId::new("code-generation.read-only-abort").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let operation_owner = Arc::new(SemanticVectorOperationTaskOwnerV1::new());
+    let recovery_started = Arc::new(Notify::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    let probe = Arc::new(PublicationAuthorityProbeRuntime {
+        recover_snapshot_gate: Mutex::new(Some(gate)),
+        recover_snapshot_started: Some(Arc::clone(&recovery_started)),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(retained.runtime()))
+    });
+    let retained = RetainedSemanticVectorGraphV1::new_with_operation_task_owner(
+        probe,
+        Arc::clone(retained.cancellation()),
+        Arc::clone(&operation_owner),
+    );
+    let caller =
+        tokio::spawn(async move { GraphVectorGenerationStoreV1::read_only(&retained).await });
+    recovery_started.notified().await;
+
+    caller.abort();
+    let join_error = match caller.await {
+        Err(join_error) => join_error,
+        Ok(_) => panic!("read-only caller unexpectedly completed"),
+    };
+    assert!(
+        join_error.is_cancelled(),
+        "caller abort must drop only the live result receiver"
+    );
+    operation_owner.begin_shutdown();
+    let shutdown = tokio::spawn({
+        let operation_owner = Arc::clone(&operation_owner);
+        async move { operation_owner.shutdown().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "operation-owner shutdown must wait for blocked recovery"
+    );
+
+    release.send(()).expect("release blocked snapshot recovery");
+    shutdown
+        .await
+        .expect("operation-owner shutdown remains joinable")
+        .expect("operation-owner shutdown joins blocking recovery");
+}
 
 /// The store's durable operations acquire the project's one exclusive writer
 /// synchronously. Running that on the runtime is what starved the tasks that
@@ -481,7 +602,7 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
         .unwrap(),
     );
     let retained = graph.retained(&source).unwrap();
-    let mut store = GraphVectorGenerationStoreV1::open(&retained).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
     let (plan, _, descriptor) = prepared_generation(
         &source,
         "chunk.writer-contention",
@@ -492,7 +613,8 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     let (release, gate) = std::sync::mpsc::channel();
     let probe = Arc::new(PublicationAuthorityProbeRuntime {
         begin_gate: Mutex::new(Some(gate)),
-        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(&store.runtime))
+        recover_snapshot_gate: Mutex::new(None),
+        ..PublicationAuthorityProbeRuntime::wrapping(Arc::clone(store.runtime()))
     });
     store.replace_runtime(probe);
 
@@ -535,14 +657,67 @@ async fn writer_contention_leaves_the_only_runtime_worker_free_to_commit() {
     );
 }
 
+/// #915: waiting for store admission must consume the operation budget, not
+/// mint a fresh timeout after contention.
+#[tokio::test(flavor = "current_thread")]
+async fn operation_authority_is_minted_before_store_admission_wait() {
+    let source = CodeGenerationId::new("code-generation.admission-authority").unwrap();
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
+    let graph = Arc::new(
+        IsolatedSemanticEvaluationGraphV1::open_source_generations(
+            std::slice::from_ref(&source),
+            Arc::clone(&cancellation),
+        )
+        .unwrap(),
+    );
+    let retained = graph.retained(&source).unwrap();
+    let mut store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
+    let probe = Arc::new(PublicationAuthorityProbeRuntime::wrapping(Arc::clone(
+        store.runtime(),
+    )));
+    store.replace_runtime(Arc::clone(&probe) as Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>);
+    let store = Arc::new(store);
+    let admission_permit = Arc::clone(&store.admission).acquire_owned().await.unwrap();
+    let (call_started_tx, call_started_rx) = tokio::sync::oneshot::channel();
+
+    let reserve = tokio::spawn(async move {
+        let call_started = Instant::now();
+        call_started_tx.send(call_started).unwrap();
+        store.reserve_one_generation(None, cancellation).await
+    });
+    let call_started = call_started_rx.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(admission_permit);
+
+    let outcome = reserve.await.unwrap();
+    assert!(
+        matches!(outcome, Err(VectorGenerationStoreErrorV1::Unavailable(_))),
+        "isolated evaluation retention must remain unavailable"
+    );
+    let reserve_deadline = probe
+        .reserve_deadline
+        .lock()
+        .unwrap()
+        .expect("reserve authority deadline");
+    assert!(
+        reserve_deadline <= call_started + GRAPH_OPERATION_DEADLINE + Duration::from_millis(50),
+        "store admission wait must not extend the operation timeout"
+    );
+}
+
 struct PublicationAuthorityProbeRuntime {
     inner: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
     require_background_begin: bool,
     prepare_deadline: Mutex<Option<Instant>>,
+    reserve_deadline: Mutex<Option<Instant>>,
     cancellation_to_trip: Option<Arc<AtomicBool>>,
     /// Stands in for the project's exclusive exact-SQL writer: `begin_stage`
     /// blocks here until the transaction holder releases it.
     begin_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Stands in for that writer while verified snapshot recovery blocks.
+    recover_snapshot_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Signals when verified snapshot recovery has entered the blocking child.
+    recover_snapshot_started: Option<Arc<Notify>>,
     /// How long the whole-generation digest pass would run at corpus scale.
     /// Simulated rather than slept: what the fix has to survive is the
     /// *elapsed budget*, and a real 168k-chunk pass is not a unit test.
@@ -561,8 +736,11 @@ impl PublicationAuthorityProbeRuntime {
             inner,
             require_background_begin: false,
             prepare_deadline: Mutex::new(None),
+            reserve_deadline: Mutex::new(None),
             cancellation_to_trip: None,
             begin_gate: Mutex::new(None),
+            recover_snapshot_gate: Mutex::new(None),
+            recover_snapshot_started: None,
             simulated_verify_elapsed: None,
             verify_completed_at: Mutex::new(None),
             cancel_during_verify: None,
@@ -581,6 +759,13 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         &self,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        if let Some(started) = &self.recover_snapshot_started {
+            started.notify_one();
+        }
+        if let Some(gate) = self.recover_snapshot_gate.lock().unwrap().take() {
+            gate.recv_timeout(WRITER_GATE_LEASE)
+                .map_err(|_| GraphDbError::Cancelled)?;
+        }
         if let Some(cancellation) = &self.cancellation_to_trip {
             cancellation.store(true, Ordering::SeqCst);
             authority.checkpoint()?;
@@ -755,6 +940,7 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
         after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
         authority: &SemanticGraphExecutionAuthorityV1,
     ) -> Result<tracedecay_graph_db::SemanticVectorRetentionStep, GraphDbError> {
+        *self.reserve_deadline.lock().unwrap() = Some(authority.deadline());
         self.inner.reserve_one_generation(after, authority)
     }
 

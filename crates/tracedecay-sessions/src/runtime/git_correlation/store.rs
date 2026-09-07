@@ -154,6 +154,31 @@ pub trait GitCorrelationSessionStore: Sync {
         &self,
     ) -> impl Future<Output = Result<Self::WriteTxn<'_>, GitCorrelationError>> + Send;
 
+    /// Publishes owned Git evidence without requiring async callers to retain
+    /// borrowed buffers across the publication boundary.
+    ///
+    /// Test and standalone stores keep the synchronous implementation inline.
+    /// Production registered stores override this to move the complete graph
+    /// operation off the async runtime worker.
+    fn publish_graph_evidence_owned(
+        &self,
+        publication_prefix: String,
+        new_spans: Vec<SessionGitSpan>,
+        new_commits: Vec<CommitSessionRecord>,
+    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send
+    where
+        Self: Sized,
+    {
+        async move {
+            super::attribution::publish_graph_evidence(
+                self,
+                &publication_prefix,
+                &new_spans,
+                &new_commits,
+            )
+        }
+    }
+
     /// Serializes recovery, merge, and publication for this exact retained
     /// Git-evidence projection. The graph runtime's own publication gate
     /// starts after the caller has recovered its base generation, so it cannot
