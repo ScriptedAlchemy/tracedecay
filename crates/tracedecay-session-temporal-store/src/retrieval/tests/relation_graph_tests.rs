@@ -249,7 +249,7 @@ async fn seed_production_summary(
         .expect("production raw protection");
     let response = database
         .lcm_compress_guarded(
-            tracedecay_lcm::LcmCompressionRequest {
+            &tracedecay_lcm::LcmCompressionRequest {
                 provider: provider.to_string(),
                 session_id: session_id.to_string(),
                 messages: Vec::new(),

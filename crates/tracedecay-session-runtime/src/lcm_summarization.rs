@@ -23,16 +23,19 @@ pub(super) struct AuthoritativeSummary {
     pub(super) source_range: Option<LcmSummarySourceRange>,
 }
 
+/// Borrows the pending response's summary request: native-evidence hits and
+/// providers without a summarizer never copy the source messages, and the
+/// caller keeps the pending response intact for the unavailable result.
 pub(super) async fn resolve_authoritative_summary(
     database: &RegisteredGlobalDb,
     provider: &str,
     session_id: &str,
-    request: LcmSummaryRequest,
+    request: &LcmSummaryRequest,
     timeout: Duration,
     required_native_source_range: Option<&LcmSummarySourceRange>,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
     if let Some(summary) =
-        native_summary_evidence(database, provider, session_id, Some(&request)).await?
+        native_summary_evidence(database, provider, session_id, Some(request)).await?
         && required_native_source_range
             .is_none_or(|required| summary.source_range.as_ref() == Some(required))
     {
@@ -44,7 +47,7 @@ pub(super) async fn resolve_authoritative_summary(
 #[hotpath::measure(label = "daemon.lcm.summarize", future = true)]
 async fn generate_provider_summary(
     provider: &str,
-    request: LcmSummaryRequest,
+    request: &LcmSummaryRequest,
     timeout: Duration,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
     let Some(summarizer) = authoritative_summarizer(provider) else {
@@ -52,7 +55,8 @@ async fn generate_provider_summary(
             "authoritative_summarizer_unavailable",
         ));
     };
-    summarizer.summarize(request, timeout).await
+    // Provider summarizers run on a blocking thread and need an owned request.
+    summarizer.summarize(request.clone(), timeout).await
 }
 
 /// Finds evidence that the host itself already produced an authoritative
