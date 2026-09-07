@@ -22,6 +22,12 @@ include = [
 name = "tracedecay"
 path = "src/main.rs"
 
+# Built explicitly by test workflows. Keeping the fake as an example leaves
+# ordinary product `--bin` / `--bins` builds free of test executables.
+[[example]]
+name = "tracedecay-host-cli-fixture"
+path = "build-support/host_cli_fixture.rs"
+
 [[test]]
 name = "cli_boundary"
 path = "tests/cli_boundary.rs"
@@ -214,7 +220,7 @@ tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-featur
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }

@@ -224,21 +224,37 @@ fn manifest_encodes_sessions_spans_commits_and_evidence_relations() {
     let identity =
         git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
     let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
     let manifest =
         build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
 
-    assert_eq!(manifest.entities.len(), 8);
-    assert_eq!(manifest.relations.len(), 5);
+    // 1 projection + 2 sessions + 3 spans + 2 commits, plus the query index:
+    // 2 branch hubs, 2 worktree hubs, 1 commit-prefix bucket.
+    assert_eq!(manifest.entities.len(), 13);
+    // 3 session→span + 2 session→commit, plus 3 branch→span, 3 worktree→span,
+    // 2 prefix→commit index edges.
+    assert_eq!(manifest.relations.len(), 13);
     assert_eq!(manifest.source_generation.as_str(), "watermark-7");
     assert_eq!(manifest.watermark.as_str(), "watermark-7");
+}
+
+#[test]
+fn manifest_rejects_a_foreign_projector_revision() {
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
+    let legacy =
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1.to_owned())
+            .unwrap();
+    let error = build_git_evidence_manifest_checked(identity, &projection(), &legacy, &|| Ok(()))
+        .unwrap_err();
+    assert!(matches!(error, GitCorrelationError::Contract(_)), "{error}");
 }
 
 #[test]
 fn manifest_generation_is_content_addressed() {
     let projection = projection();
     let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
     let first = git_evidence_generation_id(&projection, &revision).unwrap();
     let second = git_evidence_generation_id(&projection, &revision).unwrap();
     assert_eq!(first, second);
@@ -261,7 +277,7 @@ fn cancellation_check_is_observed_while_building_manifest() {
     let identity =
         git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
     let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
     let cancelled = Arc::new(AtomicBool::new(true));
     let result = build_git_evidence_manifest_checked(identity, &projection, &revision, &|| {
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
@@ -279,7 +295,7 @@ fn publication_returns_committed_projection_after_commit_point_cancellation() {
     runtime.cancel_request_after_next_publish();
     let projection = projection();
     let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
     let published = publish_git_evidence_projection(
         &runtime,
@@ -301,7 +317,7 @@ fn recovery_rejects_a_generation_not_bound_to_canonical_projection_bytes() {
     let identity =
         git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
     let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
     let mut manifest =
         build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
     manifest.generation = GraphGenerationId::new("foreign-git-evidence-generation").unwrap();
@@ -321,7 +337,7 @@ fn recovery_rejects_a_foreign_namespace_with_canonical_projection_bytes() {
     let identity =
         git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
     let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
     let mut manifest =
         build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
     let foreign_identity =
@@ -348,7 +364,7 @@ fn publication_rejects_a_foreign_namespace_before_verified_head_cas() {
     let foreign_identity =
         git_evidence_projection_identity(GraphNamespace::new("foreign").unwrap()).unwrap();
     let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
 
     let error = publish_git_evidence_projection(
         &runtime,

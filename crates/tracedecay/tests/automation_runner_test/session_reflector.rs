@@ -268,7 +268,10 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+        "Session reflection does not warrant a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -364,7 +367,10 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         let cg = init_project(temp.path()).await;
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
         let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-        let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+        let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+            "Rejected evidence must not produce a managed skill mutation.",
+            "no_action",
+        ));
         let config = AutomationConfig {
             enabled: true,
             backend: AutomationBackend::CodexAppServer,
@@ -429,7 +435,10 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
     let cg = init_project(temp.path()).await;
     let retrieval = EmptyAutomationSessionRetrieval::new();
     let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+        "No retained evidence supports a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,

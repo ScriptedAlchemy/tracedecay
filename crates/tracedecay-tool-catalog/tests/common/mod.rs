@@ -7,9 +7,8 @@ use tracedecay_tool_catalog::{
     FeatureId, IdempotencyContract, LifecycleClass, PaginationContract, PrivacyClass,
     ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileId, ProfileKind,
     ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, RoutingFixtureExpectation, RoutingFixtureV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamResumeContract, StreamingContract, TerminalState,
-    TerminalStateContract, UseCaseId,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamResumeContract,
+    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 pub fn capability_id(value: &str) -> CapabilityId {
@@ -109,29 +108,6 @@ pub fn profile(
     capability_ids: Vec<CapabilityId>,
     budget: ProfileBudget,
 ) -> ProfileDefinition {
-    let mut routing_fixtures = capability_ids
-        .iter()
-        .cloned()
-        .map(|capability_id| {
-            RoutingFixtureV1::new(
-                format!("select {capability_id}"),
-                RoutingFixtureExpectation::Select { capability_id },
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    routing_fixtures
-        .push(RoutingFixtureV1::new("do nothing", RoutingFixtureExpectation::Reject).unwrap());
-    if capability_ids.len() > 1 {
-        routing_fixtures.push(
-            RoutingFixtureV1::new(
-                "this is intentionally ambiguous",
-                RoutingFixtureExpectation::ambiguous(capability_ids.clone()).unwrap(),
-            )
-            .unwrap(),
-        );
-    }
-
     ProfileDefinition::new(ProfileDefinitionInputV1 {
         profile_id,
         kind: ProfileKind::Default,
@@ -139,7 +115,6 @@ pub fn profile(
         enabled_surfaces: Vec::new(),
         requires_cli_mcp_pairing: false,
         budget,
-        routing_fixtures,
     })
     .unwrap()
 }

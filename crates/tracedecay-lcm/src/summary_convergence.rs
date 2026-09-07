@@ -1,5 +1,8 @@
 //! Durable bounded work queue for retained-session summary convergence.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use crate::{LcmCompressionResponse, LcmError, schema};
@@ -387,14 +390,30 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
     Ok(())
 }
 
-pub async fn backfill_queue_page(
-    conn: &(impl Executor + ?Sized),
-    page_limit: usize,
-) -> Result<LcmSummaryQueueBackfillPage, LcmError> {
-    let page_limit_usize = page_limit.max(1);
-    let page_limit = i64::try_from(page_limit_usize)
-        .map_err(|_| LcmError::Db("LCM summary queue page limit overflow".to_string()))?;
-    let frontier = schema::get_gc_meta(conn, BACKFILL_FRONTIER_KEY)
+/// Read-side probe: does any raw message lie beyond the backfill frontier?
+///
+/// This lets an idle convergence pass skip the writer transaction entirely.
+/// It is not a claim on the cursor: [`backfill_queue_page`] re-reads the
+/// authoritative frontier under the writer before it changes anything.
+pub async fn backfill_queue_has_work(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<bool, LcmError> {
+    let frontier = backfill_frontier(conn).await?;
+    let mut rows = conn
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM lcm_raw_messages WHERE store_id > ?1)",
+            params![frontier],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("summary queue backfill probe returned no row".into()))?;
+    Ok(row.get::<i64>(0)? != 0)
+}
+
+async fn backfill_frontier(conn: &(impl QueryExecutor + ?Sized)) -> Result<i64, LcmError> {
+    schema::get_gc_meta(conn, BACKFILL_FRONTIER_KEY)
         .await?
         .map(|value| {
             value.parse::<i64>().map_err(|error| {
@@ -403,11 +422,21 @@ pub async fn backfill_queue_page(
                 ))
             })
         })
-        .transpose()?
-        .unwrap_or(0);
+        .transpose()
+        .map(|frontier| frontier.unwrap_or(0))
+}
+
+pub async fn backfill_queue_page(
+    conn: &(impl Executor + ?Sized),
+    page_limit: usize,
+) -> Result<LcmSummaryQueueBackfillPage, LcmError> {
+    let page_limit_usize = page_limit.max(1);
+    let page_limit = i64::try_from(page_limit_usize)
+        .map_err(|_| LcmError::Db("LCM summary queue page limit overflow".to_string()))?;
+    let frontier = backfill_frontier(conn).await?;
     let mut rows = conn
         .query(
-            "SELECT provider, session_id, message_id, store_id
+            "SELECT provider, session_id, store_id
              FROM lcm_raw_messages
              WHERE store_id > ?1
              ORDER BY store_id
@@ -415,26 +444,44 @@ pub async fn backfill_queue_page(
             params![frontier, page_limit],
         )
         .await?;
-    let mut queued = Vec::new();
+    // One queue upsert per session carries that session's newest store id.
+    // The page is in ascending `store_id` order, so the last row seen for a
+    // session is its maximum, and the first row seen fixes the session's
+    // position: queue rows are inserted in first-seen order so `queue_id`
+    // (fair-scheduling order) matches a per-row walk.
+    let mut sessions: Vec<(String, String, i64)> = Vec::new();
+    let mut session_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut rows_scanned = 0_usize;
+    let mut last_store_id = None;
     while let Some(row) = rows.next().await? {
-        queued.push((
-            row.get::<String>(0)?,
-            row.get::<String>(1)?,
-            row.get::<String>(2)?,
-            row.get::<i64>(3)?,
-        ));
+        let provider = row.get::<String>(0)?;
+        let session_id = row.get::<String>(1)?;
+        let store_id = row.get::<i64>(2)?;
+        rows_scanned += 1;
+        last_store_id = Some(store_id);
+        match session_index.entry((provider, session_id)) {
+            Entry::Occupied(entry) => sessions[*entry.get()].2 = store_id,
+            Entry::Vacant(entry) => {
+                let (provider, session_id) = entry.key().clone();
+                entry.insert(sessions.len());
+                sessions.push((provider, session_id, store_id));
+            }
+        }
     }
     drop(rows);
-    for (provider, session_id, message_id, store_id) in &queued {
-        queue_raw_session(conn, provider, session_id, *store_id).await?;
-        crate::raw::persist_raw_predecessor_range_for_identity(conn, provider, message_id).await?;
+    for (provider, session_id, newest_store_id) in &sessions {
+        queue_raw_session(conn, provider, session_id, *newest_store_id).await?;
     }
-    if let Some((_, _, _, store_id)) = queued.last() {
-        schema::set_gc_meta(conn, BACKFILL_FRONTIER_KEY, &store_id.to_string()).await?;
+    if let Some(last_store_id) = last_store_id {
+        // Every message on the page keeps its own exact predecessor relation;
+        // only the statement is set-based.
+        crate::raw::persist_raw_predecessor_ranges_for_store_range(conn, frontier, last_store_id)
+            .await?;
+        schema::set_gc_meta(conn, BACKFILL_FRONTIER_KEY, &last_store_id.to_string()).await?;
     }
     Ok(LcmSummaryQueueBackfillPage {
-        rows_scanned: queued.len(),
-        has_more: queued.len() == page_limit_usize,
+        rows_scanned,
+        has_more: rows_scanned == page_limit_usize,
     })
 }
 

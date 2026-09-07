@@ -6,7 +6,7 @@ use tracedecay_graph_db::{GraphIdempotencyKey, GraphNamespace, GraphProjectorRev
 use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 
 use super::{
-    CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION_V1,
+    CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION,
     GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionStore,
     GitEvidenceProjectionV1, SessionGitSpan, SpanObservation, SpanOverlapKind,
     git_evidence_projection_identity, normalize_worktree, observation_extends_span,
@@ -393,7 +393,7 @@ fn publish_merged_graph_evidence(
     }
     let publication_key = graph_evidence_publication_key(publication_prefix, &spans, &commits)?;
     let projection = GitEvidenceProjectionV1::new(&publication_key, spans, commits)?;
-    let revision = GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned())?;
+    let revision = GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned())?;
     publish_git_evidence_projection(
         runtime,
         identity,

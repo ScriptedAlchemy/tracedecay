@@ -1,23 +1,21 @@
 //! Native `gix` reader for the narrow historical-blob read port.
 //!
-//! The port, its request/response values, and the canonical path predicate all
-//! live beside this module. Only the concrete `gix` read was left in the root
-//! Git adapter, which forced every historical consumer through the root
-//! binary. The reader now lives with its port so extracted crates can mount
-//! the exact same production read.
+//! The port, its request/response values, and the canonical path predicate
+//! live in `tracedecay_application::git`; this crate owns the concrete `gix`
+//! read so the contract crate stays dependency-free and every historical
+//! consumer (use cases, the search evaluator) mounts the same production read.
 //!
 //! Read-only is structural: `gix` opens no subprocess, and this module exposes
 //! no revision expression, traversal, ref mutation, or object write surface.
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_domain::git::GitOidV1;
-use tracedecay_domain::research::{RepositoryId, WorktreeId};
-
-use super::read::{
+use tracedecay_application::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1,
     GitHistoricalBlobV1, GitIntelligenceError, is_canonical_repository_relative_path,
 };
+use tracedecay_domain::git::GitOidV1;
+use tracedecay_domain::research::{RepositoryId, WorktreeId};
 
 /// Fixed read-only historical blob reader for one repository checkout.
 pub struct NativeHistoricalBlobReaderV1 {
@@ -40,7 +38,7 @@ impl NativeHistoricalBlobReaderV1 {
     }
 
     /// Read one exact commit/path blob through the mounted Git authority.
-    #[hotpath::measure(label = "application.git.historical_blob.read")]
+    #[hotpath::measure(label = "query.native_git.historical_blob.read")]
     pub fn read(
         &self,
         request: &GitHistoricalBlobRequestV1,

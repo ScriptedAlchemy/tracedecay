@@ -101,6 +101,28 @@ fn nextest_shared_target_profile_is_isolated_by_test_name() {
 }
 
 #[test]
+fn nextest_shared_target_profile_is_isolated_under_the_perf_profile() {
+    let _lock = lock_user_data_dir_test_env();
+    let root = TempDir::new().unwrap();
+    let target = root.path().join("target");
+    // A `cargo test-ci` / CI checkout only ever builds `target/perf`.
+    fs::create_dir_all(target.join("perf")).unwrap();
+    let profile = target.join("test-profile/.tracedecay");
+    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
+    let _binary_id = EnvRestore::set("NEXTEST_BINARY_ID", "tracedecay::storage_suite");
+    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::perf_profile");
+
+    let resolved = user_data_dir().unwrap();
+
+    let canonical_profile = target
+        .canonicalize()
+        .unwrap()
+        .join("test-profile/.tracedecay");
+    assert!(resolved.starts_with(canonical_profile.join("nextest")));
+    assert_ne!(resolved, canonical_profile);
+}
+
+#[test]
 fn nextest_preserves_explicit_temp_profile_override() {
     let _lock = lock_user_data_dir_test_env();
     let root = TempDir::new().unwrap();

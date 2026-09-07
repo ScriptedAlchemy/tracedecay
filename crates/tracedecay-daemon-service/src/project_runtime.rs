@@ -755,10 +755,18 @@ pub struct ProjectRuntimeRequestLeaseV1 {
     inner: Arc<ProjectRuntimeRequestLeaseInnerV1>,
 }
 
+/// One admitted project request: the counted roots, the exact registered key
+/// admission resolved, and the owners that key held under the admission lock.
+///
+/// The owners travel with the lease so every snapshot taken from it serves
+/// the runtime the lease counter was incremented for; a later replacement,
+/// withdrawal, or publication-state change under the same key cannot retarget
+/// an already-admitted request.
 struct ProjectRuntimeRequestLeaseInnerV1 {
     registry: ProjectRuntimeRegistryV1,
     roots: BTreeSet<PathBuf>,
     registered_root: PathBuf,
+    admitted: request_snapshot::AdmittedProjectRuntimeV1,
 }
 
 impl Clone for ProjectRuntimeRequestLeaseV1 {
@@ -1539,28 +1547,33 @@ pub(super) fn candidate_request_roots(
     roots
 }
 
-pub(super) enum ProjectRuntimeKeyResolutionV1 {
+/// The registry entry one request spelling names, resolved once.
+///
+/// `Unique` carries the entry itself, not only its key, so a caller that
+/// resolved under the registry lock reads the owners from that same
+/// resolution instead of looking the key up a second time.
+pub(super) enum ProjectRuntimeResolutionV1<'a> {
     Missing,
-    Unique(PathBuf),
+    Unique(&'a Path, &'a ProjectRuntime),
     Ambiguous,
 }
 
-pub(super) fn resolve_runtime_key(
-    runtimes: &BTreeMap<PathBuf, ProjectRuntime>,
+pub(super) fn resolve_runtime<'a>(
+    runtimes: &'a BTreeMap<PathBuf, ProjectRuntime>,
     project_root: &Path,
     canonical_root: Option<&Path>,
-) -> ProjectRuntimeKeyResolutionV1 {
+) -> ProjectRuntimeResolutionV1<'a> {
     let candidates = candidate_request_roots(project_root, canonical_root);
     let mut matches = runtimes
-        .keys()
-        .filter(|key| candidates.contains(*key) || candidates.contains(&plain_host_path(key)));
-    let Some(first) = matches.next() else {
-        return ProjectRuntimeKeyResolutionV1::Missing;
+        .iter()
+        .filter(|(key, _)| candidates.contains(*key) || candidates.contains(&plain_host_path(key)));
+    let Some((key, runtime)) = matches.next() else {
+        return ProjectRuntimeResolutionV1::Missing;
     };
     if matches.next().is_some() {
-        ProjectRuntimeKeyResolutionV1::Ambiguous
+        ProjectRuntimeResolutionV1::Ambiguous
     } else {
-        ProjectRuntimeKeyResolutionV1::Unique(first.clone())
+        ProjectRuntimeResolutionV1::Unique(key, runtime)
     }
 }
 
@@ -1569,12 +1582,10 @@ fn runtime_for_lookup<'a>(
     project_root: &Path,
     canonical_root: Option<&Path>,
 ) -> Option<&'a ProjectRuntime> {
-    let ProjectRuntimeKeyResolutionV1::Unique(key) =
-        resolve_runtime_key(runtimes, project_root, canonical_root)
-    else {
-        return None;
-    };
-    runtimes.get(&key)
+    match resolve_runtime(runtimes, project_root, canonical_root) {
+        ProjectRuntimeResolutionV1::Unique(_, runtime) => Some(runtime),
+        ProjectRuntimeResolutionV1::Missing | ProjectRuntimeResolutionV1::Ambiguous => None,
+    }
 }
 
 impl ProjectRuntimeRegistryV1 {

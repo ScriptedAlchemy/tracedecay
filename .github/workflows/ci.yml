@@ -289,19 +289,27 @@ jobs:
       # `--workspace --features tracedecay/test-helpers` resolution turns the
       # tiers back on, and it makes these artifacts a cache hit for the run
       # that follows rather than a second, differently-featured build.
+      #
+      # Every build in this lane uses the `perf` cargo profile that
+      # `cargo test-ci` (the test step below) compiles the suites with; see
+      # [profile.perf] in Cargo.toml. A default-profile build here would be a
+      # second, unshared dependency graph.
       - name: Build workspace binaries for the test lane
-        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
+
+      - name: Build host-CLI test fixture
+        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
 
       # This parity test must execute separate feature-off/on binaries. Copy
       # each result immediately so the second Cargo resolution cannot replace
-      # the first executable in target/debug/examples.
+      # the first executable in target/perf/examples.
       - name: Build controlled-workload hotpath parity executables
         shell: bash
-        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile test
+        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile perf
 
       - name: Verify controlled-workload hotpath parity
         run: |
-          cargo nextest run -p tracedecay-search-eval --locked \
+          cargo nextest run -p tracedecay-search-eval --locked --cargo-profile perf \
             --run-ignored only \
             -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
             --no-tests=fail
@@ -317,12 +325,16 @@ jobs:
       # every sibling.
       - name: Run isolated background-CPU width test
         run: |
-          cargo test -p tracedecay-code-index --locked --lib \
+          cargo test -p tracedecay-code-index --locked --profile perf --lib \
             nested_chunk_fanout_admits_stolen_workers_without_exceeding_width \
             -- --ignored --test-threads=1
 
+      # The `test-ci` alias (.cargo/config.toml) is the one maintained
+      # definition of the hosted selection — workspace, nextest `ci` policy,
+      # root fixture feature, perf cargo profile — so a local `cargo test-ci`
+      # reproduces exactly this run.
       - name: Run tests
-        run: cargo nextest run --workspace --profile ci --locked --features tracedecay/test-helpers
+        run: cargo test-ci --locked
 
       # Compile-only gate for the features this lane does not enable. Both are
       # otherwise built for the first time at release (`--all-features`), so
@@ -423,32 +435,40 @@ jobs:
           echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
 
       # Compile this portable historical-artifact journey before the large
-      # root test binaries monopolize the hosted runner. The workspace and
-      # feature selection match the archive, so Cargo reuses the result below.
+      # root test binaries monopolize the hosted runner. The workspace,
+      # feature and cargo-profile selection match the archive, so Cargo
+      # reuses the result below.
       - name: Compile Windows search-quality portability target
         shell: pwsh
-        run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
+        run: cargo test --no-run --workspace --locked --profile perf --features tracedecay/test-helpers --test search_quality_suite
 
       # `runtime_acceptance_suite::search_eval_cli_test` and
       # `product_surface_suite::packaged_semantic_evaluator` execute the
       # ordinary `tracedecay-search-eval` binaries out of the profile directory,
       # and `cargo nextest archive` never links them (the package has no test
-      # target). Build them with the archive's exact package and feature
-      # selection so Cargo reuses the artifacts and the evaluator keeps the
-      # default language tiers; `archive.include` in `.config/nextest.toml`
-      # then carries them to every shard.
+      # target). Build them with the archive's exact package, feature and
+      # cargo-profile selection so Cargo reuses the artifacts and the
+      # evaluator keeps the default language tiers; `archive.include` in
+      # `.config/nextest.toml` then carries them (from `target/perf`) to
+      # every shard.
       - name: Build workspace binaries for the Windows test lane
         shell: pwsh
-        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
+
+      - name: Build Windows host-CLI test fixture
+        shell: pwsh
+        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified on the Linux test lane only. Building them here would put a
       # second, feature-on resolution of the search-eval dependency graph
       # inside this job's bound (18 of its 62 minutes before it was cancelled),
       # and the parity property does not depend on the platform.
+      # Same selection as `cargo test-ci` (.cargo/config.toml); nextest has no
+      # archive alias, so the arguments are spelled out here once.
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload Windows archive build timings
         if: always()
