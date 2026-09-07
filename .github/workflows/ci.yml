@@ -102,6 +102,56 @@ jobs:
           TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
           TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
 
+  # One dev-profile `tracedecay` binary for every job that only exercises the
+  # built CLI against a host (Hermes, Claude Code, OpenCode). Each of those
+  # jobs used to compile the whole workspace itself behind its own cache key,
+  # so a cold cache cost the run three 25-minute builds instead of one and
+  # tripped their timeouts. `pr-dogfood` keeps its own build on purpose: it
+  # tests the checked-out PR head, not the merge ref the other jobs check out.
+  debug-cli:
+    name: Build debug CLI
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-debug-cli-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: kache compiler cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+      - name: Build tracedecay binary
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+
+      - name: Publish the binary for the host integration jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-tracedecay-cli
+          path: target/debug/tracedecay
+          if-no-files-found: error
+          retention-days: 1
+
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
@@ -834,7 +884,7 @@ jobs:
 
   hermes-integration:
     name: Hermes integration (stock)
-    needs: scope-gate
+    needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -847,39 +897,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
       - name: Install ast-grep
         uses: ./.github/actions/install-ast-grep
         with:
           version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+      - name: Fetch the debug CLI built once for this run
+        uses: actions/download-artifact@v4
         with:
-          shared-key: ci-hermes-integration-full-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build tracedecay binary
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+          name: debug-tracedecay-cli
+          path: target/debug
+      - name: Restore the executable bit the artifact store drops
+        run: chmod +x target/debug/tracedecay
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py
@@ -910,7 +938,7 @@ jobs:
 
   host-stock-integration:
     name: Claude Code + OpenCode integration (stock)
-    needs: scope-gate
+    needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -924,34 +952,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+      - name: Fetch the debug CLI built once for this run
+        uses: actions/download-artifact@v4
         with:
-          shared-key: ci-host-stock-integration-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build tracedecay binary
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+          name: debug-tracedecay-cli
+          path: target/debug
+      - name: Restore the executable bit the artifact store drops
+        run: chmod +x target/debug/tracedecay
 
       - name: Install stock Claude Code and OpenCode at pinned versions
         run: |
