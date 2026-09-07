@@ -71,6 +71,17 @@ fn candidate_sources_always_admit_the_most_selective_term() {
 }
 
 #[test]
+fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    assert_eq!(
+        admit_candidate_sources(vec![(0, "missing"), (budget + 1, "common"), (0, "absent")]),
+        ["common"],
+        "empty sources must not consume the first nonempty source exception"
+    );
+    assert!(admit_candidate_sources(vec![(0, "missing"), (0, "absent")]).is_empty());
+}
+
+#[test]
 fn candidate_sources_keep_request_order_across_equal_frequencies() {
     let half = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / 2;
     assert_eq!(

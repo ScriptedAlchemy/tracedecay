@@ -26,6 +26,7 @@ mod materialize;
 
 pub use connection::SnapshotConnection;
 pub use control::SnapshotReadControl;
+pub use materialize::materialize;
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 static NEXT_BACKUP_STAGING: AtomicU64 = AtomicU64::new(0);
@@ -496,6 +497,22 @@ pub struct SourceGeneration {
 }
 
 impl SourceGeneration {
+    /// Capture the existing durable family identity before an external read or
+    /// copy. Validate after that operation to refuse a changing source.
+    pub fn capture(source: &Path) -> io::Result<Self> {
+        let states = family_state(source)?;
+        if !states.iter().any(|state| state.path == source) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("SQLite database '{}' does not exist", source.display()),
+            ));
+        }
+        Ok(Self {
+            source: source.to_path_buf(),
+            states,
+        })
+    }
+
     pub fn validate(&self) -> io::Result<()> {
         let current = family_state(&self.source)?;
         if durable_family_state(&self.source, &current)
@@ -1417,6 +1434,42 @@ mod backup_tests;
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn captured_source_generation_refuses_durable_main_and_wal_changes() {
+        for journal_mode in ["DELETE", "WAL"] {
+            let temp = TempDir::new().unwrap();
+            let source = temp.path().join("source.db");
+            let writer = Connection::open(&source).unwrap();
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA journal_mode={journal_mode};
+                     PRAGMA wal_autocheckpoint=0;
+                     CREATE TABLE durable(value BLOB);"
+                ))
+                .unwrap();
+            let generation = SourceGeneration::capture(&source).unwrap();
+            generation.validate().unwrap();
+            writer
+                .execute("INSERT INTO durable VALUES (zeroblob(65536))", [])
+                .unwrap();
+            assert!(
+                generation.validate().is_err(),
+                "the copied family must be refused after a {journal_mode} write"
+            );
+            SourceGeneration::capture(&source)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        let temp = TempDir::new().unwrap();
+        assert_eq!(
+            SourceGeneration::capture(&temp.path().join("missing.db"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn copy_mode_admission_excludes_shm_and_charges_main_plus_wal() {

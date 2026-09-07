@@ -54,6 +54,8 @@ mod lsp_projection;
 #[cfg(test)]
 mod reconcile_failure_isolation_tests;
 mod scope_identity;
+#[cfg(test)]
+mod serving_readiness_tests;
 
 pub use scope_identity::{latest_matches_scope_identity, text_matches_scope_identity};
 
@@ -610,6 +612,7 @@ pub struct MountedCodeIndexWorktreeV1 {
         ManifestDigest,
         Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>,
     )>,
+    pub semantic_lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     pub query_activation_revision: Option<ConfigurationRevisionId>,
     pub query_activation_epoch: Option<i64>,
     pub query_activation_transition_digest: Option<ManifestDigest>,
@@ -626,6 +629,10 @@ pub struct MountedCodeIndexWorktreeV1 {
     pub(super) build_publication_lock: Arc<tokio::sync::Mutex<()>>,
     pub historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
     pub serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    /// Complete-generation callers need the decoded serving owner; restored
+    /// text and persistent graph reads do not. Only their explicit demand
+    /// admits this optional decode after verified-head recovery.
+    complete_generation_requested: Arc<AtomicBool>,
     /// Source-freshness state is independent from scheduler build state so
     /// readiness probes remain available throughout a long publication.
     source_freshness: super::SourceFreshnessFenceV1,
@@ -663,6 +670,8 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Monotonic replacement epoch for the serving slot. It invalidates a
     /// branch-publication token even if a future worker re-seats an equal id.
     serving_generation_epoch: Arc<AtomicU64>,
+    /// A wake signal only: readers resolve identity and availability from the serving slot.
+    serving_generation_changed: tokio::sync::watch::Sender<()>,
     /// One in-flight branch publication may own a serving-slot installation.
     /// It is paired with `serving_generation_epoch` under the slot CAS.
     serving_generation_installation: Arc<Mutex<Option<ServingGenerationInstallationClaimV1>>>,
@@ -2022,7 +2031,6 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Clear the pending-wake slot so a test starts from a known due window.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn clear_pending_wake_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
@@ -2086,6 +2094,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree
                     .serving_generation_epoch
                     .fetch_add(1, Ordering::AcqRel);
+                worktree.serving_generation_changed.send_replace(());
             }
         }
     }
@@ -2193,6 +2202,7 @@ impl CodeIndexSchedulerRegistryV1 {
             active_installation,
             text_generation,
             serving_source_witness,
+            serving_generation_changed,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
@@ -2204,6 +2214,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation_installation),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.serving_source_witness),
+                worktree.serving_generation_changed.clone(),
             )
         };
         let mut serving = serving_generation
@@ -2243,6 +2254,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }) {
                 *text = None;
             }
+            serving_generation_changed.send_replace(());
         }
         ServingGenerationRollbackOutcomeV1::Cleared
     }
@@ -2587,6 +2599,31 @@ impl CodeIndexSchedulerRegistryV1 {
         self.generation_publications.subscribe()
     }
 
+    /// Admit complete-generation demand and subscribe before probing the serving
+    /// slot. Sealed publication precedes serving, including on a restored mount
+    /// where no new publication event is emitted. Successful source revalidation
+    /// also signals this watch when an unchanged complete generation stays seated.
+    pub async fn subscribe_serving_generation_changes(
+        &self,
+        project_root: &Path,
+    ) -> Option<tokio::sync::watch::Receiver<()>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root)?;
+        let changes = worktree.serving_generation_changed.subscribe();
+        if !worktree
+            .complete_generation_requested
+            .swap(true, Ordering::AcqRel)
+        {
+            Self::note_wake(
+                &worktree.pending_wake,
+                &worktree.wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+        }
+        Some(changes)
+    }
+
     /// Observe serving-slot seating. Each advance means the serving slot was
     /// written; the receiver reads the slot to learn what it now holds.
     pub fn subscribe_serving_seats(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -2684,6 +2721,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_runtime: Arc<dyn crate::code_graph_seat::CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         graph_activation_policy: CodeGraphActivationPolicyV1,
+        semantic_lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
@@ -2695,6 +2733,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
             },
+            semantic_lifecycle_owner,
         )
         .await
     }
@@ -2718,6 +2757,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(true)),
             },
+            None,
         )
         .await
     }
@@ -2741,6 +2781,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeGraphActivationAuthorityV1::Memory {
                 policy: Arc::new(AtomicBool::new(policy.is_enabled())),
             },
+            None,
         )
         .await
     }
@@ -2837,8 +2878,26 @@ impl CodeIndexSchedulerRegistryV1 {
             tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
         graph_activation: CodeGraphActivationAuthorityV1,
+        semantic_lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
+        let validate_lifecycle_owner = |existing: &MountedCodeIndexWorktreeV1| {
+            let same_owner = match (
+                existing.semantic_lifecycle_owner.as_ref(),
+                semantic_lifecycle_owner.as_ref(),
+            ) {
+                (Some(incumbent), Some(incoming)) => Arc::ptr_eq(incumbent, incoming),
+                (None, None) => true,
+                _ => false,
+            };
+            if same_owner {
+                Ok(())
+            } else {
+                Err(CodeIndexSchedulerErrorV1::Identity(
+                    "mounted worktree belongs to a different semantic lifecycle owner".to_owned(),
+                ))
+            }
+        };
         #[cfg(test)]
         Self::pause_cold_mount_admission_for_test(&project_root).await;
         let cold_mount_reservation = loop {
@@ -2860,6 +2919,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             let mounted = self.mounted.lock().await;
             if let Some(existing) = mounted.get(&project_root) {
+                validate_lifecycle_owner(existing)?;
                 existing
                     .graph_activation
                     .update_policy(graph_activation.policy());
@@ -2942,6 +3002,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // claims freshness; missing Git authority still leaves this empty.
         let serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>> =
             Arc::new(RwLock::new(None));
+        let complete_generation_requested = Arc::new(AtomicBool::new(false));
         let text_generation: Arc<RwLock<Option<LatestCodeTextGenerationV1>>> =
             Arc::new(RwLock::new(None));
         let convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>> =
@@ -2949,6 +3010,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>> =
             Arc::new(RwLock::new(None));
         let serving_generation_epoch = Arc::new(AtomicU64::new(0));
+        let (serving_generation_changed, _) = tokio::sync::watch::channel(());
         let serving_generation_installation = Arc::new(Mutex::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
@@ -2965,10 +3027,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
+        let worker_complete_generation_requested = Arc::clone(&complete_generation_requested);
         let worker_text_generation = Arc::clone(&text_generation);
         let worker_convergence_park = Arc::clone(&convergence_park);
         let worker_serving_source_witness = Arc::clone(&serving_source_witness);
         let worker_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
+        let worker_serving_generation_changed = serving_generation_changed.clone();
+        let worker_source_freshness = source_freshness.clone();
         let worker_wake = Arc::clone(&wake);
         // The code-index control epoch. It advances exactly when new input is
         // announced (hook hints, watch paths, overflow), so it is the signal a
@@ -3010,6 +3075,7 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         if let Some(existing) = mounted.get(&project_root) {
+            validate_lifecycle_owner(existing)?;
             // The scheduler Arc is the mounted owner's exact identity. It is
             // rechecked after the asynchronous update so a retirement or
             // replacement cannot turn this remount into a success for a
@@ -3829,19 +3895,16 @@ impl CodeIndexSchedulerRegistryV1 {
                         worker_wake.notify_one();
                     }
                 }
-                // A text owner that already serves a native graph must not be
-                // activated a second time, but preparation is not activation.
-                // Clearing `prepare_graph` here also skipped the bind and the
-                // serving swap, so a restart that restored a Ready retained
-                // graph left `serving_generation` empty forever: every
-                // complete-generation demand (`latest_complete_ready`,
-                // `latest_complete_fresh`, `latest_complete_serving_for_scope`)
-                // answered unavailable while `dashboard_code_graph_serving`
-                // read the same text owner and reported Ready. Prepare, bind
-                // and seat as usual; only the activation call is suppressed.
                 let graph_already_serves = graph_text
                     .as_ref()
                     .is_some_and(|retained| retained.interactive_graph_store().is_ok());
+                if prepare_graph && graph_already_serves {
+                    // A retained native graph serves without a full decode.
+                    // Explicit complete-generation demand still admits binding
+                    // and seating, independently of redundant activation.
+                    prepare_graph = serving_empty
+                        && worker_complete_generation_requested.load(Ordering::Acquire);
+                }
                 if prepare_graph
                     && !published_pass
                     && !retained_graph_head_recovery_attempted
@@ -4090,7 +4153,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 // swap still installs the prepared generation.
                 let activate_graph = match &result {
                     Ok((Ok(_), Some(latest), Some(_))) => GraphActivationGateV1::decide(
-                        graph_already_serves,
+                        graph_already_serves
+                            || latest.code_graph_serving_readiness()
+                                == CodeGraphServingReadinessV1::Ready,
                         replace_serving_generation,
                         latest.graph_activation_is_pending(),
                         graph_seat_attempted.as_ref()
@@ -4293,12 +4358,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     match serving_swap {
                         Ok(Ok(outcome)) => {
-                            // The slot was written inside the blocking swap, so
-                            // a waiter woken here already reads the seated
-                            // generation. Publication fired before the seal, so
-                            // this is the only transition it can wait on.
                             if outcome.installs() {
                                 Self::record_serving_seat(&worker_serving_seats);
+                                worker_serving_generation_changed.send_replace(());
                             }
                             let generation_id = text_latest
                                 .generation()
@@ -4374,6 +4436,20 @@ impl CodeIndexSchedulerRegistryV1 {
                         started_micros,
                         outcome,
                     );
+                    // An unchanged-source reconcile can restore admission for
+                    // the existing seat without publishing or replacing it.
+                    // Wake retained readers only after that source proof is
+                    // current; they still validate scope and freshness on read.
+                    if matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_))
+                        && worker_serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .is_some()
+                        && worker_source_freshness
+                            .ready_without_stat(&worker_project_root, &worker_shutting_down)
+                    {
+                        worker_serving_generation_changed.send_replace(());
+                    }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
                     match &result {
@@ -4506,6 +4582,7 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree_id,
             query_authority: None,
             semantic_query_authority: None,
+            semantic_lifecycle_owner,
             query_activation_revision: None,
             query_activation_epoch: None,
             query_activation_transition_digest: None,
@@ -4516,6 +4593,7 @@ impl CodeIndexSchedulerRegistryV1 {
             build_publication_lock,
             historical_generation_owner,
             serving_generation,
+            complete_generation_requested,
             source_freshness,
             last_reconciled_at_micros,
             text_generation,
@@ -4524,6 +4602,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_source_witness,
             build_progress,
             serving_generation_epoch,
+            serving_generation_changed,
             serving_generation_installation,
             graph_activation,
             ignored_dependency_admissions,
@@ -5595,9 +5674,20 @@ impl CodeIndexSchedulerRegistryV1 {
         let project_root = project_root.canonicalize().ok()?;
         // Clone the per-worktree handle under a short map lock, then drop the
         // registry guard before checking the mounted route.
-        let (scheduler, serving_generation, text_generation, hints, wake, pending_wake) = {
+        let (
+            scheduler,
+            serving_generation,
+            text_generation,
+            hints,
+            wake,
+            pending_wake,
+            first_complete_demand,
+        ) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
+            let first_complete_demand = !worktree
+                .complete_generation_requested
+                .swap(true, Ordering::AcqRel);
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
@@ -5605,6 +5695,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                first_complete_demand,
             )
         };
         // When the background worker already owns the scheduler, preserve the
@@ -5672,6 +5763,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
             {
+                // A retained text owner needs only complete-owner demand. A
+                // truly cold owner below must attach its authoritative scan
+                // before recording the wake, so demand cannot suppress it.
+                if first_complete_demand {
+                    Self::note_wake(
+                        &pending_wake,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::QueryAdmission,
+                    );
+                }
                 return None;
             }
             // Cold open has no servable generation. Verification and any
@@ -5735,33 +5836,65 @@ impl CodeIndexSchedulerRegistryV1 {
     async fn latest_complete_ready_with(
         &self,
         project_root: &Path,
-        _admission: GenerationDecodeAdmissionV1,
+        admission: GenerationDecodeAdmissionV1,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
-        let (source_freshness, serving_generation, shutting_down) = {
+        let (source_freshness, serving_generation, shutting_down, graph_enabled) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
+            if admission == GenerationDecodeAdmissionV1::AwaitDecode
+                && !worktree
+                    .complete_generation_requested
+                    .swap(true, Ordering::AcqRel)
+            {
+                Self::note_wake(
+                    &worktree.pending_wake,
+                    &worktree.wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
             (
                 worktree.source_freshness.clone(),
                 Arc::clone(&worktree.serving_generation),
                 Arc::clone(&worktree.shutting_down),
+                worktree.graph_activation.policy().is_enabled(),
             )
         };
         let freshness_root = project_root.clone();
-        let latest = tokio::task::spawn_blocking(move || {
-            source_freshness
-                .ready_without_stat(&freshness_root, &shutting_down)
-                .then(|| {
-                    serving_generation
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
-                })
-                .flatten()
+        let (request_reconcile, latest) = tokio::task::spawn_blocking(move || {
+            // The cheap proof expires even when an idle checkout is unchanged.
+            // Revalidate through the same source fence before refusing its seat.
+            let source_ready = source_freshness.ready_without_stat(&freshness_root, &shutting_down)
+                || source_freshness.exact_source_is_ready(&freshness_root, &shutting_down);
+            let serving = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let latest = source_ready.then(|| serving.clone()).flatten();
+            if latest.is_none() {
+                tracing::info!(
+                    event = "code_index_complete_generation_unavailable",
+                    project = %freshness_root.display(),
+                    graph_enabled,
+                    source_ready,
+                    serving_present = serving.is_some(),
+                    shutting_down = shutting_down.load(Ordering::Acquire),
+                    "complete-generation read declined before scope validation"
+                );
+            }
+            drop(serving);
+            (
+                !source_ready && !shutting_down.load(Ordering::Acquire),
+                latest,
+            )
         })
         .await
-        .ok()
-        .flatten()?;
+        .ok()?;
+        if request_reconcile && admission == GenerationDecodeAdmissionV1::AwaitDecode {
+            // This ladder retains the source-change and cancellation authority;
+            // the ready read must not serve its stale result.
+            self.latest_complete_fresh(&project_root).await;
+        }
+        let latest = latest?;
         if let Ok(authority) = latest.test_attribution_authority() {
             let mut authorities = self
                 .test_attribution_authorities
@@ -6010,7 +6143,17 @@ impl CodeIndexSchedulerRegistryV1 {
         self.activate_for_scope(scope);
         let (root, graph_activation_enabled, text_generation) = {
             let mounted = self.mounted.lock().await;
-            let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
+            let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
+                tracing::info!(
+                    event = "code_index_complete_generation_unavailable",
+                    project_id = %scope.project_id.as_str(),
+                    repository_id = %scope.repository_id.as_str(),
+                    worktree_id = %scope.worktree_id.as_str(),
+                    reason = "no_unique_mounted_scope",
+                    "complete-generation read declined at mounted scope"
+                );
+                return None;
+            };
             (
                 root.clone(),
                 worktree.graph_activation.policy().is_enabled(),
@@ -6028,6 +6171,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
         {
+            tracing::info!(
+                event = "code_index_complete_generation_unavailable",
+                project = %root.display(),
+                reason = "graph_policy_disabled_with_text_owner",
+                "complete-generation read retains the text-only authority"
+            );
             return None;
         }
         let latest = self.latest_complete_ready_with(&root, admission).await?;
@@ -6035,7 +6184,20 @@ impl CodeIndexSchedulerRegistryV1 {
         // the live worktree, so a scope whose branch label was resolved on
         // the other side of a `git switch` must still be served its own
         // checkout's generation (see [`latest_matches_scope_identity`]).
-        latest_matches_scope_identity(&latest, scope).then_some(latest)
+        let scope_matches = latest_matches_scope_identity(&latest, scope);
+        if !scope_matches {
+            tracing::info!(
+                event = "code_index_complete_generation_unavailable",
+                project = %root.display(),
+                scope_valid = scope.validate().is_ok(),
+                project_matches = latest.generation().manifest().project_id == scope.project_id,
+                repository_matches = latest.generation().snapshot().repository == scope.repository_id,
+                worktree_matches = latest.generation().snapshot().worktree.as_ref() == Some(&scope.worktree_id),
+                reason = "serving_scope_mismatch",
+                "complete-generation read declined exact checkout identity"
+            );
+        }
+        scope_matches.then_some(latest)
     }
 
     /// Resolve one exact scope and serve the last complete generation already
@@ -6473,8 +6635,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Test support for proving the explicit same-store build/publication
     /// invariant independently of the scheduler metadata mutex.
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub async fn build_publication_lock_handle(
         &self,
         project_root: &Path,
@@ -6499,6 +6660,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .clear();
         for worktree in mounted.values() {
             worktree.shutting_down.store(true, Ordering::Release);
+            worktree.serving_generation_changed.send_replace(());
             worktree.wake.notify_one();
         }
         for (_, worktree) in mounted {
@@ -6553,6 +6715,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         for (root, worktree) in retired {
             worktree.shutting_down.store(true, Ordering::Release);
+            worktree.serving_generation_changed.send_replace(());
             worktree.wake.notify_one();
             retiring.insert(root, worktree);
         }
@@ -6603,6 +6766,7 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Ok(mounted) = self.mounted.try_lock() {
             for worktree in mounted.values() {
                 worktree.shutting_down.store(true, Ordering::Release);
+                worktree.serving_generation_changed.send_replace(());
                 worktree.wake.notify_one();
             }
         }

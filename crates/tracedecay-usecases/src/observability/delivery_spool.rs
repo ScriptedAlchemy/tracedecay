@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::is_lowercase_hex;
 use tracedecay_domain::{DeliverySettlementV1, canonical_json_bytes, canonical_sha256};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
@@ -336,24 +337,11 @@ fn valid_receipt_name(name: &str) -> bool {
 }
 
 fn decode_hex_prefix(hex: &str, output: &mut [u8; 16]) -> Result<(), DeliveryRecorderSpoolError> {
-    if hex.len() < 32 {
-        return Err(DeliveryRecorderSpoolError::InvalidReceipt);
-    }
-    for (index, slot) in output.iter_mut().enumerate() {
-        let offset = index * 2;
-        let high = decode_nibble(hex.as_bytes()[offset])?;
-        let low = decode_nibble(hex.as_bytes()[offset + 1])?;
-        *slot = (high << 4) | low;
-    }
-    Ok(())
-}
-
-fn decode_nibble(byte: u8) -> Result<u8, DeliveryRecorderSpoolError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(DeliveryRecorderSpoolError::InvalidReceipt),
-    }
+    let prefix = hex
+        .get(..32)
+        .filter(|prefix| is_lowercase_hex(prefix, 32))
+        .ok_or(DeliveryRecorderSpoolError::InvalidReceipt)?;
+    hex::decode_to_slice(prefix, output).map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)
 }
 
 #[cfg(test)]
@@ -392,6 +380,35 @@ mod tests {
             producer_revision: "delivery-spool-producer.v1".to_owned(),
             configuration_revision: "delivery-spool-config.v1".to_owned(),
             policy_revision: "delivery-spool-policy.v1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn receipt_hex_prefix_preserves_bytes_and_ignores_suffix() {
+        let mut output = [0; 16];
+        decode_hex_prefix("0123456789abcdef0123456789abcdefINVALIDé", &mut output).unwrap();
+        assert_eq!(
+            output,
+            [
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef
+            ]
+        );
+    }
+
+    #[test]
+    fn receipt_hex_prefix_rejects_noncanonical_input() {
+        for input in [
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdeF",
+            "0123456789abcdef0123456789abcdeg",
+            "0123456789abcdef0123456789abcdeé",
+        ] {
+            assert_eq!(
+                decode_hex_prefix(input, &mut [0; 16]),
+                Err(DeliveryRecorderSpoolError::InvalidReceipt),
+                "{input}"
+            );
         }
     }
 

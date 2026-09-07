@@ -190,6 +190,18 @@ async fn derive_projection_with_alias_from_generation(
     observation: &DurableObservationV1,
     rebuild_generation: Option<&str>,
 ) -> ProjectionStoreResult<ObservationProjection> {
+    if durable_projection_disposition(conn, observation.observation_id().as_str()).await?
+        == Some(ProjectionSkipReason::NativeSourceSuperseded)
+    {
+        Box::pin(super::source_transition::verify_native_source_supersession(
+            conn,
+            observation,
+        ))
+        .await?;
+        return Ok(ObservationProjection::Skipped(
+            ProjectionSkipReason::NativeSourceSuperseded,
+        ));
+    }
     if let Some(reason) =
         durable_projection_disposition(conn, observation.observation_id().as_str()).await?
         && matches!(
@@ -207,9 +219,16 @@ async fn derive_projection_with_alias_from_generation(
     // established (thread, objective, status) transition semantics.
     let projection =
         collapse_consecutive_goal_ticks(conn, observation, projection, rebuild_generation).await?;
-    let Some(alias) =
-        read_projection_alias(conn, observation.observation_id(), rebuild_generation).await?
-    else {
+    let mut alias =
+        read_projection_alias(conn, observation.observation_id(), rebuild_generation).await?;
+    if alias.is_none()
+        && let Some(predecessor) =
+            super::source_transition::read_native_source_predecessor(conn, observation).await?
+    {
+        alias =
+            read_projection_alias(conn, predecessor.observation_id(), rebuild_generation).await?;
+    }
+    let Some(alias) = alias else {
         return Ok(projection);
     };
     let (projection, derived_messages, workflow_facts) = match projection {
@@ -1612,14 +1631,34 @@ async fn provider_usage_observation_sequence(
         .map_err(|error| storage("read provider usage observation sequence", error))
 }
 
+pub(super) async fn verify_observation_provider_usage(
+    conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let sequence = provider_usage_observation_sequence(conn, observation.observation_id()).await?;
+    verify_provider_usage_effects(conn, sequence, observation).await
+}
+
 #[hotpath::measure(future = true, label = "global_db.observation_apply.query")]
 pub async fn verify_effect(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
-    let sequence = provider_usage_observation_sequence(conn, observation.observation_id()).await?;
-    verify_provider_usage_effects(conn, sequence, observation).await?;
+    if effect.skip_reason() == Some(ProjectionSkipReason::NativeSourceSuperseded) {
+        Box::pin(super::source_transition::verify_native_source_supersession(
+            conn,
+            observation,
+        ))
+        .await?;
+        return verify_skip_disposition(
+            conn,
+            observation,
+            ProjectionSkipReason::NativeSourceSuperseded,
+        )
+        .await;
+    }
+    verify_observation_provider_usage(conn, observation).await?;
     match effect {
         ObservationProjection::Message(projection) => verify_message_effect(conn, projection).await,
         ObservationProjection::Composite {
@@ -1659,6 +1698,19 @@ pub(super) async fn apply_effect(
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
+    if effect.skip_reason() == Some(ProjectionSkipReason::NativeSourceSuperseded) {
+        Box::pin(super::source_transition::verify_native_source_supersession(
+            conn,
+            observation,
+        ))
+        .await?;
+        return apply_skip_disposition(
+            conn,
+            observation,
+            ProjectionSkipReason::NativeSourceSuperseded,
+        )
+        .await;
+    }
     apply_provider_usage_effects(conn, sequence, observation).await?;
     // Boxed message-effect futures: this apply sits at the bottom of the
     // session-sync ingest chain, and its many-statement state machine inlined
@@ -1692,7 +1744,19 @@ pub(super) async fn apply_effect(
         ObservationProjection::Skipped(reason) => {
             apply_skip_disposition(conn, observation, *reason).await
         }
+    }?;
+    if effect
+        .skip_reason()
+        .is_none_or(|reason| reason == ProjectionSkipReason::NonConversationalRecord)
+    {
+        super::source_transition::settle_native_source_transition(
+            conn,
+            observation,
+            super::source_transition::SourceTransitionTarget::Live,
+        )
+        .await?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

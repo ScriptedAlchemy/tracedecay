@@ -5,9 +5,13 @@
 //! wrote or fails as a collision.
 
 use rusqlite::{OptionalExtension, params};
-use tracedecay_domain::{ObservationSourceCursorV1, RetrievalAnchorRecordV2};
+use tracedecay_domain::{
+    DurableObservationV1, FactOwnerV1, ObservationSourceCursorV1, RetrievalAnchorRecordV2,
+    RetrievalAnchorTargetV2, prove_cline_native_source_transition,
+};
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationCursorAdvance, RepositoryProvenanceAttachmentV1,
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
+    ObservationCursorAdvance, RepositoryProvenanceAttachmentV1, RetrievalAnchorDispositionRecordV1,
 };
 
 use super::super::support::{decode, encode, invalid};
@@ -156,6 +160,7 @@ fn verify_retrieval_anchor(
     {
         return Err(invalid("retrieval anchor identity collision"));
     }
+    let mut owned_aliases = 0_usize;
     for alias in anchor.aliases() {
         let stored_anchor_id = connection
             .query_row(
@@ -169,7 +174,12 @@ fn verify_retrieval_anchor(
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        if stored_anchor_id.as_deref() != Some(anchor.anchor_id().as_str()) {
+        if stored_anchor_id.as_deref() == Some(anchor.anchor_id().as_str()) {
+            owned_aliases += 1;
+        } else if !matches!(
+            stored_anchor_id.as_deref(),
+            Some(current) if cline_alias_transition_is_valid(connection, anchor, current)?
+        ) {
             return Err(invalid("retrieval anchor alias collision"));
         }
     }
@@ -179,10 +189,99 @@ fn verify_retrieval_anchor(
         params![owner_json, anchor.anchor_id().as_str()],
         |row| row.get::<_, i64>(0),
     )?;
-    if usize::try_from(alias_count).ok() != Some(anchor.aliases().len()) {
+    if usize::try_from(alias_count).ok() != Some(owned_aliases) {
         return Err(invalid("retrieval anchor alias collision"));
     }
     Ok(())
+}
+
+// Alias promotion belongs to the projector transaction: a newly captured
+// successor may wait behind the still-readable predecessor. Once promoted,
+// immutable historical anchor replay requires the exact supersession receipt.
+fn cline_alias_transition_is_valid(
+    connection: &rusqlite::Connection,
+    anchor: &RetrievalAnchorRecordV2,
+    current_anchor_id: &str,
+) -> rusqlite::Result<bool> {
+    let Some(current_json) = connection
+        .query_row(
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
+            [current_anchor_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let current: RetrievalAnchorRecordV2 = decode(current_json)?;
+    let (
+        RetrievalAnchorTargetV2::ExactObservation(anchor_observation_id),
+        RetrievalAnchorTargetV2::ExactObservation(current_observation_id),
+    ) = (anchor.target(), current.target())
+    else {
+        return Ok(false);
+    };
+    let anchor_auth = anchor.authorization();
+    let current_auth = current.authorization();
+    if current.anchor_id().as_str() != current_anchor_id
+        || anchor.owner() != current.owner()
+        || anchor.aliases() != current.aliases()
+        || anchor.payload_access() != current.payload_access()
+        || anchor.retention_class() != current.retention_class()
+        || anchor.durability() != current.durability()
+        || anchor_auth.resolved_scope_id != current_auth.resolved_scope_id
+        || anchor_auth.privacy_domain_id != current_auth.privacy_domain_id
+        || anchor_auth.access_policy_digest != current_auth.access_policy_digest
+        || anchor_auth.capability_id != current_auth.capability_id
+    {
+        return Ok(false);
+    }
+    let Some((anchor_json, current_json)) = connection
+        .query_row(
+            "SELECT candidate.observation_json, current.observation_json
+             FROM observations AS candidate
+             JOIN observations AS current ON current.observation_id = ?2
+             WHERE candidate.observation_id = ?1",
+            params![
+                anchor_observation_id.as_str(),
+                current_observation_id.as_str()
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let candidate_observation: DurableObservationV1 = decode(anchor_json)?;
+    let current_observation: DurableObservationV1 = decode(current_json)?;
+    if prove_cline_native_source_transition(&current_observation, &candidate_observation).is_some()
+    {
+        // Pending successor: leave current alias and predecessor availability
+        // unchanged until derived output promotion commits.
+        return Ok(true);
+    }
+    if prove_cline_native_source_transition(&candidate_observation, &current_observation).is_none()
+    {
+        return Ok(false);
+    }
+    let Some(disposition_json) = connection
+        .query_row(
+            "SELECT record_json FROM retrieval_anchor_dispositions
+             WHERE anchor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [anchor.anchor_id().as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let disposition: RetrievalAnchorDispositionRecordV1 = decode(disposition_json)?;
+    disposition.validate().map_err(invalid)?;
+    Ok(disposition.anchor_id() == anchor.anchor_id()
+        && disposition.owner().v2() == Some(&FactOwnerV1::from(anchor.owner().clone()))
+        && disposition.state() == AnchorDispositionStateV1::Superseded
+        && disposition.reason_class() == AnchorDispositionReasonClassV1::Correction
+        && disposition.superseded_by() == Some(current.anchor_id()))
 }
 
 pub(super) fn persist_repository_provenance(

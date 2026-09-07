@@ -677,6 +677,23 @@ fn push_summary_grep_filters(
     filters: &mut Vec<String>,
     values: &mut Vec<Value>,
 ) {
+    // Immutable lineage remains retained after supersession; only active,
+    // available summaries are eligible for current retrieval.
+    filters.push(
+        "EXISTS (
+            SELECT 1 FROM session_temporal_generations generation
+            JOIN session_summary_availability availability
+              ON availability.session_id = generation.session_id
+             AND availability.generation = generation.generation
+            WHERE generation.session_id = n.session_id AND generation.state = 'active'
+              AND availability.summary_id = n.node_id
+              AND availability.availability = 'available'
+         ) AND NOT EXISTS (
+            SELECT 1 FROM lcm_summary_convergence_dirty_raw dirty
+            WHERE dirty.provider = n.provider AND dirty.session_id = n.session_id
+         )"
+        .to_string(),
+    );
     if let Some(session_id) = session_id {
         filters.push("n.session_id = ?".to_string());
         values.push(Value::Text(session_id.to_string()));

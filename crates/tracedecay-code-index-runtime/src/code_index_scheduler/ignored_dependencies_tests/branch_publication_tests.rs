@@ -308,6 +308,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
             graph_runtime.code_graph_seat_port(),
             Arc::clone(&project_database),
             tracedecay_code_index_runtime::code_index_scheduler::CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount persistent graph-backed scheduler");
@@ -427,24 +428,7 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
         .join()
         .expect("follow-up scheduler holder joins");
     wait_for_reconciling(&registry, 0).await;
-    // The serving swap runs after the source pass releases
-    // `reconcile_in_progress`, and that release is itself pinned by
-    // `graph_decode_does_not_block_text_freshness`: the optional graph decode
-    // must never read as a rebuild in flight. A quiesced reconcile is
-    // therefore not yet a seated generation. Wait for the slot to leave the
-    // incumbent rather than sampling it once; the assertions below still pin
-    // exactly which generation it may leave for.
-    let converged = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let served = latest(&registry, fixture.path()).await;
-            if served.generation().manifest().generation_id != incumbent {
-                break served;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("the real worker advances serving past the incumbent");
+    let converged = latest_for_generation(&registry, fixture.path(), Some(&competitor)).await;
     assert_eq!(
         converged.generation().manifest().generation_id,
         competitor,

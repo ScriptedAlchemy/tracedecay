@@ -6,10 +6,13 @@ use super::{BoundedBackfillInterruption, BoundedGitControl};
 
 mod resume;
 mod seal;
+#[cfg(test)]
+pub(super) use resume::initialize_reflog_cursor;
 pub(super) use resume::{
-    GraphChunk, GraphPending, ReflogCursor, ReflogHeadState, ReflogVerificationCursor, decode_path,
-    encode_path, initialize_reflog_cursor, scan_graph_chunk, scan_reflog_chunk,
-    scan_reflog_verification_chunk, verify_reflog_source,
+    GraphChunk, GraphPending, HistorySource, ReflogCursor, ReflogHeadState,
+    ReflogVerificationCursor, capture_unborn_source, decode_path, encode_path,
+    initialize_history_source, scan_graph_chunk, scan_reflog_chunk, scan_reflog_verification_chunk,
+    verify_reflog_source, verify_unborn_source,
 };
 pub(super) use seal::{RepositorySeal, verify_repository_source};
 

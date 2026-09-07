@@ -1155,23 +1155,8 @@ impl StoreRuntimeClientLease {
         authority: &crate::db::DatabaseAuthority,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
-        authority
-            .require_active_write_scope(operation)
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation,
-                message: error.to_string(),
-            })?;
-        if authority.canonical_database_path() != self.locator().path() {
-            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation,
-                message: format!(
-                    "registered locator {} does not match database authority {}",
-                    self.locator().path().display(),
-                    authority.canonical_database_path().display()
-                ),
-            });
-        }
-        self.validate_opened_file_identity(operation)
+        self.inner
+            .validate_database_write_authority(authority, operation)
     }
 
     fn validate_opened_file_identity(

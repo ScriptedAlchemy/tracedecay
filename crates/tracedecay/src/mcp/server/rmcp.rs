@@ -1076,7 +1076,7 @@ mod tests {
         );
 
         for index in 0..8 {
-            fixture
+            let seeded = fixture
                 .client
                 .call_tool(
                     CallToolRequestParams::new("tracedecay_fact_store_add").with_arguments(
@@ -1096,8 +1096,13 @@ mod tests {
                 )
                 .await
                 .expect("seed large RMCP tools/call");
+            assert_ne!(
+                seeded.is_error,
+                Some(true),
+                "large-response seed {index} was refused: {seeded:?}"
+            );
         }
-        fixture
+        let listed = fixture
             .client
             .call_tool(
                 CallToolRequestParams::new("tracedecay_fact_store_list").with_arguments(
@@ -1114,13 +1119,22 @@ mod tests {
             )
             .await
             .expect("large RMCP tools/call");
+        assert_ne!(
+            listed.is_error,
+            Some(true),
+            "large-response list was refused: {listed:?}"
+        );
         let large_response = fixture.last_response();
         let large_text = large_response["result"]["content"][0]["text"]
             .as_str()
             .expect("large response text");
         let large_envelope: Value =
             serde_json::from_str(large_text).expect("large response truncation envelope");
-        assert_eq!(large_envelope["truncated"], json!(true));
+        assert_eq!(
+            large_envelope["truncated"],
+            json!(true),
+            "large-response list did not return a truncation envelope: {listed:?}"
+        );
         assert!(
             large_envelope["original_chars"]
                 .as_u64()

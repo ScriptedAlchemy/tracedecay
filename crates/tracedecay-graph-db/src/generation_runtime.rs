@@ -3547,6 +3547,98 @@ mod tests {
     }
 
     #[test]
+    fn persistent_reopen_restages_partially_released_generation_pages() {
+        assert_partial_release_replays(true);
+    }
+
+    #[test]
+    fn persistent_reopen_restages_owned_partially_released_generation_pages() {
+        assert_partial_release_replays(false);
+    }
+
+    fn assert_partial_release_replays(shared: bool) {
+        let temp = TempDir::new().unwrap();
+        let fixture = large_manifest("partial-release-replay");
+        let entity_count =
+            MAX_NATIVE_GENERATION_STAGE_MUTATIONS + 2 * MAX_VERIFIED_GENERATION_BATCH_MUTATIONS;
+        let manifest = GraphGenerationManifest::new(
+            fixture.projection,
+            fixture.generation,
+            fixture.source_generation,
+            fixture.watermark,
+            vec![],
+            (0..entity_count)
+                .map(|index| {
+                    GraphEntity::new(
+                        GraphEntityId::new(format!("entity:{index:06}")).unwrap(),
+                        BTreeSet::new(),
+                        BTreeMap::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            vec![],
+        )
+        .unwrap();
+        let pages = generation_stage_pages(&manifest).unwrap();
+        assert_eq!(pages.len(), 2);
+        let sealed = sealed_digest(&manifest);
+        let retained_manifest = arc_manifest(&manifest);
+        let (owner, database) = persistent_database(&temp);
+        database
+            .apply_generation_unverified_with_digest_observed(
+                Arc::clone(&retained_manifest),
+                &sealed,
+                &|| Ok(()),
+            )
+            .unwrap();
+
+        // Stop at the production retirement transaction boundary, retaining
+        // the original page receipts just as interrupted row release does.
+        let (_, removed) = database
+            .delete_projection_page_checked(
+                &manifest.identity().physical_namespace().unwrap(),
+                &manifest.projection.projection,
+                &manifest.source_generation,
+                &manifest.watermark,
+                super::GenerationRetirementPageKind::Entities,
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert!(removed);
+        let remaining = database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap();
+        assert_eq!(
+            remaining,
+            (entity_count - MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, 0)
+        );
+        assert!(remaining.0 >= pages[0].range.end);
+        drop(database);
+        owner.close().unwrap();
+
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        let replay_manifest = if shared {
+            Arc::clone(&retained_manifest)
+        } else {
+            retained_manifest
+        };
+        reopened
+            .apply_generation_unverified_with_digest_observed(replay_manifest, &sealed, &|| Ok(()))
+            .expect("a retained generation must replay after a partial durable row release");
+        let (_, recovered) = reopened
+            .reopen_and_verify_existing_generation(
+                &manifest.identity(),
+                &sealed,
+                manifest.row_counts(),
+                &|| Ok(()),
+            )
+            .expect("replayed pages must restore the exact generation digest");
+        assert_eq!(recovered, sealed);
+        reopened_owner.close().unwrap();
+    }
+
+    #[test]
     fn second_generation_apply_writes_instead_of_reseating_prior() {
         let temp = TempDir::new().unwrap();
         let (owner, database, manifest_a) = large_persistent_generation(&temp, "two-generations");

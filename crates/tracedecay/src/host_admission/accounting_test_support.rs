@@ -60,41 +60,6 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
-    #[doc(hidden)]
-    pub async fn profile_analytics_indexes_present_for_test(&self) -> Result<i64> {
-        let snapshot = self.profile_database.read_snapshot().await?;
-        let mut rows = snapshot
-            .query(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index'
-                   AND name IN (
-                       'idx_analytics_events_project_time',
-                       'idx_analytics_events_timestamp'
-                   )",
-                (),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "query registered profile analytics indexes".to_owned(),
-                message: error.to_string(),
-            })?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "read registered profile analytics indexes".to_owned(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| TraceDecayError::Database {
-                operation: "read registered profile analytics indexes".to_owned(),
-                message: "count query returned no row".to_owned(),
-            })?;
-        row.get(0).map_err(|error| TraceDecayError::Database {
-            operation: "decode registered profile analytics indexes".to_owned(),
-            message: error.to_string(),
-        })
-    }
-
     /// Fails the calling test loudly: a read this runtime could not perform is
     /// not a token total of zero.
     #[doc(hidden)]

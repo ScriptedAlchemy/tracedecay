@@ -185,6 +185,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount retained generation");
@@ -557,6 +558,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount persistent graph generation");
@@ -756,6 +758,38 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         assert_eq!(
             sealed_decode_count, 0,
             "clean restart must seat the verified graph head without replaying partition segments"
+        );
+        let mut serving_changes = registry
+            .subscribe_serving_generation_changes(fixture.path())
+            .await
+            .expect("subscribe to the restored serving owner");
+        let complete = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(complete) = registry.latest_complete_ready_for_scope(&scope).await {
+                    break complete;
+                }
+                serving_changes
+                    .changed()
+                    .await
+                    .expect("restored complete owner must signal installation");
+            }
+        })
+        .await
+        .expect("explicit complete-generation demand must seat the restored generation");
+        assert_eq!(
+            complete.generation().manifest().generation_id,
+            seeded_generation_id,
+            "complete-generation demand must preserve the restored publication identity"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &complete
+                    .text_generation_handle()
+                    .interactive_graph_store()
+                    .expect("complete serving graph"),
+                &settled.interactive_graph_store().expect("restored graph"),
+            ),
+            "complete-generation seating must reuse the recovered graph authority"
         );
     }
     let (held_tx, held_rx) = std::sync::mpsc::channel();

@@ -1,6 +1,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::Instant;
+
+use crate::lock_admission::{LockAdmissionError, lock_until};
 
 use tracedecay_domain::UtcMicros;
 
@@ -60,25 +63,22 @@ pub(super) fn write_lease_file(
     })
 }
 
-/// Acquires the single-writer lease, waiting out a sibling hook that holds it.
-/// See [`crate::contention`] for why a contended lease must not fail the
-/// callback.
+/// Acquires the single-writer lease without waiting. Native callbacks use the
+/// deadline-aware admission path so capture and delivery share one budget.
 #[hotpath::measure(label = "hooks.spool.acquire_lease")]
 pub(super) fn acquire_lease(
     root: &Path,
     lease_duration_micros: i64,
     now: UtcMicros,
 ) -> Result<(HookSpoolWriterLeaseV1, File), HookSpoolError> {
-    crate::contention::wait_out_contention(
-        || try_acquire_lease(root, lease_duration_micros, now),
-        |error| matches!(error, HookSpoolError::WriterLeaseHeld),
-    )
+    acquire_lease_with_deadline(root, lease_duration_micros, now, None)
 }
 
-fn try_acquire_lease(
+pub(super) fn acquire_lease_with_deadline(
     root: &Path,
     lease_duration_micros: i64,
     now: UtcMicros,
+    deadline: Option<Instant>,
 ) -> Result<(HookSpoolWriterLeaseV1, File), HookSpoolError> {
     let expires_at = UtcMicros(
         now.0
@@ -102,7 +102,13 @@ fn try_acquire_lease(
     if !validate_regular_or_missing(&path)? {
         return Err(HookSpoolError::UnsafePath);
     }
-    file.try_lock().map_err(map_try_lock_error)?;
+    match deadline {
+        Some(deadline) => lock_until(&file, deadline).map_err(|error| match error {
+            LockAdmissionError::TimedOut => HookSpoolError::AdmissionTimedOut,
+            LockAdmissionError::Io => HookSpoolError::Io,
+        })?,
+        None => file.try_lock().map_err(map_try_lock_error)?,
+    }
     write_lease_file(&mut file, candidate)?;
     hotpath::measure_block!("hooks.spool.fsync.directory", {
         shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)

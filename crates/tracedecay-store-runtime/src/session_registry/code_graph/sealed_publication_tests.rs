@@ -2130,3 +2130,179 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
          {peak_growth} bytes"
     );
 }
+
+#[test]
+fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain() {
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("isolated blocking-pool runtime");
+    executor.block_on(async {
+        let temporary = tempfile::tempdir().expect("temporary fixture parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+        git(&project_root, &["init", "-q", "-b", "main"]);
+        git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            &project_root,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn staging_release_value() -> usize { 917 }\n",
+        )
+        .expect("project source");
+        git(&project_root, &["add", "."]);
+        git(&project_root, &["commit", "-qm", "staging release fixture"]);
+        let project_id = ProjectId::new("project.staging-release-drain").expect("project id");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+        let canonical_project = project_root.canonicalize().expect("canonical project root");
+
+        let store_root = root.join("code-index-store");
+        let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open worktree scheduler");
+        scheduler.reconcile_now().expect("seal the generation");
+        let latest = scheduler.latest_complete().expect("complete generation");
+        let repository_id = latest.generation().snapshot().repository.clone();
+        let reference = latest.generation().snapshot().reference.clone();
+        let worktree_id = scheduler.identity().worktree_id().clone();
+        let generation_id = latest.generation().manifest().generation_id.clone();
+        drop(scheduler);
+        let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+                .expect("active generation pointer"),
+        )
+        .expect("decode active generation pointer");
+        let replay_binding = CodeGraphReplayBindingV1 {
+            generations_root: scoped_store.join("code-generations-v1"),
+            sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+                pointer.state_digest.clone(),
+            )
+            .expect("sealed state digest"),
+        };
+
+        let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            61,
+            "staging release drain",
+        )
+        .expect("daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let project_database = registry
+            .project_memory(project_id.clone(), [canonical_project.clone()])
+            .await
+            .expect("project graph database");
+        let replay_root = project_database
+            .database_path()
+            .with_extension("graph-replay");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+            .expect("private graph replay root");
+
+        let runtime = registry
+            .retain_code_graph_runtime(
+                project_id,
+                repository_id,
+                worktree_id,
+                reference,
+                generation_id,
+                project_database,
+                replay_binding,
+                None,
+            )
+            .await
+            .expect("retain real code graph runtime");
+        let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+            runtime.authority.namespace().clone(),
+        )
+        .expect("canonical code projection");
+        let projection = runtime.relational_projection(&projection).unwrap();
+        let build = Arc::clone(&runtime.publication_locks.build)
+            .lock_owned()
+            .await;
+        let database_leases = Arc::strong_count(&runtime.project_database);
+        let graph_leases = Arc::strong_count(&runtime.authority);
+
+        // Occupy the actual blocking-pool slot. Dropping the sender on any
+        // assertion failure also releases this worker, so teardown cannot hang.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        entered.await.unwrap();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.release_sealed_staging_rows(build, projection))
+                .join()
+                .expect("publication from a plain OS thread");
+        });
+        assert!(
+            Arc::clone(&runtime.publication_locks.build)
+                .try_lock_owned()
+                .is_err()
+        );
+        assert_eq!(
+            Arc::strong_count(&runtime.project_database),
+            database_leases + 1
+        );
+        assert_eq!(Arc::strong_count(&runtime.authority), graph_leases + 1);
+
+        // Poll the operation owner itself: terminal shutdown has other blocking
+        // phases, which must not make a detached release falsely pass this test.
+        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown());
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(operation_drain.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks());
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(terminal_drain.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(!runtime.operation_task_owner.retain(async {}));
+        assert!(
+            Arc::clone(&runtime.publication_locks.build)
+                .try_lock_owned()
+                .is_err()
+        );
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        operation_drain.await.expect("accepted sweep is joined");
+        terminal_drain
+            .await
+            .expect("terminal shutdown joins the sweep");
+        assert!(
+            Arc::clone(&runtime.publication_locks.build)
+                .try_lock_owned()
+                .is_ok()
+        );
+        assert_eq!(
+            Arc::strong_count(&runtime.project_database),
+            database_leases
+        );
+        assert_eq!(Arc::strong_count(&runtime.authority), graph_leases);
+    });
+}

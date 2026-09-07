@@ -188,7 +188,10 @@ async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
         .project_owners
         .lock()
         .expect("project owner registry")
-        .insert(project_id, ProjectRuntimeOwnerStateV1::Opening);
+        .insert(
+            project_id,
+            ProjectRuntimeOwnerStateV1::Opening(Default::default()),
+        );
 
     let error = registry
         .close_retained_graph_runtimes_for_shutdown()

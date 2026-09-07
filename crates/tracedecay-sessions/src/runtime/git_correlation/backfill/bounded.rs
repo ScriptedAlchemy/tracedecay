@@ -66,6 +66,18 @@ impl BoundedGitControl {
     }
 }
 
+pub(super) fn verified_empty_history(
+    project_path: &std::path::Path,
+) -> Result<bool, BoundedBackfillInterruption> {
+    let control =
+        BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+    let Some(source) = native::capture_unborn_source(project_path, &control)? else {
+        return Ok(false);
+    };
+    native::verify_unborn_source(project_path, &source, &control)?;
+    Ok(true)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundedBackfillInterruption {
     Cancelled,
@@ -466,13 +478,46 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
     drop(snapshot);
     if progress.is_none() {
         let native_control = control.clone();
-        let native_path = project_path;
+        let native_path = project_path.clone();
         let cursor = run_blocking(control, move || {
-            native::initialize_reflog_cursor(&native_path, window_end, &native_control)
+            native::initialize_history_source(&native_path, window_end, &native_control)
         })
         .await;
         let cursor = match cursor {
-            Ok(cursor) => cursor,
+            Ok(native::HistorySource::Reflog(cursor)) => *cursor,
+            Ok(native::HistorySource::Unborn(source)) => {
+                let native_control = control.clone();
+                run_blocking(control, move || {
+                    native::verify_unborn_source(&project_path, &source, &native_control)
+                })
+                .await?;
+                let transaction = session_store
+                    .open_write_transaction()
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                control.check()?;
+                // A concurrent worker may already have captured real history.
+                // Its progress remains authoritative and must not be skipped.
+                if history_progress::read_progress(&transaction, key)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
+                    .is_some()
+                {
+                    return Ok(StreamGitEvidenceOutcome::Progressed);
+                }
+                history_failures::clear_unresolved(&transaction, key.source_rowid)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                let frontier = super::advance_history_frontier(&transaction, candidate_frontier)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                control.check()?;
+                GitCorrelationWriteTxn::commit(transaction)
+                    .await
+                    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+                *committed = true;
+                return Ok(StreamGitEvidenceOutcome::Applied(Some(frontier)));
+            }
             Err(BoundedBackfillInterruption::UnsupportedSourceFraming) => {
                 return history_failures::record_candidate(
                     session_store,
@@ -637,10 +682,19 @@ async fn dry_run_native_history(
 ) -> Result<(), BoundedBackfillInterruption> {
     let path = project_path.to_owned();
     let native_control = control.clone();
-    let mut cursor = run_blocking(control, move || {
-        native::initialize_reflog_cursor(&path, window_end, &native_control)
+    let cursor = run_blocking(control, move || {
+        match native::initialize_history_source(&path, window_end, &native_control)? {
+            native::HistorySource::Reflog(cursor) => Ok(Some(*cursor)),
+            native::HistorySource::Unborn(source) => {
+                native::verify_unborn_source(&path, &source, &native_control)?;
+                Ok(None)
+            }
+        }
     })
     .await?;
+    let Some(mut cursor) = cursor else {
+        return Ok(());
+    };
     let initial_cursor = cursor.clone();
     let canonical_worktree = cursor.worktree.clone();
     let source_length = cursor.byte_offset;

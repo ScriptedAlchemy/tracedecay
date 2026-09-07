@@ -80,10 +80,11 @@ pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize =
 
 /// Admit `(document_frequency, source)` pairs rarest-first while the summed
 /// frequency stays within [`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`]; the rarest
-/// source is always admitted. Ties keep request order so the admitted set is
-/// deterministic. Sources past the bound still weigh admitted candidates
+/// nonempty source is always admitted. Ties keep request order so admission
+/// is deterministic. Sources past the bound still weigh admitted candidates
 /// through scoring; a document matching only those sources is never hydrated.
 pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S> {
+    sources.retain(|(frequency, _)| *frequency > 0);
     sources.sort_by_key(|(frequency, _)| *frequency);
     let total = sources.len();
     let mut admitted_documents = 0usize;

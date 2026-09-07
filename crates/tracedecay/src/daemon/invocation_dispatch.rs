@@ -11,12 +11,14 @@
 use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
 use std::future::Future;
+use tracedecay_application::SharedProfileStoreLocatorV1;
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationService, Lease, SemanticInvocationControlV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_store::StoreShardScopeV1;
 
 fn semantic_invocation_interruption_response(
     request_id: &str,
@@ -497,23 +499,22 @@ pub(super) async fn resolve_multi_root_projects(
         .registered_profile_database()
         .await
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-    let profile_id = store_administration
+    let profile_identity = store_administration
         .profile_identity()
-        .map_err(|_| DaemonInvocationProblem::Unavailable)?
-        .profile_id()
-        .clone();
-    // `SharedProfileStoreLocatorV1` names the one physical profile store every
-    // registered root of this profile resolves through, and an authorized
-    // scope set refuses roots that do not share it. The registry's
-    // `store_instances.store_id` is per project (`store:<project>:<mode>`), so
-    // stamping it here made every federated workspace that spans two projects
-    // — the only kind this resolver builds — fail closed on its own locator.
-    // The profile lease's verified locator is that shared store authority.
-    let profile_store_id = database
-        .verified_locator()
-        .locator_digest
-        .as_str()
-        .to_owned();
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let profile_shard = &database.binding().shard_id;
+    if profile_shard.scope != StoreShardScopeV1::Profile
+        || &profile_shard.brain_id != profile_identity.brain_id()
+        || &profile_shard.profile_id != profile_identity.profile_id()
+    {
+        return Err(DaemonInvocationProblem::Unavailable);
+    }
+    let profile_locator = SharedProfileStoreLocatorV1::new(
+        profile_shard.brain_id.clone(),
+        profile_shard.profile_id.clone(),
+        database.verified_locator().locator_digest.as_str(),
+    )
+    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
     let mut roots = Vec::with_capacity(selectors.len());
     for selector in selectors {
         let context = database
@@ -566,8 +567,7 @@ pub(super) async fn resolve_multi_root_projects(
         }
         let locator = tracedecay_application::RegisteredRootLocatorV1::new(
             selector.project_id.clone(),
-            profile_id.clone(),
-            profile_store_id.clone(),
+            profile_locator.clone(),
             root.clone(),
         )
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;

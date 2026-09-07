@@ -21,14 +21,10 @@ fn serving_query_profile_id(
 
 #[tokio::test]
 async fn committed_query_routes_install_and_rollback_as_one_revision() {
-    // `install_committed_query_authorities` canonicalizes the root it keys the
-    // semantic redundancy state on, so the fixture root has to be canonical
-    // before `project.path()` can read that state back. On macOS the
-    // `/var` -> `/private/var` spelling reads an empty slot instead.
-    let project = TempDir::new_in(
-        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
-    )
-    .expect("project root");
+    let temporary_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temporary root");
+    let project = TempDir::new_in(temporary_root).expect("canonical project root");
     git(project.path(), &["init", "-q", "-b", "main"]);
     git(project.path(), &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -110,6 +106,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
             tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
                 serving_query_profile_id(&semantic),
+                registry.semantic_lifecycle_owner_for_scope(&scope).await,
             )
             .expect("prepare semantic route"),
         );
@@ -459,6 +456,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
             tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
                 serving_query_profile_id(&semantic),
+                registry.semantic_lifecycle_owner_for_scope(&scope).await,
             )
             .expect("prepare delayed semantic route"),
         );
@@ -734,6 +732,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
             serving_query_profile_id(&semantic),
+            registry.semantic_lifecycle_owner_for_scope(&scope).await,
         )
         .expect("prepare standalone semantic route"),
     );
@@ -771,6 +770,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
             serving_query_profile_id(&semantic),
+            registry.semantic_lifecycle_owner_for_scope(&scope).await,
         )
         .expect("prepare committed semantic route"),
     );
@@ -1231,6 +1231,7 @@ async fn install_committed_semantic_route(
             tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 committed.clone(),
                 query_profile_id.clone(),
+                registry.semantic_lifecycle_owner_for_scope(&scope).await,
             )
             .expect("bind committed semantic route"),
         );

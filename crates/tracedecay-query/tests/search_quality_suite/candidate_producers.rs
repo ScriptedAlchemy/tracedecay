@@ -20,10 +20,11 @@ use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
     CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageBatchBoundsV1,
-    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
+    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalCursorV1,
+    VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -58,7 +59,8 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    MAX_LEXICAL_QUERY_TERM_BYTES_V1, VerifiedCodeLexicalArtifactV1,
+    MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
+    VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{ExactTermPostingReadPort, LexicalPostingReadPort};
 use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1};
@@ -424,13 +426,23 @@ fn real_lexical_source_fixture_from_sources(
     assert!(!source_inputs.is_empty(), "fixture needs at least one file");
     let repository = id::<RepositoryId>("repository.artifact");
     let sanitizer_revision = id::<SanitizerRevision>("sanitizer.v1");
+    let languages = StaticLanguageRegistry::new();
     let sources = source_inputs
         .into_iter()
         .map(|(file_id, logical_path, source)| {
+            let extension = Path::new(&logical_path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .expect("fixture source extension");
+            let language = languages
+                .descriptor_for_extension(extension)
+                .expect("compiled fixture language descriptor")
+                .language
+                .clone();
             let file = SanitizedCodeFileV1 {
                 file_occurrence_id: id::<FileOccurrenceId>(&file_id),
                 logical_path,
-                language: Some(id("typescript")),
+                language: Some(language),
                 content_digest: content_digest(&source),
                 disposition: SnapshotFileDispositionV1::Present,
             };
@@ -1302,6 +1314,109 @@ fn qualified_name_query_recalls_the_extracted_symbol_and_rejects_a_wrong_qualifi
 }
 
 #[test]
+fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.qualified".to_owned(),
+        "src/qualified.rs".to_owned(),
+        b"pub struct VectorWatermark;\nimpl VectorWatermark { pub fn merge_max(&self) {} }\npub struct UnrelatedContainer;\nimpl UnrelatedContainer { pub fn merge_max(&self) {} }\n".to_vec(),
+    )]);
+    let generation = CodeIndexPublishedGenerationV1::decode_sealed(&fixture.sealed)
+        .expect("restore canonical generation");
+    let allowed_files = fixture.metadata.logical_paths.keys().cloned().collect();
+    let memory = CodeLexicalProjectionAdapterV1::new_published(
+        fixture.metadata.clone(),
+        &generation,
+        &allowed_files,
+    )
+    .expect("generation-backed lexical projection");
+    let directory = tempfile::tempdir().expect("artifact directory");
+    let path = directory.path().join("qualified.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, fixture.metadata.clone())
+        .expect("create artifact");
+    let verified = builder
+        .rebuild_and_finalize(&mut fixture.open_source(128), &control)
+        .expect("build from parser-attested pages");
+    drop(builder);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen qualified-name postings");
+    for (query, expected_name) in [
+        (
+            "VectorWatermark::merge_max",
+            Some("VectorWatermark::merge_max"),
+        ),
+        (
+            "UnrelatedContainer::merge_max",
+            Some("UnrelatedContainer::merge_max"),
+        ),
+        ("WrongQualifier::merge_max", None),
+    ] {
+        let parts = tracedecay_query::retrieval::lexical::lexical_query_parts(query)
+            .expect("canonical query grammar");
+        assert_eq!(parts.whole_terms, vec![query]);
+        assert!(parts.subtokens.is_empty());
+        let mut request = lexical_request(query, &[], &[], &[], 8, 32);
+        request.generation = fixture.metadata.generation.clone();
+        request.whole_terms = parts.whole_terms;
+        request.subtokens = parts.subtokens;
+        request.phrases = parts.phrases;
+        let disk = complete(
+            reader
+                .read_lexical_postings(&request)
+                .expect("artifact query"),
+        );
+        let in_memory = complete(
+            memory
+                .read_lexical_postings(&request)
+                .expect("memory query"),
+        );
+        assert_eq!(disk, in_memory, "{query} must use the same search fields");
+        if let Some(expected_name) = expected_name {
+            assert!(!disk.candidates.is_empty(), "missing {query}");
+            for candidate in &disk.candidates {
+                let evidence = &disk.evidence_by_occurrence[&candidate.source_occurrence_id];
+                assert!(
+                    !evidence
+                        .binding
+                        .matched_term_kinds
+                        .contains(&ExactTechnicalTermKindV1::QualifiedName),
+                    "derived lexical fields must not fabricate source-exact terms"
+                );
+                assert!(evidence.field_scores_micros.iter().any(|(field, score)| {
+                    *field == LexicalFieldV1::QualifiedName && *score > 0
+                }));
+                let occurrence = reader
+                    .occurrence_by_chunk(
+                        evidence
+                            .binding
+                            .occurrence
+                            .chunk
+                            .as_ref()
+                            .expect("chunk binding"),
+                    )
+                    .expect("read canonical occurrence")
+                    .expect("matched occurrence");
+                assert_eq!(
+                    occurrence.qualified_name,
+                    Some(format!("src/qualified.rs::{expected_name}")),
+                    "a method name alone must not match the other containing type"
+                );
+            }
+        } else {
+            assert!(
+                disk.candidates.is_empty(),
+                "wrong qualifier matched loose method tokens"
+            );
+        }
+    }
+}
+
+#[test]
 fn disk_artifact_batch_stores_one_ngram_bitmap_shard_per_distinct_key() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
@@ -1526,6 +1641,93 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
                 Err(CodeLexicalArtifactErrorV1::Incompatible(_))
             ),
             "revision {revision} must fail closed"
+        );
+    }
+}
+
+#[test]
+fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
+    let files = 128;
+    let functions_per_file = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / files + 1;
+    let fixture = real_lexical_source_fixture_from_sources(
+        (0..files)
+            .map(|file| {
+                let source = (0..functions_per_file)
+                    .map(|function| {
+                        format!("pub fn function_{function}() {{ shared_candidate(); }}\n")
+                    })
+                    .collect::<String>();
+                (
+                    format!("file.common.{file:03}"),
+                    format!("src/common_{file:03}.rs"),
+                    source.into_bytes(),
+                )
+            })
+            .collect(),
+    );
+    let generation = CodeIndexPublishedGenerationV1::decode_sealed(&fixture.sealed)
+        .expect("restore canonical generation");
+    let allowed_files = fixture.metadata.logical_paths.keys().cloned().collect();
+    let memory = CodeLexicalProjectionAdapterV1::new_published(
+        fixture.metadata.clone(),
+        &generation,
+        &allowed_files,
+    )
+    .expect("generation-backed projection");
+    let memory = LexicalLane::new(memory);
+    let mut common = lexical_request("shared_candidate", &["shared_candidate"], &[], &[], 0, 8);
+    common.generation = fixture.metadata.generation.clone();
+    let baseline = complete(memory.retrieve_lexical(&common).expect("common term query"));
+    assert_eq!(baseline.candidates.len(), 8);
+    assert!(
+        baseline.coverage.eligible > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
+        "fixture must exercise the first-source exception above the admission bound"
+    );
+    let mut mixed = lexical_request(
+        "never_present_term shared_candidate",
+        &["never_present_term", "shared_candidate"],
+        &[],
+        &[],
+        0,
+        8,
+    );
+    mixed.generation = fixture.metadata.generation.clone();
+    let expected = complete(memory.retrieve_lexical(&mixed).expect("mixed term query"));
+    assert_eq!(expected.candidates, baseline.candidates);
+    assert_eq!(expected.coverage.eligible, baseline.coverage.eligible);
+
+    let directory = tempfile::tempdir().expect("artifact directory");
+    let control = ArtifactControl { cancelled: false };
+    for revision in [
+        CodeLexicalArtifactWriterRevisionV1::V11,
+        CodeLexicalArtifactWriterRevisionV1::V12,
+    ] {
+        let path = directory.path().join(format!("common-{revision:?}.sqlite"));
+        let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+            &path,
+            fixture.metadata.clone(),
+            revision,
+        )
+        .expect("create versioned artifact");
+        let verified = builder
+            .rebuild_and_finalize(&mut fixture.open_source(128), &control)
+            .expect("build canonical pages");
+        drop(builder);
+        let reader = CodeLexicalArtifactReaderV1::open_with_control(
+            &path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        )
+        .expect("reopen artifact");
+        let actual = complete(
+            LexicalLane::new(reader)
+                .retrieve_lexical(&mixed)
+                .expect("mixed artifact query"),
+        );
+        assert_eq!(
+            actual, expected,
+            "{revision:?} must preserve canonical candidate parity"
         );
     }
 }
@@ -2736,6 +2938,282 @@ fn disk_artifact_widened_reservation_commits_high_ngram_window_atomically() {
             .sum::<u64>(),
         "one transaction must make every page row visible together"
     );
+}
+
+#[test]
+fn disk_artifact_subdivides_refused_suffix_and_resumes_exact_cursor() {
+    let sources = (0..24)
+        .map(|ordinal| {
+            let body = if ordinal < 16 {
+                "return 1;".to_owned()
+            } else {
+                format!(
+                    "return \"{}\";",
+                    (0..200)
+                        .map(|n| format!("token{n:03} "))
+                        .collect::<String>()
+                )
+            };
+            (
+                format!("file.subdivision.{ordinal:02}"),
+                format!("src/subdivision_{ordinal:02}.ts"),
+                format!("import {{ helper }} from \"dependency\";\nexport function function_{ordinal:02}() {{ {body} }}\n").into_bytes(),
+            )
+        })
+        .collect();
+    let fixture = real_lexical_source_fixture_from_sources(sources);
+    let (single_pages, expected_receipt) = drain_verified_pages(&fixture, 1);
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("subdivision.sqlite");
+    let probe = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("probe.sqlite"),
+        fixture.metadata.clone(),
+    )
+    .unwrap();
+    let budget = probe.fixed_ledger_charge_bytes()
+        + single_pages
+            .iter()
+            .map(|page| {
+                probe
+                    .page_batch_ledger_charge_bytes(std::slice::from_ref(page))
+                    .unwrap()
+            })
+            .max()
+            .unwrap();
+    drop(probe);
+    let mut builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        &path,
+        fixture.metadata.clone(),
+        budget,
+    )
+    .unwrap();
+    let mut source = fixture.open_source(4);
+    let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 64 * 1024 * 1024).unwrap();
+    let mut refusals = 0;
+    let mut reopened = false;
+    let receipt = loop {
+        let before = source.cursor().clone();
+        let progress_before = builder.progress().unwrap();
+        let result = source
+            .next_page_batch_if(&control, bounds, |pages| {
+                let prepared = builder.prepare_admissible_page_prefix(pages, &control)?;
+                let accepted = prepared.accepted_prefix();
+                builder.append_prepared_pages(prepared.prepared_pages(), &control)?;
+                Ok(accepted)
+            })
+            .unwrap();
+        match result {
+            Err(CodeLexicalArtifactErrorV1::BatchTooLarge { .. }) => {
+                assert!(
+                    before.emitted_chunks() > 0,
+                    "real builder must accept a prefix before the larger suffix refuses"
+                );
+                assert_eq!(source.cursor(), &before);
+                assert_eq!(builder.progress().unwrap(), progress_before);
+                refusals += 1;
+                assert!(refusals <= 2, "four chunks need at most two subdivisions");
+                assert!(source.tighten_page_record_bound().is_some());
+                // Cancellation cannot consume the newly subdivided suffix.
+                assert!(matches!(
+                    source.next_page_batch_if(
+                        &ArtifactControl { cancelled: true },
+                        bounds,
+                        |_| -> Result<NonZeroUsize, CodeLexicalArtifactErrorV1> {
+                            panic!("cancelled source must not call builder")
+                        }
+                    ),
+                    Err(CodeIndexProductionErrorV1::Interrupted(_))
+                ));
+                assert_eq!(source.cursor(), &before);
+            }
+            Err(error) => panic!("unexpected builder refusal: {error}"),
+            Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(pages)) => {
+                assert_eq!(pages[0].page_ordinal(), before.next_page_ordinal());
+                assert_eq!(
+                    builder.progress().unwrap().next_cursor.as_ref(),
+                    Some(source.cursor())
+                );
+                if refusals > 0 && !reopened {
+                    let cursor = builder.progress().unwrap().next_cursor.unwrap();
+                    let persisted = cursor.persisted_bytes().unwrap();
+                    drop(builder);
+                    builder = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                        &path, fixture.metadata.clone(), budget, &control).unwrap();
+                    source = fixture.open_source(1);
+                    source
+                        .restore_cursor(
+                            &VerifiedSealedLexicalCursorV1::restore_persisted(&persisted).unwrap(),
+                            &control,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        builder.progress().unwrap().next_cursor.as_ref(),
+                        Some(source.cursor())
+                    );
+                    reopened = true;
+                }
+            }
+            Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)) => break receipt,
+        }
+    };
+    assert!(
+        refusals > 0 && reopened,
+        "must exercise actual refusal and persisted recovery"
+    );
+    assert_eq!(receipt.total_chunks(), expected_receipt.total_chunks());
+    let expected_cursor = single_pages.last().unwrap().next_cursor();
+    assert!(
+        expected_cursor.emitted_imports() > 0,
+        "fixture must authenticate a nonempty import dictionary"
+    );
+    assert_eq!(
+        source.cursor().cumulative_digest(),
+        expected_cursor.cumulative_digest()
+    );
+    assert_eq!(
+        source.cursor().import_dictionary_digest(),
+        expected_cursor.import_dictionary_digest()
+    );
+    let (rows, distinct) = staged_row_cardinality(&path);
+    assert_eq!(
+        (rows, distinct),
+        (receipt.total_chunks(), receipt.total_chunks())
+    );
+    finish_staged_artifact(&mut builder, &receipt, &control);
+}
+
+#[test]
+fn disk_artifact_subdivides_import_only_suffix_without_replaying_chunks() {
+    let mut text = (0..12)
+        .map(|n| format!("import {{ helper{n} }} from \"dependency{n}\";\n"))
+        .collect::<String>();
+    text.push_str("export function imported() { return helper0(); }\n");
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.imports".to_owned(),
+        "src/imports.ts".to_owned(),
+        text.into_bytes(),
+    )]);
+    let (single_pages, expected_receipt) = drain_verified_pages(&fixture, 1);
+    let (wide_pages, _) = drain_verified_pages(&fixture, 4);
+    let prefix_len = wide_pages
+        .iter()
+        .position(|page| page.chunk_count() == 0 && page.import_count() > 1)
+        .expect("divisible import-only suffix");
+    assert!(prefix_len > 0);
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("import-subdivision.sqlite");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&path, fixture.metadata.clone()).unwrap();
+    for page in &wide_pages[..prefix_len] {
+        builder.append_page(page, &control).unwrap();
+    }
+    let budget = builder.fixed_ledger_charge_bytes()
+        + single_pages
+            .iter()
+            .filter(|page| page.chunk_count() == 0)
+            .map(|page| {
+                assert_eq!(page.import_count(), 1);
+                builder
+                    .page_batch_ledger_charge_bytes(std::slice::from_ref(page))
+                    .unwrap()
+            })
+            .max()
+            .expect("one-import page charges");
+    let cursor = builder.progress().unwrap().next_cursor.unwrap();
+    drop(builder);
+    let mut builder = CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+        &path,
+        fixture.metadata.clone(),
+        budget,
+        &control,
+    )
+    .unwrap();
+    let mut source = fixture.open_source(4);
+    source.restore_cursor(&cursor, &control).unwrap();
+    let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 64 * 1024 * 1024).unwrap();
+    let mut refusals = 0;
+    let receipt = loop {
+        let before = source.cursor().clone();
+        let progress = builder.progress().unwrap();
+        let result = source
+            .next_page_batch_if(&control, bounds, |pages| {
+                assert!(pages.iter().all(|page| page.chunk_count() == 0));
+                let prepared = builder.prepare_admissible_page_prefix(pages, &control)?;
+                let accepted = prepared.accepted_prefix();
+                builder.append_prepared_pages(prepared.prepared_pages(), &control)?;
+                Ok(accepted)
+            })
+            .unwrap();
+        match result {
+            Err(CodeLexicalArtifactErrorV1::BatchTooLarge { .. }) => {
+                refusals += 1;
+                assert!(refusals <= 2);
+                assert_eq!(source.cursor(), &before);
+                assert_eq!(builder.progress().unwrap(), progress);
+                assert!(source.tighten_page_record_bound().is_some());
+            }
+            Err(error) => panic!("unexpected import refusal: {error}"),
+            Ok(VerifiedSealedLexicalPageBatchReadV1::Pages(_)) => {
+                assert_eq!(source.cursor().emitted_chunks(), cursor.emitted_chunks());
+            }
+            Ok(VerifiedSealedLexicalPageBatchReadV1::Complete(receipt)) => break receipt,
+        }
+    };
+    assert!(refusals > 0);
+    assert_eq!(receipt.total_chunks(), expected_receipt.total_chunks());
+    let expected = single_pages.last().unwrap().next_cursor();
+    assert_eq!(
+        source.cursor().cumulative_digest(),
+        expected.cumulative_digest()
+    );
+    assert_eq!(
+        source.cursor().import_dictionary_digest(),
+        expected.import_dictionary_digest()
+    );
+    assert_eq!(
+        source.cursor().emitted_imports(),
+        expected.emitted_imports()
+    );
+    finish_staged_artifact(&mut builder, &receipt, &control);
+}
+
+#[test]
+fn disk_artifact_indivisible_refusal_keeps_source_and_builder_progress() {
+    let fixture = real_lexical_source_fixture();
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().unwrap();
+    let probe = CodeLexicalArtifactBuilderV1::create(
+        directory.path().join("probe.sqlite"),
+        fixture.metadata.clone(),
+    )
+    .unwrap();
+    let budget = probe.fixed_ledger_charge_bytes() + 1;
+    drop(probe);
+    let builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+        directory.path().join("indivisible.sqlite"),
+        fixture.metadata.clone(),
+        budget,
+    )
+    .unwrap();
+    let mut source = fixture.open_source(1);
+    let before = source.cursor().clone();
+    let bounds = VerifiedSealedLexicalPageBatchBoundsV1::new(1, 64 * 1024 * 1024).unwrap();
+    let refusal = source
+        .next_page_batch_if(&control, bounds, |pages| {
+            builder
+                .prepare_admissible_page_prefix(pages, &control)
+                .map(|prepared| prepared.accepted_prefix())
+        })
+        .unwrap();
+    assert!(matches!(
+        refusal,
+        Err(CodeLexicalArtifactErrorV1::BatchTooLarge { .. })
+    ));
+    assert_eq!(source.tighten_page_record_bound(), None);
+    assert_eq!(source.cursor(), &before);
+    assert_eq!(builder.progress().unwrap().next_page_ordinal, 0);
 }
 
 #[test]

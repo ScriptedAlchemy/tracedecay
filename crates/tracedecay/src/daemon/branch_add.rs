@@ -746,13 +746,19 @@ fn await_exact_branch_generation_inner<'a>(
     // Erase the deeply nested future before it reaches the measured wrapper
     // so every profiling feature can compute its layout.
     Box::pin(async move {
-        let mut publications = schedulers.subscribe_generation_publications();
-        // Publication is broadcast before graph seating, so the serving slot
-        // can become exact after the matching publication with no second
-        // publication to wake this waiter. The seating counter is that
-        // missing transition; subscribing before the refresh request keeps
-        // every seat from this point on observable.
-        let mut seats = schedulers.subscribe_serving_seats();
+        let mut serving_changes = schedulers
+            .subscribe_serving_generation_changes(canonical_worktree_root)
+            .await
+            .ok_or_else(|| {
+                TraceDecayError::project_route(
+                    CODE_INDEX_SCHEDULER_UNAVAILABLE,
+                    true,
+                    format!(
+                        "code-index scheduler is unavailable for branch worktree '{}'",
+                        canonical_worktree_root.display()
+                    ),
+                )
+            })?;
         if !schedulers
             .notify_hook_overflow(canonical_worktree_root)
             .await
@@ -822,27 +828,18 @@ fn await_exact_branch_generation_inner<'a>(
                 ));
             }
             tokio::select! {
-                result = publications.recv() => match result {
-                    Ok(event) if event.project_root == canonical_worktree_root => {}
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                result = serving_changes.changed() => {
+                    if result.is_err() {
                         return Err(TraceDecayError::project_route(
                             CODE_INDEX_ACTIVATION_UNAVAILABLE,
                             true,
                             format!(
-                                "code-index publication stream closed for branch worktree '{}'",
+                                "code-index serving owner closed for branch worktree '{}'",
                                 canonical_worktree_root.display()
                             ),
                         ));
                     }
-                },
-                // The scheduler advances this after it writes the serving slot,
-                // so a wake here means the slot already holds its new value.
-                // A closed channel disables this branch rather than spinning;
-                // the deadline below still bounds the wait.
-                Ok(()) = seats.changed() => {}
-                // Sleep to the nearer deadline so neither bound is overshot and
-                // neither is polled for.
+                }
                 () = tokio::time::sleep_until(idle_deadline.min(hard_deadline)) => {}
             }
         }

@@ -18,7 +18,7 @@ use super::code_graph_namespace::is_legacy_per_generation_code_graph_namespace_s
 use super::path::canonical_graph_database_file;
 use super::publication_support::{
     RegisteredGraphDbOperationV1, check_all, clear_retiring_fence, collect_closure,
-    dependency_key_for_binding, locator_from_dependency, locator_from_key, map_publication_error,
+    dependency_key_for_binding, locator_from_dependency, locator_from_key,
     require_active_replay_evidence, require_head_replay, require_projection_binding,
     retain_lease_closure, validate_exact_dependency_closure, validate_replay_cursor,
 };
@@ -165,13 +165,13 @@ impl GraphDbRegistry {
         require_projection_binding(&registration, projection)?;
         let head = authority
             .verified_head(projection, context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
             .ok_or_else(|| {
                 GraphDbError::unavailable("graph projection has no relational verified head")
             })?;
         let replay = authority
             .replay(&head.key, context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         let replay = require_active_replay_evidence(
             replay,
             "verified graph head has no durable active replay",
@@ -243,12 +243,12 @@ impl GraphDbRegistry {
         database.reap_idle_sealed_generation_engines(None);
         let relational_head = authority
             .verified_head(projection, context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         let (key, direct_dependencies, canonical_replay_source, relational_recovered_digest) =
             if let Some(head) = &relational_head {
                 let replay = authority
                     .replay(&head.key, context)
-                    .map_err(map_publication_error)?;
+                    .map_err(GraphDbError::from)?;
                 let replay = require_active_replay_evidence(
                     replay,
                     "verified graph head has no durable active replay",
@@ -264,7 +264,7 @@ impl GraphDbRegistry {
                 if !is_shipped_legacy_code_graph_projection(projection)
                     || authority
                         .pending_replay(projection, context)
-                        .map_err(map_publication_error)?
+                        .map_err(GraphDbError::from)?
                         .is_some()
                 {
                     return Ok(SealedStagingRelease::Retained(
@@ -288,7 +288,7 @@ impl GraphDbRegistry {
                     .map_err(|error| GraphDbError::invalid(error.to_string()))?;
                     let page = authority
                         .retired_cleanup_page(&request, context)
-                        .map_err(map_publication_error)?;
+                        .map_err(GraphDbError::from)?;
                     for tombstone in page.records {
                         if tombstone.key.projection != *projection {
                             return Err(GraphDbError::Corrupt {
@@ -431,7 +431,7 @@ impl GraphDbRegistry {
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
             let page = authority
                 .projection_page(&request, context)
-                .map_err(map_publication_error)?;
+                .map_err(GraphDbError::from)?;
             for projection in &page.projections {
                 require_projection_binding(&registration, projection)?;
             }
@@ -458,13 +458,13 @@ impl GraphDbRegistry {
         for projection in projections {
             if let Some(head) = authority
                 .verified_head(&projection, context)
-                .map_err(map_publication_error)?
+                .map_err(GraphDbError::from)?
             {
                 heads.insert(locator_from_key(&head.key)?, head);
             }
             if let Some(pending) = authority
                 .pending_replay(&projection, context)
-                .map_err(map_publication_error)?
+                .map_err(GraphDbError::from)?
             {
                 retained.insert(locator_from_key(&pending.publication.key)?);
             }
@@ -478,7 +478,7 @@ impl GraphDbRegistry {
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
                 let page = authority
                     .replay_page(&request, context)
-                    .map_err(map_publication_error)?;
+                    .map_err(GraphDbError::from)?;
                 for replay in page.records {
                     if replay.publication.key.projection != projection {
                         return Err(GraphDbError::Corrupt {
@@ -525,7 +525,7 @@ impl GraphDbRegistry {
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
                 let page = authority
                     .retired_cleanup_page(&request, context)
-                    .map_err(map_publication_error)?;
+                    .map_err(GraphDbError::from)?;
                 for tombstone in page.records {
                     if tombstone.key.projection != projection {
                         return Err(GraphDbError::Corrupt {
@@ -679,7 +679,7 @@ impl GraphDbRegistry {
             Ok(outcome) => outcome,
             Err(error) => {
                 clear_retiring_fence(&database, &locator)?;
-                return Err(map_publication_error(error));
+                return Err(GraphDbError::from(error));
             }
         };
         match retirement_outcome {
@@ -811,7 +811,7 @@ impl GraphDbRegistry {
             Ok(outcome) => outcome,
             Err(error) => {
                 clear_retiring_fence(&database, &locator)?;
-                return Err(map_publication_error(error));
+                return Err(GraphDbError::from(error));
             }
         };
         if matches!(outcome, GraphPendingReplayDiscardOutcomeV1::Discarded(_)) {
@@ -860,7 +860,7 @@ impl GraphDbRegistry {
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
             let page = authority
                 .projection_page(&request, context)
-                .map_err(map_publication_error)?;
+                .map_err(GraphDbError::from)?;
             for projection in page.projections {
                 require_projection_binding(&registration, &projection)?;
                 let mut cleanup_after = None;
@@ -873,7 +873,7 @@ impl GraphDbRegistry {
                     .map_err(|error| GraphDbError::invalid(error.to_string()))?;
                     let cleanup = authority
                         .retired_cleanup_page(&request, context)
-                        .map_err(map_publication_error)?;
+                        .map_err(GraphDbError::from)?;
                     for tombstone in cleanup.records {
                         if tombstone.key.projection != projection {
                             return Err(GraphDbError::Corrupt {
@@ -908,7 +908,7 @@ impl GraphDbRegistry {
                             }
                             return match authority
                                 .finalize_retired_replay_cleanup(&tombstone.retirement(), context)
-                                .map_err(map_publication_error)?
+                                .map_err(GraphDbError::from)?
                             {
                                 GraphRetiredReplayCleanupFinalizeOutcomeV1::Finalized(_)
                                 | GraphRetiredReplayCleanupFinalizeOutcomeV1::ExactReplay(_) => {
@@ -1144,7 +1144,7 @@ impl GraphDbRegistry {
         let check = || operation.check(self, context);
         let replay = authority
             .replay(publication_key, context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         let replay = match replay {
             GraphPublicationReplayLookupV1::Active(replay) => replay,
             GraphPublicationReplayLookupV1::Retired(tombstone) => {
@@ -1199,7 +1199,7 @@ impl GraphDbRegistry {
         });
         let current = authority
             .verified_head(&publication_key.projection, context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         if current != replay.publication.expected_prior_head {
             let historical_head = GraphVerifiedHeadV1::from_replay(
                 &replay,
@@ -1314,7 +1314,7 @@ impl GraphDbRegistry {
                         })?;
                         let observed = authority
                             .verified_head(&historical_head.key.projection, context)
-                            .map_err(map_publication_error)?;
+                            .map_err(GraphDbError::from)?;
                         if observed.as_ref() != Some(&historical_head) {
                             return Err(GraphDbError::conflict_observed(
                                 "publication.repair.adopted_head",
@@ -1324,7 +1324,7 @@ impl GraphDbRegistry {
                         }
                         let replay = authority
                             .replay(&historical_head.key, context)
-                            .map_err(map_publication_error)?;
+                            .map_err(GraphDbError::from)?;
                         let replay = require_active_replay_evidence(
                             replay,
                             "adopted graph head has no durable active replay",
@@ -1661,7 +1661,7 @@ impl GraphDbRegistry {
         };
         let head = match authority
             .compare_and_swap_verified_head(&cas, context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
         {
             GraphVerifiedHeadCasOutcomeV1::Advanced(head)
             | GraphVerifiedHeadCasOutcomeV1::ExactReplay(head) => head,
@@ -1814,7 +1814,7 @@ impl GraphDbRegistry {
         database.record_memory_checkpoint(crate::hotpath_observe::GrafeoMemoryPhase::RecoveryStart);
         let head = authority
             .verified_head(projection, context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
             .ok_or_else(|| {
                 GraphDbError::unavailable("graph projection has no relational verified head")
             })?;
@@ -1850,9 +1850,7 @@ impl GraphDbRegistry {
         operation.check(self, context)?;
         operation.require_publication_binding(key)?;
         let database = operation.database().clone();
-        let replay = authority
-            .replay(key, context)
-            .map_err(map_publication_error)?;
+        let replay = authority.replay(key, context).map_err(GraphDbError::from)?;
         let replay = match replay {
             GraphPublicationReplayLookupV1::Active(replay) => replay,
             GraphPublicationReplayLookupV1::Retired(_) => {
@@ -1869,7 +1867,7 @@ impl GraphDbRegistry {
         };
         let current = authority
             .verified_head(&key.projection, context)
-            .map_err(map_publication_error)?
+            .map_err(GraphDbError::from)?
             .ok_or_else(|| {
                 GraphDbError::unavailable("graph projection has no relational verified head")
             })?;
@@ -1930,7 +1928,7 @@ impl GraphDbRegistry {
             let key = dependency_key_for_binding(operation.binding(), dependency)?;
             let replay = authority
                 .replay(&key, context)
-                .map_err(map_publication_error)?;
+                .map_err(GraphDbError::from)?;
             let replay = require_active_replay_evidence(
                 replay,
                 &format!(
@@ -1942,7 +1940,7 @@ impl GraphDbRegistry {
             )?;
             let relational_head = authority
                 .verified_head(&key.projection, context)
-                .map_err(map_publication_error)?
+                .map_err(GraphDbError::from)?
                 .ok_or_else(|| {
                     tracing::warn!(
                         event = "graph_dependency_head_missing",
@@ -2025,7 +2023,7 @@ impl GraphDbRegistry {
         }
         let replay = authority
             .replay(&head.key, context)
-            .map_err(map_publication_error)?;
+            .map_err(GraphDbError::from)?;
         let replay = require_active_replay_evidence(
             replay,
             "verified graph head has no durable active replay",

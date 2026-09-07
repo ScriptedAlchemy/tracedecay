@@ -14,6 +14,7 @@ use tracedecay_store_runtime::{
 use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
+use crate::daemon::maintenance::StoreTelemetrySamplingRegistry;
 use crate::daemon::store_writer_gate::WriterAdmissionGuard;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
@@ -36,7 +37,7 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     >,
     native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
-    store_telemetry_sampling: super::super::maintenance::StoreTelemetrySamplingRegistry,
+    store_telemetry_sampling: StoreTelemetrySamplingRegistry,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,
     #[cfg(unix)]

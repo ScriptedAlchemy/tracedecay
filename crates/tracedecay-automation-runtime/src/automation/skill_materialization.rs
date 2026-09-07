@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex};
 
+use super::artifact_refs::sha256_bytes;
 use super::config_error;
 use super::host_io::{HostIo, home_dir, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
@@ -374,7 +375,7 @@ fn recompute_on_disk_package(
     let mut hasher = Sha256::new();
     hasher.update(reconstructed.as_bytes());
     let mut files = BTreeMap::new();
-    files.insert(SKILL_FILE.to_string(), hash_bytes(&skill_bytes));
+    files.insert(SKILL_FILE.to_string(), sha256_bytes(&skill_bytes));
     for (relative, bytes) in &supports {
         // Hash the slash-normalized key, not Path display form. On Windows,
         // `strip_prefix` relatives stringify with `\`, while authoring hashes
@@ -385,7 +386,7 @@ fn recompute_on_disk_package(
         hasher.update(key.as_bytes());
         hasher.update(b"\0");
         hasher.update(bytes);
-        files.insert(key, hash_bytes(bytes));
+        files.insert(key, sha256_bytes(bytes));
     }
     let recomputed = encode_tagged_lowercase_hex("sha256:", &hasher.finalize());
     if recomputed != recorded {
@@ -419,10 +420,6 @@ fn on_disk_body_markdown(contents: &str) -> Option<String> {
     let region = region.strip_prefix('\n').unwrap_or(region);
     let region = region.strip_suffix('\n').unwrap_or(region);
     Some(region.to_string())
-}
-
-fn hash_body(body: &str) -> String {
-    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(body.as_bytes()))
 }
 
 const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
@@ -478,7 +475,7 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
         ),
         None => (None, None, None),
     };
-    let body_hash = on_disk_body_markdown(&contents).map(|body| hash_body(&body));
+    let body_hash = on_disk_body_markdown(&contents).map(|body| sha256_bytes(body.as_bytes()));
     Ok(Some(FileProvenance {
         managed_by,
         skill_id,
@@ -625,10 +622,6 @@ fn read_materialization_manifest(dir: &Path, skill_id: &str) -> Result<ManifestS
     Ok(ManifestState::Owned(manifest))
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
-    super::artifact_refs::sha256_bytes(bytes)
-}
-
 fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -638,7 +631,7 @@ fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
     if !metadata.file_type().is_file() {
         return Ok(None);
     }
-    Ok(Some(hash_bytes(&fs::read(path)?)))
+    Ok(Some(sha256_bytes(&fs::read(path)?)))
 }
 
 fn artifact_state(dir: &Path, relative: &str, expected_hash: &str) -> Result<ArtifactState> {
@@ -688,7 +681,7 @@ fn write_artifact_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let staging = PathBuf::from(format!("{}.new", path.display()));
     ensure_not_symlink(&staging)?;
     if path_exists_without_following_links(&staging)? {
-        if current_artifact_hash(&staging)?.as_deref() != Some(hash_bytes(bytes).as_str()) {
+        if current_artifact_hash(&staging)?.as_deref() != Some(sha256_bytes(bytes).as_str()) {
             return Err(config_error(format!(
                 "refusing to overwrite foreign materialization staging file '{}'",
                 staging.display()
@@ -722,7 +715,7 @@ fn build_materialization_manifest(
         materialized_by: Some(installation_id.to_string()),
         files: artifacts
             .iter()
-            .map(|(relative, bytes)| (relative.clone(), hash_bytes(bytes)))
+            .map(|(relative, bytes)| (relative.clone(), sha256_bytes(bytes)))
             .collect(),
     }
 }
@@ -766,7 +759,7 @@ fn decode_pending_artifacts(pending: &PendingMaterialization) -> Result<BTreeMap
                 "invalid pending materialization artifact '{relative}': {err}"
             ))
         })?;
-        if pending.next_manifest.files.get(relative) != Some(&hash_bytes(&bytes)) {
+        if pending.next_manifest.files.get(relative) != Some(&sha256_bytes(&bytes)) {
             return Err(config_error(format!(
                 "pending materialization hash mismatch for '{relative}'"
             )));
@@ -1036,7 +1029,7 @@ fn legacy_support_files_are_forked(
         if !path_exists_without_following_links(&path)? {
             continue;
         }
-        let desired_hash = hash_bytes(desired);
+        let desired_hash = sha256_bytes(desired);
         if current_artifact_hash(&path)?.as_deref() != Some(desired_hash.as_str()) {
             return Ok(true);
         }

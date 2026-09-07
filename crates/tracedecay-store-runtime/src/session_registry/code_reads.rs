@@ -62,7 +62,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     }
                     true
                 }
-                Some(super::ProjectRuntimeOwnerStateV1::Opening) => {
+                Some(super::ProjectRuntimeOwnerStateV1::Opening(_)) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(TraceDecayError::project_route(
@@ -72,9 +72,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ));
                 }
                 Some(
-                    super::ProjectRuntimeOwnerStateV1::Retiring
-                    | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | super::ProjectRuntimeOwnerStateV1::Recovering
+                    super::ProjectRuntimeOwnerStateV1::Retiring(_)
+                    | super::ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                    | super::ProjectRuntimeOwnerStateV1::Recovering(_)
                     | super::ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | super::ProjectRuntimeOwnerStateV1::Faulted(_),
                 ) => {

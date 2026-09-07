@@ -436,6 +436,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_source_witness,
             text_generation,
             serving_generation_epoch,
+            serving_generation_changed,
             graph_activation,
             publication_gate,
             build_publication_lock,
@@ -459,6 +460,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_source_witness),
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.serving_generation_epoch),
+                worktree.serving_generation_changed.clone(),
                 worktree.graph_activation.clone(),
                 Arc::clone(&worktree.semantic_evaluation_publication_gate),
                 Arc::clone(&worktree.build_publication_lock),
@@ -591,19 +593,17 @@ impl CodeIndexSchedulerRegistryV1 {
             let mut serving = swap_serving_generation
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut witness = swap_serving_source_witness.write().map_err(|_| {
+                CodeIndexSchedulerErrorV1::Identity(
+                    "ignored-dependency serving witness lock is poisoned".to_owned(),
+                )
+            })?;
             *serving = Some(candidate.clone());
             swap_serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
-            drop(serving);
-            // This candidate was extracted from the live checkout by this very
-            // pass and is now the active durable publication, so it carries the
-            // same freshness proof a published background pass mints. Without
-            // it the seat is unproven, and the verified read that follows
-            // admission - the caller's whole reason for admitting - abstained
-            // on its own newly seated generation.
-            *swap_serving_source_witness
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = scheduler
+            *witness = scheduler
                 .source_currency_witness_for(&candidate.generation().manifest().generation_id);
+            drop(witness);
+            drop(serving);
             let _ = scheduler.schedule_semantic_generation(candidate.generation_handle());
             Ok::<_, CodeIndexSchedulerErrorV1>(())
         })
@@ -618,7 +618,10 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         };
         match swap {
-            Ok(()) => Self::record_serving_seat(&self.serving_seats),
+            Ok(()) => {
+                Self::record_serving_seat(&self.serving_seats);
+                serving_generation_changed.send_replace(());
+            }
             Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
                 CodeIndexIgnoredDependencyRefusalV1::StaleGeneration,
             )) => {

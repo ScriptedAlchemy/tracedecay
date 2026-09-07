@@ -58,20 +58,9 @@ async fn release_one_idle_project_server_before_open(
     capacity_admission: tokio::sync::OwnedMutexGuard<()>,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
     let runtime_registry = store_administration.session_runtime_registry().await?;
-    // Two independent bounds share this one release path.
-    //
-    // Graph admission is the original one. The second is the project-server
-    // cache: the code-index scheduler registry is sized to
-    // `MAX_CACHED_PROJECT_SERVERS`, and the bounded route-cache eviction
-    // inside `bind_or_insert_route_bounded` retires only the evicted MCP
-    // server -- it never releases that project's invocation runtime owners, so
-    // the evicted project's code-index worktree holds its scheduler slot for
-    // the life of the daemon. Past `MAX_CACHED_PROJECT_SERVERS` distinct
-    // projects every further project then failed its mount with "code-index
-    // scheduler capacity is exhausted" and served, silently, with no code
-    // indexing at all. Release a whole idle owner here instead: this is the
-    // only path that drains the code-index workers along with the server it
-    // retires.
+    // The route cache and invocation schedulers have independent bounds. Retire
+    // the whole idle owner before either fills: evicting only its MCP server
+    // leaves the code-index worker holding its scheduler slot.
     let project_server_cache_saturated = store_administration
         .project_servers()
         .lock()
@@ -406,14 +395,30 @@ async fn production_project_server_inner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("authoritative runtime configuration unavailable: {error}"),
         })?;
+    let semantic_project_id =
+        tracedecay_domain::ProjectId::new(key.owner.project_id.clone().ok_or_else(|| {
+            TraceDecayError::Config {
+                message: "semantic selection requires authoritative project identity".to_owned(),
+            }
+        })?)
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
     let SemanticProjectRuntime {
         handle: semantic_runtime,
         lifecycle: semantic_lifecycle,
         resources: semantic_resources,
         document_composition: semantic_document_composition,
         auto_download_enabled: semantic_auto_download_enabled,
-        startup_selection: semantic_startup_selection,
-    } = semantic_project_runtime(&runtime_configuration, &runtime)?;
+    } = semantic_project_runtime(
+        &runtime_configuration,
+        &runtime,
+        store_administration
+            .session_runtime_registry()
+            .await?
+            .project_semantic_lifecycle(&semantic_project_id)
+            .await?,
+    )?;
     let project_database_is_read_only = !cg.db().is_writable();
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
@@ -785,33 +790,29 @@ async fn production_project_server_inner(
                 ),
             ],
         );
-        let semantic_startup_project = canonical_project_path.to_path_buf();
-        let semantic_startup_schedulers = invocation.code_index_schedulers.clone();
-        tokio::spawn(async move {
-            let started = Instant::now();
-            let selected = tokio::task::spawn_blocking(move || {
-                tracedecay_semantic::apply_default_config_selection(
-                    semantic_startup_selection.as_deref(),
-                    semantic_auto_download_enabled,
-                )
-            })
-            .await
-            .ok()
-            .flatten();
-            if selected.is_some() {
-                let _ = semantic_startup_schedulers
-                    .reschedule_semantic_generation(&semantic_startup_project)
-                    .await;
+        if !retain_project_semantic_startup(
+            graph_runtime.as_ref(),
+            canonical_project_path.to_path_buf(),
+            invocation.code_index_schedulers.clone(),
+            Arc::clone(cg.configuration_runtime()),
+            semantic_lifecycle,
+            runtime.semantic_auto_download(),
+        ) {
+            if let Some(mutation) = &core_source_edit_mutation {
+                mutation.mark_failed();
             }
-            log_daemon_event(
-                "project_open_phase",
-                &[
-                    ("project", semantic_startup_project.display().to_string()),
-                    ("phase", "semantic_config_selected".to_owned()),
-                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                ],
-            );
-        });
+            retire_failed_project_open_owner(
+                store_administration,
+                &key,
+                &resolved,
+                false,
+                &route_registered,
+            )
+            .await;
+            return Err(TraceDecayError::Config {
+                message: "semantic startup task owner is not accepting work".to_owned(),
+            });
+        }
         let session_capabilities_published = AtomicBool::new(false);
         let mut published_full_candidate = None;
         let full_upgrade: Result<Arc<crate::mcp::McpServer>> = Box::pin(async {
@@ -1402,6 +1403,86 @@ fn cached_project_composition(
     }
 }
 
+/// The existing retained-task owner drains startup selection before semantic
+/// lifecycle shutdown. A blocking selection is always joined, even after its
+/// async task receives cancellation.
+pub(super) fn retain_project_semantic_startup(
+    registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+    semantic_startup_project: PathBuf,
+    semantic_startup_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
+    semantic_lifecycle: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
+    semantic_download_allowed: bool,
+) -> bool {
+    let semantic_configuration_client = configuration.client();
+    let task_key = tracedecay_domain::canonical_text::encode_lowercase_hex(
+        semantic_startup_project.as_os_str().as_encoded_bytes(),
+    );
+    registry.retain_hook_task("semantic-config-selection", &task_key, move |cancellation| async move {
+            let started = Instant::now();
+            let selected: Result<()> = async {
+                let owner = semantic_lifecycle.ok_or_else(|| TraceDecayError::Config {
+                    message: "project semantic lifecycle owner is unavailable".to_owned(),
+                })?;
+                // Linked worktrees read and apply the same logical project's
+                // configuration under its one selection gate. A delayed open
+                // cannot replay a snapshot captured before another open.
+                if cancellation.is_cancelled() {
+                    return Err(project_open_cancellation_error());
+                }
+                let selection = owner.configuration_selection_guard().await;
+                if cancellation.is_cancelled() {
+                    return Err(project_open_cancellation_error());
+                }
+                let current = semantic_configuration_client
+                    .current()
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("semantic startup configuration unavailable: {error}"),
+                    })?;
+                if cancellation.is_cancelled() {
+                    return Err(project_open_cancellation_error());
+                }
+                let owner = Arc::clone(&owner);
+                tokio::task::spawn_blocking(move || {
+                    let _selection = selection;
+                    owner.select_model(
+                        current.config().semantic.selected_model.as_deref(),
+                        current.config().semantic.auto_download && semantic_download_allowed,
+                    )
+                })
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("semantic startup worker failed: {error}"),
+                })?
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("semantic startup selection failed: {error:?}"),
+                })?;
+                Ok(())
+            }
+            .await;
+            match selected {
+                Ok(()) if !cancellation.is_cancelled() => {
+                    let _ = semantic_startup_schedulers
+                        .reschedule_semantic_generation(&semantic_startup_project)
+                        .await;
+                }
+                Ok(()) => {}
+                Err(error) => {
+                    tracing::warn!(%error, project = %semantic_startup_project.display(), "semantic startup selection unavailable")
+                }
+            }
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", semantic_startup_project.display().to_string()),
+                    ("phase", "semantic_config_selection_settled".to_owned()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+    })
+}
+
 /// Semantic-code choices this route resolves once from its authoritative
 /// runtime configuration.
 struct SemanticProjectRuntime {
@@ -1410,7 +1491,6 @@ struct SemanticProjectRuntime {
     resources: SemanticResourceCeilings,
     document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1,
     auto_download_enabled: bool,
-    startup_selection: Option<String>,
 }
 
 /// Derive this route's semantic runtime handle and startup choices. The
@@ -1419,6 +1499,7 @@ struct SemanticProjectRuntime {
 fn semantic_project_runtime(
     runtime_configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     runtime: &ProductionProjectCompositionRuntime,
+    lifecycle: Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>,
 ) -> Result<SemanticProjectRuntime> {
     let semantic_config = &runtime_configuration.config().semantic;
     let semantic_resources = &semantic_config.resources;
@@ -1440,11 +1521,10 @@ fn semantic_project_runtime(
     })?;
     Ok(SemanticProjectRuntime {
         handle,
-        lifecycle: tracedecay_semantic::default_shared_lifecycle_owner(),
+        lifecycle: Some(lifecycle),
         resources: *semantic_resources,
         document_composition: semantic_config.document_composition,
         auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
-        startup_selection: semantic_config.selected_model.clone(),
     })
 }
 

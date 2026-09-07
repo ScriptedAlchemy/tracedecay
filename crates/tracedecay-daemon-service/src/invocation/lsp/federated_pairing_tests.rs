@@ -20,9 +20,10 @@ use std::path::PathBuf;
 
 use tracedecay_application::{
     CapabilityGrantId, DisclosureClass, RegisteredRootLocatorV1, ResolvedScope,
+    SharedProfileStoreLocatorV1,
 };
 use tracedecay_domain::{
-    ProjectId, RefId, RepositoryId, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
+    BrainId, ProjectId, RefId, RepositoryId, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -105,8 +106,12 @@ async fn install_root(
     // a per-project store id here would fail the scope set closed.
     let locator = RegisteredRootLocatorV1::new(
         scope.project_id.clone(),
-        UserProfileId::new(PROFILE).expect("profile id"),
-        SHARED_STORE.to_owned(),
+        SharedProfileStoreLocatorV1::new(
+            BrainId::new("brain.fixture").unwrap(),
+            UserProfileId::new(PROFILE).expect("profile id"),
+            SHARED_STORE.to_owned(),
+        )
+        .unwrap(),
         project_root.clone(),
     )
     .expect("registered root locator");

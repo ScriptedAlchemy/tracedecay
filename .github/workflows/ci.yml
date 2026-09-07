@@ -158,7 +158,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: scripts/lint-commit-range.sh "$BASE_SHA" "$HEAD_SHA"
+        run: node scripts/lint-commit-range.mjs --repository "$PWD" "$BASE_SHA" "$HEAD_SHA"
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
@@ -177,7 +177,7 @@ jobs:
           else
             base_sha="$BEFORE_SHA"
           fi
-          scripts/lint-commit-range.sh "$base_sha" "$HEAD_SHA"
+          node scripts/lint-commit-range.mjs --repository "$PWD" "$base_sha" "$HEAD_SHA"
 
   release-version-drift:
     name: Release Version Drift
@@ -470,15 +470,9 @@ jobs:
         shell: pwsh
         run: cargo test --no-run --workspace --locked --profile perf --features tracedecay/test-helpers --test search_quality_suite
 
-      # `runtime_acceptance_suite::search_eval_cli_test` and
-      # `product_surface_suite::packaged_semantic_evaluator` execute the
-      # ordinary `tracedecay-search-eval` binaries out of the profile directory,
-      # and `cargo nextest archive` never links them (the package has no test
-      # target). Build them with the archive's exact package, feature and
-      # cargo-profile selection so Cargo reuses the artifacts and the
-      # evaluator keeps the default language tiers; `archive.include` in
-      # `.config/nextest.toml` then carries them (from `target/perf`) to
-      # every shard.
+      # Acceptance tests execute the ordinary evaluator binaries. Match the
+      # archive's features and perf profile to reuse dependency artifacts;
+      # nextest's archive.include carries the executables to every shard.
       - name: Build workspace binaries for the Windows test lane
         shell: pwsh
         run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers

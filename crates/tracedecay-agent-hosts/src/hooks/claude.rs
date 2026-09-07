@@ -3,6 +3,7 @@
 //! Claude and Codex share the common hook JSON shape.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -87,15 +88,15 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 /// Claude Code `SessionStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.session_start")]
 pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
-    let (root, output) = claude_session_start_response(runtime, &event).await;
+    let (root, output) = claude_session_start_response(runtime, &event, started).await;
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &output,
-        None,
+        started,
     )
     .await
     {
@@ -109,6 +110,7 @@ pub async fn hook_claude_session_start(runtime: &HookRuntimeV1) -> i32 {
 async fn claude_session_start_response(
     runtime: &HookRuntimeV1,
     event: &str,
+    started: Instant,
 ) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     // Resolve the project root the same identity-aware way the printed context
@@ -128,6 +130,7 @@ async fn claude_session_start_response(
         event,
         root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
@@ -147,6 +150,7 @@ async fn claude_session_start_response(
 /// transcript or summary state.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.post_compact")]
 pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -165,12 +169,11 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
         tracing::warn!(%error, "Claude PostCompact daemon call failed");
     }
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
+        started,
     )
     .await
     {
@@ -182,16 +185,16 @@ pub async fn hook_claude_post_compact(runtime: &HookRuntimeV1) -> i32 {
 /// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.post_tool_use")]
 pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
-    let (root, response) = claude_post_tool_use_response(runtime, &event).await;
+    let (root, response) = claude_post_tool_use_response(runtime, &event, started).await;
     if let Some(response) = response
         && !super::write_hook_output(
-            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
             &response,
-            None,
+            started,
         )
         .await
     {
@@ -205,6 +208,7 @@ pub async fn hook_claude_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
 async fn claude_post_tool_use_response(
     runtime: &HookRuntimeV1,
     event: &str,
+    started: Instant,
 ) -> (Option<PathBuf>, Option<String>) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let hook_event_name = if is_post_tool_use_failure_event(&parsed) {
@@ -227,6 +231,7 @@ async fn claude_post_tool_use_response(
         event,
         root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
@@ -238,6 +243,7 @@ async fn claude_post_tool_use_response(
 /// `Stop` hook handler: submits the native turn boundary to the daemon.
 #[hotpath::measure(future = true, label = "hosts.hooks.claude.stop")]
 pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
         Ok(super::HookStdinRead::Oversized) => {
@@ -249,14 +255,13 @@ pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
         }
         Err(_) => String::new(),
     };
-    let (root, output) = claude_stop_response_for_event(runtime, &event).await;
+    let (root, output) = claude_stop_response_for_event(runtime, &event, started).await;
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::ClaudeCode,
         &event,
         &output,
-        None,
+        started,
     )
     .await
     {
@@ -270,6 +275,7 @@ pub async fn hook_stop(runtime: &HookRuntimeV1) -> i32 {
 async fn claude_stop_response_for_event(
     runtime: &HookRuntimeV1,
     event: &str,
+    started: Instant,
 ) -> (Option<PathBuf>, String) {
     let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -287,6 +293,7 @@ async fn claude_stop_response_for_event(
         event,
         root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)

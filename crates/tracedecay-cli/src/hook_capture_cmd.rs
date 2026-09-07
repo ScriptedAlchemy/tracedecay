@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{HookHostV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1};
@@ -228,6 +228,11 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
 }
 
 pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
+    let Some(deadline) = Instant::now().checked_add(Duration::from_micros(
+        tracedecay_hooks::HookSynchronousDeadlineV1::start().remaining_micros(),
+    )) else {
+        return 1;
+    };
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,
         Err(()) => {
@@ -266,13 +271,15 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
                                     &payload,
                                     material,
                                     now,
+                                    deadline,
                                 );
                                 if outcome == NativeHookCaptureOutcomeV1::Captured {
-                                    match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+                                    match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_until(
                                         tracedecay_hooks::hook_delivery_receipt_spool_root(
                                             &layout.data_root,
                                             source.host(),
                                         ),
+                                        deadline,
                                     ) {
                                         Ok(writer) => delivery_writer = Some(writer),
                                         Err(error) => delivery_open_error = Some(error),
@@ -310,27 +317,27 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     if outcome == NativeHookCaptureOutcomeV1::Captured {
         let Some(writer) = delivery_writer else {
             if let Some(error) = delivery_open_error {
-                eprintln!("tracedecay hook: delivery receipt spool unavailable: {error}");
+                tracing::warn!(%error, "native delivery receipt spool unavailable");
             } else {
-                eprintln!("tracedecay hook: delivery receipt writer unavailable");
+                tracing::warn!("native delivery receipt writer unavailable");
             }
             return 1;
         };
         let (Some(material), Some(delivered_at)) = (delivery_material, current_time()) else {
-            eprintln!("tracedecay hook: delivery receipt material unavailable");
+            tracing::warn!("native delivery receipt material unavailable");
             return 1;
         };
         let Some(settlement) = native_hook_delivery_settlement(source, material, delivered_at)
         else {
-            eprintln!("tracedecay hook: delivery settlement identity could not be derived");
+            tracing::warn!("native delivery settlement identity could not be derived");
             return 1;
         };
         let Ok(receipt) = tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) else {
-            eprintln!("tracedecay hook: delivery receipt is invalid");
+            tracing::warn!("native delivery receipt is invalid");
             return 1;
         };
         if let Err(error) = writer.append(&receipt) {
-            eprintln!("tracedecay hook: delivery receipt could not be retained: {error}");
+            tracing::warn!(%error, "native delivery receipt could not be retained");
             return 1;
         }
     }
@@ -344,7 +351,8 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         NativeHookCaptureOutcomeV1::Rejected
         | NativeHookCaptureOutcomeV1::Full
         | NativeHookCaptureOutcomeV1::ResetRequired
-        | NativeHookCaptureOutcomeV1::Unavailable => {
+        | NativeHookCaptureOutcomeV1::Unavailable
+        | NativeHookCaptureOutcomeV1::AdmissionTimedOut => {
             tracing::warn!(?outcome, "native capture did not land");
             1
         }

@@ -132,6 +132,20 @@ impl GraphVectorGenerationStoreStateV1 {
 }
 
 impl GraphVectorGenerationStoreV1 {
+    pub async fn project_stage_census(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<tracedecay_store::SemanticVectorStageCensusPage, VectorGenerationStoreErrorV1> {
+        let authority = operation_authority(cancellation);
+        self.dispatch(move |state| {
+            state
+                .runtime
+                .project_stage_census(&authority)
+                .map_err(map_graph_error)
+        })
+        .await
+    }
+
     #[hotpath::measure(label = "usecases.store.reserve_generation", future = true)]
     pub async fn reserve_one_generation(
         &self,

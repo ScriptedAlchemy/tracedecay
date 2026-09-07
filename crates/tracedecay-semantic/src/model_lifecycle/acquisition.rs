@@ -13,6 +13,7 @@ fn run_acquisition(
     epoch: &AcquisitionEpochV1,
     inner: &LifecyclePublicationGateV1,
     verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
+    shared_store: Option<(&ModelArtifactStore, &str, &str)>,
 ) -> Result<(), ModelLifecycleErrorV1> {
     let result = run_acquisition_inner(
         root,
@@ -22,6 +23,7 @@ fn run_acquisition(
         epoch,
         inner,
         verified_ready,
+        shared_store,
     );
     match &result {
         Ok(()) => crate::hotpath_observe::record_model_state("installed"),
@@ -47,6 +49,9 @@ fn run_acquisition(
                     | ModelLifecycleErrorV1::DownloadFailed
                     | ModelLifecycleErrorV1::DownloadFailedWithReason(_)
                     | ModelLifecycleErrorV1::InstallFailed
+                    | ModelLifecycleErrorV1::ArtifactImport(
+                        ArtifactImportErrorV1::StagingUnavailable
+                    )
             );
             let _ = epoch.while_current(|| {
                 set_failed_state(
@@ -70,6 +75,7 @@ fn run_acquisition_inner(
     epoch: &AcquisitionEpochV1,
     inner: &LifecyclePublicationGateV1,
     verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
+    shared_store: Option<(&ModelArtifactStore, &str, &str)>,
 ) -> Result<(), ModelLifecycleErrorV1> {
     let model = catalog
         .get(model_id)
@@ -188,6 +194,47 @@ fn run_acquisition_inner(
     if epoch.ensure_active().is_err() {
         cleanup_cancelled_path(root, &staging, epoch)?;
         return Err(ModelLifecycleErrorV1::Cancelled);
+    }
+    if let Some((store, active_lease, rollback_lease)) = shared_store {
+        let resources = SemanticResourceCeilings {
+            max_sequence_length: model.max_length,
+            ..SemanticResourceCeilings::default()
+        };
+        let manifest = catalog_artifact_manifest(&model, resources)?;
+        let now_unix = current_unix_seconds()?;
+        let record = store.import_local_directory(&manifest, &staging, now_unix)?;
+        // Imported bytes belong to inventory even when cancellation races the
+        // import. Only owner-private staging may be removed by this worker.
+        fs::remove_dir_all(&staging).map_err(|_| ModelLifecycleErrorV1::InstallFailed)?;
+        return epoch.while_active(|| {
+            let mut guard = inner.writer();
+            let prior = guard.durable.clone();
+            store.activate_artifact_with_rollback(
+                &record.artifact_digest,
+                active_lease,
+                rollback_lease,
+                now_unix,
+            )?;
+            guard.durable.state = Some(SemanticModelLifecycleStateV1::Installed {
+                model_id: model.model_id.clone(),
+                revision: model.source.revision.clone(),
+                artifact_digest: record.artifact_digest.to_string(),
+                install_path: store.installed_directory(&record.artifact_digest),
+            });
+            if let Err(error) = persist_durable(root, &guard.durable) {
+                guard.durable = prior;
+                reconcile_embedding_artifact_leases(
+                    store,
+                    active_lease,
+                    rollback_lease,
+                    &guard.durable,
+                    now_unix,
+                )?;
+                return Err(error);
+            }
+            publish_verified_ready_event(verified_ready, &guard);
+            Ok(())
+        });
     }
     let install_path = install_path_for(root, &model.model_id, &model.source.revision, &digest);
     // Install-publication disk phase: prior-install removal, atomic rename,

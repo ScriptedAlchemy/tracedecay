@@ -279,9 +279,8 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     .await
     .expect("production harness authority");
     let first_root = projects[0].canonicalize().expect("canonical first project");
-    // The harness retains one convenience handle for every setup project. A
-    // sequential CLI connection releases that handle after its response, so
-    // remove only this fixture-owned initial client before the real journey.
+    // Keep the oldest owner leased while sequential clients exceed capacity.
+    // Retirement must choose another idle owner, preserving this live client.
     let initial_client = harness
         .resources
         .as_mut()
@@ -289,7 +288,6 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
         .servers
         .remove(&first_root)
         .expect("harness retains its initial client handle");
-    drop(initial_client);
 
     let mut replay_roots = Vec::new();
     let mut seeded_generations = Vec::new();
@@ -328,6 +326,10 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     };
     let initial_cached_owner_count = initial_cached_projects.len();
     assert!(
+        initial_cached_projects.contains(&first_root),
+        "the oldest owner's live client must survive capacity retirement"
+    );
+    assert!(
         (2..=MAX_CACHED_PROJECT_SERVERS).contains(&initial_cached_owner_count),
         "graph pressure must preserve a useful multi-project cache: {initial_cached_owner_count}"
     );
@@ -339,6 +341,22 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
             project.display()
         );
     }
+
+    let (still_live, latest) =
+        open_project(&harness, &projects[0], "retained-client", "project_0_probe")
+            .await
+            .expect("an active owner's cached route remains available under pressure");
+    assert!(Arc::ptr_eq(&initial_client, &still_live.server));
+    assert_eq!(
+        latest.metadata().manifest().generation_id,
+        seeded_generations[0],
+        "the retained client must still serve its original project's generation"
+    );
+    // Release the generation reader with this client before the revisit loop
+    // retires that owner.
+    drop(latest);
+    drop(still_live);
+    drop(initial_client);
 
     for (ordinal, project) in projects.iter().enumerate() {
         let probe = format!("project_{ordinal}_probe");
@@ -434,6 +452,34 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
         (1..=MAX_CACHED_PROJECT_SERVERS).contains(&cached_owner_count),
         "the production registry must remain non-empty and bounded"
     );
+
+    let leased_servers = {
+        let servers = harness
+            .resources
+            .as_ref()
+            .expect("production harness resources")
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        servers
+            .servers
+            .iter()
+            .map(|(key, entry)| (key.project_root.clone(), Arc::clone(&entry.server)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let uncached_project = projects
+        .iter()
+        .find(|project| !leased_servers.contains_key(&project.canonicalize().unwrap()))
+        .expect("the journey exceeds the route cache");
+    let refused = open_project_composition(&harness, uncached_project, "all-owners-leased").await;
+    assert!(
+        matches!(refused, Err(ref error)
+            if error.to_string() == project_server_capacity_error().to_string()),
+        "an open must fail with capacity denial while every retained owner is leased: {:?}",
+        refused.as_ref().err()
+    );
+    drop(leased_servers);
 
     harness.shutdown().await;
 }

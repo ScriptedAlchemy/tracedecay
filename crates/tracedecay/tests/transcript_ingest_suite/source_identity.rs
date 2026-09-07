@@ -5,9 +5,11 @@
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
+use tracedecay_domain::{
+    ClineTranscriptStream, ObservationSourceIdentityV1, ProviderId, SessionId,
+};
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::cline_like::{ClineLikeSource, ui_messages_source_key};
+use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
 use tracedecay_sessions::runtime::cursor::ingest_cursor_transcript_event;
 
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
@@ -84,8 +86,8 @@ async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources()
     let api_cursor = observation_source_cursor(&db, "cline", session_id, &project)
         .await
         .expect("API stream cursor");
-    let ui_key = ui_messages_source_key(session_id);
-    let ui_cursor = observation_source_cursor_for_key(&db, "cline", session_id, &ui_key)
+    let ui_key = "ui_messages";
+    let ui_cursor = observation_source_cursor_for_key(&db, "cline", session_id, ui_key)
         .await
         .expect("UI stream cursor");
     assert_ne!(
@@ -95,14 +97,12 @@ async fn cline_registered_ingest_keeps_api_and_ui_cursors_on_their_own_sources()
     );
     let provider = ProviderId::new("cline").unwrap();
     let session = SessionId::new(session_id).unwrap();
-    let expected_api =
-        ObservationSourceIdentityV1::for_provider(provider.clone(), session.clone()).unwrap();
-    let expected_ui = ObservationSourceIdentityV1::for_provider_source(
-        provider,
-        session,
-        SessionId::new(ui_key).unwrap(),
-    )
-    .unwrap();
+    let expected_api = ClineTranscriptStream::ApiHistory
+        .source_identity(provider.clone(), session.clone())
+        .unwrap();
+    let expected_ui = ClineTranscriptStream::UiMessages
+        .source_identity(provider, session)
+        .unwrap();
     assert_eq!(api_cursor.source(), &expected_api);
     assert_eq!(ui_cursor.source(), &expected_ui);
 }
