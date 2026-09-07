@@ -8,6 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use fs2::FileExt;
 use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
@@ -25,6 +28,12 @@ pub use connection::SnapshotConnection;
 pub use control::SnapshotReadControl;
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
+static NEXT_BACKUP_STAGING: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_BACKUP_PUBLISH: Cell<bool> = const { Cell::new(false) };
+}
 
 pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> io::Result<()> {
     let source = source.to_path_buf();
@@ -40,17 +49,48 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
 ///
 /// The source is opened `SQLITE_OPEN_READ_ONLY` without `immutable=1`. That
 /// URI skips locking and ignores WAL/SHM; it is illegal on a changing family.
-/// The destination is staged beside `destination` and renamed only after
-/// `Backup` reports `Done`, so a cancelled, timed-out, or failed backup never
-/// hands the caller an incomplete database.
+/// Each attempt writes an owned staging file beside `destination` and
+/// retires only that scratch. A pre-existing destination is left untouched
+/// until an authorized replace succeeds, so a failed public backup cannot
+/// delete a valid snapshot.
 fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
     backup_live_sqlite_database_with(source, destination, || Ok(()))
 }
 
 fn backup_staging_path(destination: &Path) -> PathBuf {
+    let id = NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed);
     let mut staging = destination.as_os_str().to_os_string();
-    staging.push(".backup-partial");
+    staging.push(format!(".{}.{id}.backup-partial", std::process::id()));
     PathBuf::from(staging)
+}
+
+fn retire_attempt_scratch(staging: &Path) {
+    let _ = fs::remove_file(staging);
+    for suffix in ["-wal", "-shm"] {
+        let _ = fs::remove_file(with_suffix(staging, suffix));
+    }
+}
+
+fn reject_aliased_backup_paths(source: &Path, destination: &Path) -> io::Result<()> {
+    if source == destination {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite backup source and destination are the same path",
+        ));
+    }
+    if destination.exists()
+        && crate::db::sqlite_generation_identity(source)
+            .ok()
+            .is_some_and(|source_id| {
+                crate::db::sqlite_generation_identity(destination).ok() == Some(source_id)
+            })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite backup source and destination are the same file",
+        ));
+    }
+    Ok(())
 }
 
 fn backup_live_sqlite_database_with(
@@ -58,20 +98,52 @@ fn backup_live_sqlite_database_with(
     destination: &Path,
     checkpoint: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
+    reject_aliased_backup_paths(source, destination)?;
     let staging = backup_staging_path(destination);
-    match fs::remove_file(&staging) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
     match run_online_backup(source, &staging, checkpoint) {
         Ok(()) => publish_complete_backup(&staging, destination),
         Err(error) => {
-            let _ = fs::remove_file(&staging);
-            let _ = fs::remove_file(destination);
+            retire_attempt_scratch(&staging);
             Err(error)
         }
     }
+}
+
+#[cfg(test)]
+fn fail_next_backup_publish() {
+    FAIL_NEXT_BACKUP_PUBLISH.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+fn first_backup_step(source: &Path) -> io::Result<StepResult> {
+    let probe_dir = source
+        .parent()
+        .ok_or_else(|| io::Error::other("backup probe source has no parent"))?;
+    let probe = probe_dir.join(format!(
+        "backup-probe-{}.db",
+        NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed)
+    ));
+    let source_conn = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    source_conn
+        .busy_timeout(Duration::ZERO)
+        .map_err(io::Error::other)?;
+    let mut destination = Connection::open_with_flags(
+        &probe,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )
+    .map_err(io::Error::other)?;
+    let backup =
+        rusqlite::backup::Backup::new(&source_conn, &mut destination).map_err(io::Error::other)?;
+    let step = backup.step(1).map_err(io::Error::other)?;
+    drop(backup);
+    drop(destination);
+    drop(source_conn);
+    retire_attempt_scratch(&probe);
+    Ok(step)
 }
 
 fn run_online_backup(
@@ -139,20 +211,43 @@ fn run_online_backup(
 }
 
 fn publish_complete_backup(staging: &Path, destination: &Path) -> io::Result<()> {
-    match fs::remove_file(destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            let _ = fs::remove_file(staging);
+    #[cfg(test)]
+    if FAIL_NEXT_BACKUP_PUBLISH.with(Cell::get) {
+        FAIL_NEXT_BACKUP_PUBLISH.with(|flag| flag.set(false));
+        retire_attempt_scratch(staging);
+        return Err(io::Error::other("forced backup publish failure"));
+    }
+    if destination.exists() {
+        replace_existing_destination(staging, destination)
+    } else {
+        fs::rename(staging, destination).inspect_err(|_| retire_attempt_scratch(staging))
+    }
+}
+
+fn replace_existing_destination(staging: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        // rename(2) replaces the name atomically. Failure leaves destination
+        // untouched; only this attempt's staging is retired.
+        fs::rename(staging, destination).inspect_err(|_| retire_attempt_scratch(staging))
+    }
+    #[cfg(not(unix))]
+    {
+        let displaced = backup_staging_path(destination);
+        if let Err(error) = fs::rename(destination, &displaced) {
+            retire_attempt_scratch(staging);
             return Err(error);
         }
-    }
-    match fs::rename(staging, destination) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(staging);
-            let _ = fs::remove_file(destination);
-            Err(error)
+        match fs::rename(staging, destination) {
+            Ok(()) => {
+                let _ = fs::remove_file(&displaced);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::rename(&displaced, destination);
+                retire_attempt_scratch(staging);
+                Err(error)
+            }
         }
     }
 }
