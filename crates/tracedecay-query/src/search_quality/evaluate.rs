@@ -953,10 +953,11 @@ fn evaluate_resources(output: &ProductionCandidateOutputV1) -> DirectEvaluationS
 ///
 /// A pending sample has no peak RSS and names its reason. It is either not
 /// run at all (no latency samples, zero measured queries) or a complete
-/// latency run whose peak RSS the host could not report: the producer reads
-/// `/proc/self/status`, which macOS does not have, so every macOS sample
-/// carries every query's latency under `Pending`. Latency evidence without
-/// RSS is still evidence; only the RSS half stays pending.
+/// latency run whose peak RSS the host could not report. The producer observes
+/// the process-lifetime high-water mark through Linux `VmHWM`, macOS
+/// `ru_maxrss`, or Windows `PeakWorkingSetSize`; these values are not isolated
+/// per-stage allocations. Latency evidence without RSS is still evidence;
+/// only the RSS half stays pending.
 fn resource_sample_verdict(
     sample: &ResourceSampleV1,
     expected_queries: u64,
@@ -1425,8 +1426,8 @@ mod tests {
 
     #[test]
     fn pending_resource_sample_with_a_complete_latency_run_stays_pending() {
-        // macOS cannot report peak RSS, so its producer emits every query's
-        // latency under `Pending`; the latency half is evidence, not a fault.
+        // A supported host API can still fail, so the producer retains every
+        // query's latency under `Pending`; the latency half is evidence.
         let sample = resource_sample(
             ResourceMeasurementStatusV1::Pending,
             None,
