@@ -14,9 +14,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, Edge, ExtractionResult, ExtractorRevision, FileOccurrenceId,
-    GrammarRevision, LanguageDescriptorRevision, LanguageDescriptorV1, LanguageId, ManifestDigest,
-    Node, SourceSpan, UnresolvedRef, ValidatedCodeFileV1, Visibility, canonical_sha256,
+    CodeGenerationId, ComplexityAnalysisV1, ContentDigest, Edge, ExtractionResult,
+    ExtractorRevision, FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision,
+    LanguageDescriptorV1, LanguageId, ManifestDigest, Node, SourceSpan, UnresolvedRef,
+    ValidatedCodeFileV1, Visibility, canonical_sha256,
 };
 
 use super::{
@@ -379,6 +380,10 @@ struct CanonicalNodeRow<'a> {
     assertions: u32,
     attrs_start_line: u32,
     branches: u32,
+    /// Omitted when complete, matching the extraction row, so complete rows
+    /// keep their pinned digest bytes.
+    #[serde(skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    complexity_analysis: ComplexityAnalysisV1,
     docstring: Option<&'a str>,
     end_column: u32,
     end_line: u32,
@@ -406,6 +411,7 @@ impl<'a> From<&'a Node> for CanonicalNodeRow<'a> {
             assertions: node.assertions,
             attrs_start_line: node.attrs_start_line,
             branches: node.branches,
+            complexity_analysis: node.complexity_analysis,
             docstring: node.docstring.as_deref(),
             end_column: node.end_column,
             end_line: node.end_line,

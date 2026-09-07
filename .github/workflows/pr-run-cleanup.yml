@@ -1,0 +1,49 @@
+# Cancels every workflow run still queued or in progress for a pull request
+# once that pull request is closed or merged.
+#
+# GitHub does not do this itself: a merged PR's queued CI, profiling and
+# validation runs keep their place in the account's FIFO runner queue and
+# their concurrency-group slots, so an afternoon of merges leaves dozens of
+# runs that can never be acted on ahead of the integration branch's own run.
+# A run whose head can no longer be merged has no verdict anyone will read,
+# so it is cancelled rather than left to consume runner time.
+name: Cancel runs for closed pull requests
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    name: Cancel superseded runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel queued and in-progress runs for the closed head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          OWN_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cancelled=0
+          for status in queued in_progress waiting pending; do
+            # Every workflow that ran for this head, not only CI: profiling,
+            # plugin validation and SDK conformance queue per push too.
+            for run in $(gh api "repos/$REPO/actions/runs?branch=$HEAD_REF&status=$status&per_page=100" \
+                           --jq '.workflow_runs[].id'); do
+              if [ "$run" = "$OWN_RUN" ]; then
+                continue
+              fi
+              if gh api -X POST "repos/$REPO/actions/runs/$run/cancel" >/dev/null 2>&1; then
+                echo "cancelled run $run ($status) for $HEAD_REF@${HEAD_SHA:0:9}"
+                cancelled=$((cancelled + 1))
+              fi
+            done
+          done
+          echo "cancelled $cancelled run(s) for closed head $HEAD_REF"

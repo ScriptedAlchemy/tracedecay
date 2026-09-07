@@ -20,11 +20,11 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, ContentDigest, EphemeralSanitizedQueryViewV1, FileIdentityDigest,
-    FileOccurrenceId, LanguageDescriptorRevision, LanguageId, ManifestDigest, ProjectId,
-    QueryNormalizationRevision, RefId, RepositoryId, RetrievalGrainV1, SanitizedCodeFileV1,
-    SanitizerRevision, SessionId, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, WorktreeId,
+    ActorId, CodeGenerationId, ComplexityAnalysisV1, ContentDigest, EphemeralSanitizedQueryViewV1,
+    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, ManifestDigest,
+    ProjectId, QueryNormalizationRevision, RefId, RepositoryId, RetrievalGrainV1,
+    SanitizedCodeFileV1, SanitizerRevision, SessionId, SnapshotFileDispositionV1, SourceSpan,
+    SymbolIdentityDigest, SymbolOccurrenceId, TemporalModeV1, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{
     GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationManifest, GraphGenerationRelation,
@@ -827,6 +827,7 @@ fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: 1,
             start_line: 0,
             signature: None,

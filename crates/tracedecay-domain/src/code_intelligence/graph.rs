@@ -6,399 +6,150 @@
 
 use std::collections::{HashMap, HashSet};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Byte-wise `&str` equality usable during `const` evaluation, where
-/// `PartialEq` is not. Only the `ALL` totality guards in this module call it.
-const fn same_wire_str(left: &str, right: &str) -> bool {
-    let (left, right) = (left.as_bytes(), right.as_bytes());
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut index = 0;
-    while index < left.len() {
-        if left[index] != right[index] {
-            return false;
+/// Declares a graph vocabulary enum and its persistence spelling in one place.
+///
+/// Each `Variant => "wire"` line is the sole authority for that variant: it
+/// emits the enum variant, the `ALL` slot, the `as_str` arm, and the
+/// `from_str` arm, so a spelling cannot drift between them. `as_str` stays a
+/// direct exhaustive `match` — a new variant fails to compile until it is
+/// declared here, and the node-ID hot path never scans the table. Extra
+/// `| "alias"` spellings widen `from_str` only; `ALL` and `as_str` record what
+/// is written. Serde representations come from the derives passed through on
+/// the enum and are independent of these spellings.
+macro_rules! wire_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident => $wire:literal $(| $alias:literal)*
+            ),+ $(,)?
         }
-        index += 1;
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $( $(#[$variant_meta])* $variant, )+
+        }
+
+        #[allow(clippy::should_implement_trait)]
+        impl $name {
+            /// Every variant paired with the spelling [`Self::as_str`] emits and
+            /// [`Self::from_str`] accepts, in declaration order. Inbound-only
+            /// aliases are not listed: `ALL` records what is written.
+            pub const ALL: [($name, &'static str); wire_enum!(@count $($variant)+)] =
+                [$((Self::$variant, $wire),)+];
+
+            pub const fn as_str(&self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+
+            pub fn from_str(s: &str) -> Option<Self> {
+                match s {
+                    $($wire $(| $alias)* => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+    (@count $($variant:ident)+) => {
+        <[()]>::len(&[$(wire_enum!(@unit $variant)),+])
+    };
+    (@unit $variant:ident) => {
+        ()
+    };
+}
+
+wire_enum! {
+    /// The persistence spelling is a contract, not a display detail: node IDs
+    /// are `"{wire}:{hash}"` (see [`generate_node_id`]), so a renamed spelling
+    /// invalidates every stored ID for that kind.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum NodeKind {
+        File => "file",
+        Module => "module",
+        Struct => "struct",
+        Enum => "enum",
+        EnumVariant => "enum_variant",
+        Trait => "trait",
+        Function => "function",
+        Method => "method",
+        Impl => "impl",
+        Const => "const",
+        Static => "static",
+        TypeAlias => "type_alias",
+        Field => "field",
+        Macro => "macro",
+        Use => "use",
+        // Java-specific
+        Class => "class",
+        Interface => "interface",
+        Constructor => "constructor",
+        Annotation => "annotation",
+        AnnotationUsage => "annotation_usage",
+        Package => "package",
+        InnerClass => "inner_class",
+        InitBlock => "init_block",
+        AbstractMethod => "abstract_method",
+        // Go-specific
+        InterfaceType => "interface_type",
+        StructMethod => "struct_method",
+        GoPackage => "go_package",
+        StructTag => "struct_tag",
+        // Scala-specific
+        ScalaObject => "object",
+        CaseClass => "case_class",
+        ScalaPackage => "scala_package",
+        ValField => "val",
+        VarField => "var",
+        // Shared
+        GenericParam => "generic_param",
+        // TypeScript/JavaScript-specific
+        ArrowFunction => "arrow_function",
+        Decorator => "decorator",
+        Export => "export",
+        Namespace => "namespace",
+        // C/C++-specific
+        Union => "union",
+        Typedef => "typedef",
+        Include => "include",
+        PreprocessorDef => "preprocessor_def",
+        Template => "template",
+        // Kotlin-specific
+        DataClass => "data_class",
+        SealedClass => "sealed_class",
+        CompanionObject => "companion_object",
+        KotlinObject => "kotlin_object",
+        KotlinPackage => "kotlin_package",
+        Property => "property",
+        // Dart-specific
+        Mixin => "mixin",
+        Extension => "extension",
+        Library => "library",
+        // C#-specific
+        Delegate => "delegate",
+        Event => "event",
+        Record => "record",
+        CSharpProperty => "csharp_property",
+        // Pascal-specific
+        Procedure => "procedure",
+        PascalUnit => "pascal_unit",
+        PascalProgram => "pascal_program",
+        PascalRecord => "pascal_record",
+        // Protobuf-specific. These are unconditional domain vocabulary; parser
+        // availability remains a root-crate feature concern.
+        ProtoMessage => "proto_message",
+        ProtoService => "proto_service",
+        ProtoRpc => "proto_rpc",
     }
-    true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum NodeKind {
-    File,
-    Module,
-    Struct,
-    Enum,
-    EnumVariant,
-    Trait,
-    Function,
-    Method,
-    Impl,
-    Const,
-    Static,
-    TypeAlias,
-    Field,
-    Macro,
-    Use,
-    // Java-specific
-    Class,
-    Interface,
-    Constructor,
-    Annotation,
-    AnnotationUsage,
-    Package,
-    InnerClass,
-    InitBlock,
-    AbstractMethod,
-    // Go-specific
-    InterfaceType,
-    StructMethod,
-    GoPackage,
-    StructTag,
-    // Scala-specific
-    ScalaObject,
-    CaseClass,
-    ScalaPackage,
-    ValField,
-    VarField,
-    // Shared
-    GenericParam,
-    // TypeScript/JavaScript-specific
-    ArrowFunction,
-    Decorator,
-    Export,
-    Namespace,
-    // C/C++-specific
-    Union,
-    Typedef,
-    Include,
-    PreprocessorDef,
-    Template,
-    // Kotlin-specific
-    DataClass,
-    SealedClass,
-    CompanionObject,
-    KotlinObject,
-    KotlinPackage,
-    Property,
-    // Dart-specific
-    Mixin,
-    Extension,
-    Library,
-    // C#-specific
-    Delegate,
-    Event,
-    Record,
-    CSharpProperty,
-    // Pascal-specific
-    Procedure,
-    PascalUnit,
-    PascalProgram,
-    PascalRecord,
-    // Protobuf-specific. These are unconditional domain vocabulary; parser
-    // availability remains a root-crate feature concern.
-    ProtoMessage,
-    ProtoService,
-    ProtoRpc,
-}
-
-#[allow(clippy::should_implement_trait)]
 impl NodeKind {
-    /// Every variant paired with the wire string [`NodeKind::as_str`] emits and
-    /// [`NodeKind::from_str`] accepts.
-    ///
-    /// The pairing is a persistence contract, not a display detail: node IDs
-    /// are `"{wire}:{hash}"` (see [`generate_node_id`]), so a renamed string
-    /// invalidates every stored ID for that kind. Callers that need to iterate
-    /// or exhaustively test the kind space should drive off this table rather
-    /// than hand-maintaining a list. [`NodeKind::wire_str_from_all`] keeps it
-    /// total.
-    pub const ALL: [(NodeKind, &'static str); 63] = [
-        (Self::File, "file"),
-        (Self::Module, "module"),
-        (Self::Struct, "struct"),
-        (Self::Enum, "enum"),
-        (Self::EnumVariant, "enum_variant"),
-        (Self::Trait, "trait"),
-        (Self::Function, "function"),
-        (Self::Method, "method"),
-        (Self::Impl, "impl"),
-        (Self::Const, "const"),
-        (Self::Static, "static"),
-        (Self::TypeAlias, "type_alias"),
-        (Self::Field, "field"),
-        (Self::Macro, "macro"),
-        (Self::Use, "use"),
-        (Self::Class, "class"),
-        (Self::Interface, "interface"),
-        (Self::Constructor, "constructor"),
-        (Self::Annotation, "annotation"),
-        (Self::AnnotationUsage, "annotation_usage"),
-        (Self::Package, "package"),
-        (Self::InnerClass, "inner_class"),
-        (Self::InitBlock, "init_block"),
-        (Self::AbstractMethod, "abstract_method"),
-        (Self::InterfaceType, "interface_type"),
-        (Self::StructMethod, "struct_method"),
-        (Self::GoPackage, "go_package"),
-        (Self::StructTag, "struct_tag"),
-        (Self::ScalaObject, "object"),
-        (Self::CaseClass, "case_class"),
-        (Self::ScalaPackage, "scala_package"),
-        (Self::ValField, "val"),
-        (Self::VarField, "var"),
-        (Self::GenericParam, "generic_param"),
-        (Self::ArrowFunction, "arrow_function"),
-        (Self::Decorator, "decorator"),
-        (Self::Export, "export"),
-        (Self::Namespace, "namespace"),
-        (Self::Union, "union"),
-        (Self::Typedef, "typedef"),
-        (Self::Include, "include"),
-        (Self::PreprocessorDef, "preprocessor_def"),
-        (Self::Template, "template"),
-        (Self::DataClass, "data_class"),
-        (Self::SealedClass, "sealed_class"),
-        (Self::CompanionObject, "companion_object"),
-        (Self::KotlinObject, "kotlin_object"),
-        (Self::KotlinPackage, "kotlin_package"),
-        (Self::Property, "property"),
-        (Self::Mixin, "mixin"),
-        (Self::Extension, "extension"),
-        (Self::Library, "library"),
-        (Self::Delegate, "delegate"),
-        (Self::Event, "event"),
-        (Self::Record, "record"),
-        (Self::CSharpProperty, "csharp_property"),
-        (Self::Procedure, "procedure"),
-        (Self::PascalUnit, "pascal_unit"),
-        (Self::PascalProgram, "pascal_program"),
-        (Self::PascalRecord, "pascal_record"),
-        (Self::ProtoMessage, "proto_message"),
-        (Self::ProtoService, "proto_service"),
-        (Self::ProtoRpc, "proto_rpc"),
-    ];
-
-    /// Compile-time totality proof for [`NodeKind::ALL`]. Never called at
-    /// runtime; it exists so the table cannot silently fall behind the enum.
-    ///
-    /// The match is exhaustive, so a new variant does not compile until it is
-    /// named here, and each arm has to name a real `ALL` slot — the slot count
-    /// is part of `ALL`'s type, so the natural next index does not compile
-    /// until the variant is also appended to `ALL`. The `const` block below
-    /// then rejects any arm that points at the wrong slot.
-    ///
-    /// [`NodeKind::as_str`] keeps its own literals instead of delegating here:
-    /// it is on the node-ID hot path and must not depend on indexing a
-    /// 63-entry table.
-    const fn wire_str_from_all(&self) -> &'static str {
-        match self {
-            Self::File => Self::ALL[0].1,
-            Self::Module => Self::ALL[1].1,
-            Self::Struct => Self::ALL[2].1,
-            Self::Enum => Self::ALL[3].1,
-            Self::EnumVariant => Self::ALL[4].1,
-            Self::Trait => Self::ALL[5].1,
-            Self::Function => Self::ALL[6].1,
-            Self::Method => Self::ALL[7].1,
-            Self::Impl => Self::ALL[8].1,
-            Self::Const => Self::ALL[9].1,
-            Self::Static => Self::ALL[10].1,
-            Self::TypeAlias => Self::ALL[11].1,
-            Self::Field => Self::ALL[12].1,
-            Self::Macro => Self::ALL[13].1,
-            Self::Use => Self::ALL[14].1,
-            Self::Class => Self::ALL[15].1,
-            Self::Interface => Self::ALL[16].1,
-            Self::Constructor => Self::ALL[17].1,
-            Self::Annotation => Self::ALL[18].1,
-            Self::AnnotationUsage => Self::ALL[19].1,
-            Self::Package => Self::ALL[20].1,
-            Self::InnerClass => Self::ALL[21].1,
-            Self::InitBlock => Self::ALL[22].1,
-            Self::AbstractMethod => Self::ALL[23].1,
-            Self::InterfaceType => Self::ALL[24].1,
-            Self::StructMethod => Self::ALL[25].1,
-            Self::GoPackage => Self::ALL[26].1,
-            Self::StructTag => Self::ALL[27].1,
-            Self::ScalaObject => Self::ALL[28].1,
-            Self::CaseClass => Self::ALL[29].1,
-            Self::ScalaPackage => Self::ALL[30].1,
-            Self::ValField => Self::ALL[31].1,
-            Self::VarField => Self::ALL[32].1,
-            Self::GenericParam => Self::ALL[33].1,
-            Self::ArrowFunction => Self::ALL[34].1,
-            Self::Decorator => Self::ALL[35].1,
-            Self::Export => Self::ALL[36].1,
-            Self::Namespace => Self::ALL[37].1,
-            Self::Union => Self::ALL[38].1,
-            Self::Typedef => Self::ALL[39].1,
-            Self::Include => Self::ALL[40].1,
-            Self::PreprocessorDef => Self::ALL[41].1,
-            Self::Template => Self::ALL[42].1,
-            Self::DataClass => Self::ALL[43].1,
-            Self::SealedClass => Self::ALL[44].1,
-            Self::CompanionObject => Self::ALL[45].1,
-            Self::KotlinObject => Self::ALL[46].1,
-            Self::KotlinPackage => Self::ALL[47].1,
-            Self::Property => Self::ALL[48].1,
-            Self::Mixin => Self::ALL[49].1,
-            Self::Extension => Self::ALL[50].1,
-            Self::Library => Self::ALL[51].1,
-            Self::Delegate => Self::ALL[52].1,
-            Self::Event => Self::ALL[53].1,
-            Self::Record => Self::ALL[54].1,
-            Self::CSharpProperty => Self::ALL[55].1,
-            Self::Procedure => Self::ALL[56].1,
-            Self::PascalUnit => Self::ALL[57].1,
-            Self::PascalProgram => Self::ALL[58].1,
-            Self::PascalRecord => Self::ALL[59].1,
-            Self::ProtoMessage => Self::ALL[60].1,
-            Self::ProtoService => Self::ALL[61].1,
-            Self::ProtoRpc => Self::ALL[62].1,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            NodeKind::File => "file",
-            NodeKind::Module => "module",
-            NodeKind::Struct => "struct",
-            NodeKind::Enum => "enum",
-            NodeKind::EnumVariant => "enum_variant",
-            NodeKind::Trait => "trait",
-            NodeKind::Function => "function",
-            NodeKind::Method => "method",
-            NodeKind::Impl => "impl",
-            NodeKind::Const => "const",
-            NodeKind::Static => "static",
-            NodeKind::TypeAlias => "type_alias",
-            NodeKind::Field => "field",
-            NodeKind::Macro => "macro",
-            NodeKind::Use => "use",
-            NodeKind::Class => "class",
-            NodeKind::Interface => "interface",
-            NodeKind::Constructor => "constructor",
-            NodeKind::Annotation => "annotation",
-            NodeKind::AnnotationUsage => "annotation_usage",
-            NodeKind::Package => "package",
-            NodeKind::InnerClass => "inner_class",
-            NodeKind::InitBlock => "init_block",
-            NodeKind::AbstractMethod => "abstract_method",
-            NodeKind::InterfaceType => "interface_type",
-            NodeKind::StructMethod => "struct_method",
-            NodeKind::GoPackage => "go_package",
-            NodeKind::StructTag => "struct_tag",
-            NodeKind::ScalaObject => "object",
-            NodeKind::CaseClass => "case_class",
-            NodeKind::ScalaPackage => "scala_package",
-            NodeKind::ValField => "val",
-            NodeKind::VarField => "var",
-            NodeKind::GenericParam => "generic_param",
-            NodeKind::ArrowFunction => "arrow_function",
-            NodeKind::Decorator => "decorator",
-            NodeKind::Export => "export",
-            NodeKind::Namespace => "namespace",
-            NodeKind::Union => "union",
-            NodeKind::Typedef => "typedef",
-            NodeKind::Include => "include",
-            NodeKind::PreprocessorDef => "preprocessor_def",
-            NodeKind::Template => "template",
-            NodeKind::DataClass => "data_class",
-            NodeKind::SealedClass => "sealed_class",
-            NodeKind::CompanionObject => "companion_object",
-            NodeKind::KotlinObject => "kotlin_object",
-            NodeKind::KotlinPackage => "kotlin_package",
-            NodeKind::Property => "property",
-            NodeKind::Mixin => "mixin",
-            NodeKind::Extension => "extension",
-            NodeKind::Library => "library",
-            NodeKind::Delegate => "delegate",
-            NodeKind::Event => "event",
-            NodeKind::Record => "record",
-            NodeKind::CSharpProperty => "csharp_property",
-            NodeKind::Procedure => "procedure",
-            NodeKind::PascalUnit => "pascal_unit",
-            NodeKind::PascalProgram => "pascal_program",
-            NodeKind::PascalRecord => "pascal_record",
-            NodeKind::ProtoMessage => "proto_message",
-            NodeKind::ProtoService => "proto_service",
-            NodeKind::ProtoRpc => "proto_rpc",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<NodeKind> {
-        match s {
-            "file" => Some(NodeKind::File),
-            "module" => Some(NodeKind::Module),
-            "struct" => Some(NodeKind::Struct),
-            "enum" => Some(NodeKind::Enum),
-            "enum_variant" => Some(NodeKind::EnumVariant),
-            "trait" => Some(NodeKind::Trait),
-            "function" => Some(NodeKind::Function),
-            "method" => Some(NodeKind::Method),
-            "impl" => Some(NodeKind::Impl),
-            "const" => Some(NodeKind::Const),
-            "static" => Some(NodeKind::Static),
-            "type_alias" => Some(NodeKind::TypeAlias),
-            "field" => Some(NodeKind::Field),
-            "macro" => Some(NodeKind::Macro),
-            "use" => Some(NodeKind::Use),
-            "class" => Some(NodeKind::Class),
-            "interface" => Some(NodeKind::Interface),
-            "constructor" => Some(NodeKind::Constructor),
-            "annotation" => Some(NodeKind::Annotation),
-            "annotation_usage" => Some(NodeKind::AnnotationUsage),
-            "package" => Some(NodeKind::Package),
-            "inner_class" => Some(NodeKind::InnerClass),
-            "init_block" => Some(NodeKind::InitBlock),
-            "abstract_method" => Some(NodeKind::AbstractMethod),
-            "interface_type" => Some(NodeKind::InterfaceType),
-            "struct_method" => Some(NodeKind::StructMethod),
-            "go_package" => Some(NodeKind::GoPackage),
-            "struct_tag" => Some(NodeKind::StructTag),
-            "object" => Some(NodeKind::ScalaObject),
-            "case_class" => Some(NodeKind::CaseClass),
-            "scala_package" => Some(NodeKind::ScalaPackage),
-            "val" => Some(NodeKind::ValField),
-            "var" => Some(NodeKind::VarField),
-            "generic_param" => Some(NodeKind::GenericParam),
-            "arrow_function" => Some(NodeKind::ArrowFunction),
-            "decorator" => Some(NodeKind::Decorator),
-            "export" => Some(NodeKind::Export),
-            "namespace" => Some(NodeKind::Namespace),
-            "union" => Some(NodeKind::Union),
-            "typedef" => Some(NodeKind::Typedef),
-            "include" => Some(NodeKind::Include),
-            "preprocessor_def" => Some(NodeKind::PreprocessorDef),
-            "template" => Some(NodeKind::Template),
-            "data_class" => Some(NodeKind::DataClass),
-            "sealed_class" => Some(NodeKind::SealedClass),
-            "companion_object" => Some(NodeKind::CompanionObject),
-            "kotlin_object" => Some(NodeKind::KotlinObject),
-            "kotlin_package" => Some(NodeKind::KotlinPackage),
-            "property" => Some(NodeKind::Property),
-            "mixin" => Some(NodeKind::Mixin),
-            "extension" => Some(NodeKind::Extension),
-            "library" => Some(NodeKind::Library),
-            "delegate" => Some(NodeKind::Delegate),
-            "event" => Some(NodeKind::Event),
-            "record" => Some(NodeKind::Record),
-            "csharp_property" => Some(NodeKind::CSharpProperty),
-            "procedure" => Some(NodeKind::Procedure),
-            "pascal_unit" => Some(NodeKind::PascalUnit),
-            "pascal_program" => Some(NodeKind::PascalProgram),
-            "pascal_record" => Some(NodeKind::PascalRecord),
-            "proto_message" => Some(NodeKind::ProtoMessage),
-            "proto_service" => Some(NodeKind::ProtoService),
-            "proto_rpc" => Some(NodeKind::ProtoRpc),
-            _ => None,
-        }
-    }
-
     /// Returns `true` if this node kind represents a callable definition that
     /// should participate in test-coverage / attribution accounting.
     ///
@@ -415,189 +166,33 @@ impl NodeKind {
     }
 }
 
-/// Rejects a [`NodeKind::wire_str_from_all`] arm that points at the wrong
-/// [`NodeKind::ALL`] slot, which is the only way a variant could be named in
-/// the totality match yet be absent from (or misplaced in) the table.
-const _: () = {
-    let mut slot = 0;
-    while slot < NodeKind::ALL.len() {
-        assert!(
-            same_wire_str(
-                NodeKind::ALL[slot].0.wire_str_from_all(),
-                NodeKind::ALL[slot].1
-            ),
-            "NodeKind::wire_str_from_all points at the wrong NodeKind::ALL slot"
-        );
-        slot += 1;
-    }
-};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EdgeKind {
-    Contains,
-    Calls,
-    Uses,
-    Implements,
-    TypeOf,
-    Returns,
-    DerivesMacro,
-    Extends,
-    Annotates,
-    Receives,
-}
-
-#[allow(clippy::should_implement_trait)]
-impl EdgeKind {
-    /// Every variant paired with the wire string [`EdgeKind::as_str`] emits and
-    /// [`EdgeKind::from_str`] accepts. Kept total by
-    /// [`EdgeKind::wire_str_from_all`], exactly as [`NodeKind::ALL`] is.
-    pub const ALL: [(EdgeKind, &'static str); 10] = [
-        (Self::Contains, "contains"),
-        (Self::Calls, "calls"),
-        (Self::Uses, "uses"),
-        (Self::Implements, "implements"),
-        (Self::TypeOf, "type_of"),
-        (Self::Returns, "returns"),
-        (Self::DerivesMacro, "derives_macro"),
-        (Self::Extends, "extends"),
-        (Self::Annotates, "annotates"),
-        (Self::Receives, "receives"),
-    ];
-
-    /// Compile-time totality proof for [`EdgeKind::ALL`]; see
-    /// [`NodeKind::wire_str_from_all`] for how the guard works.
-    const fn wire_str_from_all(&self) -> &'static str {
-        match self {
-            Self::Contains => Self::ALL[0].1,
-            Self::Calls => Self::ALL[1].1,
-            Self::Uses => Self::ALL[2].1,
-            Self::Implements => Self::ALL[3].1,
-            Self::TypeOf => Self::ALL[4].1,
-            Self::Returns => Self::ALL[5].1,
-            Self::DerivesMacro => Self::ALL[6].1,
-            Self::Extends => Self::ALL[7].1,
-            Self::Annotates => Self::ALL[8].1,
-            Self::Receives => Self::ALL[9].1,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EdgeKind::Contains => "contains",
-            EdgeKind::Calls => "calls",
-            EdgeKind::Uses => "uses",
-            EdgeKind::Implements => "implements",
-            EdgeKind::TypeOf => "type_of",
-            EdgeKind::Returns => "returns",
-            EdgeKind::DerivesMacro => "derives_macro",
-            EdgeKind::Extends => "extends",
-            EdgeKind::Annotates => "annotates",
-            EdgeKind::Receives => "receives",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<EdgeKind> {
-        match s {
-            "contains" => Some(EdgeKind::Contains),
-            "calls" => Some(EdgeKind::Calls),
-            "uses" => Some(EdgeKind::Uses),
-            "implements" => Some(EdgeKind::Implements),
-            "type_of" => Some(EdgeKind::TypeOf),
-            "returns" => Some(EdgeKind::Returns),
-            "derives_macro" => Some(EdgeKind::DerivesMacro),
-            "extends" => Some(EdgeKind::Extends),
-            "annotates" => Some(EdgeKind::Annotates),
-            "receives" => Some(EdgeKind::Receives),
-            _ => None,
-        }
+wire_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum EdgeKind {
+        Contains => "contains",
+        Calls => "calls",
+        Uses => "uses",
+        Implements => "implements",
+        TypeOf => "type_of",
+        Returns => "returns",
+        DerivesMacro => "derives_macro",
+        Extends => "extends",
+        Annotates => "annotates",
+        Receives => "receives",
     }
 }
 
-/// Rejects an [`EdgeKind::wire_str_from_all`] arm that points at the wrong
-/// [`EdgeKind::ALL`] slot.
-const _: () = {
-    let mut slot = 0;
-    while slot < EdgeKind::ALL.len() {
-        assert!(
-            same_wire_str(
-                EdgeKind::ALL[slot].0.wire_str_from_all(),
-                EdgeKind::ALL[slot].1
-            ),
-            "EdgeKind::wire_str_from_all points at the wrong EdgeKind::ALL slot"
-        );
-        slot += 1;
-    }
-};
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Visibility {
-    Pub,
-    PubCrate,
-    PubSuper,
-    #[default]
-    Private,
-}
-
-impl Visibility {
-    /// Every variant paired with the wire string [`Visibility::as_str`] emits.
-    /// [`Visibility::from_str`] also accepts `"pub"` as an inbound alias for
-    /// `"public"`, which is deliberately not part of this table: `ALL` records
-    /// what is written, the alias only widens what is read. Kept total by
-    /// [`Visibility::wire_str_from_all`], as [`NodeKind::ALL`] is.
-    pub const ALL: [(Visibility, &'static str); 4] = [
-        (Self::Pub, "public"),
-        (Self::PubCrate, "pub_crate"),
-        (Self::PubSuper, "pub_super"),
-        (Self::Private, "private"),
-    ];
-
-    /// Compile-time totality proof for [`Visibility::ALL`]; see
-    /// [`NodeKind::wire_str_from_all`] for how the guard works.
-    const fn wire_str_from_all(&self) -> &'static str {
-        match self {
-            Self::Pub => Self::ALL[0].1,
-            Self::PubCrate => Self::ALL[1].1,
-            Self::PubSuper => Self::ALL[2].1,
-            Self::Private => Self::ALL[3].1,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pub => "public",
-            Self::PubCrate => "pub_crate",
-            Self::PubSuper => "pub_super",
-            Self::Private => "private",
-        }
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "public" | "pub" => Some(Self::Pub),
-            "pub_crate" => Some(Self::PubCrate),
-            "pub_super" => Some(Self::PubSuper),
-            "private" => Some(Self::Private),
-            _ => None,
-        }
+wire_enum! {
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum Visibility {
+        // `"pub"` is accepted inbound only; `"public"` is what is written.
+        Pub => "public" | "pub",
+        PubCrate => "pub_crate",
+        PubSuper => "pub_super",
+        #[default]
+        Private => "private",
     }
 }
-
-/// Rejects a [`Visibility::wire_str_from_all`] arm that points at the wrong
-/// [`Visibility::ALL`] slot.
-const _: () = {
-    let mut slot = 0;
-    while slot < Visibility::ALL.len() {
-        assert!(
-            same_wire_str(
-                Visibility::ALL[slot].0.wire_str_from_all(),
-                Visibility::ALL[slot].1
-            ),
-            "Visibility::wire_str_from_all points at the wrong Visibility::ALL slot"
-        );
-        slot += 1;
-    }
-};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -633,12 +228,38 @@ pub struct Node {
     pub unchecked_calls: u32,
     /// Number of assertion calls (e.g. `assert!`, `assertEquals`, `expect`).
     pub assertions: u32,
+    /// Whether the bounded complexity walk covered the whole body. Omitted on
+    /// the wire when complete, so rows without it carry exact counters.
+    #[serde(default, skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    pub complexity_analysis: ComplexityAnalysisV1,
     pub updated_at: u64,
     /// `id` of the enclosing scope (module, impl, class, …). `None` for
     /// top-level nodes whose parent is the file itself. Populated from
     /// `Contains` edges at insert time; once written, callers should prefer
     /// `parent_id` over walking edges.
     pub parent_id: Option<String>,
+}
+
+/// Whether the bounded complexity walk over a symbol's body ran to the end.
+///
+/// The extractor stops walking a body once its traversal budget is spent. The
+/// counters accumulated by then are lower bounds over the visited prefix, not
+/// facts about the whole body, so every surface that prints, ranks, or
+/// aggregates complexity must render this state instead of treating those
+/// counters as exact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplexityAnalysisV1 {
+    #[default]
+    Complete,
+    /// The walk stopped when the traversal budget ran out.
+    TraversalBudgetExhausted,
+}
+
+impl ComplexityAnalysisV1 {
+    pub const fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -767,12 +388,122 @@ pub struct GraphStats {
 /// Extracted names may be empty for anonymous source constructs; file, kind,
 /// and line keep those identities deterministic and distinct.
 pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32) -> String {
-    let input = format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line);
+    hash_node_id(
+        kind,
+        &format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line),
+    )
+}
+
+/// Generates the node ID for a construct that shares its line with preceding
+/// source text, so the start column also participates.
+///
+/// Extraction mints [`generate_node_id`] for constructs that begin their line
+/// (only blanks precede them) and this form otherwise. Two constructs of the
+/// same kind and name on one line — `impl A { fn run() {} } impl B { fn run()
+/// {} }` — therefore never share an ID, while indentation and one-construct
+/// lines leave the line-keyed ID unchanged.
+pub fn generate_node_id_at(
+    file_path: &str,
+    kind: &NodeKind,
+    name: &str,
+    line: u32,
+    column: u32,
+) -> String {
+    hash_node_id(
+        kind,
+        &format!(
+            "{}:{}:{}:{}:{}",
+            file_path,
+            kind.as_str(),
+            name,
+            line,
+            column
+        ),
+    )
+}
+
+fn hash_node_id(kind: &NodeKind, input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
     let hex_str = crate::canonical_text::encode_lowercase_hex(&hash);
     format!("{}:{}", kind.as_str(), &hex_str[..32])
+}
+
+#[cfg(test)]
+mod complexity_analysis_wire_tests {
+    use super::{ComplexityAnalysisV1, Node, NodeKind, Visibility};
+
+    fn node(complexity_analysis: ComplexityAnalysisV1) -> Node {
+        Node {
+            id: "function:0".to_owned(),
+            kind: NodeKind::Function,
+            name: "f".to_owned(),
+            qualified_name: "lib.rs::f".to_owned(),
+            file_path: "lib.rs".to_owned(),
+            start_line: 0,
+            attrs_start_line: 0,
+            end_line: 0,
+            start_column: 0,
+            end_column: 0,
+            signature: None,
+            docstring: None,
+            visibility: Visibility::Private,
+            is_async: false,
+            branches: 2,
+            loops: 0,
+            returns: 0,
+            max_nesting: 1,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis,
+            updated_at: 0,
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn complete_rows_omit_the_state_and_incomplete_rows_carry_it() {
+        let complete = serde_json::to_value(node(ComplexityAnalysisV1::Complete)).expect("row");
+        assert!(complete.get("complexity_analysis").is_none());
+
+        let incomplete = serde_json::to_value(node(ComplexityAnalysisV1::TraversalBudgetExhausted))
+            .expect("row");
+        assert_eq!(
+            incomplete["complexity_analysis"],
+            serde_json::json!("traversal_budget_exhausted")
+        );
+
+        let restored: Node = serde_json::from_value(complete).expect("row without the state");
+        assert_eq!(restored.complexity_analysis, ComplexityAnalysisV1::Complete);
+        let restored: Node = serde_json::from_value(incomplete).expect("row with the state");
+        assert_eq!(
+            restored.complexity_analysis,
+            ComplexityAnalysisV1::TraversalBudgetExhausted
+        );
+    }
+}
+
+#[cfg(test)]
+mod same_line_node_id_tests {
+    use super::{NodeKind, generate_node_id, generate_node_id_at};
+
+    #[test]
+    fn column_keyed_ids_are_deterministic_and_distinct_from_line_keyed_ids() {
+        let line_keyed = generate_node_id("src/lib.rs", &NodeKind::Method, "run", 3);
+        let first = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60);
+        let second = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 94);
+
+        assert_eq!(
+            first,
+            generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60)
+        );
+        assert_ne!(first, second, "same-line constructs must stay distinct");
+        assert_ne!(first, line_keyed);
+        assert_ne!(second, line_keyed);
+        assert!(first.starts_with("method:"), "unexpected id shape: {first}");
+    }
 }
 
 #[cfg(test)]
@@ -808,5 +539,71 @@ mod empty_name_node_id_tests {
         assert_ne!(base, generate_node_id("b.ts", &NodeKind::Function, "", 286));
         assert_ne!(base, generate_node_id("a.ts", &NodeKind::Class, "", 286));
         assert_ne!(base, generate_node_id("a.ts", &NodeKind::Function, "", 287));
+    }
+}
+
+#[cfg(test)]
+mod wire_spelling_tests {
+    use std::fmt::Debug;
+
+    use serde::Serialize;
+    use serde_json::Value;
+
+    use super::{EdgeKind, NodeKind, Visibility, generate_node_id};
+
+    /// Every `ALL` slot must spell, parse, and serialize the same way it did
+    /// before the spellings were declared once. Derived serde keeps the variant
+    /// identifier — which is also what `Debug` prints for a unit variant — so
+    /// the JSON contract is checked without a second literal inventory.
+    fn assert_wire_round_trip<T: Debug + PartialEq + Serialize>(
+        all: &[(T, &'static str)],
+        as_str: fn(&T) -> &'static str,
+        from_str: fn(&str) -> Option<T>,
+    ) {
+        for (kind, wire) in all {
+            assert_eq!(as_str(kind), *wire, "{kind:?} no longer spells {wire:?}");
+            assert_eq!(
+                from_str(wire).as_ref(),
+                Some(kind),
+                "{wire:?} did not parse back to {kind:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                Value::String(format!("{kind:?}")),
+                "{kind:?} serde representation changed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_variant_round_trips_and_keeps_its_serde_spelling() {
+        assert_wire_round_trip(&NodeKind::ALL, NodeKind::as_str, NodeKind::from_str);
+        assert_wire_round_trip(&EdgeKind::ALL, EdgeKind::as_str, EdgeKind::from_str);
+        assert_wire_round_trip(&Visibility::ALL, Visibility::as_str, Visibility::from_str);
+    }
+
+    /// Spellings that do not follow from the variant name, the inbound-only
+    /// `"pub"` alias, and refusal of unknown spellings.
+    #[test]
+    fn representative_spellings_alias_and_refusal() {
+        assert_eq!(NodeKind::ScalaObject.as_str(), "object");
+        assert_eq!(NodeKind::ValField.as_str(), "val");
+        assert_eq!(NodeKind::VarField.as_str(), "var");
+        assert_eq!(NodeKind::EnumVariant.as_str(), "enum_variant");
+        assert_eq!(EdgeKind::TypeOf.as_str(), "type_of");
+        assert_eq!(Visibility::Pub.as_str(), "public");
+        assert!(
+            generate_node_id("Main.scala", &NodeKind::ScalaObject, "Main", 1)
+                .starts_with("object:")
+        );
+
+        assert_eq!(Visibility::from_str("pub"), Some(Visibility::Pub));
+        assert!(Visibility::ALL.iter().all(|(_, wire)| *wire != "pub"));
+        assert_eq!(Visibility::default(), Visibility::Private);
+
+        assert!(NodeKind::from_str("unknown_kind").is_none());
+        assert!(NodeKind::from_str("").is_none());
+        assert!(EdgeKind::from_str("unknown_edge").is_none());
+        assert!(Visibility::from_str("unknown").is_none());
     }
 }

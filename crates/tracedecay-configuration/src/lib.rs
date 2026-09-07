@@ -9,11 +9,8 @@ pub mod configuration;
 
 pub use config::{
     OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, PinnedRuntimeConfigurationCachePort,
-    RuntimeConfigurationAuthorityPort, RuntimeConfigurationFuture, RuntimeConfigurationTarget,
-    SyncConfig, TelemetryConfig, TraceDecayConfig, cached_pinned_runtime_configuration,
-    install_pinned_runtime_configuration_cache, install_runtime_configuration_authority,
-    open_runtime_configuration_for_registered_database,
-    open_runtime_configuration_for_registered_database_read_only,
+    RuntimeConfigurationTarget, SyncConfig, TelemetryConfig, TraceDecayConfig,
+    cached_pinned_runtime_configuration, install_pinned_runtime_configuration_cache,
     publish_pinned_runtime_configuration,
 };
 pub use configuration::{

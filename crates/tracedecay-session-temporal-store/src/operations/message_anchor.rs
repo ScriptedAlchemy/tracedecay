@@ -1,4 +1,5 @@
-//! Canonical retrieval-anchor resolution for one raw-message summary source.
+//! Canonical retrieval-anchor resolution for the raw-message sources of one
+//! summary publication.
 //!
 //! A published summary's source lineage must name the same retrieval anchor the
 //! temporal projection binds to that message. Anything else is a second anchor
@@ -11,6 +12,16 @@
 //! instead — the exact-observation anchor identity is retained when the
 //! observation is persisted and does not change when the refresh later
 //! materializes the occurrence, so both routes agree on the anchor.
+//!
+//! A publication's raw sources are resolved together: the materialized
+//! occurrences of the whole message set are read in one statement, and the
+//! messages that leaves unresolved share one pass over the session's canonical
+//! observation effects, each observation decoded and projected once. Per
+//! message the outcome is exactly the single-message resolution — same anchor
+//! derivation, ownership, receipt agreement, readability and ambiguity
+//! refusals — so `K` sources cost one scan of `N` effects instead of `K`.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, ObservationScopeV1, PayloadAccessState, ProjectId,
@@ -26,48 +37,93 @@ use super::sources::unavailable;
 /// has to write a compatibility anchor row, and the source's knowledge time.
 pub(super) type ResolvedMessageAnchor = (String, bool, i64);
 
-/// Resolves the canonical retrieval anchor for one raw LCM message.
-///
-/// `Ok(None)` means the message has no canonical anchor in this store at all —
-/// the only case in which the publication falls back to a legacy compatibility
-/// anchor.
-#[hotpath::measure(future = true, label = "session_temporal.publication.resolve_anchor")]
-pub(super) async fn resolve_message_anchor(
-    conn: &impl crate::handle::SessionTemporalExec,
-    provider: &str,
-    session_id: &str,
-    message_id: &str,
-    now: i64,
-) -> Result<Option<ResolvedMessageAnchor>, LcmError> {
-    if let Some(resolved) =
-        resolve_materialized_occurrence(conn, provider, session_id, message_id, now).await?
-    {
-        return Ok(Some(resolved));
-    }
-    resolve_canonical_observation(conn, provider, session_id, message_id, now).await
+/// One materialized occurrence row of a requested message.
+struct MaterializedOccurrence {
+    anchor_id: String,
+    anchor_json: String,
+    owner_json: String,
+    knowledge_at: i64,
+    observation_json: String,
+    receipt_id: String,
 }
 
-/// Resolves through the message's occurrence in the active temporal generation.
-async fn resolve_materialized_occurrence(
+/// Resolves the canonical retrieval anchors of `message_ids` (distinct, in
+/// source order) for one session, reading the shared authorities once.
+///
+/// A message absent from the returned map has no canonical anchor in this
+/// store at all — the only case in which the publication falls back to a
+/// legacy compatibility anchor. A refusal raised by one message's own
+/// evidence names that message; a refusal the shared observation scan raises
+/// before any message matched (missing or undecodable observation authority)
+/// names the first still-unresolved message in source order, which is the
+/// message whose single-message scan met it before.
+#[hotpath::measure(future = true, label = "session_temporal.publication.resolve_anchors")]
+pub(super) async fn resolve_message_anchors(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,
     session_id: &str,
-    message_id: &str,
+    project_key: &str,
+    active_generation: Option<i64>,
+    message_ids: &[String],
     now: i64,
-) -> Result<Option<ResolvedMessageAnchor>, LcmError> {
-    let Some(generation) = super::generation::active_generation(conn, session_id).await? else {
-        return Ok(None);
+) -> Result<BTreeMap<String, ResolvedMessageAnchor>, LcmError> {
+    if message_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let expected_scope = publishing_scope(project_key)?;
+    let mut resolved = match active_generation {
+        Some(generation) => {
+            resolve_materialized_occurrences(
+                conn,
+                provider,
+                session_id,
+                generation,
+                message_ids,
+                &expected_scope,
+                now,
+            )
+            .await?
+        }
+        None => BTreeMap::new(),
     };
+    let unresolved = message_ids
+        .iter()
+        .filter(|message_id| !resolved.contains_key(*message_id))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+        resolve_canonical_observations(
+            conn,
+            provider,
+            session_id,
+            &unresolved,
+            &expected_scope,
+            now,
+            &mut resolved,
+        )
+        .await?;
+    }
+    Ok(resolved)
+}
+
+/// Resolves every requested message that has an occurrence in the active
+/// temporal generation. Messages without one are simply absent from the map.
+async fn resolve_materialized_occurrences(
+    conn: &impl crate::handle::SessionTemporalExec,
+    provider: &str,
+    session_id: &str,
+    generation: i64,
+    message_ids: &[String],
+    expected_scope: &ObservationScopeV1,
+    now: i64,
+) -> Result<BTreeMap<String, ResolvedMessageAnchor>, LcmError> {
+    let encoded_ids =
+        serde_json::to_string(message_ids).map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT DISTINCT json_object(
-                    'anchor_id', occurrence.retrieval_anchor_id,
-                    'anchor_json', anchor.anchor_json,
-                    'owner_json', anchor.owner_json,
-                    'knowledge_at', occurrence.knowledge_at,
-                    'observation_json', observation.observation_json,
-                    'receipt_id', observation.receipt_id
-                )
+            "SELECT DISTINCT occurrence.message_id, occurrence.retrieval_anchor_id,
+                    anchor.anchor_json, anchor.owner_json, occurrence.knowledge_at,
+                    observation.observation_json, observation.receipt_id
              FROM session_occurrences occurrence
              JOIN retrieval_anchors anchor
                ON anchor.anchor_id = occurrence.retrieval_anchor_id
@@ -75,64 +131,81 @@ async fn resolve_materialized_occurrence(
                ON observation.observation_id = occurrence.source_observation_id
              WHERE occurrence.session_id = ?1
                AND occurrence.generation = ?2
-               AND occurrence.message_id = ?3
-             ORDER BY occurrence.retrieval_anchor_id",
-            params![session_id, generation, message_id],
+               AND occurrence.message_id IN (SELECT value FROM json_each(?3))
+             ORDER BY occurrence.message_id, occurrence.retrieval_anchor_id",
+            params![session_id, generation, encoded_ids],
         )
         .await?;
-    let Some(row) = rows.next().await? else {
-        return Ok(None);
-    };
-    let encoded = row.get::<String>(0)?;
-    let retained: serde_json::Value =
-        serde_json::from_str(&encoded).map_err(|error| LcmError::Db(error.to_string()))?;
-    let string = |field: &str| {
-        retained[field]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| LcmError::Db(format!("retained source {field} is unavailable")))
-    };
-    let anchor_id = string("anchor_id")?;
-    let anchor_json = string("anchor_json")?;
-    let owner_json = string("owner_json")?;
-    let knowledge_at = retained["knowledge_at"]
-        .as_i64()
-        .ok_or_else(|| LcmError::Db("retained source knowledge_at is unavailable".to_string()))?;
-    if rows.next().await?.is_some() {
-        return Err(LcmError::SummarySourceUnavailable {
-            source_id: message_id.to_string(),
-            reason: "ambiguous_anchor".to_string(),
-        });
+    let mut by_message: BTreeMap<String, Vec<MaterializedOccurrence>> = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let message_id: String = row.get(0)?;
+        by_message
+            .entry(message_id)
+            .or_default()
+            .push(MaterializedOccurrence {
+                anchor_id: row.get(1)?,
+                anchor_json: row.get(2)?,
+                owner_json: row.get(3)?,
+                knowledge_at: row.get(4)?,
+                observation_json: row.get(5)?,
+                receipt_id: row.get(6)?,
+            });
     }
-    let anchor: RetrievalAnchorRecord = serde_json::from_str(&anchor_json)
-        .map_err(|_| unavailable(&anchor_id, "unverifiable_anchor"))?;
-    let observation_raw = string("observation_json")?;
-    let observation: DurableObservationV1 = serde_json::from_str(&observation_raw)
-        .map_err(|_| unavailable(&anchor_id, "unverifiable_observation"))?;
-    let expected_scope = publishing_scope(conn, provider, session_id).await?;
-    require_session_owned_observation(
-        &observation,
-        &anchor,
-        &owner_json,
-        &string("receipt_id")?,
-        provider,
-        session_id,
-        &expected_scope,
-    )?;
-    require_readable_anchor(&anchor, &anchor_id, now)?;
-    Ok(Some((anchor_id, false, knowledge_at)))
+    let mut resolved = BTreeMap::new();
+    for message_id in message_ids {
+        let Some(occurrences) = by_message.remove(message_id) else {
+            continue;
+        };
+        let mut occurrences = occurrences.into_iter();
+        let Some(retained) = occurrences.next() else {
+            continue;
+        };
+        if occurrences.next().is_some() {
+            return Err(LcmError::SummarySourceUnavailable {
+                source_id: message_id.clone(),
+                reason: "ambiguous_anchor".to_string(),
+            });
+        }
+        let anchor: RetrievalAnchorRecord = serde_json::from_str(&retained.anchor_json)
+            .map_err(|_| unavailable(&retained.anchor_id, "unverifiable_anchor"))?;
+        let observation: DurableObservationV1 = serde_json::from_str(&retained.observation_json)
+            .map_err(|_| unavailable(&retained.anchor_id, "unverifiable_observation"))?;
+        require_session_owned_observation(
+            &observation,
+            &anchor,
+            &retained.owner_json,
+            &retained.receipt_id,
+            provider,
+            session_id,
+            expected_scope,
+        )?;
+        require_readable_anchor(&anchor, &retained.anchor_id, now)?;
+        resolved.insert(
+            message_id.clone(),
+            (retained.anchor_id, false, retained.knowledge_at),
+        );
+    }
+    Ok(resolved)
 }
 
-/// Resolves through the durable observation authority, which retains the
-/// exact-observation anchor before any generation materializes the occurrence.
-async fn resolve_canonical_observation(
+/// Resolves the still-unresolved messages through the durable observation
+/// authority in one pass over the session's positive-output effects. Each
+/// observation is decoded and projected once and its anchor is bound to every
+/// unresolved message it projects; two different anchors for one message are
+/// an ambiguity refusal, exactly as for a single message.
+async fn resolve_canonical_observations(
     conn: &impl crate::handle::SessionTemporalExec,
     provider: &str,
     session_id: &str,
-    message_id: &str,
+    unresolved: &[&str],
+    expected_scope: &ObservationScopeV1,
     now: i64,
-) -> Result<Option<ResolvedMessageAnchor>, LcmError> {
-    let expected_scope = publishing_scope(conn, provider, session_id).await?;
+    resolved: &mut BTreeMap<String, ResolvedMessageAnchor>,
+) -> Result<(), LcmError> {
+    let Some(first_unresolved) = unresolved.first().copied() else {
+        return Ok(());
+    };
+    let wanted = unresolved.iter().copied().collect::<BTreeSet<_>>();
     let mut rows = conn
         .query(
             "SELECT observation.observation_json, observation.receipt_id,
@@ -151,31 +224,31 @@ async fn resolve_canonical_observation(
             params![session_id],
         )
         .await?;
-    let mut resolved: Option<ResolvedMessageAnchor> = None;
     while let Some(row) = rows.next().await? {
         let observation_raw = row
             .get::<Option<String>>(0)?
-            .ok_or_else(|| unavailable(message_id, "missing_observation_authority"))?;
+            .ok_or_else(|| unavailable(first_unresolved, "missing_observation_authority"))?;
         let observation = serde_json::from_str::<DurableObservationV1>(&observation_raw)
-            .map_err(|_| unavailable(message_id, "unverifiable_observation"))?;
+            .map_err(|_| unavailable(first_unresolved, "unverifiable_observation"))?;
         if observation.source().provider().as_str() != provider
             || observation.source().session_id().as_str() != session_id
         {
             continue;
         }
-        if !projects_message(&observation, message_id)? {
+        let projected = projected_messages(&observation, unresolved, &wanted, first_unresolved)?;
+        let Some(attributed) = projected.first().copied() else {
             continue;
-        }
+        };
         let receipt_id = row
             .get::<Option<String>>(1)?
-            .ok_or_else(|| unavailable(message_id, "missing_observation_receipt"))?;
+            .ok_or_else(|| unavailable(attributed, "missing_observation_receipt"))?;
         let effect_receipt_id = row.get::<String>(2)?;
         if effect_receipt_id != receipt_id {
             return Err(LcmError::SummarySourceNotOwnedBySession);
         }
         let retained_anchor_id = row
             .get::<Option<String>>(3)?
-            .ok_or_else(|| unavailable(message_id, "missing_anchor_binding"))?;
+            .ok_or_else(|| unavailable(attributed, "missing_anchor_binding"))?;
         let anchor_json = row
             .get::<Option<String>>(4)?
             .ok_or_else(|| unavailable(&retained_anchor_id, "missing_anchor_authority"))?;
@@ -191,35 +264,49 @@ async fn resolve_canonical_observation(
             &receipt_id,
             provider,
             session_id,
-            &expected_scope,
+            expected_scope,
         )?;
         require_exact_observation_anchor(&observation, &anchor)?;
         let anchor_id = anchor.anchor_id().as_str().to_owned();
         require_readable_anchor(&anchor, &anchor_id, now)?;
         let candidate = (anchor_id, false, anchor.ingested_at().0);
-        match &resolved {
-            Some(existing) if existing.0 != candidate.0 => {
-                return Err(LcmError::SummarySourceUnavailable {
-                    source_id: message_id.to_string(),
-                    reason: "ambiguous_anchor".to_string(),
-                });
+        for message_id in projected {
+            match resolved.get(message_id) {
+                Some(existing) if existing.0 != candidate.0 => {
+                    return Err(LcmError::SummarySourceUnavailable {
+                        source_id: message_id.to_string(),
+                        reason: "ambiguous_anchor".to_string(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    resolved.insert(message_id.to_owned(), candidate.clone());
+                }
             }
-            Some(_) => {}
-            None => resolved = Some(candidate),
         }
     }
-    Ok(resolved)
+    Ok(())
 }
 
-fn projects_message(
+/// The unresolved messages (in source order) that `observation` projects.
+fn projected_messages<'a>(
     observation: &DurableObservationV1,
-    message_id: &str,
-) -> Result<bool, LcmError> {
-    let projects_message = derive_canonical_projection(observation)
-        .map_err(|_| unavailable(message_id, "unverifiable_observation"))?
+    unresolved: &[&'a str],
+    wanted: &BTreeSet<&str>,
+    attributed: &str,
+) -> Result<Vec<&'a str>, LcmError> {
+    let projection = derive_canonical_projection(observation)
+        .map_err(|_| unavailable(attributed, "unverifiable_observation"))?;
+    let projected = projection
         .messages()
-        .any(|output| output.message().message_id == message_id);
-    Ok(projects_message)
+        .map(|output| output.message().message_id.as_str())
+        .filter(|message_id| wanted.contains(message_id))
+        .collect::<BTreeSet<_>>();
+    Ok(unresolved
+        .iter()
+        .copied()
+        .filter(|message_id| projected.contains(message_id))
+        .collect())
 }
 
 fn require_session_owned_observation(
@@ -284,25 +371,13 @@ fn require_readable_anchor(
     Ok(())
 }
 
-async fn publishing_scope(
-    conn: &impl crate::handle::SessionTemporalExec,
-    provider: &str,
-    session_id: &str,
-) -> Result<ObservationScopeV1, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT project_key FROM sessions WHERE provider = ?1 AND session_id = ?2",
-            params![provider, session_id],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::SummarySourceNotOwnedBySession);
-    };
-    let project_key: String = row.get(0)?;
+/// The observation scope a session publishes under, derived from its owner's
+/// project key.
+fn publishing_scope(project_key: &str) -> Result<ObservationScopeV1, LcmError> {
     if project_key == "user" {
         return Ok(ObservationScopeV1::Profile);
     }
-    ProjectId::new(project_key)
+    ProjectId::new(project_key.to_owned())
         .map(|project_id| ObservationScopeV1::Project { project_id })
         .map_err(|_| LcmError::SummarySourceNotOwnedBySession)
 }
@@ -327,6 +402,7 @@ mod tests {
     use tracedecay_runtime_core::db::engine::params;
 
     use crate::relations::{SessionRelationProjection, SessionRelationScope};
+    use crate::test_support::QueryCountingConnection;
     use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
@@ -350,16 +426,29 @@ mod tests {
         message_id: &str,
         ordinal: u64,
     ) -> DurableObservationV1 {
+        fixture_observation_projecting(provider, session_id, message_id, message_id, ordinal)
+    }
+
+    /// An observation whose native record is `record_id` but whose canonical
+    /// projection names `message_id`; distinct records projecting one message
+    /// are how an ambiguous canonical anchor arises.
+    fn fixture_observation_projecting(
+        provider: &str,
+        session_id: &str,
+        record_id: &str,
+        message_id: &str,
+        ordinal: u64,
+    ) -> DurableObservationV1 {
         let provider_id = ProviderId::new(provider).expect("provider");
         let session_id = SessionId::new(session_id).expect("session");
-        let record_id = ObservationId::new(message_id).expect("record id");
+        let record_id = ObservationId::new(record_id).expect("record id");
+        let message_id = ObservationId::new(message_id).expect("message id");
         let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
         let envelope = CanonicalObservationEnvelopeV1::new(
             provider_id.clone(),
             "message",
             record_id.clone(),
-            CanonicalObservationRelationsV1::new(session_id.clone())
-                .with_message_id(record_id.clone()),
+            CanonicalObservationRelationsV1::new(session_id.clone()).with_message_id(message_id),
             vec![CanonicalObservationFactV1::Message {
                 role: CanonicalMessageRoleV1::Assistant,
                 content: json!({"text": "canonical message-anchor fixture"}),
@@ -438,7 +527,18 @@ mod tests {
         anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
         owner_json: &str,
     ) {
-        seed_canonical_observation(conn, observation_json, observation).await;
+        seed_canonical_binding_at(conn, observation_json, observation, anchor, owner_json, 1).await;
+    }
+
+    async fn seed_canonical_binding_at(
+        conn: &impl crate::handle::SessionTemporalExec,
+        observation_json: &str,
+        observation: &DurableObservationV1,
+        anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
+        owner_json: &str,
+        sequence: i64,
+    ) {
+        seed_canonical_observation_at(conn, observation_json, observation, sequence).await;
         conn.execute(
             "INSERT INTO retrieval_anchors (
                 anchor_id, anchor_json, owner_json, projection_generation
@@ -467,6 +567,15 @@ mod tests {
         conn: &impl crate::handle::SessionTemporalExec,
         observation_json: &str,
         observation: &DurableObservationV1,
+    ) {
+        seed_canonical_observation_at(conn, observation_json, observation, 1).await;
+    }
+
+    async fn seed_canonical_observation_at(
+        conn: &impl crate::handle::SessionTemporalExec,
+        observation_json: &str,
+        observation: &DurableObservationV1,
+        sequence: i64,
     ) {
         let receipt = observation.receipt();
         conn.execute(
@@ -500,14 +609,97 @@ mod tests {
             "INSERT INTO session_temporal_observation_effects (
                 observation_id, observation_sequence, session_id, receipt_id,
                 effect_digest, output_count, recorded_at
-             ) VALUES (?1, 1, 'session.message-anchor', ?2, 'effect.fixture', 1, 1)",
+             ) VALUES (?1, ?3, 'session.message-anchor', ?2, 'effect.fixture', 1, 1)",
             params![
                 observation.observation_id().as_str(),
                 receipt.receipt().receipt_id().as_str(),
+                sequence,
             ],
         )
         .await
         .expect("temporal observation effect");
+    }
+
+    /// Seeds the session row plus `count` inline raw messages with store ids
+    /// `41..41 + count` and message ids `message.source.<index>`.
+    async fn seed_raw_sources(conn: &impl crate::handle::SessionTemporalExec, count: i64) {
+        conn.execute(
+            "INSERT INTO sessions (provider, session_id, project_key, project_path)
+             VALUES ('codex', 'session.message-anchor', 'user', '/fixture')",
+            (),
+        )
+        .await
+        .expect("session owner");
+        for index in 0..count {
+            conn.execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, store_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref, snippet_text,
+                    index_text, legacy_source, legacy_truncated, metadata_json
+                 ) VALUES (
+                    'codex', ?1, 'session.message-anchor', ?2, 'assistant', ?3, 1715000001,
+                    'source body', 'sha256:source-body', 'inline', NULL, 'source body',
+                    'source body', 0, 0, NULL
+                 )",
+                params![format!("message.source.{index}"), 41 + index, index],
+            )
+            .await
+            .expect("raw source");
+        }
+    }
+
+    /// Materializes `observation`'s message into the active generation, the
+    /// state a temporal refresh leaves behind.
+    async fn materialize_occurrence(
+        conn: &impl crate::handle::SessionTemporalExec,
+        observation: &DurableObservationV1,
+        anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
+        message_id: &str,
+    ) {
+        // The generation lifecycle guards admit only building -> ready -> active.
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES ('session.message-anchor', 1, 'building', '{}', 1);
+             UPDATE session_temporal_generations SET state = 'ready', ready_at = 1
+              WHERE session_id = 'session.message-anchor' AND generation = 1
+                AND state = 'building';
+             UPDATE session_temporal_generations SET state = 'active', activated_at = 1
+              WHERE session_id = 'session.message-anchor' AND generation = 1
+                AND state = 'ready';",
+        )
+        .await
+        .expect("active generation");
+        conn.execute(
+            "INSERT INTO session_occurrences (
+                session_id, generation, occurrence_id, source_observation_id, source_provider,
+                projection_output_ordinal, retrieval_anchor_id, message_id, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, snippet_text, index_text
+             ) VALUES (
+                'session.message-anchor', 1, ?1, ?2, 'codex', 0, ?3, ?1, 'assistant',
+                1715000002, '{\"kind\":\"unknown\"}', '{}',
+                '0000000000000000000000000000000000000000000000000000000000000000', 0, '', ''
+             )",
+            params![
+                message_id,
+                observation.observation_id().as_str(),
+                anchor.anchor_id().as_str(),
+            ],
+        )
+        .await
+        .expect("materialized occurrence");
+    }
+
+    fn publication_over(store_ids: &[i64]) -> LcmImmutableSummaryPublication {
+        let mut publication = publication();
+        publication.draft.source_refs = store_ids
+            .iter()
+            .map(|store_id| LcmSourceRef::RawMessage {
+                store_id: *store_id,
+            })
+            .collect();
+        publication
     }
 
     fn publication() -> LcmImmutableSummaryPublication {
@@ -579,6 +771,19 @@ mod tests {
             &empty_relation_projection(),
         )
         .await
+    }
+
+    async fn summary_node_count(conn: &impl crate::handle::SessionTemporalExec) -> i64 {
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM session_summary_nodes", ())
+            .await
+            .expect("summary node count");
+        rows.next()
+            .await
+            .expect("summary node row")
+            .expect("summary node count row")
+            .get(0)
+            .expect("summary node count value")
     }
 
     async fn legacy_anchor_count(conn: &impl crate::handle::SessionTemporalExec) -> i64 {
@@ -884,5 +1089,255 @@ mod tests {
             }) if source_id == "summary.message-anchor.malformed"
                 && reason == "unverifiable_source_horizon"
         ));
+    }
+
+    /// `K` raw sources published before any refresh resolve through one scan
+    /// of the session's `N` observation effects, and the same bindings come
+    /// back once the refresh has materialized some or all of the occurrences.
+    #[tokio::test]
+    async fn many_raw_sources_resolve_their_anchors_in_one_bounded_pass() {
+        const SOURCES: i64 = 6;
+        const UNRELATED_OBSERVATIONS: i64 = 4;
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        seed_raw_sources(&conn, SOURCES).await;
+        let mut bindings = Vec::new();
+        for index in 0..SOURCES {
+            let message_id = format!("message.source.{index}");
+            let observation = fixture_observation(
+                "codex",
+                "session.message-anchor",
+                &message_id,
+                (index + 1) as u64,
+            );
+            let anchor = fixture_anchor(&observation);
+            seed_canonical_binding_at(
+                &conn,
+                &serde_json::to_string(&observation).expect("observation json"),
+                &observation,
+                &anchor,
+                &serde_json::to_string(anchor.owner()).expect("owner json"),
+                index + 1,
+            )
+            .await;
+            bindings.push((message_id, observation, anchor));
+        }
+        // Same-session observations that project none of the sources are still
+        // part of every scan and must be decoded once per publication, not
+        // once per source.
+        for index in 0..UNRELATED_OBSERVATIONS {
+            let observation = fixture_observation(
+                "codex",
+                "session.message-anchor",
+                &format!("message.unrelated.{index}"),
+                (SOURCES + index + 1) as u64,
+            );
+            seed_canonical_observation_at(
+                &conn,
+                &serde_json::to_string(&observation).expect("observation json"),
+                &observation,
+                SOURCES + index + 1,
+            )
+            .await;
+        }
+        let effects = SOURCES + UNRELATED_OBSERVATIONS;
+        let publication = publication_over(&(41..41 + SOURCES).collect::<Vec<_>>());
+        let expected_bindings = bindings
+            .iter()
+            .map(|(_, _, anchor)| (anchor.anchor_id().as_str().to_owned(), false))
+            .collect::<Vec<_>>();
+        let prepared_bindings = |sources: &[super::super::PreparedSource]| {
+            sources
+                .iter()
+                .map(|source| (source.canonical.id.clone(), source.compatibility_anchor))
+                .collect::<Vec<_>>()
+        };
+
+        // Before any refresh: every source goes through the canonical
+        // observation authority.
+        let counted = QueryCountingConnection::new(&conn);
+        let before_refresh = super::super::sources::prepare_sources(&counted, &publication)
+            .await
+            .expect("publication sources before refresh");
+        assert_eq!(prepared_bindings(&before_refresh), expected_bindings);
+        let unmaterialized_statements = counted.query_count();
+        println!(
+            "prepare_sources before refresh: {SOURCES} sources, {effects} effects -> \
+             {unmaterialized_statements} statements"
+        );
+        assert!(
+            unmaterialized_statements <= 5,
+            "{SOURCES} unmaterialized sources issued {unmaterialized_statements} statements"
+        );
+
+        // A refresh that has materialized half the sources: the materialized
+        // half resolves through the generation, the rest through one scan.
+        for (message_id, observation, anchor) in bindings.iter().take(SOURCES as usize / 2) {
+            materialize_occurrence(&conn, observation, anchor, message_id).await;
+        }
+        let counted = QueryCountingConnection::new(&conn);
+        let partially_materialized = super::super::sources::prepare_sources(&counted, &publication)
+            .await
+            .expect("publication sources after partial refresh");
+        assert_eq!(
+            prepared_bindings(&partially_materialized),
+            expected_bindings
+        );
+        println!(
+            "prepare_sources after partial refresh: {SOURCES} sources -> {} statements",
+            counted.query_count()
+        );
+        assert!(
+            counted.query_count() <= 6,
+            "partially materialized sources issued {} statements",
+            counted.query_count()
+        );
+
+        // Fully materialized: the occurrence lookup answers everything and the
+        // observation scan is skipped.
+        for (message_id, observation, anchor) in bindings.iter().skip(SOURCES as usize / 2) {
+            materialize_occurrence(&conn, observation, anchor, message_id).await;
+        }
+        let counted = QueryCountingConnection::new(&conn);
+        let materialized = super::super::sources::prepare_sources(&counted, &publication)
+            .await
+            .expect("publication sources after refresh");
+        assert_eq!(prepared_bindings(&materialized), expected_bindings);
+        println!(
+            "prepare_sources after refresh: {SOURCES} sources -> {} statements",
+            counted.query_count()
+        );
+        assert!(
+            counted.query_count() <= 5,
+            "materialized sources issued {} statements",
+            counted.query_count()
+        );
+    }
+
+    /// A mixed publication refuses on the first source (in source order) that
+    /// fails its own check, with that source's typed refusal, and leaves
+    /// nothing published: no summary node and no legacy anchor.
+    #[tokio::test]
+    async fn mixed_source_publication_refuses_on_the_first_failing_source() {
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        // 41: canonical anchor; 42: no canonical evidence (legacy fallback);
+        // 43: ambiguous (two exact anchors project it); 44: retention-expired;
+        // 45: foreign session.
+        seed_raw_sources(&conn, 4).await;
+        let canonical =
+            fixture_observation("codex", "session.message-anchor", "message.source.0", 1);
+        let canonical_anchor = fixture_anchor(&canonical);
+        seed_canonical_binding_at(
+            &conn,
+            &serde_json::to_string(&canonical).expect("observation json"),
+            &canonical,
+            &canonical_anchor,
+            &serde_json::to_string(canonical_anchor.owner()).expect("owner json"),
+            1,
+        )
+        .await;
+        for (sequence, ordinal, record_id) in [
+            (2_i64, 2_u64, "message.source.2"),
+            (3, 3, "message.source.2.duplicate"),
+        ] {
+            let observation = fixture_observation_projecting(
+                "codex",
+                "session.message-anchor",
+                record_id,
+                "message.source.2",
+                ordinal,
+            );
+            let anchor = fixture_anchor(&observation);
+            seed_canonical_binding_at(
+                &conn,
+                &serde_json::to_string(&observation).expect("observation json"),
+                &observation,
+                &anchor,
+                &serde_json::to_string(anchor.owner()).expect("owner json"),
+                sequence,
+            )
+            .await;
+        }
+        conn.execute(
+            "UPDATE lcm_raw_messages SET metadata_json = '{\"retention_expires_at\": 1}'
+             WHERE store_id = 44",
+            (),
+        )
+        .await
+        .expect("expired source");
+        conn.execute_batch(
+            "INSERT INTO sessions (provider, session_id, project_key, project_path)
+             VALUES ('codex', 'session.foreign', 'user', '/foreign');
+             INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, store_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, payload_ref, snippet_text,
+                index_text, legacy_source, legacy_truncated, metadata_json
+             ) VALUES (
+                'codex', 'message.foreign', 'session.foreign', 45, 'assistant', 0, 1715000001,
+                'foreign body', 'sha256:foreign-body', 'inline', NULL, 'foreign body',
+                'foreign body', 0, 0, NULL
+             );",
+        )
+        .await
+        .expect("foreign source");
+        // Expired (44) precedes foreign (45) in source order, so the expiry is
+        // the refusal even though both fail.
+        let result = super::super::publication::publish_immutable_summary(
+            &conn,
+            publication_over(&[41, 42, 44, 45]),
+            &empty_relation_projection(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(LcmError::SummarySourceUnavailable { ref source_id, ref reason })
+                if source_id == "44" && reason == "retention_expired"
+        ));
+        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(summary_node_count(&conn).await, 0);
+
+        // The ambiguous source (43) is refused by its own evidence even though
+        // the canonical (41) and legacy-fallback (42) sources ahead of it are
+        // fine; the fallback anchor for 42 is never written.
+        let result = super::super::publication::publish_immutable_summary(
+            &conn,
+            publication_over(&[41, 42, 43]),
+            &empty_relation_projection(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(LcmError::SummarySourceUnavailable { ref source_id, ref reason })
+                if source_id == "message.source.2" && reason == "ambiguous_anchor"
+        ));
+        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(summary_node_count(&conn).await, 0);
+
+        // Without the failing sources the same publication commits: 41 keeps
+        // its canonical anchor and 42 falls back to exactly one legacy anchor.
+        super::super::publication::publish_immutable_summary(
+            &conn,
+            publication_over(&[41, 42]),
+            &empty_relation_projection(),
+        )
+        .await
+        .expect("publication over canonical and legacy sources");
+        assert_eq!(legacy_anchor_count(&conn).await, 1);
+        assert_eq!(summary_node_count(&conn).await, 1);
     }
 }

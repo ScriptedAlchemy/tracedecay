@@ -37,7 +37,7 @@ pub(crate) async fn execute_retained_memory_curator(
                 "the automation configuration could not be loaded: {error}"
             ))
         })?;
-    let mut config = from_configuration_snapshot(&pinned.snapshot).map_err(|error| {
+    let mut config = from_configuration_snapshot(pinned.snapshot()).map_err(|error| {
         RetainedSurfaceExecutionErrorV1::unavailable(format!(
             "the automation configuration snapshot is invalid: {error}"
         ))
@@ -47,9 +47,9 @@ pub(crate) async fn execute_retained_memory_curator(
     let backend = CodexAppServerBackend::from_automation_config(&config);
     let configuration_digest =
         crate::daemon::automation_effect::pinned_automation_configuration_digest(
-            &pinned.revision_id,
-            &pinned.snapshot.effective_behavior_digest,
-            &pinned.snapshot.resolution_provenance_digest,
+            pinned.revision_id(),
+            &pinned.snapshot().effective_behavior_digest,
+            &pinned.snapshot().resolution_provenance_digest,
         )
         .map_err(|error| {
             RetainedSurfaceExecutionErrorV1::unavailable(format!(
@@ -111,7 +111,7 @@ pub(crate) async fn execute_retained_memory_curator(
     let retained_run = run_memory_curator_with_backend_for_retained_settlement(
         cg,
         &config,
-        &pinned.revision_id,
+        pinned.revision_id(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Application,

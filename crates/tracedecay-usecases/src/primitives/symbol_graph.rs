@@ -499,7 +499,7 @@ where
                         records.push(TypeHierarchyRecord {
                             symbol,
                             parent_node_id: parent_id.as_str().to_owned(),
-                            edge_kind: relation_kind_name(edge.edge.kind).to_owned(),
+                            edge_kind: edge.edge.kind.as_str().to_owned(),
                             depth: depth + 1,
                         });
                         frontier.push((child_id, depth + 1));
@@ -635,7 +635,7 @@ where
                             };
                             records.push(SymbolRelationRecord {
                                 symbol,
-                                edge_kind: relation_kind_name(RelationEdgeKindV1::Calls).to_owned(),
+                                edge_kind: RelationEdgeKindV1::Calls.as_str().to_owned(),
                                 dispatch_via_trait: true,
                                 dispatch_from: Some(callee_id.clone()),
                                 depth: None,
@@ -824,7 +824,7 @@ pub(super) fn trait_implementations(
             }
             records.push(SymbolRelationRecord {
                 symbol: symbol_record(implementation, None)?,
-                edge_kind: relation_kind_name(edge.edge.kind).to_owned(),
+                edge_kind: edge.edge.kind.as_str().to_owned(),
                 dispatch_via_trait: false,
                 dispatch_from: Some(trait_node.occurrence.as_str().to_owned()),
                 depth: None,
@@ -944,7 +944,7 @@ fn relation_traversal(
             if in_scope(&edge.neighbor, scope) {
                 records.push(SymbolRelationRecord {
                     symbol: symbol_record(edge.neighbor, None)?,
-                    edge_kind: relation_kind_name(edge.edge.kind).to_owned(),
+                    edge_kind: edge.edge.kind.as_str().to_owned(),
                     dispatch_via_trait: false,
                     dispatch_from: None,
                     depth: Some(depth),
@@ -1069,20 +1069,6 @@ fn in_scope(node: &CodeGraphSymbolSummaryV1, scope: &SymbolGraphScope) -> bool {
     scope.path_prefix.as_deref().is_none_or(|path_prefix| {
         tracedecay_runtime_core::path_scope::path_matches_scope(file, Some(path_prefix))
     })
-}
-
-fn relation_kind_name(kind: RelationEdgeKindV1) -> &'static str {
-    match kind {
-        RelationEdgeKindV1::Calls => "calls",
-        RelationEdgeKindV1::Uses => "uses",
-        RelationEdgeKindV1::TypeOf => "type_of",
-        RelationEdgeKindV1::Contains => "contains",
-        RelationEdgeKindV1::Implements => "implements",
-        RelationEdgeKindV1::Extends => "extends",
-        RelationEdgeKindV1::Annotates => "annotates",
-        RelationEdgeKindV1::Returns => "returns",
-        RelationEdgeKindV1::Receives => "receives",
-    }
 }
 
 /// Binds a read to the live graph generation before any row is read, and

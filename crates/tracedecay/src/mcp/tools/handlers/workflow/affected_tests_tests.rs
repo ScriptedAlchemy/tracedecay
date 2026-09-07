@@ -14,11 +14,11 @@ use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, ManifestDigest,
-    PolicyRevisionId, ProjectId, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
-    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SourceSpan, SymbolOccurrenceId, WorktreeId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1,
+    ContentDigest, EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId,
+    ManifestDigest, PolicyRevisionId, ProjectId, RefId, RelationEdgeKindV1, RepositoryId,
+    SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, WorktreeId,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -224,6 +224,7 @@ fn push_fixture_symbol(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: ordinal,
         signature: None,

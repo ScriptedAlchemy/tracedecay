@@ -104,41 +104,31 @@ impl SourceAuthorizationDecisionV1 {
     pub fn is_authorized(&self) -> bool {
         self.access == SourceAccessDecisionV1::Authorized
     }
+}
 
-    fn compute_decision_digest(&self) -> ManifestDigest {
-        #[derive(Serialize)]
-        struct DecisionMaterial<'a> {
-            evaluator_version: &'a PolicyEvaluatorVersionV1,
-            input_digest: &'a ManifestDigest,
-            policy_revision: u64,
-            policy_digest: &'a ManifestDigest,
-            configuration_digest: &'a ManifestDigest,
-            content_status: ExternalContentStatusV1,
-            access: SourceAccessDecisionV1,
-            authorization_coverage: AuthorizationCoverageV1,
-            disposition: SourceAuthorizationDispositionV1,
-            effective_grant: &'a Option<EffectiveSourceGrantV1>,
-            ordered_reason_codes: &'a [PolicyReasonCodeV1],
-            evidence_references: &'a [PolicyIdentifierV1],
-        }
+/// Borrowed projection of every decision field that the decision digest
+/// covers. The digest is computed over this material before the owned
+/// decision exists, so a decision is constructed exactly once with its final
+/// digest and no placeholder digest is ever hashed.
+#[derive(Serialize)]
+struct DecisionMaterial<'a> {
+    evaluator_version: &'a PolicyEvaluatorVersionV1,
+    input_digest: &'a ManifestDigest,
+    policy_revision: u64,
+    policy_digest: &'a ManifestDigest,
+    configuration_digest: &'a ManifestDigest,
+    content_status: ExternalContentStatusV1,
+    access: SourceAccessDecisionV1,
+    authorization_coverage: AuthorizationCoverageV1,
+    disposition: SourceAuthorizationDispositionV1,
+    effective_grant: &'a Option<EffectiveSourceGrantV1>,
+    ordered_reason_codes: &'a [PolicyReasonCodeV1],
+    evidence_references: &'a [PolicyIdentifierV1],
+}
 
-        policy_digest(
-            "tracedecay.policy.source-authorization-decision.v1",
-            &DecisionMaterial {
-                evaluator_version: &self.evaluator_version,
-                input_digest: &self.input_digest,
-                policy_revision: self.policy_revision,
-                policy_digest: &self.policy_digest,
-                configuration_digest: &self.configuration_digest,
-                content_status: self.content_status,
-                access: self.access,
-                authorization_coverage: self.authorization_coverage,
-                disposition: self.disposition,
-                effective_grant: &self.effective_grant,
-                ordered_reason_codes: &self.ordered_reason_codes,
-                evidence_references: &self.evidence_references,
-            },
-        )
+impl DecisionMaterial<'_> {
+    fn digest(&self) -> ManifestDigest {
+        policy_digest("tracedecay.policy.source-authorization-decision.v1", self)
     }
 }
 
@@ -206,9 +196,27 @@ impl SourceAuthorizationEvaluatorV1 {
         ordered_reason_codes: Vec<PolicyReasonCodeV1>,
     ) -> SourceAuthorizationDecisionV1 {
         crate::hotpath_observe::authorization_outcome(access, disposition);
-        let mut decision = SourceAuthorizationDecisionV1 {
+        let input_digest = input.input_digest();
+        let evidence_references: Vec<PolicyIdentifierV1> =
+            input.evidence_references.iter().cloned().collect();
+        let decision_digest = DecisionMaterial {
+            evaluator_version: &self.version,
+            input_digest: &input_digest,
+            policy_revision: input.policy_revision,
+            policy_digest: &input.policy_digest,
+            configuration_digest: &input.configuration_digest,
+            content_status: input.content_status,
+            access,
+            authorization_coverage: coverage,
+            disposition,
+            effective_grant: &effective_grant,
+            ordered_reason_codes: &ordered_reason_codes,
+            evidence_references: &evidence_references,
+        }
+        .digest();
+        SourceAuthorizationDecisionV1 {
             evaluator_version: self.version.clone(),
-            input_digest: input.input_digest(),
+            input_digest,
             policy_revision: input.policy_revision,
             policy_digest: input.policy_digest.clone(),
             configuration_digest: input.configuration_digest.clone(),
@@ -218,14 +226,9 @@ impl SourceAuthorizationEvaluatorV1 {
             disposition,
             effective_grant,
             ordered_reason_codes,
-            evidence_references: input.evidence_references.iter().cloned().collect(),
-            decision_digest: policy_digest(
-                "tracedecay.policy.source-authorization-decision.pending.v1",
-                &input.input_digest(),
-            ),
-        };
-        decision.decision_digest = decision.compute_decision_digest();
-        decision
+            evidence_references,
+            decision_digest,
+        }
     }
 
     fn non_authorizing(

@@ -94,7 +94,8 @@ pub use runtime_service::{
 };
 pub use semantic_evaluation::{
     PreparedSemanticEvaluationProjectionV1, SemanticEvaluationCancellationV1,
-    SemanticEvaluationProjectionBatchCachePolicyV1, SemanticEvaluationProjectionBatchCacheV1,
+    SemanticEvaluationProjectionBatchCacheMemoryV1, SemanticEvaluationProjectionBatchCachePolicyV1,
+    SemanticEvaluationProjectionBatchCacheV1, SemanticEvaluationProjectionBatchStoreV1,
     SemanticEvaluationProjectionCancellationV1, SemanticEvaluationProjectionResourcesV1,
     SemanticEvaluationQueryEmbedderV1, SemanticEvaluationQueryFactoryV1,
     measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
@@ -1333,8 +1334,8 @@ mod document_composition_tests {
     use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ContentDigest,
-        EmbeddingDocumentCompositionV1, FileIdentityDigest, FileOccurrenceId,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComplexityAnalysisV1,
+        ContentDigest, EmbeddingDocumentCompositionV1, FileIdentityDigest, FileOccurrenceId,
         LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision, SensitivityDecision,
         SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
     };
@@ -1368,6 +1369,7 @@ mod document_composition_tests {
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: 1,
             start_line: 0,
             signature: None,

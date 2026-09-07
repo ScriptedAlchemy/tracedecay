@@ -14,10 +14,10 @@ use tracedecay_code_index::lineage::LineageKindV1;
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, FileIdentityDigest,
-    FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest,
-    SymbolOccurrenceId,
+    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComplexityAnalysisV1,
+    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
+    PolicyRevisionId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan,
+    SymbolIdentityDigest, SymbolOccurrenceId,
 };
 
 fn id<T>(value: &str) -> T
@@ -268,6 +268,7 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                         branches: 0,
                         loops: 0,
                         max_nesting: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         line_span: 1,
                         start_line: 0,
                         signature: None,

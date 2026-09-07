@@ -177,7 +177,7 @@ struct ProjectEditableSettingsV1 {
 fn project_editable_settings(
     configuration: &crate::config::PinnedRuntimeConfiguration,
 ) -> ProjectEditableSettingsV1 {
-    let config: &TraceDecayConfig = &configuration.config;
+    let config: &TraceDecayConfig = configuration.config();
     ProjectEditableSettingsV1 {
         include: config.include.clone(),
         exclude: config.exclude.clone(),
@@ -193,7 +193,7 @@ fn project_editable_settings(
             auto_track_pr_poll_secs: config.sync.auto_track_pr_poll_secs,
         },
         context_scout: context_scout_settings_are_enabled(&effective_context_scout_settings(
-            &configuration.snapshot,
+            configuration.snapshot(),
         )),
     }
 }
@@ -603,11 +603,11 @@ async fn settings_envelope(
             legacy_config_path: legacy_config_path.display().to_string(),
             legacy_config_read_only: true,
             configuration_snapshot_id: project_configuration
-                .snapshot
+                .snapshot()
                 .snapshot_id
                 .as_str()
                 .to_owned(),
-            configuration_revision_id: project_configuration.revision_id.as_str().to_owned(),
+            configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
             tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
             pr_autotrack: pr_autotrack_payload(state),
@@ -695,7 +695,7 @@ fn user_settings_payload(
 fn automation_settings_payload(
     project_configuration: &crate::config::PinnedRuntimeConfiguration,
 ) -> AutomationSettingsPayloadV1 {
-    match from_configuration_snapshot(&project_configuration.snapshot) {
+    match from_configuration_snapshot(project_configuration.snapshot()) {
         Ok(automation) => AutomationSettingsPayloadV1 {
             config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
             availability: SettingsAvailabilityV1 {
@@ -703,7 +703,9 @@ fn automation_settings_payload(
                 reason: None,
                 required_authority: None,
             },
-            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
+            configuration_revision_id: Some(
+                project_configuration.revision_id().as_str().to_owned(),
+            ),
             enabled: Some(automation.enabled),
             backend: Some(automation.backend.as_str().to_owned()),
             host_mode: Some(automation.host_mode.as_str().to_owned()),
@@ -717,7 +719,9 @@ fn automation_settings_payload(
                 )),
                 required_authority: Some("pinned automation configuration".to_owned()),
             },
-            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
+            configuration_revision_id: Some(
+                project_configuration.revision_id().as_str().to_owned(),
+            ),
             enabled: None,
             backend: None,
             host_mode: None,
@@ -828,12 +832,12 @@ fn project_apply_error(
 ) -> DashboardConfigurationRouteErrorV1 {
     if problem.problem.kind() == ApplicationProblemKind::Conflict
         && let Ok(current) = crate::config::cached_runtime_configuration(project_root)
-        && current.revision_id != *expected_revision
+        && current.revision_id() != expected_revision
     {
         return configuration_revision_conflict_error(
             "settings changed after this edit began; refresh and retry",
             expected_revision.as_str(),
-            current.revision_id.as_str(),
+            current.revision_id().as_str(),
         );
     }
     configuration_application_problem_error(problem)

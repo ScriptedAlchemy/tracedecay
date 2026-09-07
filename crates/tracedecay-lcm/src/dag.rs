@@ -332,6 +332,96 @@ pub struct LcmUncondensedSummaryNode {
     pub first_source_store_id: Option<i64>,
 }
 
+/// CTE prefix shared by [`load_uncondensed_summary_nodes`] and its work
+/// measurement: the available unparented roots of one session and, per root,
+/// the descendants reachable through `lcm_summary_sources`.
+///
+/// `lineage` holds one `(root_id, source_kind, source_id)` row per *distinct*
+/// descendant. The recursive `UNION` (not `UNION ALL`) makes SQLite's queue a
+/// visited set, so a descendant shared by many routes is expanded once per
+/// root and the walk costs O(reachable nodes + edges), never O(paths). The
+/// replay consumer only needs `MIN(raw store id)` per root, which the distinct
+/// set answers exactly. The visited set is also the termination bound: a
+/// corrupted cyclic lineage revisits nothing and still yields the complete
+/// reachable minimum instead of a depth-truncated one.
+const UNCONDENSED_LINEAGE_CTE: &str = "WITH RECURSIVE unparented AS (
+       SELECT n.node_id, n.provider, n.conversation_id, n.session_id, n.depth,
+              n.summary_text, n.summary_hash, n.summary_token_count,
+              n.source_token_count, n.source_time_start, n.source_time_end,
+              n.expand_hint, n.metadata_json, n.created_at
+       FROM lcm_summary_nodes n
+       JOIN session_temporal_generations generation
+         ON generation.session_id = n.session_id
+        AND generation.state = 'active'
+       JOIN session_summary_availability availability
+         ON availability.session_id = generation.session_id
+        AND availability.generation = generation.generation
+        AND availability.summary_id = n.node_id
+        AND availability.availability = 'available'
+       WHERE n.provider = ?1 AND n.session_id = ?2
+         -- Fail closed only while a raw revision's invalidation
+         -- closure is partially applied: the walk enqueues
+         -- `summary_node` work exactly when it has already staled at
+         -- least one summary and has more to visit. Queued-but-
+         -- unstarted work (only `raw_message` rows, which every
+         -- protection revision seeds) leaves a consistent view.
+         AND NOT EXISTS (
+           SELECT 1
+           FROM lcm_summary_convergence_invalidation_work partial
+           WHERE partial.provider = n.provider
+             AND partial.session_id = n.session_id
+             AND partial.source_kind = 'summary_node'
+             AND partial.state = 'pending'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM lcm_summary_sources s
+           JOIN session_summary_availability parent_availability
+             ON parent_availability.session_id = generation.session_id
+            AND parent_availability.generation = generation.generation
+            AND parent_availability.summary_id = s.node_id
+            AND parent_availability.availability = 'available'
+           WHERE s.source_kind = 'summary_node'
+             AND s.source_id = n.node_id
+         )
+     ),
+     lineage(root_id, source_kind, source_id) AS (
+       SELECT s.node_id, s.source_kind, s.source_id
+       FROM lcm_summary_sources s
+       JOIN unparented u ON u.node_id = s.node_id
+       UNION
+       SELECT l.root_id, s.source_kind, s.source_id
+       FROM lineage l
+       JOIN lcm_summary_sources s
+         ON l.source_kind = 'summary_node' AND s.node_id = l.source_id
+     ),
+     first_raw AS (
+       SELECT root_id, MIN(CAST(source_id AS INTEGER)) AS first_source_store_id
+       FROM lineage
+       WHERE source_kind = 'raw_message'
+       GROUP BY root_id
+     )";
+
+/// The replay query: every unparented root with its earliest reachable raw
+/// store id, in replay order. Parameters: `?1` provider, `?2` session id.
+fn uncondensed_summary_nodes_sql() -> String {
+    format!(
+        "{UNCONDENSED_LINEAGE_CTE}
+         SELECT u.node_id, u.provider, u.conversation_id, u.session_id, u.depth,
+                u.summary_text, u.summary_hash, u.summary_token_count,
+                u.source_token_count, u.source_time_start, u.source_time_end,
+                u.expand_hint, u.metadata_json, u.created_at,
+                first_raw.first_source_store_id
+         FROM unparented u
+         LEFT JOIN first_raw ON first_raw.root_id = u.node_id
+         ORDER BY first_raw.first_source_store_id IS NULL,
+                  first_raw.first_source_store_id,
+                  u.depth DESC,
+                  u.source_time_start IS NULL, u.source_time_start,
+                  u.created_at, u.node_id"
+    )
+}
+
 /// Loads every summary node for the session that has not been condensed into
 /// a higher-depth node. Mirrors hermes-lcm `SummaryDAG.get_uncondensed_at_depth`
 /// collapsed across all depths in one query; replay assembly consumes the
@@ -347,94 +437,7 @@ pub async fn load_uncondensed_summary_nodes(
 ) -> Result<Vec<LcmUncondensedSummaryNode>, LcmError> {
     let mut rows = conn
         .query(
-            "WITH RECURSIVE unparented AS (
-               SELECT n.node_id, n.provider, n.conversation_id, n.session_id, n.depth,
-                      n.summary_text, n.summary_hash, n.summary_token_count,
-                      n.source_token_count, n.source_time_start, n.source_time_end,
-                      n.expand_hint, n.metadata_json, n.created_at
-               FROM lcm_summary_nodes n
-               JOIN session_temporal_generations generation
-                 ON generation.session_id = n.session_id
-                AND generation.state = 'active'
-               JOIN session_summary_availability availability
-                 ON availability.session_id = generation.session_id
-                AND availability.generation = generation.generation
-                AND availability.summary_id = n.node_id
-                AND availability.availability = 'available'
-               WHERE n.provider = ?1 AND n.session_id = ?2
-                 -- Fail closed only while a raw revision's invalidation
-                 -- closure is partially applied: the walk enqueues
-                 -- `summary_node` work exactly when it has already staled at
-                 -- least one summary and has more to visit. Queued-but-
-                 -- unstarted work (only `raw_message` rows, which every
-                 -- protection revision seeds) leaves a consistent view.
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM lcm_summary_convergence_invalidation_work partial
-                   WHERE partial.provider = n.provider
-                     AND partial.session_id = n.session_id
-                     AND partial.source_kind = 'summary_node'
-                     AND partial.state = 'pending'
-                 )
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM lcm_summary_sources s
-                   JOIN session_summary_availability parent_availability
-                     ON parent_availability.session_id = generation.session_id
-                    AND parent_availability.generation = generation.generation
-                    AND parent_availability.summary_id = s.node_id
-                    AND parent_availability.availability = 'available'
-                   WHERE s.source_kind = 'summary_node'
-                     AND s.source_id = n.node_id
-                 )
-             ),
-             lineage(root_id, source_kind, source_id, path, depth) AS (
-               SELECT s.node_id,
-                      s.source_kind,
-                      s.source_id,
-                      '|' || s.node_id || CASE
-                          WHEN s.source_kind = 'summary_node' THEN '|' || s.source_id || '|'
-                          ELSE '|'
-                      END,
-                      0
-               FROM lcm_summary_sources s
-               JOIN unparented u ON u.node_id = s.node_id
-               UNION ALL
-               SELECT l.root_id,
-                      s.source_kind,
-                      s.source_id,
-                      l.path || CASE
-                          WHEN s.source_kind = 'summary_node' THEN s.source_id || '|'
-                          ELSE ''
-                      END,
-                      l.depth + 1
-               FROM lineage l
-               JOIN lcm_summary_sources s
-                 ON l.source_kind = 'summary_node' AND s.node_id = l.source_id
-               WHERE l.depth < 128
-                 AND (
-                   s.source_kind != 'summary_node'
-                   OR instr(l.path, '|' || s.source_id || '|') = 0
-                 )
-             ),
-             first_raw AS (
-               SELECT root_id, MIN(CAST(source_id AS INTEGER)) AS first_source_store_id
-               FROM lineage
-               WHERE source_kind = 'raw_message'
-               GROUP BY root_id
-             )
-             SELECT u.node_id, u.provider, u.conversation_id, u.session_id, u.depth,
-                    u.summary_text, u.summary_hash, u.summary_token_count,
-                    u.source_token_count, u.source_time_start, u.source_time_end,
-                    u.expand_hint, u.metadata_json, u.created_at,
-                    first_raw.first_source_store_id
-             FROM unparented u
-             LEFT JOIN first_raw ON first_raw.root_id = u.node_id
-             ORDER BY first_raw.first_source_store_id IS NULL,
-                      first_raw.first_source_store_id,
-                      u.depth DESC,
-                      u.source_time_start IS NULL, u.source_time_start,
-                      u.created_at, u.node_id",
+            &uncondensed_summary_nodes_sql(),
             params![provider, session_id],
         )
         .await?;
@@ -656,6 +659,356 @@ fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef
         _ => Err(LcmError::Db(format!(
             "invalid summary source_kind: {source_kind}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    use std::cmp::Reverse;
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+
+    use super::*;
+    use crate::schema;
+    use crate::test_support::sqlite_vm_steps;
+
+    const PROVIDER: &str = "cursor";
+
+    /// One summary node of a lineage fixture.
+    struct FixtureNode {
+        node_id: String,
+        depth: i64,
+        created_at: i64,
+        available: bool,
+        sources: Vec<LcmSourceRef>,
+    }
+
+    fn node(
+        node_id: &str,
+        depth: i64,
+        created_at: i64,
+        available: bool,
+        sources: Vec<LcmSourceRef>,
+    ) -> FixtureNode {
+        FixtureNode {
+            node_id: node_id.to_string(),
+            depth,
+            created_at,
+            available,
+            sources,
+        }
+    }
+
+    fn raw(store_id: i64) -> LcmSourceRef {
+        LcmSourceRef::RawMessage { store_id }
+    }
+
+    fn child(node_id: &str) -> LcmSourceRef {
+        LcmSourceRef::SummaryNode {
+            node_id: node_id.to_string(),
+        }
+    }
+
+    /// One admitted root over `layers` layers of two nodes each, every node
+    /// sourcing both nodes of the next layer and the bottom layer sourcing one
+    /// shared raw message: the shared-descendant lattice from the issue, with
+    /// 2^layers routes to that raw message but only 2·layers + 1 descendants.
+    fn lattice(layers: usize, raw_store_id: i64) -> Vec<FixtureNode> {
+        let layer_pair =
+            |layer: usize| vec![child(&format!("l{layer}a")), child(&format!("l{layer}b"))];
+        let mut nodes = vec![node("root", layers as i64 + 1, 1, true, layer_pair(1))];
+        for layer in 1..=layers {
+            let sources = if layer == layers {
+                vec![raw(raw_store_id)]
+            } else {
+                layer_pair(layer + 1)
+            };
+            for side in ["a", "b"] {
+                nodes.push(node(
+                    &format!("l{layer}{side}"),
+                    (layers - layer) as i64 + 1,
+                    layer as i64 + 1,
+                    true,
+                    sources.clone(),
+                ));
+            }
+        }
+        nodes
+    }
+
+    async fn lineage_store(session_id: &str) -> (tempfile::TempDir, TestConnection) {
+        let temp = tempfile::tempdir().expect("lineage tempdir");
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+             );
+             CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL
+             );
+             CREATE TABLE session_summary_availability (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                summary_id TEXT NOT NULL,
+                availability TEXT NOT NULL
+             );",
+        )
+        .await
+        .expect("session and generation schema");
+        schema::ensure_lcm_schema(&conn).await.expect("lcm schema");
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES (?1, ?2, 'fixture', 'fixture')",
+            params![PROVIDER, session_id],
+        )
+        .await
+        .expect("session row");
+        conn.execute(
+            "INSERT INTO session_temporal_generations(session_id, generation, state)
+             VALUES (?1, 1, 'active')",
+            params![session_id],
+        )
+        .await
+        .expect("active generation");
+        (temp, conn)
+    }
+
+    async fn seed(conn: &TestConnection, session_id: &str, nodes: &[FixtureNode]) {
+        for fixture in nodes {
+            conn.execute(
+                "INSERT INTO lcm_summary_nodes(
+                    node_id, provider, conversation_id, session_id, depth, summary_text,
+                    summary_hash, summary_token_count, source_token_count, created_at
+                 ) VALUES (?1, ?2, ?3, ?3, ?4, ?1, ?5, 1, 1, ?6)",
+                params![
+                    fixture.node_id.as_str(),
+                    PROVIDER,
+                    session_id,
+                    fixture.depth,
+                    projected_content_hash(&fixture.node_id).as_str(),
+                    fixture.created_at,
+                ],
+            )
+            .await
+            .expect("summary node");
+            conn.execute(
+                "INSERT INTO session_summary_availability(
+                    session_id, generation, summary_id, availability
+                 ) VALUES (?1, 1, ?2, ?3)",
+                params![
+                    session_id,
+                    fixture.node_id.as_str(),
+                    if fixture.available {
+                        "available"
+                    } else {
+                        "stale"
+                    },
+                ],
+            )
+            .await
+            .expect("availability row");
+            for (ordinal, source) in fixture.sources.iter().enumerate() {
+                let (kind, source_id) = match source {
+                    LcmSourceRef::RawMessage { store_id } => ("raw_message", store_id.to_string()),
+                    LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
+                };
+                conn.execute(
+                    "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        fixture.node_id.as_str(),
+                        kind,
+                        source_id.as_str(),
+                        ordinal as i64
+                    ],
+                )
+                .await
+                .expect("summary source");
+            }
+        }
+    }
+
+    /// Independent reference for the query: available nodes without an
+    /// available parent are roots; each root's first raw source is the
+    /// minimum over a visited-set BFS of its descendants; replay order is the
+    /// query's `ORDER BY` (no fixture sets `source_time_start`).
+    fn expected_replay(nodes: &[FixtureNode]) -> Vec<(String, Option<i64>)> {
+        let by_id = nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+        let available = nodes
+            .iter()
+            .filter(|node| node.available)
+            .collect::<Vec<_>>();
+        let parented = available
+            .iter()
+            .flat_map(|node| node.sources.iter())
+            .filter_map(|source| match source {
+                LcmSourceRef::SummaryNode { node_id } => Some(node_id.as_str()),
+                LcmSourceRef::RawMessage { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut roots = available
+            .into_iter()
+            .filter(|node| !parented.contains(node.node_id.as_str()))
+            .map(|root| {
+                let mut visited = BTreeSet::new();
+                let mut queue = VecDeque::from([root.node_id.as_str()]);
+                let mut first_raw = None;
+                while let Some(node_id) = queue.pop_front() {
+                    if !visited.insert(node_id) {
+                        continue;
+                    }
+                    let Some(current) = by_id.get(node_id) else {
+                        continue;
+                    };
+                    for source in &current.sources {
+                        match source {
+                            LcmSourceRef::RawMessage { store_id } => {
+                                first_raw = Some(
+                                    first_raw.map_or(*store_id, |seen: i64| seen.min(*store_id)),
+                                );
+                            }
+                            LcmSourceRef::SummaryNode { node_id } => queue.push_back(node_id),
+                        }
+                    }
+                }
+                (root, first_raw)
+            })
+            .collect::<Vec<_>>();
+        roots.sort_by_key(|(root, first_raw)| {
+            (
+                first_raw.is_none(),
+                *first_raw,
+                Reverse(root.depth),
+                root.created_at,
+                root.node_id.clone(),
+            )
+        });
+        roots
+            .into_iter()
+            .map(|(root, first_raw)| (root.node_id.clone(), first_raw))
+            .collect()
+    }
+
+    async fn replay(conn: &TestConnection, session_id: &str) -> Vec<(String, Option<i64>)> {
+        load_uncondensed_summary_nodes(conn, PROVIDER, session_id)
+            .await
+            .expect("uncondensed summary nodes")
+            .into_iter()
+            .map(|entry| (entry.node.node_id, entry.first_source_store_id))
+            .collect()
+    }
+
+    /// Rows the recursive lineage walk materializes: the work SQLite performs
+    /// to answer the query, measured separately from the final result.
+    async fn lineage_rows(conn: &TestConnection, session_id: &str) -> i64 {
+        let mut rows = conn
+            .query(
+                &format!("{UNCONDENSED_LINEAGE_CTE} SELECT COUNT(*) FROM lineage"),
+                params![PROVIDER, session_id],
+            )
+            .await
+            .expect("lineage row count");
+        rows.next()
+            .await
+            .expect("lineage count row")
+            .expect("lineage count present")
+            .get(0)
+            .expect("lineage count value")
+    }
+
+    #[tokio::test]
+    async fn shared_descendants_are_visited_once_per_root() {
+        let mut vm_steps = BTreeMap::new();
+        for layers in [4_usize, 12] {
+            let session_id = format!("lattice-{layers}");
+            let (temp, conn) = lineage_store(&session_id).await;
+            let nodes = lattice(layers, 7);
+            seed(&conn, &session_id, &nodes).await;
+
+            let expected = expected_replay(&nodes);
+            assert_eq!(expected, vec![("root".to_string(), Some(7))]);
+            assert_eq!(replay(&conn, &session_id).await, expected);
+
+            let distinct_descendants = (2 * layers + 1) as i64;
+            let rows = lineage_rows(&conn, &session_id).await;
+            assert_eq!(
+                rows, distinct_descendants,
+                "{layers} layers: the lineage walk must materialize one row per distinct descendant, not one per route"
+            );
+            let steps = sqlite_vm_steps(
+                &temp.path().join("sessions.db"),
+                &uncondensed_summary_nodes_sql(),
+                &[
+                    Value::Text(PROVIDER.to_string()),
+                    Value::Text(session_id.clone()),
+                ],
+            );
+            println!(
+                "lineage lattice: {layers} layers, {} summary nodes, {rows} lineage rows, {steps} SQLite VM steps",
+                nodes.len()
+            );
+            vm_steps.insert(layers, steps);
+        }
+        // Tripling the reachable graph (9 -> 25 nodes) must cost roughly
+        // three times the VM work; path enumeration would cost ~250x.
+        assert!(
+            vm_steps[&12] <= vm_steps[&4] * 8,
+            "lineage VM work grew super-linearly: {vm_steps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_covers_multiple_roots_stale_parents_and_cyclic_lineage() {
+        let session_id = "mixed-lineage";
+        let (_temp, conn) = lineage_store(session_id).await;
+        let nodes = vec![
+            // A stale parent does not condense its children: both become
+            // roots, and `shared` is reached by both through a diamond.
+            node(
+                "stale-top",
+                3,
+                1,
+                false,
+                vec![child("left"), child("right")],
+            ),
+            node("left", 2, 2, true, vec![child("shared"), raw(40)]),
+            node("right", 2, 3, true, vec![child("shared"), raw(30)]),
+            node("shared", 1, 4, true, vec![raw(20), raw(25)]),
+            // A root whose descendants were corrupted into a cycle still
+            // yields the complete reachable minimum and terminates.
+            node("cycle-root", 3, 5, true, vec![child("cycle-a")]),
+            node("cycle-a", 2, 6, true, vec![child("cycle-b"), raw(90)]),
+            node("cycle-b", 1, 7, true, vec![child("cycle-a"), raw(80)]),
+            // A root with no raw sources sorts last; a stale root is hidden.
+            node("rawless", 1, 8, true, vec![child("missing-child")]),
+            node("stale-root", 1, 9, false, vec![raw(1)]),
+        ];
+        seed(&conn, session_id, &nodes).await;
+
+        let expected = expected_replay(&nodes);
+        assert_eq!(
+            expected,
+            vec![
+                ("left".to_string(), Some(20)),
+                ("right".to_string(), Some(20)),
+                ("cycle-root".to_string(), Some(80)),
+                ("rawless".to_string(), None),
+            ]
+        );
+        assert_eq!(replay(&conn, session_id).await, expected);
+        // left/right each reach {shared, 40|30, 20, 25}; cycle-root reaches
+        // {cycle-a, cycle-b, 90, 80}; rawless reaches {missing-child}.
+        assert_eq!(lineage_rows(&conn, session_id).await, 4 + 4 + 4 + 1);
     }
 }
 

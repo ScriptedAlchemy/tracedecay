@@ -5,11 +5,10 @@ use std::sync::{Arc, OnceLock};
 
 use crate::config::{
     db_filename, install_usecase_runtime_configuration_authority,
-    materialize_root_runtime_configuration,
+    open_runtime_configuration_for_registered_database_read_only,
 };
 use crate::project_store_runtime::ProjectStoreRuntimeHandle;
 use tracedecay_configuration::ProjectConfigurationRuntime;
-use tracedecay_configuration::config::open_runtime_configuration_for_registered_database_read_only;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::branch;
@@ -243,16 +242,15 @@ impl TraceDecay {
         )
         .await?;
         install_usecase_runtime_configuration_authority()?;
-        let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
-            open_runtime_configuration_for_registered_database_read_only(
-                project_root,
-                &store_layout,
-                configuration_database,
-            )
-            .await?,
-        )?;
+        let (config, opened) = open_runtime_configuration_for_registered_database_read_only(
+            project_root,
+            &store_layout,
+            configuration_database,
+        )
+        .await?
+        .into_parts();
+        let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        let config = materialize_root_runtime_configuration(&configuration)?;
         let internal_detached_scope =
             tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
                 .as_deref()

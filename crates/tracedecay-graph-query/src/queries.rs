@@ -34,7 +34,11 @@ pub struct FileAdjacencyScan {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VerifiedHealthFileAggregateV1 {
     pub file_path: String,
+    /// Summed over symbols whose bounded complexity walk covered their body;
+    /// the others are counted in `incomplete_complexity_symbols` instead of
+    /// contributing lower-bound counters as if exact.
     pub complexity: f64,
+    pub incomplete_complexity_symbols: usize,
     pub function_methods: usize,
     pub skipped_function_methods: usize,
     pub dead_function_methods: usize,
@@ -487,10 +491,15 @@ impl<'a> GraphQueryManager<'a> {
                         file_path,
                         ..VerifiedHealthFileAggregateV1::default()
                     });
-            aggregate.complexity += f64::from(record.branches) * 2.0
-                + f64::from(record.loops) * 2.0
-                + f64::from(record.max_nesting) * 3.0
-                + f64::from(record.line_span);
+            match record.exact_complexity() {
+                Some(complexity) => {
+                    aggregate.complexity += f64::from(complexity.branches) * 2.0
+                        + f64::from(complexity.loops) * 2.0
+                        + f64::from(complexity.max_nesting) * 3.0
+                        + f64::from(record.line_span);
+                }
+                None => aggregate.incomplete_complexity_symbols += 1,
+            }
             if !matches!(record.kind.as_str(), "function" | "method") {
                 continue;
             }

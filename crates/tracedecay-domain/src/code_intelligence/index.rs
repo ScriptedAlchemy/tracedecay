@@ -309,6 +309,24 @@ pub enum RelationEdgeKindV1 {
     Receives,
 }
 
+impl RelationEdgeKindV1 {
+    /// The `snake_case` serde spelling as a borrowed string, for read models
+    /// that carry the kind as text without allocating through `serde_json`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Calls => "calls",
+            Self::Uses => "uses",
+            Self::TypeOf => "type_of",
+            Self::Contains => "contains",
+            Self::Implements => "implements",
+            Self::Extends => "extends",
+            Self::Annotates => "annotates",
+            Self::Returns => "returns",
+            Self::Receives => "receives",
+        }
+    }
+}
+
 /// A typed reference to the generation-bound diagnostic contract. The
 /// diagnostic record itself is owned by `crate::diagnostics`; the index
 /// stores only anchor-bound references.
@@ -572,6 +590,28 @@ mod tests {
             .expected_legacy_invalidation_digest()
             .expect("legacy invalidation digest");
         manifest
+    }
+
+    #[test]
+    fn relation_edge_kind_as_str_matches_its_serde_spelling() {
+        assert_eq!(RelationEdgeKindV1::TypeOf.as_str(), "type_of");
+        for kind in [
+            RelationEdgeKindV1::Calls,
+            RelationEdgeKindV1::Uses,
+            RelationEdgeKindV1::TypeOf,
+            RelationEdgeKindV1::Contains,
+            RelationEdgeKindV1::Implements,
+            RelationEdgeKindV1::Extends,
+            RelationEdgeKindV1::Annotates,
+            RelationEdgeKindV1::Returns,
+            RelationEdgeKindV1::Receives,
+        ] {
+            assert_eq!(
+                serde_json::to_value(kind).expect("serialize"),
+                serde_json::Value::String(kind.as_str().to_owned()),
+                "{kind:?} as_str diverged from its serde spelling"
+            );
+        }
     }
 
     #[test]

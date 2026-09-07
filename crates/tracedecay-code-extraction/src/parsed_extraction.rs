@@ -12,7 +12,7 @@ use tracedecay_domain::{ExtractionResult, NodeKind};
 use tree_sitter::{Node as TreeSitterNode, Tree};
 
 use crate::ExtractionArtifactV1;
-use crate::incremental::{ParseChangedRange, ParsePoint};
+use crate::incremental::{ParseChangedRange, ParseInputEdit, ParsePoint};
 
 #[derive(Clone, Copy, Debug)]
 pub enum ParsedExtractionScope<'a> {
@@ -203,49 +203,12 @@ fn node_intersects(node: TreeSitterNode<'_>, region: &ParseChangedRange) -> bool
 pub(crate) fn merge_changed_extraction(
     previous: &ExtractionResult,
     mut delta: ExtractionResult,
-    edit_start: ParsePoint,
-    old_edit_end: ParsePoint,
+    edit: ParseInputEdit,
 ) -> Option<ExtractionResult> {
     if !previous.errors.is_empty() || !delta.errors.is_empty() {
         return None;
     }
-    let _delta_file = delta
-        .nodes
-        .iter()
-        .find(|node| node.kind == NodeKind::File)?;
-    let delta_ids = delta
-        .nodes
-        .iter()
-        .filter(|node| node.kind != NodeKind::File)
-        .map(|node| node.id.as_str())
-        .collect::<HashSet<_>>();
-    let mut children_by_parent = HashMap::<&str, Vec<&str>>::new();
-    let mut removed = HashSet::<&str>::new();
-    for node in &previous.nodes {
-        if let Some(parent) = node.parent_id.as_deref() {
-            children_by_parent
-                .entry(parent)
-                .or_default()
-                .push(node.id.as_str());
-        }
-        if node.kind != NodeKind::File
-            && (node_intersects_edit(node, edit_start, old_edit_end)
-                || delta_ids.contains(node.id.as_str()))
-        {
-            removed.insert(node.id.as_str());
-        }
-    }
-    let mut pending = removed.iter().copied().collect::<Vec<_>>();
-    while let Some(id) = pending.pop() {
-        let Some(children) = children_by_parent.get(id) else {
-            continue;
-        };
-        for child in children {
-            if removed.insert(*child) {
-                pending.push(*child);
-            }
-        }
-    }
+    let removed = superseded_previous_nodes(previous, &delta, edit)?;
 
     let mut merged = previous.clone();
     merged
@@ -268,6 +231,108 @@ pub(crate) fn merge_changed_extraction(
     // extraction path, so the merge only restores set membership here.
     merged.sanitize();
     Some(merged)
+}
+
+/// Ids of every previous row the delta supersedes: rows intersecting the edit,
+/// rows sharing an id with a delta row, rows that start inside a re-extracted
+/// top-level region (the delta's maximal spans, mapped back to the previous
+/// source), and their descendants. Region coverage is what pairs a re-extracted
+/// row with its predecessor: a same-line neighbour of the edit keeps its kind,
+/// name, and line but not its column, so its id alone cannot pair them.
+///
+/// `None` when the delta carries no file row, i.e. it is not a canonical
+/// changed-region extraction.
+pub(crate) fn superseded_previous_nodes<'p>(
+    previous: &'p ExtractionResult,
+    delta: &ExtractionResult,
+    edit: ParseInputEdit,
+) -> Option<HashSet<&'p str>> {
+    delta
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::File)?;
+    let delta_ids = delta
+        .nodes
+        .iter()
+        .filter(|node| node.kind != NodeKind::File)
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+    let regions = reextracted_regions(delta, edit);
+    let mut children_by_parent = HashMap::<&str, Vec<&str>>::new();
+    let mut removed = HashSet::<&str>::new();
+    for node in &previous.nodes {
+        if let Some(parent) = node.parent_id.as_deref() {
+            children_by_parent
+                .entry(parent)
+                .or_default()
+                .push(node.id.as_str());
+        }
+        let start = (node.start_line as usize, node.start_column as usize);
+        if node.kind != NodeKind::File
+            && (node_intersects_edit(node, edit.start_position, edit.old_end_position)
+                || delta_ids.contains(node.id.as_str())
+                || regions.iter().any(|(region_start, region_end)| {
+                    *region_start <= start && start < *region_end
+                }))
+        {
+            removed.insert(node.id.as_str());
+        }
+    }
+    let mut pending = removed.iter().copied().collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        let Some(children) = children_by_parent.get(id) else {
+            continue;
+        };
+        for child in children {
+            if removed.insert(*child) {
+                pending.push(*child);
+            }
+        }
+    }
+    Some(removed)
+}
+
+/// The delta's maximal non-file spans — the complete top-level syntax nodes it
+/// re-extracted — as `(start, end)` positions in the previous source.
+fn reextracted_regions(
+    delta: &ExtractionResult,
+    edit: ParseInputEdit,
+) -> Vec<((usize, usize), (usize, usize))> {
+    let mut spans = delta
+        .nodes
+        .iter()
+        .filter(|node| node.kind != NodeKind::File)
+        .map(|node| {
+            (
+                previous_position(node.start_line, node.start_column, edit),
+                previous_position(node.end_line, node.end_column, edit),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Outer spans first so a sweep keeps only the maximal ones.
+    spans.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)));
+    let mut regions: Vec<((usize, usize), (usize, usize))> = Vec::new();
+    for (start, end) in spans {
+        match regions.last() {
+            Some((_, region_end)) if start < *region_end => continue,
+            _ => regions.push((start, end)),
+        }
+    }
+    regions
+}
+
+/// Map a position in the edited source back to the previous source. Only
+/// same-line edits reach the merge, so positions after the edit on its row
+/// shift by the edit's column delta and every other position is unchanged.
+fn previous_position(row: u32, column: u32, edit: ParseInputEdit) -> (usize, usize) {
+    let (row, column) = (row as usize, column as usize);
+    if row != edit.new_end_position.row || column < edit.new_end_position.column {
+        return (row, column);
+    }
+    (
+        row,
+        column - edit.new_end_position.column + edit.old_end_position.column,
+    )
 }
 
 pub(crate) fn node_intersects_edit(

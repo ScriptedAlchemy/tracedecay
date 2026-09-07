@@ -1,5 +1,5 @@
 mod definitions;
-mod invariants;
+pub(crate) mod invariants;
 mod pragma;
 mod validation;
 

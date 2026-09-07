@@ -1,5 +1,6 @@
 use tracedecay_domain::code_intelligence::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 fn make_node(id: &str, name: &str) -> Node {
@@ -22,63 +23,13 @@ fn make_node(id: &str, name: &str) -> Node {
         loops: 0,
         returns: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         unsafe_blocks: 0,
         unchecked_calls: 0,
         assertions: 0,
         updated_at: 0,
         parent_id: None,
     }
-}
-
-/// Drives every `NodeKind` variant off `NodeKind::ALL`, which the domain crate
-/// keeps total with an exhaustive `match` — a new variant fails to compile
-/// until it is in the table, so it cannot reach this test uncovered. Replaces
-/// three hand-maintained lists that between them named 60 of the 63 variants
-/// and left the protobuf kinds untested.
-#[test]
-fn node_kind_wire_strings_round_trip_for_every_variant() {
-    for (kind, wire) in NodeKind::ALL {
-        assert_eq!(
-            kind.as_str(),
-            wire,
-            "NodeKind::{kind:?} no longer serializes to {wire:?}; node IDs embed \
-             this string, so changing it invalidates stored IDs"
-        );
-        assert_eq!(
-            NodeKind::from_str(wire).as_ref(),
-            Some(&kind),
-            "NodeKind::from_str({wire:?}) did not round-trip back to NodeKind::{kind:?}"
-        );
-    }
-}
-
-#[test]
-fn node_kind_from_str_unknown_returns_none() {
-    assert!(NodeKind::from_str("unknown_kind").is_none());
-    assert!(NodeKind::from_str("").is_none());
-}
-
-/// Same contract as the `NodeKind` test above, driven off `EdgeKind::ALL`.
-#[test]
-fn edge_kind_wire_strings_round_trip_for_every_variant() {
-    for (kind, wire) in EdgeKind::ALL {
-        assert_eq!(
-            kind.as_str(),
-            wire,
-            "EdgeKind::{kind:?} no longer serializes to {wire:?}"
-        );
-        assert_eq!(
-            EdgeKind::from_str(wire),
-            Some(kind),
-            "EdgeKind::from_str({wire:?}) did not round-trip back to EdgeKind::{kind:?}"
-        );
-    }
-}
-
-#[test]
-fn edge_kind_from_str_unknown_returns_none() {
-    assert!(EdgeKind::from_str("unknown_edge").is_none());
-    assert!(EdgeKind::from_str("").is_none());
 }
 
 #[test]
@@ -120,30 +71,6 @@ fn generate_node_id_different_inputs_produce_different_ids() {
         "different file paths should produce different IDs"
     );
     assert_ne!(id1, id5, "different kinds should produce different IDs");
-}
-
-/// Same `ALL`-driven contract as the two tests above, plus the two facts that
-/// are not expressible in the table: `"pub"` is an inbound-only alias, and an
-/// unset visibility must fall back to the most restrictive variant rather than
-/// to the first one declared.
-#[test]
-fn visibility_wire_strings_round_trip_for_every_variant() {
-    for (visibility, wire) in Visibility::ALL {
-        assert_eq!(
-            visibility.as_str(),
-            wire,
-            "Visibility::{visibility:?} no longer serializes to {wire:?}"
-        );
-        assert_eq!(
-            Visibility::from_str(wire).as_ref(),
-            Some(&visibility),
-            "Visibility::from_str({wire:?}) did not round-trip back to \
-             Visibility::{visibility:?}"
-        );
-    }
-    assert_eq!(Visibility::from_str("pub"), Some(Visibility::Pub));
-    assert!(Visibility::from_str("unknown").is_none());
-    assert_eq!(Visibility::default(), Visibility::Private);
 }
 
 #[test]

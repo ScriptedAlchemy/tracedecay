@@ -646,6 +646,16 @@ pub(super) async fn set_semantic_profile(
     active: SemanticProfileSelection,
     rollback: Option<SemanticProfileSelection>,
 ) {
+    let response = set_semantic_profile_response(harness, project, active, rollback).await;
+    assert_tool_effect_succeeded(&response);
+}
+
+async fn set_semantic_profile_response(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    active: SemanticProfileSelection,
+    rollback: Option<SemanticProfileSelection>,
+) -> JsonRpcResponse {
     let graph = harness.server(project).expect("project server").cg().await;
     let project_id = graph
         .configuration_runtime()
@@ -658,7 +668,8 @@ pub(super) async fn set_semantic_profile(
         .current()
         .await
         .expect("current production configuration")
-        .revision_id;
+        .revision_id()
+        .clone();
     let request = ConfigurationSetRequestV1 {
         layer: ConfigurationLayerIdV1::Project { project_id },
         key: SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
@@ -681,15 +692,14 @@ pub(super) async fn set_semantic_profile(
         .expect("semantic configuration idempotency key"),
         expected_revision,
     };
-    let response = harness
+    harness
         .call_tool(
             project,
             "tracedecay_configuration_set",
             serde_json::to_value(request).expect("configuration set request"),
         )
         .await
-        .expect("public semantic configuration mutation");
-    assert_tool_effect_succeeded(&response);
+        .expect("public semantic configuration mutation")
 }
 
 async fn search(
@@ -1360,13 +1370,69 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         injected_failure["state"]["retryable"], true,
         "runtime status must preserve the injected retry disposition: {injected_failure}"
     );
-    set_semantic_profile(
+    let graph = harness.server(&project).expect("project server").cg().await;
+    let configuration_before_refusal = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("configuration before failed transition");
+    let application_status_before_refusal =
+        tracedecay_usecases::semantic_runtime::project_semantic_application_status(&project, None)
+            .expect("application status before failed transition");
+    let refused = set_semantic_profile_response(
         &harness,
         &project,
         selection(second_profile.clone(), &artifact_digest, &artifact_path),
-        Some(selection(first_profile, &artifact_digest, &artifact_path)),
+        Some(selection(
+            first_profile.clone(),
+            &artifact_digest,
+            &artifact_path,
+        )),
     )
     .await;
+    assert!(
+        refused.error.is_none(),
+        "failed semantic transition became a transport error: {refused:?}"
+    );
+    let refused = refused
+        .result
+        .as_ref()
+        .expect("failed semantic transition result");
+    assert_eq!(refused["isError"], true);
+    assert_eq!(
+        refused["problem"]["code"], "configuration.invalid_request",
+        "failed lifecycle must refuse before configuration admission: {refused}"
+    );
+    assert_eq!(refused["problem"]["retryable"], false);
+    assert!(
+        refused["problem"]["diagnostic"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("inspect_generation.load_artifact")),
+        "refusal must name the unavailable lifecycle artifact: {refused}"
+    );
+    let configuration_after_refusal = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("configuration after failed transition");
+    assert_eq!(
+        configuration_after_refusal.revision_id(),
+        configuration_before_refusal.revision_id(),
+        "pre-admission refusal must not advance the configuration revision"
+    );
+    assert_eq!(
+        configuration_after_refusal.config().semantic,
+        configuration_before_refusal.config().semantic,
+        "pre-admission refusal must preserve active and rollback selections"
+    );
+    assert_eq!(
+        tracedecay_usecases::semantic_runtime::project_semantic_application_status(&project, None)
+            .expect("application status after failed transition"),
+        application_status_before_refusal,
+        "pre-admission refusal must preserve the activation receipt and epoch"
+    );
     assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
     let core_during_failure = search(&harness, &project, false).await;
     assert_eq!(
@@ -1395,6 +1461,30 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     lifecycle
         .retry()
         .expect("re-admit verified installed model");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(
+                lifecycle.status().state,
+                Some(
+                    SemanticModelLifecycleStateV1::Installed { .. }
+                        | SemanticModelLifecycleStateV1::Ready { .. }
+                )
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("lifecycle retry did not restore the verified artifact");
+    set_semantic_profile(
+        &harness,
+        &project,
+        selection(second_profile.clone(), &artifact_digest, &artifact_path),
+        Some(selection(first_profile, &artifact_digest, &artifact_path)),
+    )
+    .await;
+    assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
     let recovery = std::time::Instant::now();
     let (recovered, recovered_status) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {

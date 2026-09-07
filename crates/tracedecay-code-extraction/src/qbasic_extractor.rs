@@ -11,10 +11,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{ComplexityMetrics, QBASIC_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from `QBasic` source files using tree-sitter.
@@ -128,6 +130,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -241,7 +244,7 @@ impl QBasicExtractor {
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, line);
         let text = state.node_text(line);
 
         let graph_node = Node {
@@ -266,6 +269,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -307,7 +311,7 @@ impl QBasicExtractor {
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Field, name, line);
 
         let graph_node = Node {
             id: id.clone(),
@@ -331,6 +335,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -363,7 +368,13 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let struct_id = generate_node_id(&state.file_path, &NodeKind::Struct, name, start_line);
+        let struct_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            name,
+            node,
+        );
         let text = state.node_text(node);
         let signature = text.lines().next().unwrap_or("").trim().to_string();
 
@@ -389,6 +400,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -433,7 +445,13 @@ impl QBasicExtractor {
         let start_column = member.start_position().column as u32;
         let end_column = member.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            name,
+            member,
+        );
         let text = state.node_text(member);
 
         let graph_node = Node {
@@ -458,6 +476,7 @@ impl QBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -489,7 +508,13 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
+        let fn_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
 
         // Build signature from the first line of text.
         let text = state.node_text(node);
@@ -524,6 +549,7 @@ impl QBasicExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -559,7 +585,13 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
+        let fn_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text.lines().next().unwrap_or("").trim().to_string();
@@ -592,6 +624,7 @@ impl QBasicExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
