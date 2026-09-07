@@ -318,15 +318,21 @@ jobs:
       # second, unshared dependency graph.
       #
       # Every cargo invocation in this lane also selects `--workspace` with
-      # the same root feature. Package selection drives feature unification,
-      # so `-p tracedecay-cli` resolves `tracedecay-code-index` without its
-      # grammar tier and `-p tracedecay-search-eval` resolves 52 dependencies
-      # differently from the workspace: each such invocation compiled its own
-      # copy of the heaviest crates (run 34138693824, cold cache, Linux:
-      # 20 min for the fixture example, 20 min for the parity helpers, 7 min
-      # for one isolated unit test) before the suites themselves compiled.
-      - name: Build workspace binaries for the test lane
-        run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
+      # the same root feature, and every one of them includes dev-dependencies
+      # in the resolution. Both decide feature unification: `-p tracedecay-cli`
+      # resolves `tracedecay-code-index` without its grammar tier,
+      # `-p tracedecay-search-eval` resolves 52 dependencies differently from
+      # the workspace, and a plain `--bins` build (no dev-dependencies) gives
+      # 60 dependencies — tokio and serde_json among them — a different feature
+      # set from the one every test, example and nextest build uses. Each such
+      # invocation compiled its own copy of the heaviest crates (run
+      # 34138693824, cold cache, Linux: 33 min for the bins, 20 min for the
+      # fixture example, 20 min for the parity helpers, 7 min for one isolated
+      # unit test) before the suites themselves compiled. `--tests` here puts
+      # the binaries in the test graph, so this step compiles that graph once
+      # and everything below it is a cache hit.
+      - name: Build workspace binaries and tests for the test lane
+        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
 
       - name: Build host-CLI test fixture
         run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
@@ -473,9 +479,13 @@ jobs:
       # Acceptance tests execute the ordinary evaluator binaries. Match the
       # archive's features and perf profile to reuse dependency artifacts;
       # nextest's archive.include carries the executables to every shard.
-      - name: Build workspace binaries for the Windows test lane
+      # `--tests` keeps the binaries in the dev-dependency graph the archive
+      # is built from; a `--bins`-only build resolves 60 dependencies with
+      # different features and compiles them a second time (see the Linux
+      # lane).
+      - name: Build workspace binaries and tests for the Windows test lane
         shell: pwsh
-        run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
 
       # `--workspace`, not `-p tracedecay-cli`: the package selection decides
       # feature unification, and the narrower one recompiles the code-index
