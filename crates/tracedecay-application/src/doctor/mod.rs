@@ -16,9 +16,9 @@ pub use adapters::{
     AdvisoryFeedbackDoctorAdapterV1, CodeIndexMountDoctorAdapterV1,
     ConfigurationAuthorityDoctorAdapterV1, DaemonRuntimeHealthSignalV1, DoctorKernelInputsV1,
     HostIntegrationDoctorAdapterV1, LanguageServerDoctorAdapterV1, ObservabilityDoctorAdapterV1,
-    OperationalAuditDoctorAdapterV1, RuntimeHealthDoctorAdapterV1, StorageDoctorAdapterV1,
-    advisory_feedback_read_from_publication, compose_doctor_report, merge_storage_reads,
-    runtime_health_read, storage_family_read,
+    OperationalAuditDoctorAdapterV1, RuntimeHealthDoctorAdapterV1, SemanticOwnerDoctorAdapterV1,
+    StorageDoctorAdapterV1, advisory_feedback_read_from_publication, compose_doctor_report,
+    merge_storage_reads, runtime_health_read, storage_family_read,
 };
 pub use report::{
     DOCTOR_FINDING_FAMILIES, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
@@ -35,10 +35,12 @@ pub use sources::{
     LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort,
     ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
     ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
-    RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
-    advisory_feedback_findings, code_index_finding, configuration_finding,
-    host_integration_finding, ingest_refusal_finding, language_server_finding,
-    observability_finding, operational_audit_findings, runtime_health_finding,
+    RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, SemanticOwnerDegradedReasonV1,
+    SemanticOwnerDoctorPort, SemanticOwnerPrerequisiteV1, SemanticOwnerReadV1,
+    SemanticOwnerStateV1, StorageDoctorPort, advisory_feedback_findings, code_index_finding,
+    configuration_finding, host_integration_finding, ingest_refusal_finding,
+    language_server_finding, observability_finding, operational_audit_findings,
+    runtime_health_finding, semantic_owner_finding,
 };
 pub use types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,

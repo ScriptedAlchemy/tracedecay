@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::config_error;
-use crate::agents::safe_write_text_file;
+use super::host_io::HostIo;
 use crate::automation::managed_skills::{
     ManagedSkill, load_active_managed_skills_snapshot, validate_managed_support_files,
 };
@@ -17,7 +17,7 @@ const NATIVE_NAMESPACE_DIR: &str = "agent-managed";
 const NATIVE_MANIFEST_FILE: &str = ".tracedecay-managed-skills.json";
 /// The unslugged legacy managed-skill start marker. Reuses the same literal the
 /// prompt-rules block-splicer stops at, keeping the two in sync.
-const PROMPT_INDEX_START: &str = crate::agents::prompt_rules::SKILL_INDEX_START;
+const PROMPT_INDEX_START: &str = super::host_io::SKILL_INDEX_START;
 const PROMPT_INDEX_END: &str = "<!-- TRACEDECAY MANAGED SKILLS END -->";
 
 const ALL_SKILL_INSTALL_TARGETS: [SkillInstallTarget; 8] = [
@@ -62,6 +62,7 @@ struct RenderedNativeSkillOverlay {
 }
 
 pub fn install_managed_skills(
+    host_io: &HostIo,
     profile_root: &Path,
     target: SkillInstallTarget,
     output: &Path,
@@ -69,7 +70,7 @@ pub fn install_managed_skills(
     if target.is_native_overlay() {
         export_native_skill_overlay(profile_root, target, output)
     } else {
-        export_prompt_skill_index(profile_root, target, output)
+        export_prompt_skill_index(host_io, profile_root, target, output)
     }
 }
 
@@ -208,6 +209,7 @@ fn render_native_skill_overlay(
 
 #[hotpath::measure(label = "automation.host_io.export_prompt_index")]
 pub fn export_prompt_skill_index(
+    host_io: &HostIo,
     profile_root: &Path,
     target: SkillInstallTarget,
     prompt_path: &Path,
@@ -232,7 +234,7 @@ pub fn export_prompt_skill_index(
         if let Some(parent) = prompt_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        safe_write_text_file(prompt_path, &updated, None)?;
+        host_io.safe_write_text_file(prompt_path, &updated, None)?;
     }
 
     let exported = skills
@@ -253,18 +255,20 @@ pub fn export_prompt_skill_index(
     })
 }
 
-pub fn remove_prompt_skill_index(prompt_path: &Path) -> Result<()> {
-    remove_prompt_skill_indexes(prompt_path, None)
+pub fn remove_prompt_skill_index(host_io: &HostIo, prompt_path: &Path) -> Result<()> {
+    remove_prompt_skill_indexes(host_io, prompt_path, None)
 }
 
 pub fn remove_prompt_skill_index_for_target(
+    host_io: &HostIo,
     prompt_path: &Path,
     target: SkillInstallTarget,
 ) -> Result<()> {
-    remove_prompt_skill_indexes(prompt_path, Some(target))
+    remove_prompt_skill_indexes(host_io, prompt_path, Some(target))
 }
 
 fn remove_prompt_skill_indexes(
+    host_io: &HostIo,
     prompt_path: &Path,
     target: Option<SkillInstallTarget>,
 ) -> Result<()> {
@@ -283,7 +287,7 @@ fn remove_prompt_skill_indexes(
     if updated.trim().is_empty() {
         fs::remove_file(prompt_path)?;
     } else {
-        safe_write_text_file(prompt_path, &updated, None)?;
+        host_io.safe_write_text_file(prompt_path, &updated, None)?;
     }
     Ok(())
 }

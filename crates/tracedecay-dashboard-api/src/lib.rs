@@ -51,6 +51,55 @@ pub(crate) fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
 }
 
+/// Fixtures for states this crate's tests build without a project runtime.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+
+    use tracedecay_automation_runtime::automation::host_io::{
+        HostIo, ManagedSkillExportReport, PluginFile,
+    };
+    use tracedecay_domain::errors::Result;
+
+    /// A host I/O bundle with no agent hosts behind it: writes land on disk
+    /// plainly, export sweeps report nothing, and the managed-agent bundle is
+    /// empty.
+    pub(crate) fn fixture_host_io() -> HostIo {
+        fn export_to_agents(_: &Path, _: &Path) -> Vec<ManagedSkillExportReport> {
+            Vec::new()
+        }
+
+        fn export_to_agent_hosts(_: &Path, _: &Path, _: &Path) -> Vec<ManagedSkillExportReport> {
+            Vec::new()
+        }
+
+        fn write_text(path: &Path, contents: &str, _: Option<&Path>) -> Result<()> {
+            Ok(std::fs::write(path, contents)?)
+        }
+
+        fn write_json(path: &Path, value: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+            Ok(std::fs::write(path, serde_json::to_vec_pretty(value)?)?)
+        }
+
+        fn remove_host_file(path: &Path) -> std::io::Result<()> {
+            std::fs::remove_file(path)
+        }
+
+        fn codex_agent_files() -> &'static [PluginFile] {
+            &[]
+        }
+
+        HostIo {
+            export_to_agents,
+            export_to_agent_hosts,
+            write_text,
+            write_json,
+            remove_host_file,
+            codex_agent_files,
+        }
+    }
+}
+
 pub mod analytics_api;
 pub mod application_surface;
 mod automation_authority;
@@ -161,6 +210,7 @@ use tracedecay_api::{WorkOperation, WorkflowOperation};
 use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -346,6 +396,9 @@ impl AdmittedDoctorReportV1 {
 pub struct DashboardState {
     /// The owning binary's composed build version, from the composition.
     pub build_version: &'static str,
+    /// Host-install I/O from the project runtime; analytics reads the embedded
+    /// managed-agent bundle through it to label subagent sessions.
+    pub host_io: HostIo,
     /// Registered project id for profile-backed stores, when known.
     pub project_id: Option<String>,
     /// Exact application scope resolved ONCE when this state was constructed.
@@ -764,6 +817,7 @@ async fn build_state_inner(
     );
     let mut state = DashboardState {
         build_version,
+        host_io: cg.automation_runtime().host_io(),
         project_id: cg.store_layout().identity.project_id.clone(),
         resolved_scope: scope::resolve_dashboard_scope(
             cg.project_root(),
@@ -2310,6 +2364,7 @@ mod authority_tests {
                 project_memory_owner_for_layout(&layout).expect("dashboard project memory owner");
             let state = DashboardState {
                 build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_io: crate::test_support::fixture_host_io(),
                 project_id: layout.identity.project_id.clone(),
                 resolved_scope: scope::resolve_dashboard_scope(
                     &project_root,
