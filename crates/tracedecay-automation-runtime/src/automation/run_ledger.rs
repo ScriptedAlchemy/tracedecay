@@ -14,6 +14,7 @@ use crate::errors::{Result, TraceDecayError};
 mod cursor;
 mod exact_lookup;
 mod exact_publication;
+mod lifecycle_index;
 mod publication;
 mod scheduler_diagnostic;
 
@@ -784,6 +785,8 @@ pub(super) fn ensure_run_ledger_eof_guard(file: &mut std::fs::File) -> std::io::
 }
 
 pub(super) fn sync_run_ledger_file_and_parent(path: &Path, file: &std::fs::File) -> Result<()> {
+    #[cfg(test)]
+    exact_lookup::scan_receipt::record_sync();
     file.sync_all().map_err(TraceDecayError::from)?;
     tracedecay_private_fs::framed_log::sync_parent_directory(
         path,
@@ -1281,7 +1284,9 @@ fn read_run_ledger_task_summary(
     task: AgentTaskKind,
     requested_task_key: &str,
 ) -> Result<AutomationRunLedgerTaskSummary> {
-    let Some(file) = exact_lookup::open_stabilized_run_ledger(path, false)? else {
+    // Visible bytes are stabilized by the committed lifecycle index consulted
+    // below, which syncs only when the ledger actually grew.
+    let Some(file) = exact_lookup::open_committed_run_ledger(path, false)? else {
         return Ok(AutomationRunLedgerTaskSummary::default());
     };
     // Answer an unchanged ledger from the memo instead of rescanning it. See
@@ -1345,8 +1350,7 @@ fn read_run_ledger_task_summary(
     .flatten()
     .map(|projection| projection.run_id.clone())
     .collect::<std::collections::HashSet<_>>();
-    let lifecycles =
-        exact_lookup::read_logical_run_lifecycles(&file, path, &selected_run_ids, true)?;
+    let lifecycles = exact_lookup::read_committed_run_lifecycles(&file, path, &selected_run_ids)?;
     let summary =
         decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)?;
     store_run_ledger_task_summary(
@@ -1636,8 +1640,11 @@ fn resolve_selected_logical_records(
     fail_on_malformed: bool,
 ) -> Result<std::collections::HashMap<String, AutomationRunLedgerRecord>> {
     let mut resolved = std::collections::HashMap::with_capacity(selected_run_ids.len());
-    let lifecycles =
-        exact_lookup::read_logical_run_lifecycles(file, path, selected_run_ids, fail_on_malformed)?;
+    let lifecycles = if fail_on_malformed {
+        exact_lookup::read_committed_run_lifecycles(file, path, selected_run_ids)?
+    } else {
+        exact_lookup::read_lenient_run_lifecycles(file, path, selected_run_ids)?
+    };
     for run_id in selected_run_ids {
         let Some(lifecycle) = lifecycles.get(run_id) else {
             if fail_on_malformed {
