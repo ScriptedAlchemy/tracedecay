@@ -111,21 +111,31 @@ pub async fn expand_query(
                     label = "sessions.lcm.expand_query.search"
                 )
                 .await?;
+                // Ranked summary hits are hydrated as one page through the same
+                // bulk helper as explicit ids, then paired back with their hit
+                // metadata in ranked order; the helper returns one expansion per
+                // requested id in request order or fails the whole call.
+                let mut selected_hits = Vec::with_capacity(summary_hits.len());
+                let mut selected_node_ids = Vec::with_capacity(summary_hits.len());
                 for hit in summary_hits {
                     if let Some(node_id) = hit.node_id.as_deref() {
-                        let expansion = hotpath::future!(
-                            dag::expand_summary_node(
-                                conn,
-                                &request.provider,
-                                &request.session_id,
-                                node_id,
-                            ),
-                            label = "sessions.lcm.expand_query.hydrate"
-                        )
-                        .await?;
-                        matches.push(expand_query_match_from_hit(&hit));
-                        selected_summaries.push(expansion);
+                        selected_node_ids.push(node_id.to_owned());
+                        selected_hits.push(hit);
                     }
+                }
+                let expansions = hotpath::future!(
+                    dag::expand_summary_nodes(
+                        conn,
+                        &request.provider,
+                        &request.session_id,
+                        &selected_node_ids,
+                    ),
+                    label = "sessions.lcm.expand_query.hydrate"
+                )
+                .await?;
+                for (hit, expansion) in selected_hits.iter().zip(expansions) {
+                    matches.push(expand_query_match_from_hit(hit));
+                    selected_summaries.push(expansion);
                 }
 
                 if selected_summaries.len() < max_results {
@@ -1961,5 +1971,210 @@ mod tests {
             "explicit summary hydration used {} DB roundtrips",
             counted.queries.get()
         );
+    }
+
+    async fn insert_query_test_summary(
+        conn: &TestConnection,
+        node_id: &str,
+        depth: i64,
+        summary_text: &str,
+        created_at: i64,
+        sources: &[LcmSourceRef],
+    ) {
+        let summary_hash = crate::retrieval_content::projected_content_hash(summary_text);
+        conn.execute(
+            "INSERT INTO lcm_summary_nodes (
+                node_id, provider, conversation_id, session_id, depth, summary_text,
+                summary_hash, summary_token_count, source_token_count, created_at
+             ) VALUES (?1, 'cursor', 'conversation-a', 'session-a', ?2, ?3, ?4, 1, 1, ?5)",
+            params![
+                node_id,
+                depth,
+                summary_text,
+                summary_hash.as_str(),
+                created_at
+            ],
+        )
+        .await
+        .expect("summary node");
+        for (ordinal, source) in sources.iter().enumerate() {
+            let (source_kind, source_id) = match source {
+                LcmSourceRef::RawMessage { store_id } => ("raw_message", store_id.to_string()),
+                LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
+            };
+            conn.execute(
+                "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![node_id, source_kind, source_id.as_str(), ordinal as i64],
+            )
+            .await
+            .expect("summary source");
+        }
+    }
+
+    /// Query-selected summaries go through the same one-pass hydration as
+    /// explicit ids: the ranked page costs a fixed number of round trips, the
+    /// shared raw and child-summary sources are loaded once, and every summary
+    /// still carries them in its own output position ahead of the raw fill.
+    #[tokio::test]
+    async fn expand_query_batches_query_selected_summary_hydration_roundtrips() {
+        const SUMMARY_HITS: i64 = 8;
+        let (temp, conn) = query_test_store().await;
+        insert_query_test_raw(
+            &temp,
+            &conn,
+            "cursor",
+            "shared-source",
+            1,
+            "shared source body",
+        )
+        .await;
+        insert_query_test_raw(&temp, &conn, "cursor", "raw-orchard-a", 2, "orchard raw a").await;
+        insert_query_test_raw(&temp, &conn, "cursor", "raw-orchard-b", 3, "orchard raw b").await;
+        let shared_store_id =
+            raw::load_raw_message_by_identity(&conn, "cursor", "session-a", "shared-source")
+                .await
+                .expect("shared source lookup")
+                .expect("shared source fixture")
+                .store_id;
+        insert_query_test_summary(&conn, "child-shared", 0, "shared child summary", 50, &[]).await;
+        let shared_sources = [
+            LcmSourceRef::RawMessage {
+                store_id: shared_store_id,
+            },
+            LcmSourceRef::SummaryNode {
+                node_id: "child-shared".to_string(),
+            },
+        ];
+        let mut expected_node_ids = Vec::new();
+        for ordinal in 0..SUMMARY_HITS {
+            let node_id = format!("node-{ordinal}");
+            insert_query_test_summary(
+                &conn,
+                &node_id,
+                1,
+                &format!("orchard summary {ordinal}"),
+                100 + ordinal,
+                &shared_sources,
+            )
+            .await;
+            expected_node_ids.push(node_id);
+        }
+        // Recency ranking: the newest summary leads the page.
+        expected_node_ids.reverse();
+
+        let counted = CountingQuery::new(&conn);
+        let response = expand_query(
+            &counted,
+            LcmExpandQueryRequest {
+                provider: "cursor".to_string(),
+                session_id: "session-a".to_string(),
+                prompt: "summarize orchard".to_string(),
+                query: Some("orchard".to_string()),
+                node_ids: Vec::new(),
+                max_results: SUMMARY_HITS as usize + 2,
+                max_tokens: 100,
+                context_max_tokens: 100_000,
+            },
+        )
+        .await
+        .expect("expand query");
+
+        assert_eq!(response.node_ids, expected_node_ids);
+        let summary_matches = response
+            .matches
+            .iter()
+            .filter(|hit| hit.kind == "summary_node")
+            .map(|hit| hit.node_id.clone().expect("summary match node id"))
+            .collect::<Vec<_>>();
+        assert_eq!(summary_matches, expected_node_ids);
+        assert_eq!(
+            response
+                .matches
+                .iter()
+                .filter(|hit| hit.kind == "raw_message")
+                .count(),
+            2,
+            "raw hits must still fill the page behind the selected summaries"
+        );
+        for node_id in &expected_node_ids {
+            let sources_for = |kind: &str| {
+                response
+                    .context_blocks
+                    .iter()
+                    .filter(|block| block.kind == kind && block.node_id.as_deref() == Some(node_id))
+                    .map(|block| block.content.as_str())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(sources_for("raw_message"), vec!["shared source body"]);
+            assert_eq!(sources_for("summary_source"), vec!["shared child summary"]);
+        }
+        assert!(
+            counted.queries.get() <= 8,
+            "{SUMMARY_HITS} query-selected summary hits used {} DB roundtrips",
+            counted.queries.get()
+        );
+        println!(
+            "expand_query query-selected summary hydration: {} DB roundtrips for {SUMMARY_HITS} hits",
+            counted.queries.get()
+        );
+    }
+
+    /// A foreign child source anywhere in the ranked page refuses the whole
+    /// query-selected expansion, exactly as the per-node path did; batching
+    /// must not turn a denied source into a partially disclosed page.
+    #[tokio::test]
+    async fn query_selected_summary_with_foreign_child_source_is_refused() {
+        let (_temp, conn) = query_test_store().await;
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'session-foreign', '/p', '/p')",
+            (),
+        )
+        .await
+        .expect("foreign session");
+        let foreign_text = "foreign child summary";
+        conn.execute(
+            "INSERT INTO lcm_summary_nodes (
+                node_id, provider, conversation_id, session_id, depth, summary_text,
+                summary_hash, summary_token_count, source_token_count, created_at
+             ) VALUES ('child-foreign', 'cursor', 'conversation-b', 'session-foreign', 0, ?1, ?2,
+                       1, 1, 10)",
+            params![
+                foreign_text,
+                crate::retrieval_content::projected_content_hash(foreign_text).as_str()
+            ],
+        )
+        .await
+        .expect("foreign child node");
+        insert_query_test_summary(&conn, "node-owned", 1, "orchard owned summary", 100, &[]).await;
+        insert_query_test_summary(
+            &conn,
+            "node-denied",
+            1,
+            "orchard denied summary",
+            90,
+            &[LcmSourceRef::SummaryNode {
+                node_id: "child-foreign".to_string(),
+            }],
+        )
+        .await;
+
+        let error = expand_query(
+            &conn,
+            LcmExpandQueryRequest {
+                provider: "cursor".to_string(),
+                session_id: "session-a".to_string(),
+                prompt: "summarize orchard".to_string(),
+                query: Some("orchard".to_string()),
+                node_ids: Vec::new(),
+                max_results: 8,
+                max_tokens: 100,
+                context_max_tokens: 100_000,
+            },
+        )
+        .await
+        .expect_err("a foreign child source must refuse the page");
+        assert!(matches!(error, LcmError::SummarySourceNotOwnedBySession));
     }
 }
