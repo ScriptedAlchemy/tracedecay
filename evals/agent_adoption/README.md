@@ -97,8 +97,15 @@ The runner points `TRACEDECAY_DATA_DIR` at a throwaway dir and sets
 touch your real tracedecay store, and `tracedecay init` stays fast (indexing the
 multi-thousand-node global DB is what makes a naive `init` hang). Each host gets
 a throwaway `HOME` and config directory. Only its auth file is copied in, mode
-`0400`; the copy is deleted on runner exit. The real Claude/Codex profile is
-never loaded or mutated.
+`0400`; the copy is deleted on runner exit. For Claude the `env` and `model`
+keys of the real `settings.json` travel too, because a profile aimed at a
+non-Anthropic endpoint authenticates through `ANTHROPIC_BASE_URL` /
+`ANTHROPIC_API_KEY` there rather than through `.credentials.json`; permissions,
+plugins, hooks, and every other key stay behind. The real Claude/Codex profile
+is never loaded or mutated. Name the model exactly as the profile does
+(`CLAUDE_MODELS='k3[1m]'`, not `opus`) so transcripts and scoreboards carry the
+model that actually answered; an alias resolved through
+`ANTHROPIC_DEFAULT_*_MODEL` would be mislabelled.
 
 Live runs build a debug `tracedecay` binary from the checked-out candidate
 branch with ordinary Cargo and use it for fixture setup, MCP, hooks, and the
@@ -282,8 +289,9 @@ hermetic, componentized plugin. For every condition `run.sh`:
   `commands/` for `no-skills`/`bare` — Claude exposes plugin commands as
   `tracedecay:*` skills too — and MCP manifests for `cli-only`),
   substituting the hook binary path;
-* launches `claude` with a throwaway `HOME`, `--setting-sources project,local`
-  (drops the ambient user config, global plugin, and user `CLAUDE.md`),
+* launches `claude` with a throwaway `HOME` whose user settings hold only the
+  carried endpoint/auth env (the ambient user config, global plugin, and user
+  `CLAUDE.md` are unreachable), `--setting-sources user,project,local`,
   `--strict-mcp-config --mcp-config <hermetic tracedecay server>` (descriptions
   held constant), `--plugin-dir <the componentized copy>`, and `--add-dir
   <fixture>`;
