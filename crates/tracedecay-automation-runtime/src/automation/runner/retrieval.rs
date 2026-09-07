@@ -1,7 +1,7 @@
 use super::evidence::{
     AutomationEvidenceFilters, AutomationTemporalEvidence, AutomationTemporalEvidenceItem,
     SESSION_REPLAY_HEAD_TURNS, SESSION_REPLAY_SUMMARY_NODES, SESSION_REPLAY_TAIL_TURNS,
-    find_i64_field_in_json, find_string_field_in_json,
+    find_i64_field_in_json,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,7 +47,7 @@ use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecutio
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ports::ExecutionLimits;
-use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate};
 
 pub(super) const AUTOMATION_SESSION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const AUTOMATION_SESSION_MAX_RESULTS: u64 = 64;
@@ -455,14 +455,13 @@ pub(super) fn accept_automation_temporal_outcome(
                             "session_evidence_unavailable",
                         );
                     }
-                    let provider =
-                        find_string_field_in_json(&snippet, "provider").unwrap_or_default();
-                    let session_id = ranked.session.unwrap_or_default();
-                    if provider.is_empty() || session_id.is_empty() {
+                    let Some((provider, session_id)) = ranked_evidence_owner(&ranked) else {
                         return AutomationTemporalRetrieval::Rejected(
                             "session_evidence_unavailable",
                         );
-                    }
+                    };
+                    let provider = provider.to_string();
+                    let session_id = session_id.to_string();
                     evidence_items.push(AutomationTemporalEvidenceItem {
                         anchor_id: ranked.anchor_id.to_string(),
                         stable_id: ranked.stable_id,
@@ -554,6 +553,19 @@ pub(super) fn accept_automation_temporal_outcome(
             AutomationTemporalRetrieval::Rejected("session_evidence_cancelled")
         }
     }
+}
+
+pub(super) fn ranked_evidence_owner(ranked: &RankedCandidate) -> Option<(&str, &str)> {
+    Some((
+        ranked
+            .source
+            .as_deref()
+            .filter(|provider| !provider.is_empty())?,
+        ranked
+            .session
+            .as_deref()
+            .filter(|session_id| !session_id.is_empty())?,
+    ))
 }
 
 pub(super) const fn automation_structural_refusal_reason(

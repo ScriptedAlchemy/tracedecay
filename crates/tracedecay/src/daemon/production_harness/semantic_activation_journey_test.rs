@@ -1376,13 +1376,9 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         .current()
         .await
         .expect("configuration before failed transition");
-    let profile_state_before_refusal = graph
-        .configuration_runtime()
-        .semantic_activation_coordinator()
-        .expect("semantic activation coordinator")
-        .current_profile_state()
-        .await
-        .expect("profile state before failed transition");
+    let application_status_before_refusal =
+        tracedecay_usecases::semantic_runtime::project_semantic_application_status(&project, None)
+            .expect("application status before failed transition");
     let refused = set_semantic_profile_response(
         &harness,
         &project,
@@ -1429,15 +1425,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         "pre-admission refusal must preserve active and rollback selections"
     );
     assert_eq!(
-        graph
-            .configuration_runtime()
-            .semantic_activation_coordinator()
-            .expect("semantic activation coordinator")
-            .current_profile_state()
-            .await
-            .expect("profile state after failed transition"),
-        profile_state_before_refusal,
-        "pre-admission refusal must preserve the activation state and audit epoch"
+        tracedecay_usecases::semantic_runtime::project_semantic_application_status(&project, None)
+            .expect("application status after failed transition"),
+        application_status_before_refusal,
+        "pre-admission refusal must preserve the activation receipt and epoch"
     );
     assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
     let core_during_failure = search(&harness, &project, false).await;

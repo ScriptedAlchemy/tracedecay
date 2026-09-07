@@ -235,12 +235,6 @@ pub(super) fn find_i64_field_in_json(encoded: &str, field: &str) -> Option<i64> 
         .and_then(|value| visit(&value, field))
 }
 
-pub(super) fn find_string_field_in_json(encoded: &str, field: &str) -> Option<String> {
-    serde_json::from_str(encoded)
-        .ok()
-        .and_then(|value| find_string_field(&value, field))
-}
-
 pub(super) fn canonical_evidence_hash(value: &Value) -> Result<String> {
     fn canonicalize(value: &Value) -> Value {
         match value {

@@ -9,7 +9,7 @@ use tracedecay_application::{
     RequestContext, RequestId,
 };
 use tracedecay_domain::{
-    ActorId, FactOwnerV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
+    ActorId, FactOwnerV1, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionId,
     TemporalCoverageCountsV1, UtcMicros, WorktreeId,
 };
 use tracedecay_session_memory::context::{
@@ -28,6 +28,7 @@ use tracedecay_session_memory::session::{
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
 use tracedecay_temporal_query::ports::ExecutionLimits;
+use tracedecay_temporal_query::ranking::RankedCandidate;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
@@ -39,7 +40,8 @@ use super::evidence::{
 };
 use super::retrieval::{
     AUTOMATION_SESSION_MAX_BYTES, AutomationWordEstimator, accept_automation_temporal_outcome,
-    automation_structural_refusal_reason, retrieve_automation_session_evidence,
+    automation_structural_refusal_reason, ranked_evidence_owner,
+    retrieve_automation_session_evidence,
 };
 use super::{
     AuthorizedAutomationSessionRetrieval, AutomationRunControl, AutomationSessionRetrieval,
@@ -423,6 +425,29 @@ async fn oversized_automation_request_preserves_candidate_stage_without_executio
         )
     ));
     assert_eq!(execution_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn automation_evidence_owner_comes_from_the_ranked_temporal_candidate() {
+    let mut ranked = RankedCandidate {
+        stable_id: "stable.automation-owner".to_string(),
+        anchor_id: RetrievalAnchorId::new("anchor.automation-owner").unwrap(),
+        normalized_score_micros: 1,
+        knowledge_at_micros: 1,
+        logical_message: Some("message.automation-owner".to_string()),
+        turn: None,
+        session: Some("session.automation-owner".to_string()),
+        source: Some("cursor".to_string()),
+        evidence_role: Some("assistant".to_string()),
+        contributions: Vec::new(),
+    };
+
+    assert_eq!(
+        ranked_evidence_owner(&ranked),
+        Some(("cursor", "session.automation-owner"))
+    );
+    ranked.source = None;
+    assert_eq!(ranked_evidence_owner(&ranked), None);
 }
 
 #[test]
