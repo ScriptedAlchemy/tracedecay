@@ -58,9 +58,9 @@ use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
 use tracedecay_mcp::handlers::graph::{
-    canonical_relation_kind_name, graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths,
-    graph_symbols_in_scope, line_for_byte_offset, node_not_found as node_not_found_result,
-    required_graph_file_path, required_graph_metadata, single_graph_adjacency_batch,
+    graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
+    line_for_byte_offset, node_not_found as node_not_found_result, required_graph_file_path,
+    required_graph_metadata, single_graph_adjacency_batch,
 };
 use verified::{append_verified_plan_context, verified_context_markdown};
 
@@ -1349,7 +1349,7 @@ pub(super) async fn handle_rename_preview(
                     from_node_id: source_node.occurrence.as_str().to_owned(),
                     from_name: source_metadata.simple_name.clone(),
                     from_kind: source_metadata.kind.clone(),
-                    edge_kind: canonical_relation_kind_name(edge.edge.kind).to_owned(),
+                    edge_kind: edge.edge.kind.as_str().to_owned(),
                     file: source_file.to_owned(),
                     evidence_start_byte: edge.edge.evidence_span.start_byte,
                 });
