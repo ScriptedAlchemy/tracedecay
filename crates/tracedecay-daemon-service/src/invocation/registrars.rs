@@ -897,6 +897,12 @@ impl DaemonConfigurationRuntimeRegistrar {
         Ok(())
     }
 
+    /// Install the semantic configuration operation beside the registered
+    /// configuration runtime. The operation is a pure function of that runtime
+    /// and its registered database, and the runtime is first-registration-wins
+    /// for the root's lifetime, so a reopen of the same root finding one
+    /// installed is the same authority: the incumbent stays and the reopen
+    /// proceeds.
     #[hotpath::skip]
     pub async fn install_semantic_operation(
         &self,
@@ -906,19 +912,14 @@ impl DaemonConfigurationRuntimeRegistrar {
         self.service
             .project_runtimes
             .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
-                registered
-                    .semantic_operation
-                    .set(operation)
-                    .map_err(|_| TraceDecayError::Config {
-                        message: "semantic configuration operation is already installed".to_owned(),
-                    })
+                let _ = registered.semantic_operation.set(operation);
             })
             .await
             .ok_or_else(|| TraceDecayError::Config {
                 message:
                     "semantic configuration operation requires a registered configuration runtime"
                         .to_owned(),
-            })?
+            })
     }
 
     #[hotpath::skip]
