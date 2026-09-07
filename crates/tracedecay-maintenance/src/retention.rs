@@ -11,8 +11,15 @@
 //!
 //! Every window is expressed in whole days. Rows are pruned only when their
 //! timestamp is both present and strictly older than the cutoff, so rows with
-//! an unknown timestamp are always kept. A dry run reports the same
-//! [`RetentionTableReport`] rows it would delete, without mutating anything.
+//! an unknown timestamp are always kept.
+//!
+//! A pass captures one cutoff per table and drains eligible rows in slices of
+//! at most [`RETENTION_SLICE_ROWS`], each committed in its own registered write
+//! transaction so foreground writers interleave between slices and an
+//! interrupted pass keeps every committed slice. Reports count committed rows
+//! only.
+
+use std::fmt;
 
 use serde::Serialize;
 pub use tracedecay_automation::config::{
@@ -20,7 +27,8 @@ pub use tracedecay_automation::config::{
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::db::engine::Executor;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 /// Free-page compaction for tracked branch databases, off the hot path
 /// (plan 38, §6).
@@ -114,21 +122,18 @@ fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
     now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
 }
 
-mod backend {
-    pub trait Sealed {}
-}
-
-/// Driver-neutral execution surface for retention.
+/// Upper bound on rows removed by one committed retention slice.
 ///
-/// The trait is sealed because retention admits only daemon-owned database
-/// capabilities whose writer and snapshot lifetimes are already enforced.
-#[allow(async_fn_in_trait)]
-pub trait RetentionBackend: backend::Sealed {
-    #[doc(hidden)]
-    async fn delete_before(&self, table: RetentionTable, cutoff: i64) -> Result<u64>;
-}
+/// Every slice is its own registered write transaction, so a large backlog
+/// drains across many short writer holds instead of one transaction spanning
+/// every eligible row of every table.
+pub const RETENTION_SLICE_ROWS: u64 = 1_000;
 
-async fn delete_before(
+/// Deletes at most [`RETENTION_SLICE_ROWS`] rows of `table` that are older
+/// than `cutoff`, re-evaluating the table's eligibility predicate inside the
+/// calling transaction. Fewer deleted rows than a full slice means the table
+/// holds no further eligible rows for this cutoff.
+async fn delete_slice(
     executor: &(impl Executor + ?Sized),
     table: RetentionTable,
     cutoff: i64,
@@ -136,11 +141,15 @@ async fn delete_before(
     let name = table.table_name();
     let eligibility = retention_eligibility(table);
     let sql = format!(
-        "DELETE FROM {name} WHERE {TIMESTAMP_COLUMN} IS NOT NULL
-         AND {TIMESTAMP_COLUMN} < ?1 AND {eligibility}"
+        "DELETE FROM {name} WHERE rowid IN (
+             SELECT rowid FROM {name}
+             WHERE {TIMESTAMP_COLUMN} IS NOT NULL AND {TIMESTAMP_COLUMN} < ?1
+               AND {eligibility}
+             LIMIT ?2
+         )"
     );
     executor
-        .execute(&sql, tracedecay_runtime_core::db::engine::params![cutoff])
+        .execute(&sql, params![cutoff, RETENTION_SLICE_ROWS])
         .await
         .map_err(|error| retention_error(name, "delete", &error))
 }
@@ -171,88 +180,89 @@ fn retention_eligibility(table: RetentionTable) -> &'static str {
     }
 }
 
-macro_rules! retention_backend {
-    ($($executor:ty),+ $(,)?) => {
-        $(
-            impl backend::Sealed for $executor {}
-
-            impl RetentionBackend for $executor {
-                async fn delete_before(
-                    &self,
-                    table: RetentionTable,
-                    cutoff: i64,
-                ) -> Result<u64> {
-                    delete_before(self, table, cutoff).await
-                }
-            }
-        )+
-    };
-}
-
-retention_backend!(tracedecay_global_db::RegisteredGlobalDbWriteTransaction<'_>,);
-
-#[cfg(test)]
-retention_backend!(
-    tracedecay_runtime_core::db::engine::Connection,
-    tracedecay_runtime_core::db::engine::Transaction,
-);
-
-/// Prunes rows in `table` older than its configured window. A disabled
-/// window is a no-op that reports `rows = 0`.
-pub async fn prune_table<E>(
-    conn: &E,
+/// Deletes one slice of `table` in its own registered write transaction and
+/// commits it, so the writer is released before the next slice begins.
+async fn commit_slice(
+    database: &RegisteredGlobalDb,
     table: RetentionTable,
-    window_days: Option<u32>,
-    now_secs: i64,
-) -> Result<RetentionTableReport>
-where
-    E: RetentionBackend + ?Sized,
-{
-    let Some(window_days) = window_days else {
-        return Ok(RetentionTableReport::skipped(table));
-    };
-    let cutoff = cutoff_secs(window_days, now_secs);
-    let name = table.table_name();
-    let rows = conn.delete_before(table, cutoff).await?;
-
-    Ok(RetentionTableReport {
-        table: name,
-        window_days: Some(window_days),
-        applied: true,
-        rows,
-    })
+    cutoff: i64,
+) -> Result<u64> {
+    let transaction = database.begin_write_transaction().await?;
+    let deleted = delete_slice(&transaction, table, cutoff).await?;
+    transaction.commit().await?;
+    Ok(deleted)
 }
 
-/// Runs retention for the global-database tables
-/// ([`RetentionTable::GLOBAL_TABLES`]) using `config`, returning a per-table
-/// report.
-pub async fn prune_global_tables<E>(
-    conn: &E,
-    config: &RetentionConfig,
-    now_secs: i64,
-) -> Result<Vec<RetentionTableReport>>
-where
-    E: RetentionBackend + ?Sized,
-{
-    let mut reports = Vec::with_capacity(RetentionTable::GLOBAL_TABLES.len());
-    for table in RetentionTable::GLOBAL_TABLES {
-        reports
-            .push(prune_table(conn, table, retention_window_days(config, table), now_secs).await?);
+/// A retention pass that stopped before every enabled table drained.
+///
+/// `committed` lists exactly the tables whose slices reached a durable commit
+/// before `error`; rows of the slice that failed were rolled back and are not
+/// counted anywhere.
+#[derive(Debug)]
+pub struct RetentionPassInterruption {
+    pub committed: Vec<RetentionTableReport>,
+    pub error: TraceDecayError,
+}
+
+impl fmt::Display for RetentionPassInterruption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "retention pass interrupted: {}", self.error)
     }
-    Ok(reports)
 }
 
-/// Applies global-database retention in one registered write transaction.
+impl std::error::Error for RetentionPassInterruption {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Applies global-database retention for [`RetentionTable::GLOBAL_TABLES`] in
+/// bounded, separately committed slices.
+///
+/// Tables run in declaration order so `session_messages` is evaluated while
+/// its `lcm_raw_messages` lineage still exists. The cutoff is captured once
+/// per table; each slice re-checks eligibility in its own transaction, so
+/// rows that gain or lose lineage between slices are judged by the current
+/// authority. Disabled windows never acquire the writer.
 #[hotpath::measure(label = "maintenance.retention.prune_global", future = true)]
 pub async fn prune_global_retention(
-    database: &tracedecay_global_db::RegisteredGlobalDb,
+    database: &RegisteredGlobalDb,
     config: &RetentionConfig,
     now_secs: i64,
-) -> Result<Vec<RetentionTableReport>> {
-    let transaction = database.begin_write_transaction().await?;
-    let reports = prune_global_tables(&transaction, config, now_secs).await?;
-    transaction.commit().await?;
-    Ok(reports)
+) -> std::result::Result<Vec<RetentionTableReport>, RetentionPassInterruption> {
+    let mut committed = Vec::with_capacity(RetentionTable::GLOBAL_TABLES.len());
+    for table in RetentionTable::GLOBAL_TABLES {
+        let Some(window_days) = retention_window_days(config, table) else {
+            committed.push(RetentionTableReport::skipped(table));
+            continue;
+        };
+        let cutoff = cutoff_secs(window_days, now_secs);
+        let mut report = RetentionTableReport {
+            table: table.table_name(),
+            window_days: Some(window_days),
+            applied: true,
+            rows: 0,
+        };
+        loop {
+            let deleted = match commit_slice(database, table, cutoff).await {
+                Ok(deleted) => deleted,
+                Err(error) => {
+                    // Every committed slice before this one was full, so a
+                    // zero count means no slice of this table committed.
+                    if report.rows > 0 {
+                        committed.push(report);
+                    }
+                    return Err(RetentionPassInterruption { committed, error });
+                }
+            };
+            report.rows += deleted;
+            if deleted < RETENTION_SLICE_ROWS {
+                break;
+            }
+        }
+        committed.push(report);
+    }
+    Ok(committed)
 }
 
 fn retention_error(
@@ -269,8 +279,11 @@ fn retention_error(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use tracedecay_runtime_core::db::engine::{Connection, TestConnection, params};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_runtime_core::db::engine::{Connection, TestConnection};
 
     fn test_conn(directory: &tempfile::TempDir) -> TestConnection {
         TestConnection::open(&directory.path().join("retention.db"))
@@ -323,6 +336,37 @@ mod tests {
         }
     }
 
+    async fn registered_analytics_count(database: &RegisteredGlobalDb) -> i64 {
+        let mut rows = database
+            .read_connection()
+            .query("SELECT COUNT(*) FROM analytics_events", ())
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    /// Seeds `old_rows` analytics events far outside a 180-day window plus one
+    /// current event on the production schema.
+    async fn seed_registered_analytics_backlog(
+        database: &RegisteredGlobalDb,
+        old_rows: u64,
+        now: i64,
+    ) {
+        let old = now - 400 * SECONDS_PER_DAY;
+        database
+            .writer_connection()
+            .unwrap()
+            .execute_batch(&format!(
+                "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {old_rows})
+                 INSERT INTO analytics_events (provider, project_id, timestamp, event_kind)
+                 SELECT 'claude', 'p', {old}, 'k' FROM seq;
+                 INSERT INTO analytics_events (provider, project_id, timestamp, event_kind)
+                 VALUES ('claude', 'p', {now}, 'k');"
+            ))
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn defaults_bound_legacy_session_data_and_prune_analytics() {
         let config = RetentionConfig::default();
@@ -345,22 +389,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_window_is_a_no_op() {
-        let directory = tempfile::tempdir().unwrap();
-        let conn = test_conn(&directory);
+    async fn disabled_retention_never_acquires_the_registered_writer() {
+        let harness = RegisteredGlobalDbHarness::open("retention-disabled-no-writer").await;
+        let database = harness.registered.as_ref();
         let now = 1_000_000_000;
-        seed_analytics(&conn, &[Some(now - 10 * SECONDS_PER_DAY), Some(now)]).await;
+        seed_registered_analytics_backlog(database, 3, now).await;
+        // Any writer acquisition would park behind this open transaction.
+        let held_writer = database.begin_write_transaction().await.unwrap();
 
-        let report = prune_table(&*conn, RetentionTable::AnalyticsEvents, None, now)
-            .await
-            .unwrap();
-        assert_eq!(report.rows, 0);
-        assert!(!report.applied);
-        assert_eq!(count(&conn).await, 2, "disabled window must delete nothing");
+        let reports = tokio::time::timeout(
+            Duration::from_secs(2),
+            prune_global_retention(database, &config_days(None), now),
+        )
+        .await
+        .expect("disabled retention must finish without waiting for the writer")
+        .unwrap();
+
+        assert_eq!(reports.len(), RetentionTable::GLOBAL_TABLES.len());
+        assert!(
+            reports
+                .iter()
+                .all(|report| !report.applied && report.rows == 0),
+            "disabled windows report skipped tables only: {reports:?}"
+        );
+        held_writer.rollback().await.unwrap();
+        assert_eq!(registered_analytics_count(database).await, 4);
     }
 
     #[tokio::test]
-    async fn apply_deletes_only_rows_older_than_window_and_keeps_null_timestamps() {
+    async fn backlog_drains_in_bounded_commits_and_interruption_keeps_committed_slices() {
+        let harness = RegisteredGlobalDbHarness::open("retention-bounded-slices").await;
+        let database = harness.registered.as_ref();
+        let now = 1_000_000_000;
+        let tail = 5;
+        let eligible = 3 * RETENTION_SLICE_ROWS + tail;
+        seed_registered_analytics_backlog(database, eligible, now).await;
+        // Receipts observe every deleted row; the abort trigger fails the first
+        // delete of the third slice, after two slices have committed.
+        let abort_after = 2 * RETENTION_SLICE_ROWS;
+        database
+            .writer_connection()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE retention_delete_receipts (deleted_id INTEGER NOT NULL);
+                 CREATE TRIGGER retention_delete_receipt AFTER DELETE ON analytics_events
+                 BEGIN INSERT INTO retention_delete_receipts(deleted_id) VALUES (OLD.id); END;
+                 CREATE TRIGGER retention_abort_third_slice BEFORE DELETE ON analytics_events
+                 WHEN (SELECT COUNT(*) FROM retention_delete_receipts) >= {abort_after}
+                 BEGIN SELECT RAISE(ABORT, 'interrupt retention between slices'); END;"
+            ))
+            .await
+            .unwrap();
+        let config = config_days(Some(180));
+
+        let interruption = prune_global_retention(database, &config, now)
+            .await
+            .expect_err("the third slice must fail");
+        assert_eq!(
+            interruption.committed,
+            vec![RetentionTableReport {
+                table: "analytics_events",
+                window_days: Some(180),
+                applied: true,
+                rows: abort_after,
+            }],
+            "only the two committed slices are reported"
+        );
+        assert!(
+            interruption
+                .error
+                .to_string()
+                .contains("interrupt retention between slices"),
+            "{interruption}"
+        );
+        assert_eq!(
+            registered_analytics_count(database).await,
+            i64::try_from(eligible - abort_after + 1).unwrap(),
+            "committed slices are durable and the rolled-back slice deleted nothing"
+        );
+
+        database
+            .writer_connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER retention_abort_third_slice;")
+            .await
+            .unwrap();
+        let reports = prune_global_retention(database, &config, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            reports,
+            vec![
+                RetentionTableReport {
+                    table: "analytics_events",
+                    window_days: Some(180),
+                    applied: true,
+                    rows: eligible - abort_after,
+                },
+                RetentionTableReport::skipped(RetentionTable::SessionMessages),
+                RetentionTableReport::skipped(RetentionTable::LcmRawMessages),
+            ],
+            "the resumed pass drains exactly the remainder without double counting"
+        );
+        assert_eq!(
+            registered_analytics_count(database).await,
+            1,
+            "the in-window row survives every slice"
+        );
+    }
+
+    #[tokio::test]
+    async fn slice_deletes_only_rows_older_than_window_and_keeps_null_timestamps() {
         let directory = tempfile::tempdir().unwrap();
         let conn = test_conn(&directory);
         let now = 1_000_000_000;
@@ -376,11 +515,14 @@ mod tests {
         )
         .await;
 
-        let report = prune_table(&*conn, RetentionTable::AnalyticsEvents, Some(180), now)
-            .await
-            .unwrap();
-        assert_eq!(report.rows, 2);
-        assert!(report.applied);
+        let deleted = delete_slice(
+            &*conn,
+            RetentionTable::AnalyticsEvents,
+            cutoff_secs(180, now),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted, 2);
         assert_eq!(
             count(&conn).await,
             3,
@@ -421,60 +563,19 @@ mod tests {
         .unwrap();
 
         let config = RetentionConfig::default();
-        prune_table(
-            &*conn,
+        for table in [
             RetentionTable::SessionMessages,
-            config.session_messages_days,
-            now,
-        )
-        .await
-        .unwrap();
-        prune_table(
-            &*conn,
             RetentionTable::LcmRawMessages,
-            config.lcm_raw_messages_days,
-            now,
-        )
-        .await
-        .unwrap();
+        ] {
+            let window = retention_window_days(&config, table).unwrap();
+            delete_slice(&*conn, table, cutoff_secs(window, now))
+                .await
+                .unwrap();
+        }
 
         assert_eq!(count_message(&conn, "session_messages", "durable").await, 0);
         assert_eq!(count_message(&conn, "lcm_raw_messages", "durable").await, 0);
         assert_eq!(count_message(&conn, "session_messages", "live").await, 1);
         assert_eq!(count_message(&conn, "lcm_raw_messages", "live").await, 1);
-    }
-
-    #[tokio::test]
-    async fn prune_global_tables_reports_each_table() {
-        let directory = tempfile::tempdir().unwrap();
-        let conn = test_conn(&directory);
-        let now = 1_000_000_000;
-        seed_analytics(&conn, &[Some(now - 400 * SECONDS_PER_DAY)]).await;
-        // session_messages must exist for the (disabled) count/skip path; with
-        // a None window it is never queried, so no table is required.
-        let reports = prune_global_tables(&*conn, &config_days(Some(180)), now)
-            .await
-            .unwrap();
-        assert_eq!(reports.len(), 3);
-        let analytics = reports
-            .iter()
-            .find(|r| r.table == "analytics_events")
-            .unwrap();
-        assert_eq!(analytics.rows, 1);
-        let sessions = reports
-            .iter()
-            .find(|r| r.table == "session_messages")
-            .unwrap();
-        assert_eq!(sessions.rows, 0, "session retention is disabled by default");
-        assert_eq!(sessions.window_days, None);
-        // lcm_raw_messages participates in every global pass — an
-        // operator-set lcm_raw_messages_days must never be silently
-        // ignored. Disabled by default (lossless).
-        let lcm = reports
-            .iter()
-            .find(|r| r.table == "lcm_raw_messages")
-            .expect("lcm_raw_messages must be reported in global passes");
-        assert_eq!(lcm.rows, 0, "lcm retention is disabled by default");
-        assert_eq!(lcm.window_days, None);
     }
 }

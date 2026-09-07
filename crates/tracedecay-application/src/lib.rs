@@ -25,7 +25,6 @@
 pub mod advisory;
 pub mod authorization;
 mod bearer_token;
-#[cfg(feature = "native-git")]
 pub mod branch_snapshots;
 pub mod clock;
 pub mod configuration;
@@ -182,8 +181,6 @@ pub use feedback::{
     feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
     feedback_surface_operation,
 };
-#[cfg(feature = "native-git")]
-pub use git::NativeHistoricalBlobReaderV1;
 pub use git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,

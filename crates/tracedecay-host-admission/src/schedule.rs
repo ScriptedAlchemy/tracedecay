@@ -1,5 +1,9 @@
 //! Bounded fair multi-source scheduling for host-admission intake.
 //!
+//! The scheduler is reference-only: it orders durable spool sequences per
+//! source and accounts their retained byte lengths. Payload bytes live in the
+//! spool, which the runtime reads by sequence after a pop.
+//!
 //! Queues are strictly bounded (per source and globally). Overflow is an explicit
 //! backpressure outcome — never an unbounded buffer.
 
@@ -57,19 +61,17 @@ pub(crate) enum FairEnqueueOutcome {
     SourceTooLarge,
 }
 
-/// One fair-rotation pop.
+/// One fair-rotation pop: the durable sequence to load from the spool.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FairPop {
     pub(crate) seq: u64,
     pub(crate) source: String,
-    pub(crate) payload: Vec<u8>,
     pub(crate) total_pending: usize,
 }
 
 #[derive(Debug)]
 struct ScheduledRecord {
     seq: u64,
-    payload: Vec<u8>,
     retained_bytes: usize,
 }
 
@@ -126,13 +128,6 @@ impl FairSourceScheduler {
         self.queues.len()
     }
 
-    /// Enqueue a record for `source`, or return an explicit overflow disposition.
-    #[cfg(test)]
-    pub(crate) fn try_enqueue(&mut self, source: &str, payload: Vec<u8>) -> FairEnqueueOutcome {
-        let retained_bytes = payload.len();
-        self.try_enqueue_record(source, 0, payload, retained_bytes, false)
-    }
-
     /// Enqueue a durable record reference while accounting for its retained payload.
     pub(crate) fn try_enqueue_reference(
         &mut self,
@@ -140,7 +135,7 @@ impl FairSourceScheduler {
         seq: u64,
         retained_bytes: usize,
     ) -> FairEnqueueOutcome {
-        self.try_enqueue_record(source, seq, Vec::new(), retained_bytes, false)
+        self.try_enqueue_record(source, seq, retained_bytes, false)
     }
 
     /// Restore a lease at its source head without undoing global fair rotation.
@@ -150,14 +145,13 @@ impl FairSourceScheduler {
         seq: u64,
         retained_bytes: usize,
     ) -> FairEnqueueOutcome {
-        self.try_enqueue_record(source, seq, Vec::new(), retained_bytes, true)
+        self.try_enqueue_record(source, seq, retained_bytes, true)
     }
 
     fn try_enqueue_record(
         &mut self,
         source: &str,
         seq: u64,
-        payload: Vec<u8>,
         retained_bytes: usize,
         front: bool,
     ) -> FairEnqueueOutcome {
@@ -195,7 +189,6 @@ impl FairSourceScheduler {
 
         let record = ScheduledRecord {
             seq,
-            payload,
             retained_bytes,
         };
 
@@ -240,7 +233,6 @@ impl FairSourceScheduler {
         Some(FairPop {
             seq: record.seq,
             source,
-            payload: record.payload,
             total_pending: self.total_pending,
         })
     }
@@ -263,51 +255,56 @@ mod tests {
         FairScheduleBounds::with_byte_bounds(4, 2, 16, 8, 48, 24)
     }
 
+    /// Enqueue `seq` for `source` with a two-byte retained payload accounting.
+    fn enqueue(scheduler: &mut FairSourceScheduler, source: &str, seq: u64) -> FairEnqueueOutcome {
+        scheduler.try_enqueue_reference(source, seq, 2)
+    }
+
+    fn pop(scheduler: &mut FairSourceScheduler) -> (String, u64) {
+        let pop = scheduler.pop_next().expect("pending");
+        (pop.source, pop.seq)
+    }
+
     #[test]
     fn fair_rotation_interleaves_sources_deterministically() {
         let mut scheduler = FairSourceScheduler::new(bounds());
         assert_eq!(
-            scheduler.try_enqueue("a", b"a1".to_vec()),
+            enqueue(&mut scheduler, "a", 1),
             FairEnqueueOutcome::Accepted {
                 total_pending: 1,
                 source_pending: 1
             }
         );
         assert_eq!(
-            scheduler.try_enqueue("b", b"b1".to_vec()),
+            enqueue(&mut scheduler, "b", 2),
             FairEnqueueOutcome::Accepted {
                 total_pending: 2,
                 source_pending: 1
             }
         );
         assert_eq!(
-            scheduler.try_enqueue("a", b"a2".to_vec()),
+            enqueue(&mut scheduler, "a", 3),
             FairEnqueueOutcome::Accepted {
                 total_pending: 3,
                 source_pending: 2
             }
         );
         assert_eq!(
-            scheduler.try_enqueue("b", b"b2".to_vec()),
+            enqueue(&mut scheduler, "b", 4),
             FairEnqueueOutcome::Accepted {
                 total_pending: 4,
                 source_pending: 2
             }
         );
 
-        let pops: Vec<(String, Vec<u8>)> = (0..4)
-            .map(|_| {
-                let pop = scheduler.pop_next().expect("pending");
-                (pop.source, pop.payload)
-            })
-            .collect();
+        let pops: Vec<(String, u64)> = (0..4).map(|_| pop(&mut scheduler)).collect();
         assert_eq!(
             pops,
             vec![
-                ("a".into(), b"a1".to_vec()),
-                ("b".into(), b"b1".to_vec()),
-                ("a".into(), b"a2".to_vec()),
-                ("b".into(), b"b2".to_vec()),
+                ("a".into(), 1),
+                ("b".into(), 2),
+                ("a".into(), 3),
+                ("b".into(), 4)
             ]
         );
         assert!(scheduler.pop_next().is_none());
@@ -317,33 +314,53 @@ mod tests {
     }
 
     #[test]
+    fn front_requeue_keeps_source_order_without_resetting_rotation() {
+        let mut scheduler = FairSourceScheduler::new(bounds());
+        enqueue(&mut scheduler, "a", 1);
+        enqueue(&mut scheduler, "a", 2);
+        enqueue(&mut scheduler, "b", 3);
+
+        assert_eq!(pop(&mut scheduler), ("a".into(), 1));
+        assert!(matches!(
+            scheduler.requeue_front_reference("a", 1, 2),
+            FairEnqueueOutcome::Accepted { .. }
+        ));
+        // Rotation already moved past `a`, so `b` is served before the retry,
+        // and the retry stays ahead of `a`'s later record.
+        assert_eq!(pop(&mut scheduler), ("b".into(), 3));
+        assert_eq!(pop(&mut scheduler), ("a".into(), 1));
+        assert_eq!(pop(&mut scheduler), ("a".into(), 2));
+        assert_eq!(scheduler.total_bytes(), 0);
+    }
+
+    #[test]
     fn global_and_per_source_bounds_backpressure_without_growth() {
         let mut scheduler = FairSourceScheduler::new(bounds());
         assert!(matches!(
-            scheduler.try_enqueue("a", b"1".to_vec()),
+            enqueue(&mut scheduler, "a", 1),
             FairEnqueueOutcome::Accepted { .. }
         ));
         assert!(matches!(
-            scheduler.try_enqueue("a", b"2".to_vec()),
+            enqueue(&mut scheduler, "a", 2),
             FairEnqueueOutcome::Accepted { .. }
         ));
         assert_eq!(
-            scheduler.try_enqueue("a", b"3".to_vec()),
+            enqueue(&mut scheduler, "a", 3),
             FairEnqueueOutcome::Backpressured
         );
         assert_eq!(scheduler.source_pending("a"), 2);
         assert_eq!(scheduler.total_pending(), 2);
 
         assert!(matches!(
-            scheduler.try_enqueue("b", b"1".to_vec()),
+            enqueue(&mut scheduler, "b", 4),
             FairEnqueueOutcome::Accepted { .. }
         ));
         assert!(matches!(
-            scheduler.try_enqueue("c", b"1".to_vec()),
+            enqueue(&mut scheduler, "c", 5),
             FairEnqueueOutcome::Accepted { .. }
         ));
         assert_eq!(
-            scheduler.try_enqueue("d", b"1".to_vec()),
+            enqueue(&mut scheduler, "d", 6),
             FairEnqueueOutcome::Backpressured
         );
         assert_eq!(scheduler.total_pending(), 4);
@@ -357,7 +374,7 @@ mod tests {
     fn oversized_record_is_rejected_without_enqueue() {
         let mut scheduler = FairSourceScheduler::new(bounds());
         assert_eq!(
-            scheduler.try_enqueue("a", vec![0u8; 17]),
+            scheduler.try_enqueue_reference("a", 1, 17),
             FairEnqueueOutcome::RecordTooLarge
         );
         assert_eq!(scheduler.total_pending(), 0);
@@ -368,23 +385,18 @@ mod tests {
     fn fair_rotation_does_not_pin_on_empty_source() {
         let mut scheduler =
             FairSourceScheduler::new(FairScheduleBounds::with_byte_bounds(8, 4, 32, 8, 128, 64));
-        scheduler.try_enqueue("a", b"a1".to_vec());
-        scheduler.try_enqueue("b", b"b1".to_vec());
-        scheduler.try_enqueue("c", b"c1".to_vec());
-        let first = scheduler.pop_next().unwrap();
-        assert_eq!(first.source, "a");
+        enqueue(&mut scheduler, "a", 1);
+        enqueue(&mut scheduler, "b", 2);
+        enqueue(&mut scheduler, "c", 3);
+        assert_eq!(pop(&mut scheduler).0, "a");
         // Drain b so the next fair step past a must skip the empty slot and land on c.
-        let second = scheduler.pop_next().unwrap();
-        assert_eq!(second.source, "b");
-        let third = scheduler.pop_next().unwrap();
-        assert_eq!(third.source, "c");
-        scheduler.try_enqueue("a", b"a2".to_vec());
-        scheduler.try_enqueue("c", b"c2".to_vec());
+        assert_eq!(pop(&mut scheduler).0, "b");
+        assert_eq!(pop(&mut scheduler).0, "c");
+        enqueue(&mut scheduler, "a", 4);
+        enqueue(&mut scheduler, "c", 5);
         // Cursor advanced past c; next search starts at a (wrap), then c.
-        let fourth = scheduler.pop_next().unwrap();
-        assert_eq!(fourth.source, "a");
-        let fifth = scheduler.pop_next().unwrap();
-        assert_eq!(fifth.source, "c");
+        assert_eq!(pop(&mut scheduler).0, "a");
+        assert_eq!(pop(&mut scheduler).0, "c");
     }
 
     #[test]
@@ -393,16 +405,16 @@ mod tests {
         assert_eq!(bounds.total_bytes, 8);
         let mut scheduler = FairSourceScheduler::new(bounds);
         assert_eq!(
-            scheduler.try_enqueue("long", b"x".to_vec()),
+            scheduler.try_enqueue_reference("long", 1, 1),
             FairEnqueueOutcome::SourceTooLarge
         );
         assert!(matches!(
-            scheduler.try_enqueue("a", b"1234".to_vec()),
+            scheduler.try_enqueue_reference("a", 2, 4),
             FairEnqueueOutcome::Accepted { .. }
         ));
         assert_eq!(scheduler.total_bytes(), 5);
         assert_eq!(
-            scheduler.try_enqueue("b", b"123".to_vec()),
+            scheduler.try_enqueue_reference("b", 3, 3),
             FairEnqueueOutcome::Backpressured
         );
         assert_eq!(scheduler.total_bytes(), 5);
@@ -413,15 +425,15 @@ mod tests {
         let mut scheduler =
             FairSourceScheduler::new(FairScheduleBounds::with_byte_bounds(8, 8, 16, 8, 32, 11));
         assert!(matches!(
-            scheduler.try_enqueue("a", b"1234567890".to_vec()),
+            scheduler.try_enqueue_reference("a", 1, 10),
             FairEnqueueOutcome::Accepted { .. }
         ));
         assert_eq!(
-            scheduler.try_enqueue("a", b"x".to_vec()),
+            scheduler.try_enqueue_reference("a", 2, 1),
             FairEnqueueOutcome::Backpressured
         );
         assert!(matches!(
-            scheduler.try_enqueue("b", b"1234567890".to_vec()),
+            scheduler.try_enqueue_reference("b", 3, 10),
             FairEnqueueOutcome::Accepted { .. }
         ));
         assert_eq!(scheduler.total_pending(), 2);
@@ -431,14 +443,14 @@ mod tests {
     fn sequential_unique_source_churn_releases_all_source_state() {
         let mut scheduler =
             FairSourceScheduler::new(FairScheduleBounds::with_byte_bounds(2, 1, 8, 16, 32, 24));
-        for index in 0..10_000 {
+        for index in 0..10_000_u64 {
             let source = format!("s{index}");
             assert!(matches!(
-                scheduler.try_enqueue(&source, vec![index as u8]),
+                scheduler.try_enqueue_reference(&source, index, 1),
                 FairEnqueueOutcome::Accepted { .. }
             ));
             let popped = scheduler.pop_next().expect("just enqueued");
-            assert_eq!(popped.source, source);
+            assert_eq!((popped.source, popped.seq), (source, index));
             assert_eq!(scheduler.source_count(), 0);
             assert_eq!(scheduler.total_pending(), 0);
             assert_eq!(scheduler.total_bytes(), 0);
