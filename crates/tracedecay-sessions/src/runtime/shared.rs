@@ -166,6 +166,64 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The one canonical stored form of a path-shaped durable key.
+///
+/// Applied on write and read for `parse_offsets.file_path`, and on write for
+/// `sessions.project_path`, so each path-shaped authority has one stored form
+/// and the ingest cursor hot path needs one indexed equality lookup.
+///
+/// Only syntactically absolute Windows drive and UNC display forms are folded:
+/// the extended-length prefix, slash direction, and drive-letter case. Unix
+/// paths containing literal backslashes and opaque keys stay byte-exact. The
+/// result never depends on the compiling platform: the same input produces the
+/// same stored bytes on Windows and Unix.
+#[must_use]
+pub fn path_identity_key(path: &str) -> String {
+    if let Some(body) = path
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| path.strip_prefix("//?/UNC/"))
+    {
+        return canonical_unc_path(body).unwrap_or_else(|| path.to_owned());
+    }
+
+    if let Some(stripped) = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+    {
+        return canonical_drive_path(stripped).unwrap_or_else(|| path.to_owned());
+    }
+
+    if let Some(normalized) = canonical_drive_path(path) {
+        return normalized;
+    }
+    path.strip_prefix(r"\\")
+        .or_else(|| path.strip_prefix("//"))
+        .and_then(canonical_unc_path)
+        .unwrap_or_else(|| path.to_owned())
+}
+
+fn canonical_drive_path(path: &str) -> Option<String> {
+    let head = path.as_bytes();
+    if head.len() >= 3
+        && head[0].is_ascii_alphabetic()
+        && head[1] == b':'
+        && matches!(head[2], b'/' | b'\\')
+    {
+        let mut normalized = path.replace('\\', "/");
+        normalized[..1].make_ascii_lowercase();
+        return Some(normalized);
+    }
+    None
+}
+
+fn canonical_unc_path(body: &str) -> Option<String> {
+    let normalized = body.replace('\\', "/");
+    let mut components = normalized.split('/');
+    let server = components.next()?;
+    let share = components.next()?;
+    (!server.is_empty() && !share.is_empty()).then(|| format!("//{normalized}"))
+}
+
 pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
     ProjectRootMatcher::new(project_root).contains(path)
 }
@@ -1014,9 +1072,41 @@ mod tests {
     use super::TranscriptLocationMetadataKeys;
     use super::append_location_metadata_cached;
     use super::one_line_truncated;
+    use super::path_identity_key;
     use super::usage_counters_from;
 
     static MATCHER_CACHE_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn durable_path_identity_folds_only_absolute_windows_display_forms() {
+        assert_eq!(
+            path_identity_key(r"\\?\C:\Repo\Case\transcript.jsonl"),
+            "c:/Repo/Case/transcript.jsonl"
+        );
+        assert_eq!(
+            path_identity_key(r"\\?\UNC\server\Share\transcript.jsonl"),
+            "//server/Share/transcript.jsonl"
+        );
+        assert_eq!(
+            path_identity_key(r"\\server\Share\transcript.jsonl"),
+            "//server/Share/transcript.jsonl"
+        );
+
+        assert_eq!(path_identity_key(r"/repo/a\b"), r"/repo/a\b");
+        assert_ne!(
+            path_identity_key(r"/repo/a\b"),
+            path_identity_key("/repo/a/b")
+        );
+        assert_ne!(
+            path_identity_key("/repo/Case/transcript.jsonl"),
+            path_identity_key("/repo/case/transcript.jsonl")
+        );
+        assert_eq!(
+            path_identity_key(r"opaque\project-key"),
+            r"opaque\project-key"
+        );
+        assert_eq!(path_identity_key(r"\\server"), r"\\server");
+    }
 
     fn unknown_then_resolved_identity(path: &Path) -> GitRepositoryIdentityOutcome {
         if MATCHER_CACHE_RESOLVER_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
