@@ -584,6 +584,85 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         "runtime and automation owners must derive from the canonical StoreLayout locator"
     );
 
+    // Same apparent project identity, different store authority: the linked
+    // route's exact scope and daemon actor, but a store locator that is not
+    // the shared project store. That is a foreign runtime and must be refused
+    // with the typed registration error, leaving the live route untouched.
+    let invocation_service = engine.invocation.invocation_service();
+    let linked_retained_before = invocation_service
+        .project_runtimes
+        .get::<tracedecay_daemon_service::RegisteredRetainedRuntime>(&linked)
+        .await
+        .expect("the opted-in linked route registers a retained runtime");
+    let (linked_route, linked_scope) = &route_scopes[0];
+    assert_eq!(linked_route, &linked);
+    let linked_configuration = linked_graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("linked configuration");
+    let foreign_observed_at = tracedecay_application::now_micros();
+    let foreign_access = crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
+        linked_scope,
+        &linked,
+        &linked_configuration,
+        foreign_observed_at,
+    )
+    .expect("linked source access");
+    let foreign_grant = crate::daemon::project_open_owners::project_open_retained_grant(
+        &foreign_access,
+        foreign_observed_at,
+    )
+    .expect("linked retained grant");
+    let real_store = linked_graph.db().runtime_client();
+    let foreign_store = tracedecay_daemon_service::RetainedRuntimeStoreAuthorityV1::new(
+        real_store.binding().clone(),
+        tracedecay_store::VerifiedStoreLocatorV1::new(
+            real_store.verified_locator().shard_id.clone(),
+            real_store.verified_locator().incarnation,
+            tracedecay_store::canonical_store_locator_digest(&root.join("foreign-store"))
+                .expect("foreign locator digest"),
+        ),
+    );
+    let refused =
+        tracedecay_daemon_service::DaemonRetainedRuntimeRegistrar::new(&invocation_service)
+            .register(
+                linked.clone(),
+                linked_scope.clone(),
+                foreign_access.requester.clone(),
+                foreign_grant,
+                foreign_store,
+                linked_server.retained_surface_ports(
+                    &linked,
+                    linked_scope.project_id.clone(),
+                    foreign_access.configuration_digest.clone(),
+                ),
+            )
+            .await
+            .expect_err("a different store authority under the same project identity is foreign");
+    assert!(
+        matches!(&refused, tracedecay_domain::errors::TraceDecayError::Config { message } if message.contains("store authority")),
+        "{refused}"
+    );
+    assert!(
+        invocation_service
+            .project_runtimes
+            .get::<tracedecay_daemon_service::RegisteredRetainedRuntime>(&linked)
+            .await
+            .expect("refusal must not retire the live route")
+            .shares_ports_with(&linked_retained_before),
+        "a refused foreign registration must not rebind the live route"
+    );
+
+    // Hold one real in-flight request lease on the linked root across the
+    // server drop. While it is held the registry cannot retire the root, so
+    // the retained runtime the reopen meets is provably the one registered
+    // above — the reopen must reconcile it, not build a fresh one.
+    let linked_request_lease = invocation_service
+        .project_runtimes
+        .admit_request(&linked, None)
+        .expect("the registered linked root admits requests");
     {
         let mut servers = engine.store_administration.project_servers().lock().await;
         assert!(servers.remove(&linked_key).is_some());
@@ -608,10 +687,32 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
             .publication_id,
         "reopening an exact linked route must not publish a second database owner"
     );
+    // The reopened server built new retained ports; the same-authority
+    // registration must have rebound the retained runtime to them rather than
+    // refusing and leaving the route degraded to core-only capabilities.
+    let linked_retained_after = invocation_service
+        .project_runtimes
+        .get::<tracedecay_daemon_service::RegisteredRetainedRuntime>(&linked)
+        .await
+        .expect("the reopened linked route keeps its retained runtime");
+    assert!(
+        !linked_retained_after.shares_ports_with(&linked_retained_before),
+        "reopen must rebind the retained runtime to the live route's ports"
+    );
+    drop(linked_request_lease);
     {
         let servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
         assert_eq!(servers.aliases.len(), 2);
+        assert_eq!(
+            servers
+                .servers
+                .get(&linked_key)
+                .expect("reopened linked route is published")
+                .publication,
+            crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
+            "the reopened linked route must publish full capabilities, not a degraded core"
+        );
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
