@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
 use crate::executable::ExecutableSchemaAuthority;
@@ -211,29 +213,50 @@ impl CatalogSnapshotBuilderV1 {
 
     #[hotpath::measure(label = "tool_catalog.snapshot.build")]
     pub fn build(self) -> Result<CatalogSnapshotV1, CatalogValidationError> {
+        // Duplicate and reference validation runs over the borrowed input
+        // first, so no map insertion below can silently overwrite a record.
         validate_catalog(&self.contributions, &self.profiles, &self.handlers)?;
 
+        let Self {
+            contributions,
+            profiles,
+            handlers: _,
+        } = self;
+        let mut contribution_entries = Vec::with_capacity(contributions.len());
         let mut capabilities = BTreeMap::new();
         let mut retrieval_primitives = BTreeMap::new();
         let mut bindings = BTreeMap::new();
         let mut executable_schemas = BTreeMap::new();
-        for contribution in &self.contributions {
-            for capability in contribution.capabilities() {
-                capabilities.insert(capability.capability_id().clone(), capability.clone());
+        for contribution in contributions {
+            let CatalogContributionV1 {
+                contribution_id,
+                depends_on,
+                capabilities: contributed_capabilities,
+                retrieval_primitives: contributed_retrievals,
+                bindings: contributed_bindings,
+                executable_schemas: contributed_schemas,
+            } = contribution;
+            contribution_entries.push(ContributionDigestEntry {
+                contribution_id,
+                depends_on,
+            });
+            for capability in contributed_capabilities {
+                capabilities.insert(capability.capability_id().clone(), capability);
             }
-            for retrieval in contribution.retrieval_primitives() {
-                retrieval_primitives.insert(retrieval.capability_id().clone(), retrieval.clone());
+            for retrieval in contributed_retrievals {
+                retrieval_primitives.insert(retrieval.capability_id().clone(), retrieval);
             }
-            for binding in contribution.bindings() {
-                bindings.insert(binding.binding_id().clone(), binding.clone());
+            for binding in contributed_bindings {
+                bindings.insert(binding.binding_id().clone(), binding);
             }
-            for authority in contribution.executable_schemas() {
-                executable_schemas.insert(authority.capability_id().clone(), authority.clone());
+            for authority in contributed_schemas {
+                executable_schemas.insert(authority.capability_id().clone(), authority);
             }
         }
+        contribution_entries
+            .sort_by(|left, right| left.contribution_id.cmp(&right.contribution_id));
 
-        let profiles: BTreeMap<_, _> = self
-            .profiles
+        let profiles: BTreeMap<_, _> = profiles
             .into_iter()
             .map(|profile| (profile.profile_id().clone(), profile))
             .collect();
@@ -247,14 +270,15 @@ impl CatalogSnapshotBuilderV1 {
             })
             .collect();
         let schema_index = collect_schema_index(&capabilities, &retrieval_primitives);
-        let digest = calculate_digest(
-            &self.contributions,
-            &capabilities,
-            &retrieval_primitives,
-            &bindings,
-            &executable_schemas,
-            &profiles,
-        );
+        let digest = calculate_digest(&SnapshotDigestDocument {
+            revision: 1,
+            contributions: contribution_entries,
+            capabilities: capabilities.values().collect(),
+            retrieval_primitives: retrieval_primitives.values().collect(),
+            bindings: bindings.values().collect(),
+            executable_schemas: executable_schemas.values().collect(),
+            profiles: profiles.values().collect(),
+        })?;
         crate::hotpath_observe::snapshot_entries(
             capabilities.len(),
             bindings.len(),
@@ -486,43 +510,41 @@ fn collect_schema_index(
     schemas
 }
 
-fn calculate_digest(
-    contributions: &[CatalogContributionV1],
-    capabilities: &BTreeMap<CapabilityId, CapabilityManifestV1>,
-    retrieval_primitives: &BTreeMap<CapabilityId, RetrievalPrimitiveManifestV1>,
-    bindings: &BTreeMap<BindingId, SurfaceBindingV1>,
-    executable_schemas: &BTreeMap<CapabilityId, ExecutableSchemaAuthority>,
-    profiles: &BTreeMap<ProfileId, ProfileDefinition>,
-) -> CatalogDigest {
-    let mut contributions: Vec<_> = contributions.iter().collect();
-    contributions.sort_by(|left, right| left.contribution_id().cmp(right.contribution_id()));
+const SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"tracedecay-tool-catalog.snapshot.v1\0";
 
-    let document = SnapshotDigestDocument {
-        revision: 1,
-        contributions: contributions
-            .into_iter()
-            .map(|contribution| ContributionDigestEntry {
-                contribution_id: contribution.contribution_id(),
-                depends_on: contribution.depends_on(),
-            })
-            .collect(),
-        capabilities: capabilities.values().collect(),
-        retrieval_primitives: retrieval_primitives.values().collect(),
-        bindings: bindings.values().collect(),
-        executable_schemas: executable_schemas.values().collect(),
-        profiles: profiles.values().collect(),
-    };
-    let document =
-        serde_json::to_vec(&document).expect("catalog records serialize without fallible values");
-    let mut canonical = b"tracedecay-tool-catalog.snapshot.v1\0".to_vec();
-    canonical.extend_from_slice(&document);
-    CatalogDigest::sha256(canonical)
+/// Hash the domain separator followed by the canonical JSON document, streaming
+/// the serializer straight into the hasher so neither the document nor a
+/// prefixed copy of it is ever materialized.
+fn calculate_digest(
+    document: &SnapshotDigestDocument<'_>,
+) -> Result<CatalogDigest, CatalogValidationError> {
+    let mut hasher = DigestWriter(Sha256::new());
+    hasher.0.update(SNAPSHOT_DIGEST_DOMAIN);
+    serde_json::to_writer(&mut hasher, document).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(CatalogDigest::from_bytes(hasher.0.finalize().into()))
+}
+
+struct DigestWriter(Sha256);
+
+impl io::Write for DigestWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
 struct SnapshotDigestDocument<'a> {
     revision: u8,
-    contributions: Vec<ContributionDigestEntry<'a>>,
+    contributions: Vec<ContributionDigestEntry>,
     capabilities: Vec<&'a CapabilityManifestV1>,
     retrieval_primitives: Vec<&'a RetrievalPrimitiveManifestV1>,
     bindings: Vec<&'a SurfaceBindingV1>,
@@ -530,8 +552,10 @@ struct SnapshotDigestDocument<'a> {
     profiles: Vec<&'a ProfileDefinition>,
 }
 
+/// The only contribution material that participates in catalog identity; the
+/// contributed records themselves are digested from the folded maps.
 #[derive(Serialize)]
-struct ContributionDigestEntry<'a> {
-    contribution_id: &'a ContributionId,
-    depends_on: &'a [ContributionId],
+struct ContributionDigestEntry {
+    contribution_id: ContributionId,
+    depends_on: Vec<ContributionId>,
 }

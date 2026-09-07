@@ -14,13 +14,15 @@ archive.include = [
     # Only the Windows lane archives (the Linux/macOS lanes run in place), so
     # the `.exe` spelling is exact. These ordinary binaries are executed by
     # the acceptance tests but are not Cargo test executables, so nextest
-    # does not carry them on its own; the archive job builds them first.
-    { path = "debug/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
-    { path = "debug/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
+    # does not carry them on its own; the archive job builds them first,
+    # under the same `perf` cargo profile as the archive (`--cargo-profile
+    # perf`), so they live in `target/perf`.
+    { path = "perf/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
     # The compiled Kiro/Codex fake is a Cargo example, not a test executable.
     # The Windows build job provisions it explicitly and fixture users resolve
     # this archived path relative to their remapped test executable.
-    { path = "debug/examples/tracedecay-host-cli-fixture.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/examples/tracedecay-host-cli-fixture.exe", relative-to = "target", on-missing = "error" },
 ]
 
 [profile.ci.junit]

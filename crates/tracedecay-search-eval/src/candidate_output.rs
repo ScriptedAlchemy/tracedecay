@@ -23,11 +23,11 @@ use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+use tracedecay_application::ResolvedScope;
 use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
     HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
-use tracedecay_application::{NativeHistoricalBlobReaderV1, ResolvedScope};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
@@ -58,6 +58,7 @@ use tracedecay_domain::{
     SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
     VectorWatermark,
 };
+use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever,

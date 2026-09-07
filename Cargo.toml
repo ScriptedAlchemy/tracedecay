@@ -92,12 +92,11 @@ incremental = false
 # shrink several-fold — measured 764–966 MiB per root-lib cache entry at
 # debug=1 against 45.7 MiB without debuginfo, which was blowing the shared
 # build-cache budget and turning evictions into repeat 5-minute misses.
+#
+# `test` (built-in, inherits `dev`) and `perf` (below) inherit every setting
+# and package override declared here, so per-package overrides live only on
+# `dev`.
 [profile.dev]
-debug = "line-tables-only"
-incremental = true
-opt-level = 1
-
-[profile.test]
 debug = "line-tables-only"
 incremental = true
 opt-level = 1
@@ -120,29 +119,27 @@ debug = 0
 [profile.dev.package.tracedecay-daemon-protocol]
 opt-level = 0
 
-[profile.test.package."*"]
-debug = 0
+# The first token count pays a one-time BPE model load (embedded-vocabulary
+# base64 decode + BPE regex compile) that costs seconds in unoptimized
+# builds; the dashboard token-count warm task and its tests hit it on every
+# test-process start, and `context_scout_model` gives its proposal one second
+# in total. Optimize the loader wherever tests run, not only under `perf`.
+[profile.dev.package.tiktoken-rs]
+opt-level = 2
 
-[profile.test.package.tracedecay-daemon-protocol]
-opt-level = 0
+[profile.dev.package.regex]
+opt-level = 2
 
-# Opt-in profile for hot-kernel runs: `cargo test --profile perf ...` or
-# `cargo build --profile perf ...`. It mirrors dev/test (line tables for
-# workspace crates, no dependency debuginfo) but keeps the critical-path
-# kernels below optimized. Default `cargo build` / `cargo test` no longer
-# optimize any specific package, so ordinary edit-compile loops stay cheap;
-# reach for this profile when running the generation-scale code-index or
-# graph-publication suites at production-like speed. The full-suite gates
-# (`cargo test-all` / `cargo test-ci` in .cargo/config.toml) pin it via
-# `--cargo-profile perf` so those suites keep their kernel opt-levels.
+# The full-suite profile. Ordinary `cargo build` / `cargo test` (dev/test)
+# optimize no specific workspace package so edit-compile loops stay cheap;
+# this profile inherits dev and additionally keeps the critical-path kernels
+# below optimized so the generation-scale code-index and graph-publication
+# suites run at production-like speed. Hosted CI (`.github/workflows/ci.yml`)
+# and the local full-suite aliases (`cargo test-ci` / `cargo test-all` in
+# .cargo/config.toml) all build support binaries, archives and tests with
+# this one profile, so they share artifacts and assertions stay on.
 [profile.perf]
 inherits = "dev"
-
-[profile.perf.package."*"]
-debug = 0
-
-[profile.perf.package.tracedecay-daemon-protocol]
-opt-level = 0
 
 # Code-index lifecycle tests exercise six-figure production generations under
 # the same bounded readiness contracts as the daemon. Keep the owning kernels
@@ -187,34 +184,6 @@ opt-level = 2
 opt-level = 2
 
 [profile.perf.package.serde_json]
-opt-level = 2
-
-# The first token count pays a one-time BPE model load (embedded-vocabulary
-# base64 decode + BPE regex compile) that costs seconds in unoptimized
-# builds; the dashboard token-count warm task and its tests hit it on every
-# test-process start.
-[profile.perf.package.tiktoken-rs]
-opt-level = 2
-
-[profile.perf.package.regex]
-opt-level = 2
-
-# CI runs `cargo nextest run --profile ci`, which is a nextest profile: the
-# cargo profile stays `test`, so the `perf` overrides above never applied to
-# the gate. That left the seconds-long unoptimized BPE load inside deadlines
-# that bound a model call — `context_scout_model` gives its proposal one
-# second in total, and the cold tokenizer spent it before the backend was
-# ever raced. Optimize the loader wherever tests run, not only under `perf`.
-[profile.dev.package.tiktoken-rs]
-opt-level = 2
-
-[profile.dev.package.regex]
-opt-level = 2
-
-[profile.test.package.tiktoken-rs]
-opt-level = 2
-
-[profile.test.package.regex]
 opt-level = 2
 
 # Graph publication digest checks hash multi-megabyte canonical replay

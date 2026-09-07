@@ -98,9 +98,9 @@ impl RegisteredGlobalDb {
         }
     }
 
-    // Root-owned policy, deliberately not driven here: `prune_global_retention`
-    // wraps `tracedecay_maintenance::retention::prune_global_tables`,
-    // keyed by the root `config::RetentionConfig`) in a write transaction.
+    // Root-owned policy, deliberately not driven here:
+    // `tracedecay_maintenance::retention::prune_global_retention` drains the
+    // root `config::RetentionConfig` windows in bounded write transactions.
     // Reaching up for those types would point this crate back at the composition
     // root.
 }

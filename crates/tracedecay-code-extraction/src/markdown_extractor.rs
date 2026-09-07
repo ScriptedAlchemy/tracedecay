@@ -121,8 +121,7 @@ impl<'s> ExtractionState<'s> {
         }
         let parser = self.inline_parser.get_or_insert_with(|| {
             let mut p = Parser::new();
-            let _ =
-                p.set_language(&tracedecay_large_treesitters::markdown::inline::LANGUAGE.into());
+            let _ = p.set_language(&crate::ts_provider::markdown_grammar::INLINE_LANGUAGE.into());
             p
         });
         let range = Range {

@@ -25,6 +25,21 @@ pub const DB_FILENAME: &str = "tracedecay.db";
 /// Filename of the user-level global database inside the profile root.
 pub const GLOBAL_DB_FILENAME: &str = "global.db";
 
+/// Output directories a cargo target dir may hold for this workspace: the
+/// built-in profiles plus the `perf` profile that `cargo test-ci`/`test-all`
+/// and the CI test lanes build with (see `Cargo.toml` `[profile.perf]`).
+/// Heuristics that recognise "inside a cargo target dir" by layout must
+/// accept every entry, or they silently switch off under one profile.
+pub const CARGO_PROFILE_DIRS: &[&str] = &["debug", "release", "perf"];
+
+/// True when `target_dir` holds a build output directory for any workspace
+/// cargo profile.
+pub fn holds_cargo_profile_dir(target_dir: &Path) -> bool {
+    CARGO_PROFILE_DIRS
+        .iter()
+        .any(|profile| target_dir.join(profile).is_dir())
+}
+
 /// New runtime storage lives in the user-level profile shard. The project root
 /// only carries lightweight marker/config files under `.tracedecay/`.
 pub fn get_tracedecay_dir(project_root: &Path) -> PathBuf {
@@ -107,9 +122,7 @@ fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
 
     let profile_name = profile_dir.file_name().and_then(std::ffi::OsStr::to_str);
     let target_profile = profile_name == Some("test-profile")
-        && profile_dir
-            .parent()
-            .is_some_and(|target| target.join("debug").is_dir());
+        && profile_dir.parent().is_some_and(holds_cargo_profile_dir);
     let ci_profile =
         profile_name == Some("tracedecay-test-profile") && std::env::var_os("CI").is_some();
     if !target_profile && !ci_profile {
