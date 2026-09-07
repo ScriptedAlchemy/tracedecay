@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex as SyncMutex};
 use tokio::sync::{Mutex, MutexGuard};
 
 use super::super::client::StdioLspClient;
-use super::super::error::AnalyzerResult;
+use super::super::error::{AnalyzerResult, AnalyzerRuntimeError};
 use crate::{AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor};
 
 type ClientReaper = Pin<Box<dyn Future<Output = AnalyzerResult<()>> + Send>>;
@@ -27,6 +27,7 @@ enum SharedAnalyzerClientSlotState {
     Vacant,
     Live(Box<StdioLspClient>),
     Reaping(ClientReaper),
+    ReapFailed(AnalyzerRuntimeError),
 }
 
 impl SharedAnalyzerClientSlot {
@@ -39,9 +40,9 @@ impl SharedAnalyzerClientSlot {
     pub(crate) fn as_ref(&self) -> Option<&StdioLspClient> {
         match &self.state {
             SharedAnalyzerClientSlotState::Live(client) => Some(client.as_ref()),
-            SharedAnalyzerClientSlotState::Vacant | SharedAnalyzerClientSlotState::Reaping(_) => {
-                None
-            }
+            SharedAnalyzerClientSlotState::Vacant
+            | SharedAnalyzerClientSlotState::Reaping(_)
+            | SharedAnalyzerClientSlotState::ReapFailed(_) => None,
         }
     }
 
@@ -53,6 +54,10 @@ impl SharedAnalyzerClientSlot {
                 self.state = SharedAnalyzerClientSlotState::Reaping(reaping);
                 None
             }
+            SharedAnalyzerClientSlotState::ReapFailed(error) => {
+                self.state = SharedAnalyzerClientSlotState::ReapFailed(error);
+                None
+            }
         }
     }
 
@@ -62,16 +67,6 @@ impl SharedAnalyzerClientSlot {
 
     pub(crate) fn retire(&mut self, client: StdioLspClient) {
         self.state = SharedAnalyzerClientSlotState::Reaping(Box::pin(client.reap()));
-    }
-
-    fn take_reaper(&mut self) -> Option<ClientReaper> {
-        match std::mem::replace(&mut self.state, SharedAnalyzerClientSlotState::Vacant) {
-            SharedAnalyzerClientSlotState::Reaping(reaping) => Some(reaping),
-            state => {
-                self.state = state;
-                None
-            }
-        }
     }
 }
 
@@ -94,8 +89,22 @@ impl SharedAnalyzerClient {
     /// successor can be started or served alongside it.
     pub(crate) async fn client(&self) -> AnalyzerResult<MutexGuard<'_, SharedAnalyzerClientSlot>> {
         let mut slot = self.client.lock().await;
-        if let Some(reaping) = slot.take_reaper() {
-            reaping.await?;
+        let reap_result = match &mut slot.state {
+            SharedAnalyzerClientSlotState::Reaping(reaper) => Some(reaper.as_mut().await),
+            SharedAnalyzerClientSlotState::ReapFailed(error) => return Err(error.clone()),
+            SharedAnalyzerClientSlotState::Vacant | SharedAnalyzerClientSlotState::Live(_) => None,
+        };
+        if let Some(result) = reap_result {
+            match result {
+                Ok(()) => slot.state = SharedAnalyzerClientSlotState::Vacant,
+                Err(error) => {
+                    // A reap failure is not proof that the child settled. Keep
+                    // the slot closed and return the same failure to later
+                    // waiters rather than authorizing a replacement process.
+                    slot.state = SharedAnalyzerClientSlotState::ReapFailed(error.clone());
+                    return Err(error);
+                }
+            }
         }
         Ok(slot)
     }
@@ -192,7 +201,10 @@ impl SharedAnalyzerClient {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::oneshot::{self, error::TryRecvError};
+    use std::future::poll_fn;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::{mpsc, oneshot};
 
     use super::*;
 
@@ -213,38 +225,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successor_waits_for_the_retired_client_reaper() {
+    async fn cancelled_waiter_leaves_retired_client_reaper_owned_until_settlement() {
         let shared = SharedAnalyzerClient::new(AdmittedRoot::new("file:///project"));
         let (release, released) = oneshot::channel();
-        let (started, entered_reaper) = oneshot::channel();
+        let (polled, mut reaper_polls) = mpsc::unbounded_channel();
         {
             let mut slot = shared.client.lock().await;
             slot.state = SharedAnalyzerClientSlotState::Reaping(Box::pin(async move {
-                let _ = started.send(());
-                let _ = released.await;
+                let mut released = Box::pin(released);
+                poll_fn(move |context| {
+                    let _ = polled.send(());
+                    released.as_mut().poll(context)
+                })
+                .await
+                .map_err(|_| AnalyzerRuntimeError::new("reaper release was dropped"))?;
                 Ok(())
             }));
         }
 
+        let first_waiter = tokio::spawn({
+            let shared = Arc::clone(&shared);
+            async move {
+                let _slot = shared.client().await.unwrap();
+            }
+        });
+        reaper_polls.recv().await.unwrap();
+        first_waiter.abort();
+        assert!(first_waiter.await.unwrap_err().is_cancelled());
+
         let (acquired, mut observed) = oneshot::channel();
-        let waiter = tokio::spawn({
+        let second_waiter = tokio::spawn({
             let shared = Arc::clone(&shared);
             async move {
                 let _slot = shared.client().await.unwrap();
                 let _ = acquired.send(());
             }
         });
-        entered_reaper.await.unwrap();
-        assert!(
-            matches!(observed.try_recv(), Err(TryRecvError::Empty)),
-            "a successor acquired the slot before the retired process was reaped"
-        );
+        tokio::select! {
+            poll = reaper_polls.recv() => {
+                assert!(poll.is_some(), "the retained reaper must be polled by the next waiter");
+            }
+            acquired = &mut observed => {
+                panic!("a successor acquired the slot before the retired process settled: {acquired:?}");
+            }
+        }
 
         release.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), &mut observed)
             .await
             .expect("successor should acquire the reaped slot")
             .unwrap();
-        waiter.await.unwrap();
+        second_waiter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reaper_error_remains_owned_and_blocks_later_clients() {
+        let shared = SharedAnalyzerClient::new(AdmittedRoot::new("file:///project"));
+        let reap_count = Arc::new(AtomicUsize::new(0));
+        {
+            let mut slot = shared.client.lock().await;
+            let reap_count = Arc::clone(&reap_count);
+            slot.state = SharedAnalyzerClientSlotState::Reaping(Box::pin(async move {
+                reap_count.fetch_add(1, Ordering::SeqCst);
+                Err(AnalyzerRuntimeError::new("retained reaper failure"))
+            }));
+        }
+
+        let Err(first_error) = shared.client().await else {
+            panic!("a failed reaper must not make the slot available");
+        };
+        let Err(second_error) = shared.client().await else {
+            panic!("a later waiter must not bypass the failed reaper");
+        };
+
+        assert_eq!(first_error, second_error);
+        assert_eq!(reap_count.load(Ordering::SeqCst), 1);
     }
 }

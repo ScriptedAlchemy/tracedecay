@@ -129,6 +129,19 @@ fn serve_until_stopped(responses: Vec<String>) -> (String, StoppableServer) {
     )
 }
 
+/// Serves one event stream whose body the client may abandon mid-frame, so a
+/// refused oversized frame must not turn into a fixture write panic.
+fn serve_abandonable_event_stream(body: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        request(&mut stream);
+        let _ = stream.write_all(event_response(&body).as_bytes());
+    });
+    format!("http://{address}")
+}
+
 fn json_response(status: &str, value: serde_json::Value) -> String {
     let body = value.to_string();
     format!(
@@ -263,6 +276,46 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
 }
 
 #[test]
+fn debug_output_redacts_bearer_and_userinfo_while_the_wire_keeps_the_bearer() {
+    const TOKEN: &str = "marker-bearer-must-never-print-4c1e";
+    const USERINFO: &str = "marker-userinfo-must-never-print-9b7d";
+    let response = json_response("200 OK", json!({}));
+    let (base_url, server) = serve(vec![response]);
+    let credentialed_base = base_url.replacen("http://", &format!("http://ops:{USERINFO}@"), 1);
+    for mode in [
+        ConnectionMode::local(&credentialed_base, "project.sdk", TOKEN),
+        ConnectionMode::remote(&credentialed_base, "project.sdk", TOKEN),
+    ] {
+        let mode_debug = format!("{mode:?}");
+        assert!(!mode_debug.contains(TOKEN), "{mode_debug}");
+        assert!(!mode_debug.contains(USERINFO), "{mode_debug}");
+        assert!(mode_debug.contains("project.sdk"), "{mode_debug}");
+        assert!(mode_debug.contains("[REDACTED]"), "{mode_debug}");
+    }
+    let builder = Client::builder(ConnectionMode::local(&base_url, "project.sdk", TOKEN));
+    let builder_debug = format!("{builder:?}");
+    assert!(!builder_debug.contains(TOKEN), "{builder_debug}");
+    let client = builder.build().unwrap();
+    let client_debug = format!("{client:?}");
+    assert!(!client_debug.contains(TOKEN), "{client_debug}");
+    assert!(
+        client_debug.contains("Sensitive"),
+        "authorization header must be marked sensitive: {client_debug}"
+    );
+
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
+    let error = client
+        .execute::<WorkflowListDefinitions>(&request)
+        .unwrap_err();
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    assert!(!format!("{error:?}").contains(TOKEN));
+    let requests = server.join().unwrap();
+    assert!(requests[0].contains(&format!("authorization: Bearer {TOKEN}\r\n")));
+}
+
+#[test]
 fn cancellation_and_stream_resume_use_lifecycle_routes() {
     let cancellation = json_response("202 Accepted", json!({"status": "requested"}));
     let event_body = concat!(
@@ -313,6 +366,49 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
     assert!(requests[1].contains(
         "/application/operations/request.operation/events?next_sequence=7&resume_token=resume.old"
     ));
+}
+
+#[test]
+fn hostile_identifiers_are_percent_encoded_into_single_path_segments() {
+    const PROJECT_ID: &str = "proj?x=1#frag%2e..";
+    const OPERATION_ID: &str = "op?cancel=no#x%2Fadmin";
+    let cancellation = json_response("202 Accepted", json!({"status": "requested"}));
+    let (base_url, server) = serve(vec![cancellation, json_response("200 OK", json!({}))]);
+    let client = Client::builder(ConnectionMode::local(
+        format!("{base_url}/prefix/"),
+        PROJECT_ID,
+        "sdk-token",
+    ))
+    .build()
+    .unwrap();
+
+    client.cancel_operation(OPERATION_ID).unwrap();
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
+    let _ = client.execute::<WorkflowListDefinitions>(&request);
+    for dot_segment in [".", ".."] {
+        assert!(matches!(
+            client.cancel_operation(dot_segment).unwrap_err(),
+            ClientError::InvalidRequest(_)
+        ));
+        assert!(matches!(
+            Client::builder(ConnectionMode::local(&base_url, dot_segment, "sdk-token"))
+                .build()
+                .unwrap_err(),
+            ClientError::InvalidRequest(_)
+        ));
+    }
+
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests[0].lines().next().unwrap(),
+        "POST /prefix/projects/proj%3Fx=1%23frag%252e../application/operations/op%3Fcancel=no%23x%252Fadmin/cancel HTTP/1.1"
+    );
+    assert_eq!(
+        requests[1].lines().next().unwrap(),
+        "POST /prefix/projects/proj%3Fx=1%23frag%252e../application/workflow/list-definitions HTTP/1.1"
+    );
 }
 
 #[test]
@@ -852,6 +948,127 @@ fn malformed_sse_events_are_protocol_errors() {
         ));
         server.join().unwrap();
     }
+}
+
+const SSE_FRAME_LIMIT_BYTES: usize = 64 * 1024;
+
+const SSE_OPEN_FRAME: &str = concat!(
+    "event: open\n",
+    "data: {\"event\":\"open\",\"data\":{\"correlation_id\":\"request.operation\",",
+    "\"frontier\":{\"next_sequence\":0,\"retained_from_sequence\":0,",
+    "\"resume_token\":\"resume\"}}}\n\n"
+);
+
+#[test]
+fn oversized_sse_lines_and_frames_are_refused_without_delivery_or_reconnect() {
+    let single_line = format!(
+        "{SSE_OPEN_FRAME}event: item\nid: 0\ndata: {}\n\n",
+        "a".repeat(SSE_FRAME_LIMIT_BYTES)
+    );
+    let small_line = format!("data: {}\n", "b".repeat(1_024));
+    let many_lines = format!(
+        "{SSE_OPEN_FRAME}event: item\nid: 0\n{}\n",
+        small_line.repeat(SSE_FRAME_LIMIT_BYTES / 1_024 + 1)
+    );
+    for body in [single_line, many_lines] {
+        let base_url = serve_abandonable_event_stream(body);
+        let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+            .build()
+            .unwrap();
+        let mut stream = client
+            .stream_operation(
+                "request.operation",
+                StreamOptions {
+                    resume: None,
+                    max_reconnects: 3,
+                },
+            )
+            .unwrap();
+
+        let open = stream.next().unwrap().unwrap();
+        assert_eq!(open.event, "open");
+        assert!(matches!(
+            stream.next(),
+            Some(Err(ClientError::StreamFrameTooLarge {
+                limit_bytes: SSE_FRAME_LIMIT_BYTES
+            }))
+        ));
+        assert!(
+            stream.next().is_none(),
+            "a refused frame closes the stream instead of reconnecting or resuming"
+        );
+    }
+}
+
+#[test]
+fn unterminated_sse_frames_stay_distinct_from_oversized_ones() {
+    let unterminated = format!("{SSE_OPEN_FRAME}event: item\nid: 0\ndata: {{\"event\":\"item\"}}");
+    let (base_url, server) = serve(vec![event_response(&unterminated)]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+
+    let mut stream = client
+        .stream_operation("request.operation", StreamOptions::default())
+        .unwrap();
+
+    assert_eq!(stream.next().unwrap().unwrap().event, "open");
+    assert!(matches!(
+        stream.next(),
+        Some(Err(ClientError::Protocol { message, .. }))
+            if message.contains("ended inside an SSE frame")
+    ));
+    server.join().unwrap();
+}
+
+#[test]
+fn near_limit_multiline_sse_frames_still_decode() {
+    let padding = "p".repeat(SSE_FRAME_LIMIT_BYTES - 256);
+    let open_lines = [
+        "{\"event\":\"open\",\"data\":{\"correlation_id\":\"request.operation\",".to_owned(),
+        format!("\"padding\":\"{padding}\""),
+        ",\"frontier\":{\"next_sequence\":0,\"retained_from_sequence\":0,\"resume_token\":\"resume\"}}}"
+            .to_owned(),
+    ];
+    let retained = "open".len() + open_lines.iter().map(String::len).sum::<usize>() + 2;
+    assert!(
+        retained <= SSE_FRAME_LIMIT_BYTES && retained > SSE_FRAME_LIMIT_BYTES - 128,
+        "fixture must sit just under the frame limit, got {retained}"
+    );
+    let body = format!(
+        "event: open\n{}\n\n{}",
+        open_lines
+            .iter()
+            .map(|line| format!("data: {line}\n"))
+            .collect::<String>(),
+        concat!(
+            "event: completed\n",
+            "id: 0\n",
+            "data: {\"event\":\"completed\",\"data\":{\"sequence\":0,\"terminal\":{",
+            "\"termination\":\"completed\",\"receipt\":{\"started_at\":1,\"ended_at\":2,",
+            "\"effective_deadline\":{\"expires_at\":3},\"cancellation\":null,",
+            "\"budget\":{\"units_consumed\":1,\"bytes_consumed\":1,\"elapsed_micros\":1},",
+            "\"termination\":\"completed\"}}}}\n\n"
+        )
+    );
+    let (base_url, server) = serve(vec![event_response(&body)]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+
+    let events = client
+        .stream_operation("request.operation", StreamOptions::default())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].data["data"]["padding"].as_str().map(str::len),
+        Some(padding.len())
+    );
+    assert!(events[1].terminal());
+    server.join().unwrap();
 }
 
 #[test]

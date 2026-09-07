@@ -22,7 +22,7 @@ use tracedecay_store::FactReadControl;
 use super::{
     CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence, GitCorrelationError,
     GitEvidenceProjectionV1, GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan,
-    SessionsForQuery, canonical_provider_map,
+    SessionsForQuery, SpanObservation, canonical_provider_map,
 };
 
 const GRAPH_READ_PAGE_ITEMS: usize = 10_000;
@@ -175,6 +175,29 @@ pub trait GitCorrelationSessionStore: Sync {
                 &publication_prefix,
                 &new_spans,
                 &new_commits,
+            )
+        }
+    }
+
+    /// Shapes and publishes owned transcript observations through the same
+    /// production operation boundary as already-shaped Git evidence.
+    fn publish_transcript_graph_evidence_owned(
+        &self,
+        publication_prefix: String,
+        observations: Vec<SpanObservation>,
+        new_commits: Vec<CommitSessionRecord>,
+        merge_gap_secs: i64,
+    ) -> impl Future<Output = Result<(usize, usize), GitCorrelationError>> + Send
+    where
+        Self: Sized,
+    {
+        async move {
+            super::attribution::publish_transcript_graph_evidence(
+                self,
+                &publication_prefix,
+                &observations,
+                &new_commits,
+                merge_gap_secs,
             )
         }
     }

@@ -17,6 +17,10 @@ archive.include = [
     # does not carry them on its own; the archive job builds them first.
     { path = "debug/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
     { path = "debug/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
+    # The compiled Kiro/Codex fake is a Cargo example, not a test executable.
+    # The Windows build job provisions it explicitly and fixture users resolve
+    # this archived path relative to their remapped test executable.
+    { path = "debug/examples/tracedecay-host-cli-fixture.exe", relative-to = "target", on-missing = "error" },
 ]
 
 [profile.ci.junit]

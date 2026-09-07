@@ -69,6 +69,7 @@ pub(crate) fn record_client_error(error: &ClientError) {
         ClientError::UnsupportedTransport { .. } => "unsupported_transport",
         ClientError::Authentication(_) => "authentication",
         ClientError::Protocol { .. } => "protocol",
+        ClientError::StreamFrameTooLarge { .. } => "stream_frame_too_large",
         ClientError::Problem(problem) => problem_kind_name(&problem.kind),
     };
     hotpath::val!("sdk.http.error_class").set(&class);

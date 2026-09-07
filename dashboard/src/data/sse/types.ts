@@ -59,12 +59,6 @@ export interface SseEventEnvelope<TPayload = unknown> {
   /** Coverage descriptor (opaque to the reducer). */
   coverage: unknown;
   /**
-   * Whether this event is a receipt for an already-observed operation. The
-   * reducer retains receipts even when their event_revision would otherwise be
-   * treated as already-seen, so a crash/restart never loses a receipt.
-   */
-  is_receipt?: boolean;
-  /**
    * Decode-stashed raw SSE frame length. Overflow accounting uses this so it
    * does not re-serialize the envelope on every ingest. Absent on hand-built
    * envelopes.
