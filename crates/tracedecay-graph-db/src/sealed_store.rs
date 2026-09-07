@@ -360,11 +360,14 @@ fn remove_sealed_directory(directory: &Path) {
     }
 }
 
-/// Open options for the prospective store a build writes: a WAL-synced,
-/// write-capable engine that exists only until `copy_compact_and_close`
-/// checkpoints it into the artifact.
+/// Open options for the prospective store a build writes: a write-capable
+/// engine without a sidecar WAL that exists only until
+/// `copy_compact_and_close` checkpoints it into the artifact. Nothing ever
+/// recovers a prospective container — `build_or_open_sealed_store` wipes the
+/// staging directory before every build — so the closing checkpoint is its
+/// one durable write (see [`GraphDurability::SealedBuild`]).
 fn prospective_sealed_database_options(path: PathBuf) -> GraphDbOpenOptions {
-    sealed_database_options(path, GraphDurability::WalSync)
+    sealed_database_options(path, GraphDurability::SealedBuild)
 }
 
 /// Open options for a sealed artifact that already exists: read-only, so a
@@ -1495,6 +1498,173 @@ mod fresh_store_tests {
                 &|| Ok(()),
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        SEALED_STORE_DATABASE_FILE, build_or_open_sealed_store, sealed_generation_directory,
+        sealed_store_root,
+    };
+    use crate::{
+        GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
+        GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationId,
+        GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace,
+        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
+        GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, SourceGeneration,
+    };
+
+    fn entity_identity(index: usize) -> GraphEntityId {
+        GraphEntityId::new(format!("symbol:{index:05}")).unwrap()
+    }
+
+    /// A generation large enough that its copy spans several guard chunks
+    /// and pager pages, with a Bytes payload so it takes the production
+    /// (compact-eligible) row shape.
+    fn manifest(entities: usize, relations: usize) -> GraphGenerationManifest {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("sealed-build").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+        );
+        let entity_rows = (0..entities)
+            .map(|index| {
+                GraphEntity::new(
+                    entity_identity(index),
+                    BTreeSet::from([GraphLabel::new("function").unwrap()]),
+                    BTreeMap::from([
+                        (
+                            GraphPropertyName::new("name").unwrap(),
+                            GraphProperty::String(format!("fn_{index:05}")),
+                        ),
+                        (
+                            GraphPropertyName::new("payload").unwrap(),
+                            GraphProperty::Bytes(vec![(index % 251) as u8; 64]),
+                        ),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect();
+        let entity_ref =
+            |index: usize| GraphEntityRef::new(projection.clone(), entity_identity(index));
+        let relation_rows = (0..relations)
+            .map(|index| {
+                GraphGenerationRelation::new(
+                    GraphRelationId::new(format!("call:{index:05}")).unwrap(),
+                    entity_ref(index % entities),
+                    entity_ref((index + 1) % entities),
+                    GraphRelationKind::new("calls").unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap()
+            })
+            .collect();
+        GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("generation:build").unwrap(),
+            SourceGeneration::new("source:build").unwrap(),
+            GraphWatermark::new("watermark:build").unwrap(),
+            Vec::new(),
+            entity_rows,
+            relation_rows,
+        )
+        .unwrap()
+    }
+
+    /// The prospective container is written once, by its closing checkpoint.
+    /// While the copy streams, no sidecar WAL exists next to it (a WAL-synced
+    /// open creates that directory before the first row); a build cancelled
+    /// mid-copy leaves neither an artifact nor a staging directory behind,
+    /// and the next attempt rebuilds from the source rows and proves the
+    /// reopened artifact against the same digest.
+    #[test]
+    fn sealed_build_writes_no_wal_and_an_interrupted_build_leaves_nothing_recoverable() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let owner = GraphDbOwner::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(database_path.clone()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        let database = owner.issue_lease().unwrap();
+        let manifest = manifest(9_000, 9_000);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let sidecar_wal = {
+            let mut path = staging.join(SEALED_STORE_DATABASE_FILE).into_os_string();
+            path.push(".wal");
+            std::path::PathBuf::from(path)
+        };
+
+        // Cancel once the copy is well inside the row stream: the first
+        // checks run before any row is copied, so wait for the container to
+        // exist and then let a few thousand row checks pass.
+        let checks = AtomicUsize::new(0);
+        let saw_container_without_wal = AtomicUsize::new(0);
+        let cancel_mid_copy = || {
+            let count = checks.fetch_add(1, Ordering::Relaxed);
+            if staging.join(SEALED_STORE_DATABASE_FILE).is_file() {
+                assert!(
+                    !sidecar_wal.exists(),
+                    "a sealed build must not open a sidecar WAL next to its prospective container"
+                );
+                saw_container_without_wal.fetch_add(1, Ordering::Relaxed);
+            }
+            if count >= 12_000 {
+                return Err(GraphDbError::Cancelled);
+            }
+            Ok(())
+        };
+        let interrupted = build_or_open_sealed_store(
+            &database,
+            &identity,
+            &expected,
+            &database_path,
+            &cancel_mid_copy,
+        );
+        assert!(
+            matches!(interrupted, Err(GraphDbError::Cancelled)),
+            "mid-copy cancellation must surface typed: {interrupted:?}"
+        );
+        assert!(
+            saw_container_without_wal.load(Ordering::Relaxed) > 0,
+            "the check must have observed the prospective container mid-copy"
+        );
+        assert!(
+            !staging.exists() && !directory.exists(),
+            "an interrupted build must leave neither its staging directory nor an artifact"
+        );
+
+        let (store, staging_proof) =
+            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
+                .unwrap();
+        assert!(staging_proof.is_some(), "a fresh build carries its proof");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert_eq!((store.entity_count, store.relation_count), (9_000, 9_000));
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+        assert!(
+            !staging.exists(),
+            "a completed build renames its staging directory into place"
+        );
+        let _ = store.database().close();
     }
 }
 
