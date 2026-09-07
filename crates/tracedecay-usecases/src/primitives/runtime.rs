@@ -1969,6 +1969,7 @@ mod tests {
     use tracedecay_domain::{
         EphemeralSanitizedQueryViewV1, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
     };
+    use url::Url;
 
     // These anonymous constants are compile-time object-safety contracts:
     // rustc rejects either `dyn Trait` parameter if the trait stops being
@@ -2123,14 +2124,22 @@ mod tests {
 
     #[test]
     fn admitted_root_uri_must_be_an_absolute_file_url() {
-        assert!(validate_admitted_root_uri("file:///workspace/project").is_ok());
+        let fixture = tempfile::tempdir().expect("admitted root fixture");
+        let valid = Url::from_directory_path(fixture.path())
+            .expect("fixture root must convert to a file URL");
+        assert!(validate_admitted_root_uri(valid.as_str()).is_ok());
+
+        let mut with_query = valid.clone();
+        with_query.set_query(Some("other=true"));
+        let mut with_fragment = valid;
+        with_fragment.set_fragment(Some("other"));
         for invalid in [
-            "file:relative",
-            "https://example.com/project",
-            "file:///workspace/project?other=true",
-            "file:///workspace/project#other",
+            "file:relative".to_owned(),
+            "https://example.com/project".to_owned(),
+            with_query.to_string(),
+            with_fragment.to_string(),
         ] {
-            assert!(validate_admitted_root_uri(invalid).is_err(), "{invalid}");
+            assert!(validate_admitted_root_uri(&invalid).is_err(), "{invalid}");
         }
     }
 
