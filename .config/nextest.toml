@@ -11,6 +11,12 @@ slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 archive.include = [
     { path = "controlled-workload-hotpath", relative-to = "target", depth = 1, on-missing = "warn" },
+    # Only the Windows lane archives (the Linux/macOS lanes run in place), so
+    # the `.exe` spelling is exact. These ordinary binaries are executed by
+    # the acceptance tests but are not Cargo test executables, so nextest
+    # does not carry them on its own; the archive job builds them first.
+    { path = "debug/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
+    { path = "debug/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
 ]
 
 [profile.ci.junit]
