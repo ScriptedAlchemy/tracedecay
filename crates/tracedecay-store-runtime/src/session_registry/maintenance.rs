@@ -410,10 +410,6 @@ impl RegisteredSchemaConvergenceTestGate {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
-    fn long_lived_session_maintenance(&self) -> bool {
-        self.long_lived_session_maintenance
-    }
-
     #[hotpath::measure(label = "daemon.session_registry.attach_registered", future = true)]
     pub(super) async fn attach_registered(
         &self,
@@ -432,7 +428,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Box::pin(async move {
             let database =
                 Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-            let long_lived = self.long_lived_session_maintenance();
+            let long_lived = self.long_lived_session_maintenance;
             // Every registry mode shares terminal graph-operation ownership; only
             // long-lived daemons defer schema convergence to resumable maintenance.
             let (database, convergence) = if long_lived {

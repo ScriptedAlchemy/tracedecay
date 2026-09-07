@@ -294,18 +294,10 @@ fn graph_lifecycle_cancellation(
 /// flight waits for the winner and then resumes through the idempotent
 /// historical arm inside prepare. Publishers of different keys proceed
 /// independently, and no read or serving path ever touches this table.
+#[derive(Default)]
 pub(crate) struct CodeGraphPublicationFlightV1 {
     in_flight: Mutex<std::collections::BTreeSet<GraphPublicationKeyV1>>,
     settled: std::sync::Condvar,
-}
-
-impl Default for CodeGraphPublicationFlightV1 {
-    fn default() -> Self {
-        Self {
-            in_flight: Mutex::new(std::collections::BTreeSet::new()),
-            settled: std::sync::Condvar::new(),
-        }
-    }
 }
 
 /// RAII flight claim for one publication key; dropping it wakes every waiter.

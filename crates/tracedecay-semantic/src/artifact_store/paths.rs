@@ -64,12 +64,8 @@ impl ModelArtifactStore {
         Ok(self.staging_root().join(staging_id))
     }
 
-    pub(super) fn artifact_dir(&self, digest: &Sha256DigestHex) -> PathBuf {
-        self.artifacts_root().join(digest.as_str())
-    }
-
     pub fn installed_directory(&self, digest: &Sha256DigestHex) -> PathBuf {
-        self.artifact_dir(digest)
+        self.artifacts_root().join(digest.as_str())
     }
 
     #[cfg(test)]
@@ -83,7 +79,8 @@ impl ModelArtifactStore {
         digest: &Sha256DigestHex,
         role: ArtifactMemberRoleV1,
     ) -> PathBuf {
-        self.artifact_dir(digest).join(member_file_name(role, None))
+        self.installed_directory(digest)
+            .join(member_file_name(role, None))
     }
 
     /// Exclusive store lock acquisition (in-process mutex + advisory file

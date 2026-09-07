@@ -29,19 +29,6 @@ pub struct DiversityDecisionV1 {
     pub decision: RankingDecision,
 }
 
-/// The deterministic diversity-cap stage contract. Caps apply after fusion
-/// and preserve the fused total order of the survivors.
-pub trait DiversityCapStage {
-    /// Apply `policy` to an ordered fused candidate list, recording one
-    /// decision per cap application. Disabled caps (no evaluation anchor)
-    /// apply only as resource-safety ceilings.
-    fn apply_caps(
-        &self,
-        policy: &DiversityPolicy,
-        candidates: Vec<FusedCandidate>,
-    ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError>;
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeterministicDiversity;
 
@@ -120,16 +107,6 @@ impl DeterministicDiversity {
         hotpath::gauge!("query.diversity.results").set(ranked.len());
         hotpath::gauge!("query.diversity.capped").set(decisions.len());
         Ok((ranked, decisions))
-    }
-}
-
-impl DiversityCapStage for DeterministicDiversity {
-    fn apply_caps(
-        &self,
-        policy: &DiversityPolicy,
-        candidates: Vec<FusedCandidate>,
-    ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError> {
-        DeterministicDiversity::apply_caps(self, policy, candidates)
     }
 }
 
