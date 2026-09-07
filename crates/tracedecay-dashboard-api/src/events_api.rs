@@ -984,6 +984,7 @@ pub(crate) async fn dashboard_state_fixture(
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
         profile_code_index_worker_settings: None,
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
+        derived_snapshots: Arc::new(crate::snapshot_cache::DerivedSnapshotCaches::new()),
         code_diagnostics_authority: None,
         automation_authority: None,
         automation_observation: None,

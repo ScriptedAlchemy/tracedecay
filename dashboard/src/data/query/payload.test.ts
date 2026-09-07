@@ -17,6 +17,7 @@ import { z } from 'zod';
 
 import { fetchPayload, fetchPayloadWrite } from './payload.ts';
 import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
 
 const PayloadSchema = z.object({ status: z.string() });
 
@@ -303,4 +304,26 @@ describe('fetchPayload under cancellation', () => {
     const result = await fetchPayload('/api/x', PayloadSchema, { signal: controller.signal });
     expect(result.outcome).toBe('offline');
   });
+
+  // Headers arrived, so `fetch` resolved; the cancellation now surfaces from
+  // the body read instead. Every status branch consumes a body, and each one
+  // used to swallow that rejection into a reading — `unsupported_schema` for a
+  // 2xx, `HTTP 405`/`HTTP 503` for the rest — about a body nobody finished.
+  it.each([200, 405, 503])(
+    'preserves an abort that lands while a %i body is still being read',
+    async (status) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init?: RequestInit) =>
+          responseWithBodyPendingUntilAbort(status, init?.signal),
+        ),
+      );
+      const controller = new AbortController();
+      const pending = fetchPayload('/api/projects/proj_a', PayloadSchema, {
+        signal: controller.signal,
+      });
+      controller.abort();
+      await expect(pending).rejects.toThrow(/abort/i);
+    },
+  );
 });

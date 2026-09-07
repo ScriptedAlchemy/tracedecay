@@ -35,6 +35,7 @@ import {
 } from '../../contracts/generated.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
 import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
 
 /**
@@ -277,6 +278,24 @@ describe('fetchProjectRegistry', () => {
       fetchProjectRegistry('/api/projects/proj_b', ProjectContextPayloadV1Schema),
     ).resolves.toEqual({ outcome: 'transport', state: 'unsupported_schema' });
   });
+
+  it.each([200, 405])(
+    'preserves an abort that lands while a %i body is still being read',
+    async (status) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init?: RequestInit) =>
+          responseWithBodyPendingUntilAbort(status, init?.signal),
+        ),
+      );
+      const controller = new AbortController();
+      const pending = fetchProjectRegistry('/api/projects', ProjectContextPayloadV1Schema, {
+        signal: controller.signal,
+      });
+      controller.abort();
+      await expect(pending).rejects.toThrow(/abort/i);
+    },
+  );
 });
 
 function context(overrides: Partial<ProjectContextPayloadV1>): ProjectContextPayloadV1 {

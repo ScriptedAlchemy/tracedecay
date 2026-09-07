@@ -139,11 +139,13 @@ fn capture_inspect_prefix(retained: &[u8], next: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Read until EOF while retaining at most `max_bytes`.
+/// Read until EOF or the first byte past `max_bytes`, retaining at most
+/// `max_bytes`.
 ///
-/// Streams hostile tails through a fixed scratch buffer and discards them once
-/// the cap is exceeded so the retained allocation never grows with attacker
-/// input size beyond `max_bytes`.
+/// The outcome is known the moment the cap is crossed, so the reader stops
+/// there instead of draining to EOF: a writer that crosses the cap and keeps
+/// its end open (a hook host holding stdin) must not be able to hold the
+/// caller, and total work is bounded by the cap, not by the input size.
 #[hotpath::measure(label = "sessions.admission.read_end")]
 pub fn read_bounded_to_end(
     reader: &mut impl Read,
@@ -151,27 +153,15 @@ pub fn read_bounded_to_end(
 ) -> io::Result<WireReadOutcome<Vec<u8>>> {
     let mut retained = Vec::new();
     let mut scratch = [0_u8; 8192];
-    let mut oversized = false;
     loop {
         let read = reader.read(&mut scratch)?;
         if read == 0 {
-            break;
-        }
-        if oversized {
-            continue;
+            return Ok(WireReadOutcome::Ready(retained));
         }
         if retained.len().saturating_add(read) > max_bytes {
-            oversized = true;
-            retained.clear();
-            retained.shrink_to_fit();
-            continue;
+            return Ok(WireReadOutcome::Oversized);
         }
         retained.extend_from_slice(&scratch[..read]);
-    }
-    if oversized {
-        Ok(WireReadOutcome::Oversized)
-    } else {
-        Ok(WireReadOutcome::Ready(retained))
     }
 }
 
@@ -487,6 +477,38 @@ mod tests {
         let outcome = read_bounded_to_end(&mut hostile, max).unwrap();
         assert_eq!(outcome, WireReadOutcome::Oversized);
         assert!(hostile.remaining < max + 1_048_576);
+    }
+
+    /// A writer that crosses the cap and never closes its end. Panics instead
+    /// of looping forever so a reader that drains to EOF fails the test rather
+    /// than hanging it.
+    struct NeverClosingWriter {
+        reads: usize,
+        budget: usize,
+    }
+
+    impl Read for NeverClosingWriter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            assert!(
+                self.reads <= self.budget,
+                "bounded reader kept draining a writer that never reaches EOF"
+            );
+            buf.fill(b'z');
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn sync_read_stops_at_the_cap_when_the_writer_never_closes() {
+        let max = 8192 * 4;
+        // One read per scratch buffer up to the cap, then exactly one more
+        // that crosses it and must end the call.
+        let budget = max / 8192 + 1;
+        let mut writer = NeverClosingWriter { reads: 0, budget };
+        let outcome = read_bounded_to_end(&mut writer, max).unwrap();
+        assert_eq!(outcome, WireReadOutcome::Oversized);
+        assert_eq!(writer.reads, budget);
     }
 
     #[tokio::test]
