@@ -15,7 +15,9 @@ pub const SIMILARITY_FACT_CAP: i64 = 2000;
 pub const SIMILARITY_DEFAULT_THRESHOLD: f64 = 0.85;
 /// Most pairs any single `/similarity` response can return (`limit` is
 /// clamped to this), and therefore the deepest prefix of the sorted pair set
-/// a request can ever read.
+/// a request can ever read. [`build_similarity_computation`] retains and
+/// lexically analyzes exactly this prefix, so retained memory is O(cap) no
+/// matter how many of the O(n²) candidates clear the default threshold.
 pub const SIMILARITY_PAIR_CAP: i64 = 2000;
 /// Lowest score *scored* per computation. All finite holographic pairs feed
 /// the score distribution; only the serveable prefix is retained afterwards
@@ -395,12 +397,11 @@ pub struct SimilarityComputation {
     pub dim: usize,
     /// Fact metadata (`fact_id`, content, category, `trust_score`, `retrieval_count`).
     pub facts: Vec<Value>,
-    /// Retained pairs, sorted by similarity descending: every pair at or
-    /// above [`SIMILARITY_DEFAULT_THRESHOLD`] plus the top
-    /// [`SIMILARITY_PAIR_CAP`] overall (the deepest prefix any `/similarity`
-    /// request can return). Pairs below that horizon only contribute to
-    /// `total_pairs` and `distribution`, so the cache holds O(cap) pairs
-    /// instead of all O(n²) (~48 MB at n = 2000).
+    /// Retained pairs, sorted by similarity descending: the top
+    /// [`SIMILARITY_PAIR_CAP`] overall, which is the deepest prefix any
+    /// `/similarity` request can return. Pairs below that horizon only
+    /// contribute to `total_pairs` and `distribution`, so the cache holds
+    /// O(cap) analyzed pairs instead of all O(n²) (~2M at n = 2000).
     pub pairs: Vec<ScoredPair>,
     /// Count of all finite pairs scored, retained or not.
     pub total_pairs: i64,
@@ -411,7 +412,10 @@ pub struct SimilarityComputation {
 
 /// Finalizes a similarity computation from the full scored pair set:
 /// distribution + total over everything, lexical overlap only for the
-/// retained serveable prefix. Runs on the blocking pool with the scoring.
+/// serveable prefix. The [`SIMILARITY_PAIR_CAP`] is applied before any pair
+/// is analyzed, so the lexical pass and the retained payloads are bounded by
+/// the cap rather than by how many candidates scored highly. Runs on the
+/// blocking pool with the scoring.
 pub fn build_similarity_computation(
     dim: usize,
     facts: Vec<Value>,
@@ -428,13 +432,7 @@ pub fn build_similarity_computation(
             total_pairs += 1;
         }
     }
-    let mut retain = scored.len().min(SIMILARITY_PAIR_CAP as usize);
-    while retain < scored.len() && scored[retain].0 >= SIMILARITY_DEFAULT_THRESHOLD {
-        if read_control.interrupted() {
-            return Err(MemoryAnalysisError::Interrupted);
-        }
-        retain += 1;
-    }
+    let retain = scored.len().min(SIMILARITY_PAIR_CAP as usize);
     let mut pairs = Vec::with_capacity(retain);
     for (similarity, a, b) in scored.into_iter().take(retain) {
         if read_control.interrupted() {
@@ -664,6 +662,53 @@ mod tests {
         assert_eq!(computation.distribution["min"], -0.2);
         assert_eq!(computation.distribution["max"], 0.99);
         assert!(computation.pairs[0].similarity >= computation.pairs[1].similarity);
+    }
+
+    #[test]
+    fn build_similarity_computation_analyzes_at_most_the_pair_cap() {
+        // 80 facts form 3160 candidate pairs, every one above the default
+        // threshold. Each analyzed pair becomes exactly one `ScoredPair`, so
+        // `pairs.len()` is the count of lexical analyses performed and must
+        // stop at the cap while the distribution still covers every score.
+        let fact_count = 80_usize;
+        let facts: Vec<Value> = (0..fact_count)
+            .map(|index| {
+                json!({
+                    "fact_id": fact_id(&format!("dashboard.cap.fact-{index}")).as_str(),
+                    "content": format!("shared body token{index}"),
+                    "trust_score": 0.5,
+                })
+            })
+            .collect();
+        let mut scored = Vec::new();
+        for a in 0..fact_count {
+            for b in (a + 1)..fact_count {
+                scored.push((0.99 - (scored.len() as f64) * 1e-6, a, b));
+            }
+        }
+        let candidate_pairs = scored.len();
+        let cap = usize::try_from(SIMILARITY_PAIR_CAP).expect("pair cap fits usize");
+        assert!(candidate_pairs > cap, "fixture must exceed the pair cap");
+        assert!(
+            scored
+                .iter()
+                .all(|(score, _, _)| *score >= SIMILARITY_DEFAULT_THRESHOLD),
+            "fixture must keep every candidate above the default threshold"
+        );
+
+        let computation = build_similarity_computation(4, facts, scored, &read_control())
+            .expect("capped similarity computation must build");
+
+        assert_eq!(computation.pairs.len(), cap);
+        assert_eq!(computation.total_pairs, candidate_pairs as i64);
+        assert_eq!(computation.distribution["total_pairs"], candidate_pairs);
+        assert!(
+            computation
+                .pairs
+                .windows(2)
+                .all(|pair| pair[0].similarity >= pair[1].similarity),
+            "retained prefix must stay sorted by similarity descending"
+        );
     }
 
     #[test]
