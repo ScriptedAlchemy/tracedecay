@@ -386,6 +386,7 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             validate_run_ledger_record_semantics(&candidate).map_err(run_ledger_scan_io_error)?;
             let duplicate = find_existing_ordinary_run(&file, path, &candidate, line.as_bytes())?;
+            let pre_append_eof = file.metadata()?.len();
             if duplicate {
                 file.sync_all()?;
             } else {
@@ -396,7 +397,11 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
             tracedecay_private_fs::framed_log::sync_parent_directory(
                 path,
                 tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
-            )
+            )?;
+            if !duplicate {
+                lifecycle_index::record_durable_run_ledger_append(&file, path, pre_append_eof);
+            }
+            Ok(())
         })();
         let unlock_result = fs2::FileExt::unlock(&lock);
         write_result?;
@@ -405,6 +410,13 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
     })
 }
 
+/// Returns `true` when the candidate row is a byte-identical replay of the
+/// run's committed state at that status, `false` when it legally advances the
+/// run, and an error when it conflicts with the committed lifecycle.
+///
+/// Ordinary appends tolerate malformed unrelated rows, so this folds only the
+/// candidate's own rows with the shared lifecycle transition instead of
+/// requiring the strict committed index.
 fn find_existing_ordinary_run(
     file: &std::fs::File,
     path: &Path,
@@ -413,12 +425,9 @@ fn find_existing_ordinary_run(
 ) -> std::io::Result<bool> {
     let mut rows =
         exact_lookup::ForwardJsonlScanner::new(file, path).map_err(run_ledger_scan_io_error)?;
-    let mut duplicate = false;
-    let mut newest_status = None;
-    let mut newest_completion = None;
-    let mut status_spans: [Option<std::ops::Range<u64>>; 5] = std::array::from_fn(|_| None);
+    let mut lifecycle: Option<lifecycle_index::RunLifecycle> = None;
     while let Some(span) = rows.next_span().map_err(run_ledger_scan_io_error)? {
-        let projection = match exact_lookup::scan_jsonl_row_projection(file, path, span.clone()) {
+        let projection = match exact_lookup::scan_jsonl_row_projection(file, path, span) {
             Ok(Some(projection)) => projection,
             Ok(None) => continue,
             // A failed read must fail the dedup scan: treating it as "row not
@@ -434,97 +443,37 @@ fn find_existing_ordinary_run(
         }
         exact_lookup::validate_ledger_row_semantics(&projection)
             .map_err(run_ledger_scan_io_error)?;
-        let projection_task_key = projection
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| canonical_task_key(projection.task));
-        let candidate_task_key = effective_record_task_key(candidate);
-        if projection.task != candidate.task
-            || projection_task_key != candidate_task_key
-            || projection.trigger != candidate.trigger
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "automation run ledger run '{}' mutates immutable admission identity",
-                    candidate.run_id
-                ),
-            ));
-        }
-        let matches_candidate = projection.status == candidate.status
-            && exact_lookup::span_matches_bytes(file, &projection.span, candidate_bytes)?;
-        let status_index = run_status_index(projection.status);
-        if let Some(canonical_span) = status_spans[status_index].as_ref() {
-            let same_existing_state =
-                exact_lookup::spans_match(file, path, canonical_span, &projection.span)
-                    .map_err(run_ledger_scan_io_error)?;
-            if !same_existing_state {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "automation run ledger run '{}' repeats a conflicting lifecycle state",
-                        candidate.run_id
-                    ),
-                ));
+        match lifecycle.as_mut() {
+            Some(lifecycle) => lifecycle
+                .fold(file, path, &projection)
+                .map_err(run_ledger_scan_io_error)?,
+            None => {
+                lifecycle = Some(
+                    lifecycle_index::RunLifecycle::open(&projection)
+                        .map_err(run_ledger_scan_io_error)?,
+                );
             }
-            duplicate |= matches_candidate;
-            continue;
         }
-        if !valid_run_status_transition(newest_status, projection.status) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "automation run ledger contains lifecycle rows after terminal run '{}'",
-                    candidate.run_id
-                ),
-            ));
+    }
+    let Some(lifecycle) = lifecycle else {
+        return Ok(false);
+    };
+    let candidate_row =
+        lifecycle_index::LifecycleRow::from_record(candidate).map_err(run_ledger_scan_io_error)?;
+    match lifecycle
+        .step(&candidate_row, &candidate.run_id, path)
+        .map_err(run_ledger_scan_io_error)?
+    {
+        lifecycle_index::LifecycleStep::Replay(canonical) => {
+            if exact_lookup::span_matches_bytes(file, &canonical, candidate_bytes)? {
+                Ok(true)
+            } else {
+                Err(run_ledger_scan_io_error(
+                    lifecycle_index::conflicting_replay(path, &candidate.run_id),
+                ))
+            }
         }
-        let completion = exact_lookup::canonical_completion_key(&projection)
-            .map_err(run_ledger_scan_io_error)?;
-        let completion = (completion.0, completion.1);
-        if newest_completion.is_some_and(|previous| completion < previous) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "automation run ledger run '{}' regresses its completion timestamp",
-                    candidate.run_id
-                ),
-            ));
-        }
-        duplicate |= matches_candidate;
-        status_spans[status_index] = Some(projection.span);
-        newest_status = Some(projection.status);
-        newest_completion = Some(completion);
-    }
-    if duplicate {
-        return Ok(true);
-    }
-    let candidate_completion = canonical_completion_parts(
-        candidate.schema_version,
-        &candidate.completed_at,
-        candidate.completed_at_micros,
-    )
-    .map_err(run_ledger_scan_io_error)?;
-    if newest_completion.is_some_and(|previous| candidate_completion < previous) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "automation run ledger run '{}' regresses its completion timestamp",
-                candidate.run_id
-            ),
-        ));
-    }
-    let legal = valid_run_status_transition(newest_status, candidate.status);
-    if legal {
-        Ok(false)
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "automation run ledger run '{}' has an invalid lifecycle transition",
-                candidate.run_id
-            ),
-        ))
+        lifecycle_index::LifecycleStep::Advance => Ok(false),
     }
 }
 

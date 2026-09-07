@@ -45,7 +45,7 @@ use super::exact_lookup::{
     require_committed_jsonl_eof, scan_jsonl_row, spans_match,
 };
 use super::{
-    AutomationRunStatus, AutomationTrigger, run_status_index,
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_status_index,
     sync_run_ledger_file_and_parent, valid_run_status_transition,
 };
 use crate::automation::backend::{AgentTaskKind, task_key as canonical_task_key};
@@ -79,6 +79,21 @@ impl<'a> LifecycleRow<'a> {
             task_key: row.task_key.as_deref(),
             status: row.status,
             completion: (completed_at, completed_at_micros),
+        })
+    }
+
+    pub(super) fn from_record(record: &'a AutomationRunLedgerRecord) -> Result<Self> {
+        let completion = super::canonical_completion_parts(
+            record.schema_version,
+            &record.completed_at,
+            record.completed_at_micros,
+        )?;
+        Ok(Self {
+            task: record.task,
+            trigger: record.trigger,
+            task_key: record.task_key.as_deref(),
+            status: record.status,
+            completion,
         })
     }
 
