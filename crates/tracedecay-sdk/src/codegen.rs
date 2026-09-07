@@ -240,44 +240,276 @@ fn type_name(value: &str) -> String {
         .collect()
 }
 
-/// A canonical definition rendered as a named TypeScript alias because it is
-/// referenced recursively and cannot be inlined.
-struct NamedSchemaType {
-    definition: Value,
+/// Public TypeScript names the generated package already exports (`index.ts`
+/// re-exports `operations.ts`, `types.ts`, and the client). A canonical
+/// definition with one of these short names gets a suffixed alias instead.
+const RESERVED_TYPESCRIPT_NAMES: &[&str] = &[
+    "ApplicationEnvelope",
+    "ApplicationExecutionFailureClassV1",
+    "ApplicationOutcome",
+    "ApplicationProblemEnvelope",
+    "ApplicationProblemKind",
+    "ApplicationProblemRecord",
+    "ApplicationUnavailableClassV1",
+    "AvailableOperationDescriptor",
+    "CanonicalCancellation",
+    "CanonicalJsonSchema",
+    "ClientOptions",
+    "ContractRef",
+    "Decoder",
+    "EffectReceipt",
+    "EffectResult",
+    "EffectTermination",
+    "EvidencePacket",
+    "HttpEnvelope",
+    "HttpOperationDescriptor",
+    "HttpOperationTransport",
+    "HttpProblemEnvelope",
+    "HttpSseEvent",
+    "HttpSuccessEnvelope",
+    "LegalAction",
+    "McpToolAdapter",
+    "McpToolOperationDescriptor",
+    "McpToolOperationTransport",
+    "Operation",
+    "OperationByName",
+    "OperationCancellation",
+    "OperationDescriptor",
+    "OperationEffect",
+    "OperationIdempotency",
+    "OperationName",
+    "OperationReceipt",
+    "OperationRequestOptions",
+    "OperationRoute",
+    "OperationStreamEvent",
+    "OperationStreamOptions",
+    "OperationStreamResume",
+    "OperationTermination",
+    "OperationTransport",
+    "OperationTransportKind",
+    "PageCursor",
+    "PageOptions",
+    "PageState",
+    "PreviewResult",
+    "RequestFor",
+    "ResponseFor",
+    "ResultFor",
+    "RetryDirective",
+    "SafeDiagnostic",
+    "StreamEventName",
+    "TraceDecayAbortError",
+    "TraceDecayAuthenticationError",
+    "TraceDecayCancelledError",
+    "TraceDecayClient",
+    "TraceDecayConflictError",
+    "TraceDecayDeniedError",
+    "TraceDecayDisconnectedError",
+    "TraceDecayInvalidRequestError",
+    "TraceDecayMalformedResponseError",
+    "TraceDecayPartialEffectError",
+    "TraceDecayProblemError",
+    "TraceDecayProtocolError",
+    "TraceDecayResetRequiredError",
+    "TraceDecaySaturatedError",
+    "TraceDecayStaleError",
+    "TraceDecayTimedOutError",
+    "TraceDecayTransportError",
+    "TraceDecayUnavailableError",
+    "TraceDecayUnsupportedError",
+    "UnavailableDisposition",
+    "UnavailableOperation",
+    "UnavailableOperationCapability",
+    "UnavailableOperationName",
+    "UnknownValue",
+];
+
+/// One canonical `$defs` entry shared by every schema in which the same short
+/// name carries the same body and the same transitive reference closure.
+struct Definition {
+    ts_name: String,
+    body: Value,
     rendered: String,
 }
 
-/// Derives the TypeScript alias name for a recursive canonical reference from
-/// its final JSON-pointer segment (e.g. `#/$defs/AnalyzerStructuredValueV1`).
-fn reference_type_name(reference: &str) -> Result<String, Box<dyn Error>> {
-    let raw = reference
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .replace("~1", "/")
-        .replace("~0", "~");
-    let name = type_name(&raw);
-    if name.is_empty() {
-        return Err(format!(
-            "recursive canonical JSON Schema reference '{reference}' has no usable type name"
-        )
-        .into());
-    }
-    Ok(name)
+/// A registered root schema: its slot in the interned runtime schema table and
+/// the TypeScript alias each of its `$defs` short names resolves to.
+struct SchemaRoot {
+    index: usize,
+    names: BTreeMap<String, String>,
 }
 
-fn render_schema_type(
-    schema: &Value,
-    named: &mut BTreeMap<String, NamedSchemaType>,
+/// Shared definitions and interned root schemas across the whole SDK, so a
+/// definition is declared once and byte-identical schemas validate through one
+/// runtime record.
+#[derive(Default)]
+struct SchemaTable {
+    definitions: Vec<Definition>,
+    definitions_by_closure: BTreeMap<String, usize>,
+    taken_names: BTreeSet<String>,
+    schemas: Vec<String>,
+    schemas_by_key: BTreeMap<String, usize>,
+}
+
+impl SchemaTable {
+    fn register_root(&mut self, body: &Value) -> Result<SchemaRoot, Box<dyn Error>> {
+        let object = body
+            .as_object()
+            .ok_or("canonical JSON Schema root must be an object")?;
+        let empty = serde_json::Map::new();
+        let definitions = match object.get("$defs") {
+            None => &empty,
+            Some(Value::Object(definitions)) => definitions,
+            Some(_) => return Err("canonical JSON Schema $defs must be an object".into()),
+        };
+        let mut names = BTreeMap::new();
+        let mut created = Vec::new();
+        for (short_name, definition) in definitions {
+            let closure = definition_closure_key(definitions, short_name)?;
+            let index = match self.definitions_by_closure.get(&closure) {
+                Some(index) => *index,
+                None => {
+                    let ts_name = self.allocate_name(short_name)?;
+                    self.definitions.push(Definition {
+                        ts_name,
+                        body: definition.clone(),
+                        rendered: String::new(),
+                    });
+                    let index = self.definitions.len() - 1;
+                    self.definitions_by_closure.insert(closure, index);
+                    created.push(index);
+                    index
+                }
+            };
+            names.insert(short_name.clone(), self.definitions[index].ts_name.clone());
+        }
+        // A definition body may reference any other definition of this root,
+        // so render only once every short name of the root has its alias.
+        for index in created {
+            let rendered = render_schema_type_at(&self.definitions[index].body, &names)?;
+            self.definitions[index].rendered = rendered;
+        }
+        let mut rest = object.clone();
+        rest.remove("$defs");
+        let key = serde_json::to_string(&serde_json::json!({
+            "schema": Value::Object(rest.clone()),
+            "definitions": names,
+        }))?;
+        let index = match self.schemas_by_key.get(&key) {
+            Some(index) => *index,
+            None => {
+                self.schemas.push(render_runtime_schema(&rest, &names)?);
+                let index = self.schemas.len() - 1;
+                self.schemas_by_key.insert(key, index);
+                index
+            }
+        };
+        Ok(SchemaRoot { index, names })
+    }
+
+    /// Different definitions that share a short name stay distinct: the first
+    /// registered keeps the bare alias and later ones receive an ordinal
+    /// suffix. Names the package already exports count as taken.
+    fn allocate_name(&mut self, short_name: &str) -> Result<String, Box<dyn Error>> {
+        let base = type_name(short_name);
+        if base.is_empty() {
+            return Err(format!(
+                "canonical definition '{short_name}' has no usable TypeScript type name"
+            )
+            .into());
+        }
+        let mut candidate = base.clone();
+        let mut ordinal = 1;
+        while self.taken_names.contains(&candidate)
+            || RESERVED_TYPESCRIPT_NAMES.contains(&candidate.as_str())
+        {
+            ordinal += 1;
+            candidate = format!("{base}_{ordinal}");
+        }
+        self.taken_names.insert(candidate.clone());
+        Ok(candidate)
+    }
+}
+
+/// The short `$defs` name a local canonical reference points at.
+fn definition_short_name(reference: &str) -> Result<String, Box<dyn Error>> {
+    let short_name = reference
+        .strip_prefix("#/$defs/")
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+        .ok_or_else(|| format!("unsupported canonical JSON Schema reference: {reference}"))?;
+    Ok(short_name.replace("~1", "/").replace("~0", "~"))
+}
+
+/// Pushes the short name of every `$ref` reachable inside `value`.
+fn collect_references(value: &Value, out: &mut Vec<String>) -> Result<(), Box<dyn Error>> {
+    match value {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                out.push(definition_short_name(reference)?);
+            }
+            for child in object.values() {
+                collect_references(child, out)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_references(item, out)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Canonical identity of one `$defs` entry: its short name plus the body of
+/// every definition reachable from it. Two entries with equal keys resolve
+/// identically in any root, so they may share one alias and one runtime body.
+fn definition_closure_key(
+    definitions: &serde_json::Map<String, Value>,
+    short_name: &str,
 ) -> Result<String, Box<dyn Error>> {
-    render_schema_type_at(schema, schema, &mut BTreeSet::new(), named)
+    let mut reachable = BTreeMap::new();
+    let mut pending = vec![short_name.to_owned()];
+    while let Some(current) = pending.pop() {
+        if reachable.contains_key(&current) {
+            continue;
+        }
+        let body = definitions.get(&current).ok_or_else(|| {
+            format!("unresolved canonical JSON Schema reference: #/$defs/{current}")
+        })?;
+        collect_references(body, &mut pending)?;
+        reachable.insert(current, body);
+    }
+    Ok(serde_json::to_string(&serde_json::json!({
+        "name": short_name,
+        "definitions": reachable,
+    }))?)
+}
+
+/// The runtime schema literal: the root body with each `$defs` entry pointing
+/// at the shared definition record, so `$ref` resolution is unchanged.
+fn render_runtime_schema(
+    rest: &serde_json::Map<String, Value>,
+    names: &BTreeMap<String, String>,
+) -> Result<String, Box<dyn Error>> {
+    let rest = serde_json::to_string(&Value::Object(rest.clone()))?;
+    if names.is_empty() {
+        return Ok(rest);
+    }
+    let definitions = names
+        .iter()
+        .map(|(short_name, ts_name)| format!("{}:DEFINITIONS.{ts_name}", quote(short_name)))
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(if rest == "{}" {
+        format!("{{\"$defs\":{{{definitions}}}}}")
+    } else {
+        format!("{{\"$defs\":{{{definitions}}},{}", &rest[1..])
+    })
 }
 
 fn render_schema_type_at(
-    root: &Value,
     schema: &Value,
-    resolving: &mut BTreeSet<String>,
-    named: &mut BTreeMap<String, NamedSchemaType>,
+    names: &BTreeMap<String, String>,
 ) -> Result<String, Box<dyn Error>> {
     if let Value::Bool(accepts) = schema {
         return Ok(if *accepts { "unknown" } else { "never" }.to_owned());
@@ -299,45 +531,10 @@ fn render_schema_type_at(
         }
     }
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if !resolving.insert(reference.to_owned()) {
-            // A recursive canonical reference cannot be inlined; emit one
-            // named TypeScript alias for the definition and refer to it by
-            // name at every recursive occurrence.
-            let name = reference_type_name(reference)?;
-            let target = resolve_local_ref(root, reference)?;
-            match named.get(&name) {
-                Some(existing) if existing.definition == *target => {}
-                Some(_) => {
-                    return Err(format!(
-                        "recursive canonical JSON Schema reference '{reference}' collides with \
-                         a different definition already named '{name}'"
-                    )
-                    .into());
-                }
-                None => {
-                    // Publish the placeholder first so the definition body's
-                    // own recursive occurrences resolve to the alias name.
-                    named.insert(
-                        name.clone(),
-                        NamedSchemaType {
-                            definition: target.clone(),
-                            rendered: String::new(),
-                        },
-                    );
-                    let mut rendering = BTreeSet::from([reference.to_owned()]);
-                    let rendered = render_schema_type_at(root, target, &mut rendering, named)?;
-                    named
-                        .get_mut(&name)
-                        .ok_or("recursive schema rendering lost its named alias slot")?
-                        .rendered = rendered;
-                }
-            }
-            return Ok(name);
-        }
-        let target = resolve_local_ref(root, reference)?;
-        let rendered = render_schema_type_at(root, target, resolving, named);
-        resolving.remove(reference);
-        return rendered;
+        let short_name = definition_short_name(reference)?;
+        return names.get(&short_name).cloned().ok_or_else(|| {
+            format!("unresolved canonical JSON Schema reference: {reference}").into()
+        });
     }
     if let Some(value) = object.get("const") {
         return render_literal(value);
@@ -359,7 +556,7 @@ fn render_schema_type_at(
             }
             return variants
                 .iter()
-                .map(|variant| render_schema_type_at(root, variant, resolving, named))
+                .map(|variant| render_schema_type_at(variant, names))
                 .collect::<Result<Vec<_>, _>>()
                 .map(|variants| variants.join(" | "));
         }
@@ -370,7 +567,7 @@ fn render_schema_type_at(
         }
         return parts
             .iter()
-            .map(|part| render_schema_type_at(root, part, resolving, named))
+            .map(|part| render_schema_type_at(part, names))
             .collect::<Result<Vec<_>, _>>()
             .map(|parts| parts.join(" & "));
     }
@@ -381,7 +578,7 @@ fn render_schema_type_at(
             .map(|schema_type| {
                 let mut variant = object.clone();
                 variant.insert("type".to_owned(), schema_type.clone());
-                render_schema_type_at(root, &Value::Object(variant), resolving, named)
+                render_schema_type_at(&Value::Object(variant), names)
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|variants| variants.join(" | "));
@@ -397,14 +594,14 @@ fn render_schema_type_at(
             if let Some(prefix) = object.get("prefixItems").and_then(Value::as_array) {
                 let items = prefix
                     .iter()
-                    .map(|item| render_schema_type_at(root, item, resolving, named))
+                    .map(|item| render_schema_type_at(item, names))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(format!("readonly [{}]", items.join(", ")));
             }
             let item = object
                 .get("items")
                 .filter(|items| !matches!(items, Value::Bool(true)))
-                .map(|items| render_schema_type_at(root, items, resolving, named))
+                .map(|items| render_schema_type_at(items, names))
                 .transpose()?
                 .unwrap_or_else(|| "unknown".to_owned());
             let item =
@@ -415,11 +612,11 @@ fn render_schema_type_at(
                 };
             Ok(format!("readonly {item}[]"))
         }
-        Some("object") => render_object_type(root, object, resolving, named),
+        Some("object") => render_object_type(object, names),
         None if object.contains_key("properties")
             || object.contains_key("additionalProperties") =>
         {
-            render_object_type(root, object, resolving, named)
+            render_object_type(object, names)
         }
         None => Ok("unknown".to_owned()),
         Some(other) => Err(format!("unsupported canonical JSON Schema type: {other}").into()),
@@ -427,10 +624,8 @@ fn render_schema_type_at(
 }
 
 fn render_object_type(
-    root: &Value,
     schema: &serde_json::Map<String, Value>,
-    resolving: &mut BTreeSet<String>,
-    named: &mut BTreeMap<String, NamedSchemaType>,
+    names: &BTreeMap<String, String>,
 ) -> Result<String, Box<dyn Error>> {
     let required = schema
         .get("required")
@@ -445,7 +640,7 @@ fn render_object_type(
     let mut fields = Vec::new();
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (name, property) in properties {
-            let property_type = render_schema_type_at(root, property, resolving, named)?;
+            let property_type = render_schema_type_at(property, names)?;
             let optional = if required.contains(name.as_str()) {
                 ""
             } else {
@@ -460,21 +655,12 @@ fn render_object_type(
     match schema.get("additionalProperties") {
         Some(Value::Bool(false)) => {}
         Some(Value::Object(_)) => {
-            let additional =
-                render_schema_type_at(root, &schema["additionalProperties"], resolving, named)?;
+            let additional = render_schema_type_at(&schema["additionalProperties"], names)?;
             fields.push(format!("readonly [key: string]: {additional}"));
         }
         _ => fields.push("readonly [key: string]: unknown".to_owned()),
     }
     Ok(format!("{{ {} }}", fields.join("; ")))
-}
-
-fn resolve_local_ref<'a>(root: &'a Value, reference: &str) -> Result<&'a Value, Box<dyn Error>> {
-    let pointer = reference
-        .strip_prefix('#')
-        .ok_or_else(|| format!("non-local canonical JSON Schema reference: {reference}"))?;
-    root.pointer(pointer)
-        .ok_or_else(|| format!("unresolved canonical JSON Schema reference: {reference}").into())
 }
 
 fn render_literal(value: &Value) -> Result<String, Box<dyn Error>> {
@@ -534,55 +720,77 @@ fn render_operations(
          export type McpToolOperationDescriptor<Name extends string, Request, Result> = OperationDescriptor<Name, Request, Result> & { readonly transport: McpToolOperationTransport };\n\
          export type AvailableOperationDescriptor<Name extends string, Request, Result> = HttpOperationDescriptor<Name, Request, Result> | McpToolOperationDescriptor<Name, Request, Result>;\n\n",
     );
-    let mut named = BTreeMap::new();
+    let mut table = SchemaTable::default();
     let mut operation_types = String::new();
+    let mut schema_slots = Vec::with_capacity(operations.len());
     for operation in operations {
-        let request_type = render_schema_type(&operation.request_schema.body, &mut named)?;
-        let result_type = render_schema_type(&operation.result_schema.body, &mut named)?;
-        let request_schema = serde_json::to_string(&operation.request_schema.body)?;
-        let result_schema = serde_json::to_string(&operation.result_schema.body)?;
+        let request = table.register_root(&operation.request_schema.body)?;
+        let result = table.register_root(&operation.result_schema.body)?;
+        let request_type = render_schema_type_at(&operation.request_schema.body, &request.names)?;
+        let result_type = render_schema_type_at(&operation.result_schema.body, &result.names)?;
         emit!(
             operation_types,
-            "export type {0}Request = {1};\n\
-             export type {0}Result = {2};\n\
-             const {3}RequestSchema = {4} as const satisfies CanonicalJsonSchema;\n\
-             const {3}ResultSchema = {5} as const satisfies CanonicalJsonSchema;\n\
-             const decode{0}Request: Decoder<{0}Request> = (value) => decodeCanonicalSchema(value, {3}RequestSchema);\n\
-             const decode{0}Result: Decoder<{0}Result> = (value) => decodeCanonicalSchema(value, {3}ResultSchema);\n",
+            "export type {0}Request = {1};\nexport type {0}Result = {2};",
             operation.type_name,
             request_type,
             result_type,
-            operation.type_name,
-            request_schema,
-            result_schema,
         );
+        schema_slots.push((request.index, result.index));
     }
     for operation in operations {
         for suffix in ["Request", "Result"] {
             let alias = format!("{}{suffix}", operation.type_name);
-            if named.contains_key(&alias) {
+            if table.taken_names.contains(&alias) {
                 return Err(format!(
-                    "recursive canonical definition '{alias}' collides with the generated \
-                     {suffix} type of operation '{}'",
+                    "canonical definition '{alias}' collides with the generated {suffix} type \
+                     of operation '{}'",
                     operation.operation_id
                 )
                 .into());
             }
         }
     }
-    for (name, named_type) in &named {
-        emit!(out, "export type {name} = {};", named_type.rendered);
+    let mut definitions = table.definitions.iter().collect::<Vec<_>>();
+    definitions.sort_by(|left, right| left.ts_name.cmp(&right.ts_name));
+    for definition in &definitions {
+        emit!(
+            out,
+            "export type {} = {};",
+            definition.ts_name,
+            definition.rendered
+        );
     }
-    if !named.is_empty() {
+    if !definitions.is_empty() {
         out.push('\n');
     }
     out.push_str(&operation_types);
+    out.push_str("\nconst DEFINITIONS = {\n");
+    for definition in &definitions {
+        emit!(
+            out,
+            "  {}: {},",
+            definition.ts_name,
+            serde_json::to_string(&definition.body)?
+        );
+    }
+    out.push_str(
+        "} satisfies Readonly<Record<string, CanonicalJsonSchema>>;\n\
+         const SCHEMAS: readonly CanonicalJsonSchema[] = [\n",
+    );
+    for schema in &table.schemas {
+        emit!(out, "  {schema},");
+    }
+    out.push_str(
+        "];\n\
+         const DECODERS = SCHEMAS.map((schema): Decoder<unknown> => (value) => decodeCanonicalSchema(value, schema));\n\
+         function decoder<T>(index: number): Decoder<T> { const decode = DECODERS[index]; if (decode === undefined) throw new TypeError(`generated canonical schema ${index} is missing`); return decode as Decoder<T>; }\n\n",
+    );
     if operations.is_empty() {
         out.push_str("export const OPERATIONS = [] as const;\n\n");
     } else {
         out.push_str("export const OPERATIONS = [\n");
     }
-    for operation in operations {
+    for (operation, (request_slot, result_slot)) in operations.iter().zip(schema_slots) {
         let transport = match &operation.transport {
             OperationTransport::Http { route } => format!(
                 "{{ kind: \"http\", route: {}, method: \"POST\" }}",
@@ -594,7 +802,7 @@ fn render_operations(
         };
         let success_decoder = match &operation.transport {
             OperationTransport::Http { .. } => format!(
-                ",\n    decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {}, {}, {}, {}, {}, {}, {}, decode{}Result)",
+                ",\n    decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {}, {}, {}, {}, {}, {}, {}, decoder<{}Result>({result_slot}))",
                 quote(&operation.binding),
                 quote(&operation.result_schema.id),
                 operation.result_schema.revision,
@@ -611,7 +819,7 @@ fn render_operations(
             "  {{ operation: {0}, operationId: {1}, transport: {2}, effect: {3}, idempotency: {4}, requestIdControl: {17}, resultSemantics: {18}, bindingId: {5},\n\
              \x20   requestSchema: {{ schemaId: {6}, revision: {7} }}, resultSchema: {{ schemaId: {8}, revision: {9} }},\n\
              \x20   cancellation: {10}, deadline: {11}, reconciliation: {12}, receipt: {13}, terminalStates: {14},\n\
-             \x20   decodeRequest: decode{15}Request, decodeResult: decode{15}Result{16} }},",
+             \x20   decodeRequest: decoder<{15}Request>({request_slot}), decodeResult: decoder<{15}Result>({result_slot}){16} }},",
             quote(&operation.name),
             quote(&operation.operation_id),
             transport,
@@ -870,10 +1078,16 @@ function record(value: unknown, field: string): Record<string, unknown> { if (ty
 function string(value: unknown, field: string): string { if (typeof value !== "string") throw new TypeError(`malformed canonical envelope: ${field} must be a string`); return value; }
 function number(value: unknown, field: string): number { if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError(`malformed canonical envelope: ${field} must be a finite number`); return value; }
 function array(value: unknown, field: string): unknown[] { if (!Array.isArray(value)) throw new TypeError(`malformed canonical envelope: ${field} must be an array`); return value; }
-function nullableNumber(value: unknown, field: string): number | null { return value === null ? null : number(value, field); }
+function safeInteger(value: unknown, field: string): number { const result = number(value, field); if (!Number.isSafeInteger(result)) throw new TypeError(`malformed canonical envelope: ${field} must be a safe integer`); return result; }
+function unsignedInteger(value: unknown, field: string): number { const result = safeInteger(value, field); if (result < 0) throw new TypeError(`malformed canonical envelope: ${field} must be non-negative`); return result; }
+const UTF8_ENCODER = new TextEncoder();
+// Mirrors the application identifier contract: non-empty, trimmed, bounded in UTF-8 bytes, and free of control characters.
+function identifier(value: unknown, field: string, maximumBytes: number): string { const result = string(value, field); if (result.length === 0 || result.trim() !== result || UTF8_ENCODER.encode(result).byteLength > maximumBytes || /\p{Cc}/u.test(result)) throw new TypeError(`malformed canonical envelope: ${field} is not a bounded identifier`); return result; }
 function receipt(value: unknown, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation): OperationReceipt { const result = record(value, "outcome.value.execution"); number(result.started_at, "execution.started_at"); number(result.ended_at, "execution.ended_at"); if (!("effective_deadline" in result) || !("cancellation" in result)) throw new TypeError("malformed canonical envelope: receipt fields are required"); const budget = record(result.budget, "execution.budget"); number(budget.units_consumed, "budget.units_consumed"); number(budget.bytes_consumed, "budget.bytes_consumed"); number(budget.elapsed_micros, "budget.elapsed_micros"); const termination = string(result.termination, "execution.termination"); if (!legalTerminations.includes(termination)) throw new TypeError(`malformed canonical envelope: termination ${termination} is not legal for this operation`); if (result.cancellation !== null) { const contract = record(cancellationContract, "operation.cancellation"); const mode = string(contract.mode, "operation.cancellation.mode"); if (mode === "not_cancellable") throw new TypeError("malformed canonical envelope: non-cancellable operation returned cancellation evidence"); const observation = record(result.cancellation, "execution.cancellation"); const stage = string(observation.stage, "execution.cancellation.stage"); const points = array(contract.points, "operation.cancellation.points"); if (!points.includes(stage)) throw new TypeError(`malformed canonical envelope: cancellation stage ${stage} is not legal for this operation`); } return result as unknown as OperationReceipt; }
-function pageCursor(value: unknown): PageCursor { const result = record(value, "page.cursor"); const kind = string(result.kind, "page.cursor.kind"); if (kind === "opaque") string(result.cursor, "page.cursor.cursor"); else if (kind === "fact_search") { const cursor = record(result.cursor, "page.cursor.cursor"); const score = number(cursor.score_millionths, "page.cursor.cursor.score_millionths"); if (!Number.isInteger(score) || score < 0 || score > 4_294_967_295) throw new TypeError("malformed canonical envelope: fact search score must be uint32"); const updatedAt = number(cursor.updated_at, "page.cursor.cursor.updated_at"); if (!Number.isSafeInteger(updatedAt)) throw new TypeError("malformed canonical envelope: fact search timestamp must be a safe integer"); string(cursor.fact_id, "page.cursor.cursor.fact_id"); } else if (kind === "fact_list_after") string(result.fact_id, "page.cursor.fact_id"); else throw new TypeError(`malformed canonical envelope: unsupported page cursor kind ${kind}`); return result as PageCursor; }
-function page(value: unknown): PageState { const result = record(value, "outcome.value.page"); string(result.sort_contract_id, "page.sort_contract_id"); const revision = number(result.sort_revision, "page.sort_revision"); if (!Number.isInteger(revision) || revision < 1) throw new TypeError("malformed canonical envelope: page sort_revision must be positive"); nullableNumber(result.total, "page.total"); const returned = number(result.returned, "page.returned"); if (!Number.isInteger(returned) || returned < 0) throw new TypeError("malformed canonical envelope: page returned must be non-negative"); if (result.cursor !== null) pageCursor(result.cursor); nullableNumber(result.expires_at, "page.expires_at"); return result as PageState; }
+// Opaque cursors are bounded application identifiers (OpaqueCursor: 4 096 bytes); structural fact cursors carry their canonical ordering fields.
+function pageCursor(value: unknown): PageCursor { const result = record(value, "page.cursor"); const kind = string(result.kind, "page.cursor.kind"); if (kind === "opaque") identifier(result.cursor, "page.cursor.cursor", 4_096); else if (kind === "fact_search") { const cursor = record(result.cursor, "page.cursor.cursor"); const score = unsignedInteger(cursor.score_millionths, "page.cursor.cursor.score_millionths"); if (score > 4_294_967_295) throw new TypeError("malformed canonical envelope: fact search score must be uint32"); safeInteger(cursor.updated_at, "page.cursor.cursor.updated_at"); string(cursor.fact_id, "page.cursor.cursor.fact_id"); } else if (kind === "fact_list_after") string(result.fact_id, "page.cursor.fact_id"); else throw new TypeError(`malformed canonical envelope: unsupported page cursor kind ${kind}`); return result as PageCursor; }
+// Sort contracts are catalog identifiers (MAX_CATALOG_IDENTIFIER_BYTES: 192); a page never returns more than its total.
+function page(value: unknown): PageState { const result = record(value, "outcome.value.page"); identifier(result.sort_contract_id, "page.sort_contract_id", 192); const revision = unsignedInteger(result.sort_revision, "page.sort_revision"); if (revision < 1) throw new TypeError("malformed canonical envelope: page sort_revision must be positive"); const total = result.total === null ? null : unsignedInteger(result.total, "page.total"); const returned = unsignedInteger(result.returned, "page.returned"); if (total !== null && returned > total) throw new TypeError("malformed canonical envelope: page returned exceeds total"); if (result.cursor !== null) pageCursor(result.cursor); if (result.expires_at !== null) safeInteger(result.expires_at, "page.expires_at"); return result as PageState; }
 function outcome<T>(kind: string, value: unknown, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation, receiptContract: "operation" | "durable_effect", reconciliationContract: "not_required" | "required", decode: Decoder<T>): EvidencePacket<T> | PreviewResult<T> | EffectResult<T> { const result = record(value, "outcome.value"); if (!("payload" in result)) throw new TypeError("malformed canonical envelope: outcome.value.payload is required"); const lifecycleShapeIsLegal = (receiptContract === "durable_effect" && reconciliationContract === "required" && kind === "effect") || (receiptContract === "operation" && reconciliationContract === "not_required" && (kind === "evidence" || kind === "preview")); if (!lifecycleShapeIsLegal) throw new TypeError(`malformed canonical envelope: outcome ${kind} is outside the operation receipt contract`); receipt(result.execution, legalTerminations, cancellationContract); if (kind === "evidence") { record(result.temporal, "temporal"); record(result.authority, "authority"); array(result.evidence_authorities, "evidence_authorities"); record(result.coverage, "coverage"); array(result.omissions, "omissions"); array(result.scores, "scores"); array(result.contributions, "contributions"); page(result.page); } else if (kind === "preview") { string(result.preview_id, "preview_id"); string(result.preview_digest, "preview_digest"); string(result.effect_class, "effect_class"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); } else if (kind === "effect") { string(result.effect_id, "effect_id"); string(result.effect_class, "effect_class"); string(result.idempotency_key, "idempotency_key"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); string(result.reconciliation, "reconciliation"); record(result.receipt, "receipt"); } else throw new TypeError(`malformed canonical envelope: unsupported outcome ${kind}`); return { ...result, payload: result.payload === null ? null : decode(result.payload) } as unknown as EvidencePacket<T> | PreviewResult<T> | EffectResult<T>; }
 export function decodeHttpSuccessEnvelope<T>(value: unknown, binding: string, schema: string, revision: number, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation, receiptContract: "operation" | "durable_effect", reconciliationContract: "not_required" | "required", decode: Decoder<T>): HttpSuccessEnvelope<T> { const envelope = record(value, "success envelope"); if (string(envelope.binding_id, "binding_id") !== binding) throw new TypeError("malformed canonical envelope: binding mismatch"); const contract = record(envelope.contract, "contract"); if (string(contract.schema_id, "contract.schema_id") !== schema || number(contract.schema_revision, "contract.schema_revision") !== revision) throw new TypeError("malformed canonical envelope: result contract mismatch"); string(envelope.request_id, "request_id"); record(envelope.scope, "scope"); const outer = record(envelope.outcome, "outcome"); const kind = string(outer.outcome, "outcome.outcome"); return { ...envelope, outcome: { ...outer, outcome: kind, value: outcome(kind, outer.value, legalTerminations, cancellationContract, receiptContract, reconciliationContract, decode) } } as unknown as HttpSuccessEnvelope<T>; }
 "##
@@ -908,18 +1122,19 @@ mod transport_conformance_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
+    use std::error::Error;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tracedecay_tool_catalog::{
         CancellationPoint, DeadlineBehavior, EffectClass, IdempotencyContract, ReceiptContract,
         ReconciliationContract, SdkExecutableBindingRegistryV1, TerminalState,
     };
 
     use super::{
-        Operation, OperationTransport, Schema, canonical_application_registry,
+        Operation, OperationTransport, Schema, SchemaTable, canonical_application_registry,
         canonical_operations, canonical_unavailable_operations, render_operations,
-        render_rust_operations, render_schema_type,
+        render_rust_operations, render_schema_type_at,
     };
     use tracedecay_application::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
 
@@ -928,6 +1143,59 @@ mod tests {
             OperationTransport::Http { route } => Some(route.as_str()),
             OperationTransport::McpTool { .. } => None,
         }
+    }
+
+    fn render_schema_type(schema: &Value) -> Result<String, Box<dyn Error>> {
+        let mut table = SchemaTable::default();
+        let root = table.register_root(schema)?;
+        render_schema_type_at(schema, &root.names)
+    }
+
+    fn read_operation(name: &str, request: Value, result: Value) -> Operation {
+        Operation {
+            name: name.to_owned(),
+            operation_id: format!("operation.test.{name}"),
+            type_name: super::type_name(name),
+            transport: OperationTransport::Http {
+                route: format!("/application/test/{name}"),
+            },
+            binding: format!("binding.http.test.{name}"),
+            effect: EffectClass::Read,
+            idempotency: IdempotencyContract::NotRequired,
+            request_id_control: SdkRequestIdControlV1::ServerMinted,
+            result_semantics: SdkResultSemanticsV1::SchemaOnly,
+            request_schema: Schema {
+                id: format!("schema.test.{name}.request"),
+                revision: 1,
+                body: request,
+                rust_type_path: "()".to_owned(),
+            },
+            result_schema: Schema {
+                id: format!("schema.test.{name}.result"),
+                revision: 1,
+                body: result,
+                rust_type_path: "()".to_owned(),
+            },
+            cancellation: json!({ "mode": "not_cancellable" }),
+            cancellable: false,
+            cancellation_points: Vec::new(),
+            deadline: json!({}),
+            maximum_deadline_millis: 1,
+            deadline_behavior: DeadlineBehavior::RejectBeforeAdmission,
+            reconciliation: ReconciliationContract::NotRequired,
+            receipt: ReceiptContract::Operation,
+            terminal_states: vec![TerminalState::Completed],
+        }
+    }
+
+    fn definition_schema(definitions: Value) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "value": { "$ref": "#/$defs/Wrapper" } },
+            "required": ["value"],
+            "additionalProperties": false,
+            "$defs": definitions
+        })
     }
 
     #[test]
@@ -944,7 +1212,7 @@ mod tests {
         });
 
         assert_eq!(
-            render_schema_type(&schema, &mut BTreeMap::new()).unwrap(),
+            render_schema_type(&schema).unwrap(),
             "{ readonly name: string; readonly state: \"available\" | \"partial\" | \"unavailable\"; readonly tags?: readonly string[] }"
         );
     }
@@ -965,7 +1233,7 @@ mod tests {
         });
 
         assert_eq!(
-            render_schema_type(&schema, &mut BTreeMap::new()).unwrap(),
+            render_schema_type(&schema).unwrap(),
             "readonly (readonly [string, string])[]"
         );
     }
@@ -1038,19 +1306,35 @@ mod tests {
             "unevaluatedProperties": false
         });
 
-        assert!(render_schema_type(&schema, &mut BTreeMap::new()).is_err());
+        assert!(render_schema_type(&schema).is_err());
     }
 
     #[test]
-    fn recursive_schema_reference_renders_one_named_alias() {
+    fn unsupported_reference_forms_fail_closed() {
+        let nested_pointer = json!({
+            "type": "object",
+            "properties": { "value": { "$ref": "#/properties/other" }, "other": { "type": "string" } }
+        });
+        let external = json!({ "$ref": "https://example.invalid/schema.json" });
+
+        assert!(render_schema_type(&nested_pointer).is_err());
+        assert!(render_schema_type(&external).is_err());
+        assert!(render_schema_type(&json!({ "$ref": "#/$defs/Missing" })).is_err());
+    }
+
+    #[test]
+    fn references_render_as_named_definitions_declared_once() {
         let schema = json!({
             "type": "object",
             "properties": {
+                "source": { "$ref": "#/$defs/FactId" },
+                "target": { "anyOf": [{ "$ref": "#/$defs/FactId" }, { "type": "null" }] },
                 "settings": { "$ref": "#/$defs/StructuredValue" }
             },
-            "required": ["settings"],
+            "required": ["source", "settings"],
             "additionalProperties": false,
             "$defs": {
+                "FactId": { "type": "string" },
                 "StructuredValue": {
                     "oneOf": [
                         { "type": "string" },
@@ -1063,17 +1347,164 @@ mod tests {
             }
         });
 
-        let mut named = BTreeMap::new();
-        let rendered = render_schema_type(&schema, &mut named).unwrap();
+        let mut table = SchemaTable::default();
+        let root = table.register_root(&schema).unwrap();
+        assert_eq!(
+            render_schema_type_at(&schema, &root.names).unwrap(),
+            "{ readonly settings: StructuredValue; readonly source: FactId; readonly target?: FactId | null }"
+        );
+        let rendered = table
+            .definitions
+            .iter()
+            .map(|definition| (definition.ts_name.as_str(), definition.rendered.as_str()))
+            .collect::<Vec<_>>();
         assert_eq!(
             rendered,
-            "{ readonly settings: string | { readonly [key: string]: StructuredValue } }"
+            [
+                ("FactId", "string"),
+                (
+                    "StructuredValue",
+                    "string | { readonly [key: string]: StructuredValue }"
+                ),
+            ]
         );
-        assert_eq!(named.len(), 1);
         assert_eq!(
-            named.get("StructuredValue").unwrap().rendered,
-            "string | { readonly [key: string]: StructuredValue }"
+            table.schemas,
+            [concat!(
+                "{\"$defs\":{\"FactId\":DEFINITIONS.FactId,\"StructuredValue\":DEFINITIONS.StructuredValue},",
+                "\"additionalProperties\":false,",
+                "\"properties\":{\"settings\":{\"$ref\":\"#/$defs/StructuredValue\"},\"source\":{\"$ref\":\"#/$defs/FactId\"},\"target\":{\"anyOf\":[{\"$ref\":\"#/$defs/FactId\"},{\"type\":\"null\"}]}},",
+                "\"required\":[\"source\",\"settings\"],\"type\":\"object\"}"
+            )]
         );
+    }
+
+    #[test]
+    fn equal_definitions_share_one_alias_across_roots() {
+        let first = definition_schema(json!({
+            "Inner": { "type": "string" },
+            "Wrapper": { "$ref": "#/$defs/Inner" }
+        }));
+        let second = json!({
+            "type": "array",
+            "items": { "$ref": "#/$defs/Wrapper" },
+            "$defs": {
+                "Inner": { "type": "string" },
+                "Wrapper": { "$ref": "#/$defs/Inner" }
+            }
+        });
+
+        let mut table = SchemaTable::default();
+        let first_root = table.register_root(&first).unwrap();
+        let second_root = table.register_root(&second).unwrap();
+        assert_eq!(table.definitions.len(), 2);
+        assert_eq!(first_root.names, second_root.names);
+        assert_eq!(
+            render_schema_type_at(&second, &second_root.names).unwrap(),
+            "readonly Wrapper[]"
+        );
+        // Different root bodies stay distinct runtime records even though
+        // every definition is shared.
+        assert_eq!(table.schemas.len(), 2);
+        assert_ne!(first_root.index, second_root.index);
+    }
+
+    #[test]
+    fn same_short_name_with_a_different_body_stays_distinct() {
+        let first = definition_schema(json!({
+            "Wrapper": { "enum": ["accepted", "rejected"] }
+        }));
+        let second = definition_schema(json!({
+            "Wrapper": { "enum": ["allow", "deny"] }
+        }));
+
+        let mut table = SchemaTable::default();
+        let first_root = table.register_root(&first).unwrap();
+        let second_root = table.register_root(&second).unwrap();
+        assert_eq!(first_root.names["Wrapper"], "Wrapper");
+        assert_eq!(second_root.names["Wrapper"], "Wrapper_2");
+        assert_eq!(table.definitions[1].rendered, "\"allow\" | \"deny\"");
+        assert!(table.schemas[1].starts_with("{\"$defs\":{\"Wrapper\":DEFINITIONS.Wrapper_2},"));
+        // The reference re-registers to the alias it already owns.
+        assert_eq!(table.register_root(&first).unwrap().index, first_root.index);
+        assert_eq!(table.definitions.len(), 2);
+    }
+
+    #[test]
+    fn equal_bodies_with_different_reference_closures_stay_distinct() {
+        let first = definition_schema(json!({
+            "Inner": { "type": "string" },
+            "Wrapper": { "$ref": "#/$defs/Inner" }
+        }));
+        let second = definition_schema(json!({
+            "Inner": { "type": "number" },
+            "Wrapper": { "$ref": "#/$defs/Inner" }
+        }));
+
+        let mut table = SchemaTable::default();
+        let first_root = table.register_root(&first).unwrap();
+        let second_root = table.register_root(&second).unwrap();
+        assert_eq!(first_root.names["Wrapper"], "Wrapper");
+        assert_eq!(second_root.names["Wrapper"], "Wrapper_2");
+        assert_eq!(second_root.names["Inner"], "Inner_2");
+        assert_eq!(table.definitions[3].rendered, "Inner_2");
+    }
+
+    #[test]
+    fn definition_shadowing_an_exported_name_receives_a_distinct_alias() {
+        let schema = json!({
+            "$ref": "#/$defs/PageState",
+            "$defs": { "PageState": { "type": "object" } }
+        });
+
+        let mut table = SchemaTable::default();
+        let root = table.register_root(&schema).unwrap();
+        assert_eq!(root.names["PageState"], "PageState_2");
+        assert_eq!(
+            render_schema_type_at(&schema, &root.names).unwrap(),
+            "PageState_2"
+        );
+    }
+
+    #[test]
+    fn identical_schemas_share_one_runtime_record_and_decoder() {
+        let request = json!({
+            "type": "object",
+            "properties": { "id": { "$ref": "#/$defs/FactId" } },
+            "required": ["id"],
+            "additionalProperties": false,
+            "$defs": { "FactId": { "type": "string" } }
+        });
+        let result = json!({ "type": "array", "items": { "$ref": "#/$defs/FactId" }, "$defs": { "FactId": { "type": "string" } } });
+        let operations = [
+            read_operation("first", request.clone(), result.clone()),
+            read_operation("second", request, result),
+        ];
+
+        let generated = render_operations(&operations, &[]).unwrap();
+        assert_eq!(generated, render_operations(&operations, &[]).unwrap());
+        assert_eq!(generated.matches("export type FactId = string;").count(), 1);
+        assert_eq!(
+            generated
+                .matches("\n  FactId: {\"type\":\"string\"},")
+                .count(),
+            1
+        );
+        let schemas = generated
+            .split("const SCHEMAS: readonly CanonicalJsonSchema[] = [\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n];\n").next())
+            .expect("schema table");
+        assert_eq!(schemas.lines().count(), 2);
+        assert!(generated.contains(
+            "decodeRequest: decoder<FirstRequest>(0), decodeResult: decoder<FirstResult>(1)"
+        ));
+        assert!(generated.contains(
+            "decodeRequest: decoder<SecondRequest>(0), decodeResult: decoder<SecondResult>(1)"
+        ));
+        assert!(generated.contains("decoder<SecondResult>(1))"));
+        assert!(generated.contains("export type FirstRequest = { readonly id: FactId };"));
+        assert!(generated.contains("export type SecondResult = readonly FactId[];"));
     }
 
     #[test]

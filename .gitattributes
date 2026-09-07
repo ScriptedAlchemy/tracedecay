@@ -12,23 +12,18 @@ crates/tracedecay-query/assets/runtime-root/** text eol=lf
 # canonical source files are LF-only, and Windows checkout otherwise rewrites
 # them before the lint runs.
 plugin/** text eol=lf
-# Force LF for the retained agent source of truth; the bundle byte-identity
-# test compares plugin agents against these files and Windows checkout
-# otherwise rewrites them to CRLF.
-src/agents/claude_agents/** text eol=lf
 # Force LF for embedded Hermes plugin template assets — they are pulled into
 # the binary via include_str! and the generated-plugin snapshot test asserts
 # their exact bytes.
-src/agents/hermes/templates/** text eol=lf
+crates/tracedecay-agent-hosts/src/agents/hermes/templates/** text eol=lf
 # Claude-observation benchmark evidence attests the embedded harness and manifest byte-for-byte.
 # Keep those bytes identical when Git checks the repository out on Windows.
-src/sessions/claude_observation_benchmark.rs text eol=lf
-src/sessions/claude_observation_benchmark/** text eol=lf
+crates/tracedecay/src/sessions/claude_observation_benchmark.rs text eol=lf
+crates/tracedecay/src/sessions/claude_observation_benchmark/** text eol=lf
 benchmark_data/claude-observation/** text eol=lf
 # Vendored, patched tree-sitter grammars: generated parser sources are
 # reviewed upstream-of-generation (grammar.js + patches), not line-by-line.
 # Collapse them out of PR diffs and language stats.
-vendor/** linguist-generated=true
 crates/tracedecay-code-extraction/vendor/** linguist-generated=true
 # Vendored serde_json closure for source-provenance integration tests: Cargo
 # verifies `.cargo-checksum.json` byte-for-byte, so Git for Windows must not
@@ -42,3 +37,10 @@ dashboard/src/contracts/generated.ts linguist-generated=true
 dashboard/src/contracts/index.ts linguist-generated=true
 dashboard/codegen/schemas/dashboard-contracts.schema.json linguist-generated=true
 plugin/cursor-native-extension/embedded/extension.js linguist-generated=true
+# Generated TypeScript SDK sources: `sdks/codegen/generate.sh` writes exactly
+# these three files from the canonical registry and CI verifies the committed
+# copies byte-for-byte (`scripts/check-sdk-codegen.sh`). The authored client,
+# request controls, automation terminal, tests, and generator stay reviewable.
+sdks/typescript/src/operations.ts linguist-generated=true
+sdks/typescript/src/types.ts linguist-generated=true
+sdks/typescript/src/index.ts linguist-generated=true
