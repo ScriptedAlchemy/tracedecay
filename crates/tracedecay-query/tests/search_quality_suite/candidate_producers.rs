@@ -1503,9 +1503,9 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("revision 12 must open");
+    .expect("revision 13 must open");
 
-    for revision in [9i64, 13] {
+    for revision in [9i64, 14] {
         let connection =
             rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
@@ -1531,11 +1531,12 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
 }
 
 #[test]
-fn writer_revision_toggle_preserves_v11_v12_lexical_results() {
+fn writer_revision_toggle_preserves_v11_v12_v13_lexical_results() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let v11_path = directory.path().join("writer-v11.sqlite");
     let v12_path = directory.path().join("writer-v12.sqlite");
+    let v13_path = directory.path().join("writer-v13.sqlite");
     let control = ArtifactControl { cancelled: false };
     let mut v11_builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
         &v11_path,
@@ -1585,7 +1586,7 @@ fn writer_revision_toggle_preserves_v11_v12_lexical_results() {
 
     let mut v12_builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
         &v12_path,
-        fixture.metadata,
+        fixture.metadata.clone(),
         CodeLexicalArtifactWriterRevisionV1::V12,
     )
     .expect("create revision 12 artifact");
@@ -1603,6 +1604,57 @@ fn writer_revision_toggle_preserves_v11_v12_lexical_results() {
     )
     .expect("reopen revision 12 artifact");
 
+    let mut v13_builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+        &v13_path,
+        fixture.metadata,
+        CodeLexicalArtifactWriterRevisionV1::V13,
+    )
+    .expect("create revision 13 artifact");
+    for page in &pages {
+        v13_builder
+            .append_page(page, &control)
+            .expect("append v13 page");
+    }
+    let v13 = finish_staged_artifact(&mut v13_builder, &source_receipt, &control);
+    let connection = rusqlite::Connection::open(&v13_path).expect("inspect v13 artifact");
+    let revision: i64 = connection
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read v13 revision");
+    assert_eq!(revision, 13);
+    // Revision 13 clusters postings by document and serves term probes from
+    // the finalized term-leading covering index.
+    let document_leading_key: i64 = connection
+        .query_row(
+            "SELECT pk FROM pragma_table_xinfo('term_postings') WHERE name = 'document_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read v13 term posting key");
+    assert_eq!(document_leading_key, 1);
+    let term_probe_plan: String = connection
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT document_id FROM term_postings WHERE field = 1 AND term_id = 2",
+            [],
+            |row| row.get(3),
+        )
+        .expect("explain v13 term probe");
+    assert!(
+        term_probe_plan.contains("term_postings_by_term"),
+        "v13 term probe must use the covering term index, got {term_probe_plan}"
+    );
+    drop(connection);
+    let v13_reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &v13_path,
+        &v13,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen revision 13 artifact");
+
     let mut request = lexical_request("widget return", &["widget"], &[], &["return"], 2, 8);
     request.generation = v11.generation().clone();
     let v11_result = v11_reader
@@ -1613,6 +1665,11 @@ fn writer_revision_toggle_preserves_v11_v12_lexical_results() {
         .read_lexical_postings(&request)
         .expect("read v12 lexical postings");
     assert_eq!(v12_result, v11_result);
+    request.generation = v13.generation().clone();
+    let v13_result = v13_reader
+        .read_lexical_postings(&request)
+        .expect("read v13 lexical postings");
+    assert_eq!(v13_result, v11_result);
 }
 
 /// Historical revision-10 artifact sealed by the pre-interning writer
@@ -1668,10 +1725,10 @@ fn reader_serves_historical_v10_writer_artifact() {
 }
 
 #[test]
-fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
+fn sealed_v13_artifact_uses_compact_postings_and_reports_dbstat() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("v12-plans.sqlite");
+    let artifact_path = directory.path().join("v13-plans.sqlite");
     let control = ArtifactControl { cancelled: false };
     let started = Instant::now();
     let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
@@ -1692,7 +1749,7 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
             |row| row.get(0),
         )
         .expect("read current format revision");
-    assert_eq!(format_revision, 12);
+    assert_eq!(format_revision, 13);
     let uncompressed_ngram_rows: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM ngram_postings WHERE substr(documents, 1, 4) = x'54444e31' OR length(documents) > cardinality + 4",
@@ -1702,7 +1759,7 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
         .expect("count non-delta ngram rows");
     assert_eq!(
         uncompressed_ngram_rows, 0,
-        "revision 12 ngram shards must use canonical delta varints"
+        "revision 13 ngram shards must use canonical delta varints"
     );
     let exact_columns = connection
         .prepare(
@@ -1731,16 +1788,15 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
         .collect::<Result<Vec<_>, _>>()
         .expect("collect term plan");
     assert!(
-        term_plan.iter().any(|detail| {
-            detail.contains("PRIMARY KEY")
-                || detail.contains("term_postings") && !detail.contains("term_postings_by_term")
-        }),
-        "term equality must use the interned primary key, got {term_plan:?}"
+        term_plan
+            .iter()
+            .any(|detail| detail.contains("term_postings_by_term")),
+        "term equality must use the covering term index, got {term_plan:?}"
     );
     let frequency_plan = connection
         .prepare(
             "EXPLAIN QUERY PLAN SELECT posting.field, posting.frequency \
-             FROM term_postings AS posting INDEXED BY term_postings_by_document \
+             FROM term_postings AS posting \
              WHERE posting.document_id = 0 AND posting.term_id IN (1)",
         )
         .expect("prepare frequency plan")
@@ -1751,20 +1807,20 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
     assert!(
         frequency_plan
             .iter()
-            .any(|detail| detail.contains("term_postings_by_document")),
-        "frequency probe must use term_postings_by_document, got {frequency_plan:?}"
+            .any(|detail| detail.contains("PRIMARY KEY")),
+        "frequency probe must use the document-leading primary key, got {frequency_plan:?}"
     );
     let missing_dropped: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name IN \
-             ('term_postings_by_term', 'term_postings_by_document_term', 'term_stats_by_term')",
+             ('term_postings_by_document', 'term_postings_by_document_term', 'term_stats_by_term')",
             [],
             |row| row.get(0),
         )
         .expect("count dropped indexes");
     assert_eq!(
         missing_dropped, 0,
-        "revision 12 must not keep redundant indexes"
+        "revision 13 must not keep redundant indexes"
     );
     let compact_rows: i64 = connection
         .query_row(
@@ -1778,7 +1834,7 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
         .expect("count rows");
     assert_eq!(
         compact_rows, total_rows,
-        "every v12 row carries the compact tag"
+        "every v13 row carries the compact tag"
     );
     {
         let dbstat = connection.prepare(
@@ -1795,21 +1851,21 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
                 "dbstat must account interned postings: {sizes:?}"
             );
             assert!(
-                !sizes.keys().any(|name| name == "term_postings_by_term"),
-                "dbstat must not retain the dropped term-text index: {sizes:?}"
+                !sizes.keys().any(|name| name == "term_postings_by_document"),
+                "dbstat must not retain the superseded document-leading index: {sizes:?}"
             );
             assert!(
                 sizes.contains_key("exact_vocabulary"),
                 "dbstat must account the exact-term collision authority: {sizes:?}"
             );
             eprintln!(
-                "lexical v12 dbstat file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} sizes={sizes:?}",
+                "lexical v13 dbstat file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} sizes={sizes:?}",
                 verified.page_count(),
                 verified.artifact_digest().as_str(),
             );
         } else {
             eprintln!(
-                "lexical v12 size file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} (dbstat unavailable)",
+                "lexical v13 size file_bytes={file_bytes} build_ms={build_ms} pages={} digest={} (dbstat unavailable)",
                 verified.page_count(),
                 verified.artifact_digest().as_str(),
             );
@@ -1823,7 +1879,7 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("open v12 artifact");
+    .expect("open v13 artifact");
     let mut request = lexical_request(
         "rendre return value",
         &["rendre"],
@@ -1837,13 +1893,13 @@ fn sealed_v12_artifact_uses_compact_postings_and_reports_dbstat() {
     let mut latencies = Vec::new();
     for _ in 0..16 {
         let started = Instant::now();
-        let _ = lane.retrieve_lexical(&request).expect("v12 lexical query");
+        let _ = lane.retrieve_lexical(&request).expect("v13 lexical query");
         latencies.push(started.elapsed().as_micros());
     }
     latencies.sort_unstable();
     let p50 = latencies[latencies.len() / 2];
     let p95 = latencies[(latencies.len() * 95) / 100];
-    eprintln!("lexical v12 query_us p50={p50} p95={p95} samples={latencies:?}");
+    eprintln!("lexical v13 query_us p50={p50} p95={p95} samples={latencies:?}");
     assert!(p50 > 0 || file_bytes > 0);
 }
 
@@ -1863,8 +1919,8 @@ fn reader_rejects_current_artifact_missing_required_term_statistics_index() {
     let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
     let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
     connection
-        .execute_batch("DROP INDEX term_postings_by_document;")
-        .expect("remove required document-leading posting index");
+        .execute_batch("DROP INDEX term_postings_by_term;")
+        .expect("remove required term-leading posting index");
     drop(connection);
 
     assert!(matches!(
@@ -1972,7 +2028,7 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
             "exact_postings_by_document",
             "ngram_postings_by_ngram",
             "rows_by_chunk",
-            "term_postings_by_document",
+            "term_postings_by_term",
         ]
     );
     let incorrect_field_stats: i64 = connection
@@ -2007,6 +2063,8 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
         builder.append_page(page, &control).expect("append page");
     }
 
+    // Revision 13 clusters postings by document, so its serving indexes are
+    // built before the statistics that read them in key order.
     assert!(matches!(
         builder
             .advance_finalization(&source_receipt, 4_096, &control)
@@ -2015,17 +2073,17 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
     ));
     assert_eq!(
         persisted_finalization_position(&artifact_path),
-        ("statistics".to_owned(), 0)
+        ("indexes".to_owned(), 0)
     );
     assert!(matches!(
         builder
             .advance_finalization(&source_receipt, 4_096, &control)
-            .expect("derive only field statistics"),
+            .expect("build only the chunk index"),
         CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
     assert_eq!(
         persisted_finalization_position(&artifact_path),
-        ("statistics".to_owned(), 1),
+        ("indexes".to_owned(), 1),
         "a production-sized wake commits exactly one corpus-wide step"
     );
     drop(builder);
@@ -2036,7 +2094,7 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("restart after committed field statistics");
+    .expect("restart after committed chunk index");
     let cancellation = CancelOnBackgroundObservation::new();
     assert!(matches!(
         resumed.advance_finalization(&source_receipt, 4_096, &cancellation),
@@ -2046,21 +2104,24 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
     ));
     assert_eq!(
         persisted_finalization_position(&artifact_path),
-        ("statistics".to_owned(), 1),
+        ("indexes".to_owned(), 1),
         "cancellation inside the next SQLite statement must not advance its durable state"
     );
     let connection = rusqlite::Connection::open(&artifact_path).expect("inspect cancelled step");
-    let field_rows: i64 = connection
-        .query_row("SELECT COUNT(*) FROM field_stats", [], |row| row.get(0))
-        .expect("count committed field statistics");
-    let term_rows: i64 = connection
-        .query_row("SELECT COUNT(*) FROM term_stats", [], |row| row.get(0))
-        .expect("count rolled-back term statistics");
-    assert!(
-        field_rows > 0,
-        "the prior committed step survives cancellation"
+    let committed_indexes: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name",
+        )
+        .expect("prepare index inventory")
+        .query_map([], |row| row.get(0))
+        .expect("query index inventory")
+        .collect::<Result<_, _>>()
+        .expect("read index inventory");
+    assert_eq!(
+        committed_indexes,
+        ["rows_by_chunk"],
+        "the prior committed step survives cancellation and the interrupted step rolls back atomically"
     );
-    assert_eq!(term_rows, 0, "the interrupted step rolls back atomically");
     drop(connection);
     drop(resumed);
 
@@ -2070,19 +2131,28 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         &control,
     )
-    .expect("restart after cancelled term statistics");
+    .expect("restart after cancelled term index");
     resumed
         .advance_finalization(&source_receipt, 4_096, &control)
-        .expect("retry only term statistics");
+        .expect("retry only the term index");
     assert_eq!(
         persisted_finalization_position(&artifact_path),
-        ("statistics".to_owned(), 2),
+        ("indexes".to_owned(), 2),
         "retry resumes at the interrupted step instead of replaying the frozen prior step"
     );
     drop(resumed);
 
-    let mut expected_indexes = 0i64;
-    for expected_position in 0..=5u64 {
+    // Remaining index steps (exact, ngram, ngram statistics), then the three
+    // statistics steps, each committed by exactly one restarted wake.
+    let expected_positions = [
+        ("indexes", 3, 3),
+        ("indexes", 4, 4),
+        ("statistics", 0, 4),
+        ("statistics", 1, 4),
+        ("statistics", 2, 4),
+        ("digest", 0, 4),
+    ];
+    for (phase, ordinal, expected_indexes) in expected_positions {
         let mut resumed =
             CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
                 &artifact_path,
@@ -2095,21 +2165,24 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
             .advance_finalization(&source_receipt, 4_096, &control)
             .expect("advance one corpus-wide step");
         drop(resumed);
-
-        if expected_position == 0 {
-            assert_eq!(
-                persisted_finalization_position(&artifact_path),
-                ("indexes".to_owned(), 0),
-                "the vocabulary step alone transitions to index construction"
-            );
-        } else if expected_position == 5 {
-            assert_eq!(
-                persisted_finalization_position(&artifact_path),
-                ("digest".to_owned(), 0),
-                "the ngram-statistics step alone transitions to digest verification"
-            );
-            let connection = rusqlite::Connection::open(&artifact_path)
-                .expect("inspect derived ngram statistics");
+        assert_eq!(
+            persisted_finalization_position(&artifact_path),
+            (phase.to_owned(), ordinal)
+        );
+        let connection =
+            rusqlite::Connection::open(&artifact_path).expect("inspect serving indexes");
+        let indexes: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count committed serving indexes");
+        assert_eq!(
+            indexes, expected_indexes,
+            "each restarted production wake commits at most one serving index"
+        );
+        if (phase, ordinal) == ("statistics", 0) {
             let ngram_statistics: i64 = connection
                 .query_row("SELECT COUNT(*) FROM ngram_statistics", [], |row| {
                     row.get(0)
@@ -2119,35 +2192,14 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
                 ngram_statistics > 0,
                 "the final index-phase wake derives ngram statistics from committed postings"
             );
-            let indexes: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("count committed serving indexes");
-            assert_eq!(
-                indexes, expected_indexes,
-                "the ngram-statistics wake adds no serving index"
-            );
-        } else {
-            expected_indexes += 1;
-            assert_eq!(
-                persisted_finalization_position(&artifact_path),
-                ("indexes".to_owned(), expected_position)
-            );
-            let connection =
-                rusqlite::Connection::open(&artifact_path).expect("inspect serving indexes");
-            let indexes: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("count committed serving indexes");
-            assert_eq!(
-                indexes, expected_indexes,
-                "each restarted production wake commits exactly one serving index"
+        }
+        if (phase, ordinal) == ("digest", 0) {
+            let term_statistics: i64 = connection
+                .query_row("SELECT COUNT(*) FROM term_stats", [], |row| row.get(0))
+                .expect("count derived term statistics");
+            assert!(
+                term_statistics > 0,
+                "the statistics phase derives term statistics from the committed term index"
             );
         }
     }
@@ -2287,8 +2339,10 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
         .append_pages(&pages, &ArtifactControl { cancelled: false })
         .expect("append observed term postings");
     let trace = rusqlite::Connection::open(&artifact_path).expect("read term insert observer");
+    // Revision 13 clusters `term_postings` by `(document_id, term_id, field)`,
+    // so that is the order a monotone insert stream must follow.
     let keys = trace
-        .prepare("SELECT term_id, field, document_id FROM term_insert_trace ORDER BY sequence")
+        .prepare("SELECT document_id, term_id, field FROM term_insert_trace ORDER BY sequence")
         .expect("prepare term insert trace")
         .query_map([], |row| {
             Ok((
@@ -2986,10 +3040,10 @@ fn disk_artifact_resume_rejects_current_revision_with_wrong_term_index_shape() {
     let connection = rusqlite::Connection::open(&artifact_path).expect("open index mutation");
     connection
         .execute_batch(
-            "DROP INDEX term_postings_by_document;
-             CREATE INDEX term_postings_by_document ON term_postings(document_id, field, term_id);",
+            "DROP INDEX term_postings_by_term;
+             CREATE INDEX term_postings_by_term ON term_postings(term_id, document_id, field, frequency);",
         )
-        .expect("replace document-leading posting index with wrong column order");
+        .expect("replace term-leading posting index with wrong column order");
     drop(connection);
 
     assert!(matches!(
