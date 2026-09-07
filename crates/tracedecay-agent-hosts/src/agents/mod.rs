@@ -53,6 +53,7 @@ use tracedecay_domain::canonical_text::sha256_hex;
 use crate::errors::Result;
 use crate::errors::TraceDecayError;
 use crate::ports::mcp_tools::advertised_tools;
+use tracedecay_automation_runtime::automation::host_io::ManagedSkillExportReport;
 use tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary;
 
 pub use antigravity::AntigravityIntegration;
@@ -114,17 +115,6 @@ pub(crate) fn remove_managed_skill_prompt_index(
         target,
     )?;
     retired_memory_digest::remove_prompt_block(prompt_path)
-}
-
-/// Per-agent outcome of a managed-skill export refresh, keyed by agent id.
-/// `error` carries the failure message when the refresh failed; `exports`
-/// lists the destinations that were (re)written on success.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ManagedSkillExportReport {
-    pub agent: String,
-    pub exports: Vec<SkillInstallSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
