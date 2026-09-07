@@ -6,10 +6,15 @@
 //! resumes at `to` sees exactly the events appended after the page it holds:
 //! appends to tasks that sort earlier cannot move rows past the cursor the way
 //! an offset into a `task_id, version` ordering let them.
+//!
+//! A read first captures the owner frontier, then reads only the rows it
+//! answers with, bounded by that frontier: an exact read visits one task's
+//! history, and a page discovers its changed tasks from positions alone before
+//! decoding just those tasks' histories.
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{WorkProjectionPortError, WorkProjectionReadPort};
+use tracedecay_application::{WorkProjectionPortError, WorkProjectionReadPort, WorkStorageError};
 use tracedecay_domain::{
     ProjectionGenerationId, TaskId, WorkAuthority, WorkEvent, WorkProjection,
     WorkProjectionCoverageV1, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1,
@@ -17,7 +22,10 @@ use tracedecay_domain::{
 };
 
 use super::WorkSqliteStorage;
-use super::events::{load_registered_events_in_append_order, load_registered_owner_frontier};
+use super::events::{
+    load_registered_appended_positions, load_registered_changed_histories, load_registered_history,
+    load_registered_owner_frontier,
+};
 
 const CURSOR_TOKEN_PREFIX: &str = "work-projection-append-sequence.v1:";
 
@@ -28,16 +36,11 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         task_id: &TaskId,
     ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
         let frontier =
-            load_registered_owner_frontier(self.handle(), authority).map_err(unavailable)?;
-        let events = load_registered_events_in_append_order(self.handle(), authority, 0, frontier)
-            .map_err(unavailable)?;
-        let task_events = events
-            .iter()
-            .filter(|(_, event)| event.task_id() == task_id)
-            .map(|(_, event)| event.clone())
-            .collect::<Vec<_>>();
-        let projection = WorkProjection::rebuild(&task_events)
-            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+            load_registered_owner_frontier(self.handle(), authority).map_err(port_error)?;
+        let history = load_registered_history(self.handle(), authority, task_id, Some(frontier))
+            .map_err(port_error)?;
+        let projection =
+            WorkProjection::rebuild(&history).map_err(|_| WorkProjectionPortError::Unavailable)?;
         WorkProjectionSnapshotV1::new(
             projection_generation(authority)?,
             WorkProjectionSequenceV1::new(frontier),
@@ -54,32 +57,17 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         page_size: u32,
     ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
         let frontier =
-            load_registered_owner_frontier(self.handle(), authority).map_err(unavailable)?;
-        let events = load_registered_events_in_append_order(self.handle(), authority, 0, frontier)
-            .map_err(unavailable)?;
-        let total = count(
-            events
-                .iter()
-                .map(|(_, event)| event.task_id())
-                .collect::<BTreeSet<_>>()
-                .len(),
-        )?;
-        // A capped page is cut at an append position, never at a task count:
-        // the tasks it returns are exactly the tasks the journal prefix
-        // `(0, to]` introduced, so `delta` resumed at `to` reaches every task
-        // this page left out.
-        let page = page_tasks(&events, 0, frontier, page_size);
-        let projections = rebuild_selected(page.events(&events), &page.selected)?;
-        let returned = count(projections.len())?;
+            load_registered_owner_frontier(self.handle(), authority).map_err(port_error)?;
+        let page = self.read_page(authority, 0, frontier, page_size)?;
         let generation = projection_generation(authority)?;
         let to_sequence = WorkProjectionSequenceV1::new(page.to);
         let coverage = if page.to == frontier {
-            WorkProjectionCoverageV1::complete(returned, total)
+            WorkProjectionCoverageV1::complete(page.returned()?, page.total)
                 .map_err(|_| WorkProjectionPortError::Unavailable)?
         } else {
             WorkProjectionCoverageV1::capped(
-                returned,
-                total,
+                page.returned()?,
+                page.total,
                 page_size,
                 WorkProjectionSequenceRangeV1::new(WorkProjectionSequenceV1::new(0), to_sequence)
                     .map_err(|_| WorkProjectionPortError::Unavailable)?,
@@ -87,7 +75,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
             )
             .map_err(|_| WorkProjectionPortError::Unavailable)?
         };
-        WorkProjectionSnapshotV1::new(generation, to_sequence, projections, coverage)
+        WorkProjectionSnapshotV1::new(generation, to_sequence, page.projections, coverage)
             .map_err(|_| WorkProjectionPortError::Unavailable)
     }
 
@@ -103,32 +91,20 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         }
         let from = parse_projection_cursor(cursor)?;
         let frontier =
-            load_registered_owner_frontier(self.handle(), authority).map_err(unavailable)?;
+            load_registered_owner_frontier(self.handle(), authority).map_err(port_error)?;
         if from >= frontier {
             return Err(WorkProjectionPortError::StaleCursor);
         }
-        let events = load_registered_events_in_append_order(self.handle(), authority, 0, frontier)
-            .map_err(unavailable)?;
-        let total = count(
-            events
-                .iter()
-                .filter(|(sequence, _)| *sequence > from)
-                .map(|(_, event)| event.task_id())
-                .collect::<BTreeSet<_>>()
-                .len(),
-        )?;
-        let page = page_tasks(&events, from, frontier, page_size);
-        let changed = rebuild_selected(page.events(&events), &page.selected)?;
-        let returned = count(changed.len())?;
+        let page = self.read_page(authority, from, frontier, page_size)?;
         let from_sequence = WorkProjectionSequenceV1::new(from);
         let to_sequence = WorkProjectionSequenceV1::new(page.to);
         let coverage = if page.to == frontier {
-            WorkProjectionCoverageV1::complete(returned, total)
+            WorkProjectionCoverageV1::complete(page.returned()?, page.total)
                 .map_err(|_| WorkProjectionPortError::Unavailable)?
         } else {
             WorkProjectionCoverageV1::capped(
-                returned,
-                total,
+                page.returned()?,
+                page.total,
                 page_size,
                 WorkProjectionSequenceRangeV1::new(from_sequence, to_sequence)
                     .map_err(|_| WorkProjectionPortError::Unavailable)?,
@@ -140,7 +116,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
             generation,
             from_sequence,
             to_sequence,
-            changed,
+            page.projections,
             BTreeSet::new(),
             coverage,
         )
@@ -148,8 +124,9 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
     }
 }
 
-/// One page of the task walk: the tasks it covers and the inclusive append
-/// position it stops at.
+/// One page of the task walk after `from`: the projections it carries, the
+/// inclusive append position it stops at, and how many tasks changed in the
+/// whole `(from, frontier]` range.
 ///
 /// `to` is the page's resume point in both directions — the prefix `(0, to]`
 /// is what the returned projections replay, and a walk resumed after `to`
@@ -157,50 +134,60 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
 /// what makes a capped page resumable: a cursor minted anywhere else would
 /// name a position whose continuation does not contain the missing tasks.
 struct TaskPage {
-    selected: BTreeSet<TaskId>,
+    projections: Vec<WorkProjection>,
     to: u64,
+    total: u32,
 }
 
 impl TaskPage {
-    /// The journal prefix the page's projections are rebuilt from.
-    fn events<'a>(&self, events: &'a [(u64, WorkEvent)]) -> &'a [(u64, WorkEvent)] {
-        &events[..events.partition_point(|(sequence, _)| *sequence <= self.to)]
+    fn returned(&self) -> Result<u32, WorkProjectionPortError> {
+        count(self.projections.len())
     }
 }
 
-/// Walks the events appended after `from` and admits tasks until one more
-/// distinct task would exceed `page_size`, stopping just before that event.
-///
-/// The cut is the position preceding the event that introduces the
-/// overflowing task, so a later read resumed there starts on exactly that
-/// event and loses none of the tasks past the cap. A walk that never
-/// overflows covers the whole frontier.
-fn page_tasks(events: &[(u64, WorkEvent)], from: u64, frontier: u64, page_size: u32) -> TaskPage {
-    let mut selected = BTreeSet::new();
-    let mut to = frontier;
-    for (sequence, event) in events.iter().filter(|(sequence, _)| *sequence > from) {
-        if !selected.contains(event.task_id()) && selected.len() == page_size as usize {
-            to = sequence - 1;
-            break;
+impl WorkSqliteStorage {
+    /// Discovers the tasks changed after `from` from append positions alone,
+    /// cuts the page just before the first event of the task that would
+    /// exceed `page_size`, then reads and folds only the selected tasks'
+    /// histories as of that cut.
+    fn read_page(
+        &self,
+        authority: &WorkAuthority,
+        from: u64,
+        frontier: u64,
+        page_size: u32,
+    ) -> Result<TaskPage, WorkProjectionPortError> {
+        let positions =
+            load_registered_appended_positions(self.handle(), authority, from, frontier)
+                .map_err(port_error)?;
+        let mut changed = BTreeSet::new();
+        let mut to = frontier;
+        for (sequence, task_id) in positions {
+            // The first event of one task too many is where the page stops;
+            // the walk continues only to count every changed task.
+            if changed.insert(task_id) && changed.len() == page_size as usize + 1 {
+                to = sequence.saturating_sub(1);
+            }
         }
-        selected.insert(event.task_id().clone());
+        let total = count(changed.len())?;
+        let histories = load_registered_changed_histories(self.handle(), authority, from, to)
+            .map_err(port_error)?;
+        let projections = fold_histories(&histories)?;
+        Ok(TaskPage {
+            projections,
+            to,
+            total,
+        })
     }
-    TaskPage { selected, to }
 }
 
-fn rebuild_selected(
-    events: &[(u64, WorkEvent)],
-    selected: &BTreeSet<TaskId>,
-) -> Result<Vec<WorkProjection>, WorkProjectionPortError> {
-    selected
-        .iter()
-        .map(|task_id| {
-            let history = events
-                .iter()
-                .filter(|(_, event)| event.task_id() == task_id)
-                .map(|(_, event)| event.clone())
-                .collect::<Vec<_>>();
-            WorkProjection::rebuild(&history).map_err(|_| WorkProjectionPortError::Unavailable)
+/// Folds histories already grouped by task and ordered by version, each task
+/// exactly once.
+fn fold_histories(histories: &[WorkEvent]) -> Result<Vec<WorkProjection>, WorkProjectionPortError> {
+    histories
+        .chunk_by(|previous, next| previous.task_id() == next.task_id())
+        .map(|history| {
+            WorkProjection::rebuild(history).map_err(|_| WorkProjectionPortError::Unavailable)
         })
         .collect()
 }
@@ -238,6 +225,11 @@ fn count(value: usize) -> Result<u32, WorkProjectionPortError> {
     u32::try_from(value).map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
-fn unavailable(_: tracedecay_application::WorkStorageError) -> WorkProjectionPortError {
-    WorkProjectionPortError::Unavailable
+fn port_error(error: WorkStorageError) -> WorkProjectionPortError {
+    match error {
+        WorkStorageError::NotFoundOrNotAuthorized => {
+            WorkProjectionPortError::NotFoundOrNotAuthorized
+        }
+        _ => WorkProjectionPortError::Unavailable,
+    }
 }

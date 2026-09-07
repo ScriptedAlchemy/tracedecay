@@ -8,7 +8,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     TaskId, WorkAuthority, WorkEvent, WorkProjection, WorkProjectionResumeCursorV1,
-    WorkProjectionSnapshotV1, WorkVersion,
+    WorkProjectionSnapshotV1, WorkProjectionStateV1, WorkVersion,
 };
 
 use crate::exact_sql::{

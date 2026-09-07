@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
-    CreateWorkCommand, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
-    ReviewProposalCommand, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
+    CreateWorkCommand, Deadline, DisclosureClass, ReplanDependenciesCommand, RequestContext,
+    RequestId, ResolvedScope, ReviewProposalCommand, WorkProjectionPortError,
+    WorkProjectionReadPort, WorkService, WorkStoragePort,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
@@ -769,6 +770,277 @@ fn shipped_journal_without_append_positions_gains_them_in_insertion_order() {
     assert_eq!(
         WorkProjectionReadPort::delta(&storage, &owner_authority, &shipped_cursor, 10).unwrap_err(),
         WorkProjectionPortError::StaleCursor
+    );
+}
+
+/// Reader-side SQL work for one closure: how many reader lanes it acquired
+/// (one per statement) and how many SQLite VM steps those statements ran.
+/// VM steps grow with the rows a statement visits and returns, so they witness
+/// how much history a read touched without instrumenting the decode path.
+fn measure_reads<T>(store: &RegisteredWorkStore, read: impl FnOnce() -> T) -> (T, u64, u64) {
+    let before = store.readers.telemetry_snapshot();
+    let value = read();
+    let after = store.readers.telemetry_snapshot();
+    (
+        value,
+        after.acquire_events - before.acquire_events,
+        after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps,
+    )
+}
+
+/// Writer-side SQLite VM steps for one closure — the statements the exact-SQL
+/// transaction it runs executed.
+fn measure_writes<T>(store: &RegisteredWorkStore, write: impl FnOnce() -> T) -> (T, u64) {
+    let before = store.writer.telemetry_snapshot().sqlite_vm.vm_steps;
+    let value = write();
+    (
+        value,
+        store.writer.telemetry_snapshot().sqlite_vm.vm_steps - before,
+    )
+}
+
+fn create_accepted_tasks(
+    service: &WorkService<WorkSqliteStorage>,
+    context: &RequestContext,
+    prefix: &str,
+    count: usize,
+) {
+    for index in 0..count {
+        let task_id = format!("{prefix}.{index:03}");
+        create(service, context, &task_id);
+        accept(service, context, &task_id, 20);
+    }
+}
+
+/// An exact read answers from the task's own history plus the owner frontier.
+/// Its SQL work must therefore not grow with the history of unrelated tasks
+/// in the same authority: the same read over an authority with many more
+/// unrelated tasks costs the same statements and about the same VM steps.
+#[test]
+fn exact_task_read_costs_its_own_history_not_the_authoritys() {
+    let store = RegisteredWorkStore::start("exact-read");
+    let storage = store.storage().clone();
+    let service = WorkService::new(storage.clone());
+    let target = id::<TaskId>("task.work.exact-read.target");
+    let sparse = context("project.work.exact-read.sparse", "actor.work.owner");
+    let crowded = context("project.work.exact-read.crowded", "actor.work.owner");
+    for (owner, unrelated) in [(&sparse, 2), (&crowded, 64)] {
+        create(&service, owner, target.as_str());
+        accept(&service, owner, target.as_str(), 20);
+        create_accepted_tasks(&service, owner, "task.work.exact-read.unrelated", unrelated);
+    }
+
+    let mut costs = [(&sparse, 0, 0), (&crowded, 0, 0)];
+    for (owner, statements, steps) in &mut costs {
+        let (snapshot, read_statements, read_steps) = measure_reads(&store, || {
+            WorkProjectionReadPort::exact_snapshot(&storage, &authority(owner), &target).unwrap()
+        });
+        assert_eq!(snapshot.projections()[0].version().get(), 2);
+        assert_eq!(
+            snapshot.sequence().get(),
+            storage
+                .load_authority_events(&authority(owner))
+                .unwrap()
+                .len() as u64,
+            "an exact read is positioned at the authority frontier"
+        );
+        *statements = read_statements;
+        *steps = read_steps;
+    }
+    let [
+        (_, sparse_statements, sparse_steps),
+        (_, crowded_statements, crowded_steps),
+    ] = costs;
+    eprintln!(
+        "exact read: sparse authority {sparse_statements} statements / {sparse_steps} vm steps, \
+         crowded authority {crowded_statements} statements / {crowded_steps} vm steps"
+    );
+    assert_eq!(
+        (sparse_statements, crowded_statements),
+        (2, 2),
+        "the frontier and the task's history, nothing else"
+    );
+    assert!(
+        crowded_steps <= sparse_steps * 2,
+        "sixty-two more unrelated tasks must not be read to answer an exact read: \
+         sparse {sparse_steps} vm steps, crowded {crowded_steps} vm steps"
+    );
+
+    assert_eq!(
+        WorkProjectionReadPort::exact_snapshot(
+            &storage,
+            &authority(&sparse),
+            &id::<TaskId>("task.work.exact-read.absent"),
+        )
+        .unwrap_err(),
+        WorkProjectionPortError::NotFoundOrNotAuthorized
+    );
+    assert_eq!(
+        WorkProjectionReadPort::exact_snapshot(
+            &storage,
+            &authority(&context(
+                "project.work.exact-read.other",
+                "actor.work.owner"
+            )),
+            &target,
+        )
+        .unwrap_err(),
+        WorkProjectionPortError::NotFoundOrNotAuthorized
+    );
+}
+
+/// A capped page decodes and folds the histories of the tasks it returns,
+/// not every event in the authority, so it costs strictly less SQL work than
+/// the complete page over the same journal — and both agree with a full
+/// per-task replay.
+#[test]
+fn capped_page_reads_only_the_selected_histories() {
+    let store = RegisteredWorkStore::start("capped-page");
+    let storage = store.storage().clone();
+    let service = WorkService::new(storage.clone());
+    let owner = context("project.work.capped-page", "actor.work.owner");
+    let owner_authority = authority(&owner);
+    create_accepted_tasks(&service, &owner, "task.work.capped-page", 24);
+    for index in 0..24 {
+        admit(
+            &service,
+            &owner,
+            &format!("task.work.capped-page.{index:03}"),
+            30,
+        );
+    }
+
+    let (capped, capped_statements, capped_steps) = measure_reads(&store, || {
+        WorkProjectionReadPort::snapshot(&storage, &owner_authority, 2).unwrap()
+    });
+    let (complete, complete_statements, complete_steps) = measure_reads(&store, || {
+        WorkProjectionReadPort::snapshot(&storage, &owner_authority, 1_000).unwrap()
+    });
+    eprintln!(
+        "page of 2 tasks: {capped_statements} statements / {capped_steps} vm steps; \
+         page of 24 tasks: {complete_statements} statements / {complete_steps} vm steps"
+    );
+    assert_eq!(capped.coverage().returned(), 2);
+    assert_eq!(complete.coverage().returned(), 24);
+    assert_eq!(
+        (capped_statements, complete_statements),
+        (3, 3),
+        "frontier, changed-task discovery, selected histories"
+    );
+    assert!(
+        capped_steps < complete_steps,
+        "a page of two tasks must read less than the page of all twenty-four: \
+         capped {capped_steps} vm steps, complete {complete_steps} vm steps"
+    );
+
+    // The capped page is cut before the third task's first event, so it
+    // carries the first two tasks as of that position: created and accepted,
+    // not yet admitted. The complete page equals every task's full replay.
+    assert_eq!(capped.sequence().get(), 4);
+    for projection in capped.projections() {
+        assert_eq!(projection.version().get(), 2);
+    }
+    for projection in complete.projections() {
+        assert_eq!(
+            *projection,
+            WorkStoragePort::projection(&storage, &owner_authority, projection.task_id()).unwrap(),
+            "a page projection must equal the task's full replay"
+        );
+        assert_eq!(projection.version().get(), 3);
+    }
+}
+
+/// An append reconstructs the task's prior state once, admits the new event
+/// onto it, and inserts — it does not re-read and re-fold the history it just
+/// extended. The witness is the writer's SQL work: appending onto a long
+/// history must cost about one history read, not two, measured against the
+/// reader's cost for that same history select.
+#[test]
+fn append_folds_the_admitted_event_onto_one_prior_reconstruction() {
+    let store = RegisteredWorkStore::start("append-once");
+    let storage = store.storage().clone();
+    let service = WorkService::new(storage.clone());
+    let owner = context("project.work.append-once", "actor.work.owner");
+    let owner_authority = authority(&owner);
+    let task_id = id::<TaskId>("task.work.append-once");
+    create(&service, &owner, task_id.as_str());
+    let history_len = 240u64;
+    let replan = |version: u64, command: &str| ReplanDependenciesCommand {
+        task_id: task_id.clone(),
+        dependencies: BTreeSet::new(),
+        expected_version: WorkVersion::new(version).unwrap(),
+        command_id: id(&format!("command.replan.work.append-once.{command}")),
+        occurred_at: UtcMicros(10),
+    };
+    for version in 1..history_len {
+        service
+            .replan_dependencies(&owner, replan(version, &version.to_string()))
+            .unwrap();
+    }
+
+    let (history, _, history_steps) = measure_reads(&store, || {
+        WorkStoragePort::load(&storage, &owner_authority, &task_id).unwrap()
+    });
+    assert_eq!(history.len() as u64, history_len);
+    let (appended, append_steps) = measure_writes(&store, || {
+        service
+            .replan_dependencies(&owner, replan(history_len, "measured"))
+            .unwrap()
+    });
+    eprintln!(
+        "append onto {history_len} events: {append_steps} vm steps; \
+         one history select: {history_steps} vm steps"
+    );
+    assert!(
+        append_steps < history_steps * 2,
+        "an append must not select the history twice: append {append_steps} vm steps, \
+         one history select {history_steps} vm steps"
+    );
+    assert_eq!(appended.version().get(), history_len + 1);
+    assert_eq!(
+        appended,
+        WorkStoragePort::projection(&storage, &owner_authority, &task_id).unwrap(),
+        "the folded state must equal the full replay of the committed history"
+    );
+
+    // Refusals leave the journal and the frontier exactly where they were.
+    let events = store.count("work_events_v1");
+    let cursor = store
+        .inspect(|connection| WorkSqliteStorage::owner_cursor(connection, &owner_authority))
+        .unwrap();
+    assert_eq!(
+        service
+            .replan_dependencies(&owner, replan(history_len, "measured"))
+            .unwrap(),
+        appended,
+        "an exact replay returns the committed state"
+    );
+    assert!(
+        service
+            .replan_dependencies(&owner, replan(2, "losing"))
+            .is_err(),
+        "a losing compare-and-swap is refused"
+    );
+    assert!(
+        service
+            .admit_execution(
+                &owner,
+                AdmitExecutionCommand {
+                    task_id: task_id.clone(),
+                    expected_version: appended.version(),
+                    command_id: id("command.admit.work.append-once.invalid"),
+                    occurred_at: UtcMicros(10),
+                },
+            )
+            .is_err(),
+        "admitting execution without an accepted proposal is refused"
+    );
+    assert_eq!(store.count("work_events_v1"), events);
+    assert_eq!(
+        store
+            .inspect(|connection| WorkSqliteStorage::owner_cursor(connection, &owner_authority))
+            .unwrap(),
+        cursor
     );
 }
 
