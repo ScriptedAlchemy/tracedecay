@@ -26,7 +26,7 @@ use crate::restart_atomicity::{
     mark_test_project, observation_source_cursor, open_project_session_db, set_projection_failure,
     try_ingest_source,
 };
-use crate::support::{init_git_repo, init_project};
+use crate::support::{assert_project_path_eq, init_git_repo, init_project};
 
 const CAP: usize = 256;
 
@@ -180,7 +180,7 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
         .get_session("cursor", "comp-1")
         .await
         .expect("composer session stored");
-    assert_eq!(session.project_path, project.to_string_lossy());
+    assert_project_path_eq(&session.project_path, &project);
     assert_eq!(session.title.as_deref(), Some("Composer session"));
 
     // Message row.
@@ -867,7 +867,7 @@ async fn composer_tolerates_malformed_and_reads_store_db() {
         .get_session("cursor", "cursor-chat:agent-1")
         .await
         .expect("store.db chat session stored");
-    assert_eq!(store_session.project_path, project.to_string_lossy());
+    assert_project_path_eq(&store_session.project_path, &project);
     let expected_store_path = agent_dir.join("store.db");
     assert_eq!(
         store_session.transcript_path.as_deref(),
