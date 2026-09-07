@@ -23,20 +23,39 @@ fn run_fixture(bin: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .env("HOME", home)
         .env("USERPROFILE", home)
         .output()
-        .unwrap_or_else(|error| panic!("failed to spawn host-CLI fixture: {error}"))
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to spawn host-CLI fixture {}: {error}",
+                bin.display()
+            )
+        })
 }
 
-fn recorded_invocations(home: &Path) -> Vec<String> {
+fn recorded_invocations(home: &Path) -> Vec<Vec<String>> {
     fs::read_to_string(home.join(".tracedecay-host-cli-fixture/invocations.log"))
         .unwrap_or_default()
         .lines()
-        .map(str::to_string)
+        .map(|line| serde_json::from_str(line).expect("fixture argv record must be JSON"))
         .collect()
 }
 
 #[test]
 fn provisioned_host_cli_fixture_is_a_native_executable() {
-    let bytes = fs::read(compiled_host_cli_fixture()).unwrap();
+    let fixture = compiled_host_cli_fixture();
+    let test_exe = std::env::current_exe().unwrap();
+    let profile_dir = test_exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("integration test binary sits under <profile>/deps");
+    assert_eq!(
+        fixture,
+        profile_dir.join("examples").join(format!(
+            "tracedecay-host-cli-fixture{}",
+            std::env::consts::EXE_SUFFIX
+        )),
+        "the fixture path must be resolved from the executing test, not baked from build.rs"
+    );
+    let bytes = fs::read(fixture).unwrap();
     assert!(
         looks_like_native_executable(&bytes),
         "host-CLI fixture must be a compiled executable, not a script; first bytes: {:?}",
@@ -49,6 +68,11 @@ fn kiro_fixture_records_install_and_list_arguments() {
     let home = TempDir::new().unwrap();
     let bin_dir = TempDir::new().unwrap();
     let bin = install_compiled_host_cli_fixture(bin_dir.path(), "kiro-cli");
+    #[cfg(unix)]
+    assert!(
+        fs::symlink_metadata(&bin).unwrap().file_type().is_symlink(),
+        "Unix fixtures must not be copied open-for-write beside concurrent process spawns"
+    );
     assert!(looks_like_native_executable(&fs::read(&bin).unwrap()));
 
     let add = run_fixture(
@@ -60,7 +84,7 @@ fn kiro_fixture_records_install_and_list_arguments() {
             "--name",
             "tracedecay",
             "--command",
-            "/usr/local/bin/tracedecay",
+            "/usr/local/bin/Trace Decay/tracedecay",
             "--args",
             "serve",
             "--scope",
@@ -79,7 +103,7 @@ fn kiro_fixture_records_install_and_list_arguments() {
             .unwrap();
     assert_eq!(
         registered["mcpServers"]["tracedecay"]["command"],
-        "/usr/local/bin/tracedecay"
+        "/usr/local/bin/Trace Decay/tracedecay"
     );
 
     let list = run_fixture(&bin, home.path(), &["mcp", "list"]);
@@ -92,13 +116,25 @@ fn kiro_fixture_records_install_and_list_arguments() {
     let listed: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
     assert_eq!(
         listed["mcpServers"]["tracedecay"]["command"],
-        "/usr/local/bin/tracedecay"
+        "/usr/local/bin/Trace Decay/tracedecay"
     );
     assert_eq!(
         recorded_invocations(home.path()),
-        [
-            "mcp add --name tracedecay --command /usr/local/bin/tracedecay --args serve --scope global --force",
-            "mcp list"
+        vec![
+            vec![
+                "mcp",
+                "add",
+                "--name",
+                "tracedecay",
+                "--command",
+                "/usr/local/bin/Trace Decay/tracedecay",
+                "--args",
+                "serve",
+                "--scope",
+                "global",
+                "--force",
+            ],
+            vec!["mcp", "list"]
         ]
     );
 }
@@ -206,6 +242,9 @@ fn codex_fixture_installs_lists_and_records_plugin_arguments() {
     assert_eq!(listed["plugins"][0]["id"], "tracedecay@personal");
     assert_eq!(
         recorded_invocations(home.path()),
-        ["plugin add tracedecay@personal --json", "plugin list"]
+        vec![
+            vec!["plugin", "add", "tracedecay@personal", "--json"],
+            vec!["plugin", "list"]
+        ]
     );
 }

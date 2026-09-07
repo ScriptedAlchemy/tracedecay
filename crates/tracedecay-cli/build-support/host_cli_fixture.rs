@@ -1,13 +1,14 @@
 // Deterministic host-CLI fixture used by TraceDecay tests.
 //
-// Compiled by `build.rs` into a real native executable so Windows runners do
-// not have to rename a shell script to `.exe` (os error 216) or depend on an
+// Compiled as a Cargo example in test workflows so Windows runners do not
+// have to rename a shell script to `.exe` (os error 216) or depend on an
 // ambient Kiro/Codex install. The child environment is cleared by
 // `run_host_cli`; only `HOME` / `USERPROFILE` are admitted. Dispatch follows
 // argv[0] (`kiro-cli` / `codex`) and implements install, list, and conflict
 // outputs while recording arguments under the isolated home.
 
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,7 @@ const FIXTURE_DIR: &str = ".tracedecay-host-cli-fixture";
 const INVOCATIONS_LOG: &str = "invocations.log";
 const MALFORMED_MARKER: &str = "malformed";
 const CONFLICT_MARKER: &str = "conflict";
+const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> ExitCode {
     let raw_args: Vec<String> = env::args().collect();
@@ -106,10 +108,16 @@ fn record_invocation(home: &Path, args: &[String]) -> io::Result<()> {
     fs::create_dir_all(&root)?;
     let mut file = fs::OpenOptions::new()
         .create(true)
-        .write(true)
         .append(true)
         .open(root.join(INVOCATIONS_LOG))?;
-    writeln!(file, "{}", args.join(" "))
+    write!(file, "[")?;
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            write!(file, ",")?;
+        }
+        write!(file, "\"{}\"", json_escape(arg))?;
+    }
+    writeln!(file, "]")
 }
 
 fn run_kiro(home: &Path, args: &[String]) -> Result<u8, String> {
@@ -410,7 +418,14 @@ fn json_escape(value: &str) -> String {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = write!(out, "\\u{:04x}", ch as u32);
+            }
             ch => out.push(ch),
         }
     }
