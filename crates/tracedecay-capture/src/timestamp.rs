@@ -38,11 +38,22 @@ pub fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
 }
 
 /// Parses Cursor's human-readable timestamp format into Unix seconds.
+///
+/// The native grammar is `[Weekday, ]Mon D, YYYY, H:MM[ AM|PM][ (UTC[±H[H][:MM]])]`:
+/// three comma-separated fields, or four with the leading weekday.
 pub fn parse_cursor_human_timestamp(value: &str) -> Option<i64> {
-    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
-    let (month_day, year, time_part) = match parts.as_slice() {
-        [_, month_day, year, time] | [month_day, year, time] => (*month_day, *year, *time),
-        _ => return None,
+    let mut fields = value.split(',').map(str::trim);
+    let first = fields.next()?;
+    let second = fields.next()?;
+    let third = fields.next()?;
+    let (month_day, year, time_part) = match fields.next() {
+        None => (first, second, third),
+        Some(fourth) => {
+            if fields.next().is_some() {
+                return None;
+            }
+            (second, third, fourth)
+        }
     };
 
     let mut time_parts = time_part.split_whitespace();
@@ -99,6 +110,12 @@ pub fn parse_yyyy_mm_dd_utc_start(value: &str) -> Option<i64> {
     (timestamp >= 0).then_some(timestamp)
 }
 
+/// Parses Cursor's `(UTC)` / `(UTC±H[H][:MM])` zone suffix.
+///
+/// Exactly one sign is permitted, and it belongs to the whole offset: the
+/// hour and minute components are unsigned digit strings, so `(UTC+-1)`,
+/// `(UTC--1)`, and `(UTC+1:-30)` are malformed evidence rather than
+/// alternative spellings of some other offset.
 fn parse_cursor_utc_offset(zone: &str) -> Option<FixedOffset> {
     let inner = zone.strip_prefix("(UTC")?.strip_suffix(')')?;
     if inner.is_empty() {
@@ -109,14 +126,144 @@ fn parse_cursor_utc_offset(zone: &str) -> Option<FixedOffset> {
         b'-' => (-1_i32, &inner[1..]),
         _ => return None,
     };
-    let (hours, minutes) = magnitude.split_once(':').unwrap_or((magnitude, "0"));
-    let hours = hours.parse::<i32>().ok()?;
-    let minutes = minutes.parse::<i32>().ok()?;
-    if hours > 23 || minutes > 59 {
+    let (hours, minutes) = match magnitude.split_once(':') {
+        Some((hours, minutes)) => (
+            parse_offset_component(hours, 1..=2, 23)?,
+            parse_offset_component(minutes, 2..=2, 59)?,
+        ),
+        None => (parse_offset_component(magnitude, 1..=2, 23)?, 0),
+    };
+    // Bounded by the component ranges: at most 23 h 59 min.
+    FixedOffset::east_opt(sign * (hours * 3_600 + minutes * 60))
+}
+
+/// An unsigned, digit-only offset component whose digit count lies in
+/// `width` and whose value is at most `max_value`.
+fn parse_offset_component(
+    text: &str,
+    width: std::ops::RangeInclusive<usize>,
+    max_value: i32,
+) -> Option<i32> {
+    if !width.contains(&text.len()) || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let seconds = hours
-        .checked_mul(3_600)?
-        .checked_add(minutes.checked_mul(60)?)?;
-    FixedOffset::east_opt(sign.checked_mul(seconds)?)
+    let value = text.parse::<i32>().ok()?;
+    (value <= max_value).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{parse_cursor_human_timestamp, parse_cursor_utc_offset};
+
+    const NOON_UTC: &str = "Jun 10, 2026, 12:00 PM";
+    const NOON_UTC_UNIX: i64 = 1_781_092_800;
+
+    fn with_zone(zone: &str) -> Option<i64> {
+        parse_cursor_human_timestamp(&format!("{NOON_UTC} {zone}"))
+    }
+
+    #[test]
+    fn valid_offsets_shift_local_noon_by_their_magnitude() {
+        let table = [
+            ("(UTC)", 0),
+            ("(UTC+0)", 0),
+            ("(UTC-0)", 0),
+            ("(UTC+2)", 2 * 3_600),
+            ("(UTC+02)", 2 * 3_600),
+            ("(UTC-7)", -7 * 3_600),
+            ("(UTC+5:30)", 5 * 3_600 + 30 * 60),
+            ("(UTC-3:30)", -(3 * 3_600 + 30 * 60)),
+            ("(UTC+12:45)", 12 * 3_600 + 45 * 60),
+            ("(UTC+23:59)", 23 * 3_600 + 59 * 60),
+            ("(UTC-23:59)", -(23 * 3_600 + 59 * 60)),
+        ];
+        for (zone, offset_seconds) in table {
+            assert_eq!(
+                with_zone(zone),
+                Some(NOON_UTC_UNIX - offset_seconds),
+                "{zone}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_offsets_are_rejected_instead_of_repaired() {
+        let table = [
+            "(UTC+-1)",
+            "(UTC--1)",
+            "(UTC-+1)",
+            "(UTC++1)",
+            "(UTC+1:-30)",
+            "(UTC+1:+30)",
+            "(UTC+-1:30)",
+            "(UTC+)",
+            "(UTC-)",
+            "(UTC+:30)",
+            "(UTC+1:)",
+            "(UTC+1:3)",
+            "(UTC+1:300)",
+            "(UTC+123)",
+            "(UTC+24)",
+            "(UTC+1:60)",
+            "(UTC+1a)",
+            "(UTC+ 1)",
+            "(UTC+1:30:00)",
+            "(UTC1)",
+            "(UTC+1",
+            "UTC+1)",
+            "(GMT+1)",
+        ];
+        for zone in table {
+            assert_eq!(parse_cursor_utc_offset(zone), None, "{zone}");
+            assert_eq!(with_zone(zone), None, "{zone}");
+        }
+    }
+
+    #[test]
+    fn weekday_prefix_is_optional_and_extra_fields_are_rejected() {
+        assert_eq!(
+            parse_cursor_human_timestamp("Wednesday, Jun 10, 2026, 12:00 PM (UTC)"),
+            Some(NOON_UTC_UNIX)
+        );
+        assert_eq!(parse_cursor_human_timestamp(NOON_UTC), Some(NOON_UTC_UNIX));
+        assert_eq!(
+            parse_cursor_human_timestamp("Jun 10, 2026, 21:11 (UTC+2)"),
+            Some(1_781_118_660)
+        );
+        assert_eq!(parse_cursor_human_timestamp("Jun 10, 2026"), None);
+        assert_eq!(
+            parse_cursor_human_timestamp("Wednesday, Jun 10, 2026, 12:00 PM, (UTC)"),
+            None
+        );
+        assert_eq!(
+            parse_cursor_human_timestamp("Wednesday, Dec 31, 1969, 5:00 PM (UTC+7)"),
+            None,
+            "pre-epoch instants stay rejected"
+        );
+    }
+
+    /// A native Cursor record carries its time only inside the transcript
+    /// text; a malformed zone must leave the record without a timestamp
+    /// rather than dating it with a repaired offset.
+    #[test]
+    fn native_cursor_record_timestamp_follows_the_zone_grammar() {
+        let record = |zone: &str| {
+            json!({
+                "type": "user",
+                "message": {
+                    "content": format!("<timestamp>{NOON_UTC} {zone}</timestamp>hello")
+                }
+            })
+        };
+        assert_eq!(
+            crate::cursor::timestamp_tag_from_record(&record("(UTC+2)")),
+            Some(NOON_UTC_UNIX - 2 * 3_600)
+        );
+        assert_eq!(
+            crate::cursor::timestamp_tag_from_record(&record("(UTC+-2)")),
+            None
+        );
+    }
 }

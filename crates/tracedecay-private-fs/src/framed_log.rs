@@ -2,8 +2,17 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectorySyncPolicy {
@@ -115,12 +124,71 @@ pub fn tighten_existing_file(path: &Path) -> io::Result<()> {
     set_owner_private_file_mode(path)
 }
 
+/// Open `path` for reading without following a final symlink or reparse
+/// point, so every later kind/length check is answered by the exact object
+/// that will be read.
+///
+/// A symlink at the final component is reported as `InvalidInput`, the same
+/// kind [`validate_regular_or_missing`] uses for a non-regular path, so the
+/// callers that map `InvalidInput` to their unsafe-path outcome keep doing so.
+fn open_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        // `O_NONBLOCK` keeps a substituted FIFO from parking the opener until
+        // a writer appears; regular-file reads ignore it and the handle-kind
+        // check below rejects the FIFO.
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        // Backup semantics let a directory open so the kind check below can
+        // reject it with the same `InvalidInput` the path-based check used.
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path).map_err(normalize_no_follow_error)
+}
+
+#[cfg(unix)]
+fn normalize_no_follow_error(error: io::Error) -> io::Error {
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link")
+    } else {
+        error
+    }
+}
+
+#[cfg(not(unix))]
+fn normalize_no_follow_error(error: io::Error) -> io::Error {
+    error
+}
+
+/// Read a whole regular file of at most `maximum` bytes, or `None` when
+/// `path` does not exist.
+///
+/// The file is opened once, without following a final symlink, and the kind
+/// and length checks run on that opened handle's metadata, so a pathname that
+/// is swapped between check and read cannot substitute a different object
+/// (only a regular file that atomically replaced the path can be observed —
+/// in either its old or new state). Non-regular objects and symlinks fail
+/// with `InvalidInput`; an empty, oversized, or short-read file fails with
+/// `InvalidData`.
 #[hotpath::measure(label = "private_fs.framed_log.read_bounded")]
 pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> {
-    if !validate_regular_or_missing(path)? {
-        return Ok(None);
+    let file = match open_no_follow(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
     }
-    let length = fs::metadata(path)?.len();
+    let length = metadata.len();
     if length == 0 || length > maximum as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -129,9 +197,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
     }
     hotpath::gauge!("private_fs.framed_log.read_bytes").set(length);
     let mut bytes = Vec::with_capacity(length as usize);
-    File::open(path)?
-        .take(maximum as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() != length as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -176,10 +242,7 @@ fn create_owned_temp(destination: &Path, kind: &str) -> io::Result<(PathBuf, Fil
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
+        options.mode(0o600);
         match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -666,10 +729,7 @@ pub fn append_durable(
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    options.mode(0o600);
     let mut output = options.open(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
     output.write_all(frame)?;

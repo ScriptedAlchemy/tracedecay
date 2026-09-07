@@ -66,7 +66,27 @@ fn no_skill_needed_decision(
     proposals: &[Value],
 ) -> Result<Option<NoSkillNeededDecision>> {
     match output.get("outcome") {
-        None => Ok(None),
+        Some(Value::String(outcome)) if outcome == "skills_proposed" => {
+            if proposals.is_empty() {
+                return Err(TraceDecayError::Config {
+                    message: "skills_proposed requires at least one skill mutation".to_owned(),
+                });
+            }
+            match output.get("decision") {
+                Some(decision) if decision.is_null() => {}
+                Some(_) => {
+                    return Err(TraceDecayError::Config {
+                        message: "skills_proposed cannot include a no-skill decision".to_owned(),
+                    });
+                }
+                None => {
+                    return Err(TraceDecayError::Config {
+                        message: "skills_proposed requires decision: null".to_owned(),
+                    });
+                }
+            }
+            Ok(None)
+        }
         Some(Value::String(outcome)) if outcome == "no_skill_needed" => {
             if !proposals.is_empty() {
                 return Err(TraceDecayError::Config {
@@ -86,6 +106,9 @@ fn no_skill_needed_decision(
             }
             Ok(Some(decision))
         }
+        None => Err(TraceDecayError::Config {
+            message: "skill writer output requires an explicit outcome".to_owned(),
+        }),
         Some(_) => Err(TraceDecayError::Config {
             message: "unsupported skill writer outcome".to_owned(),
         }),
@@ -957,7 +980,7 @@ pub(super) fn build_skill_writer_prompt(evidence: &Value) -> String {
         "\n",
         "A skill is warranted only by repeated workflow evidence not already covered by ordinary reasoning or tool metadata. Evaluate overlapping skills before creation. If no skill change is warranted, return skills: [], outcome: no_skill_needed, and decision with a specific reason and remedy (improve_tool_description, improve_hint_routing, insufficient_repeated_evidence, generic_reasoning, one_off_task, or no_action). This decision creates no skill and performs no deployment. For underused tools, distinguish tool-description or hint-routing fixes from skill changes; missed use alone is not skill evidence. Every create or routing_description change must include routing_validation scenarios for the existing agent-adoption evaluator: positive expected_skill, near-neighbor expected_skill, and negative allowed_skills: []. Each scenario includes id, category, hosts (claude/codex), fixture, status, prompt, ground_truth task-outcome checks, and max_tool_calls. Preserve selection and task outcomes separately; examples are not proof of measured improvement. Authored routing_description is intentional discovery metadata distinct from summary: state the selection boundary concisely without mandatory wording. Prefer references for detailed material; repeated views or patches without successful use warrant archive, merge, or routing redesign.\n",
         "\n",
-        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, routing_description, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, routing_description, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and optional merged title/summary/routing_description/category/targets/body_markdown/support_files) or action=archive (include id, base_checksum, reason). Consolidations preserve archived source content. Valid proposals are activated and exported automatically. Never propose merge or archive for pinned or user-authored skills.\n",
+        "Response contract: Return only JSON with a skills array, an explicit outcome, and decision. Use outcome=skills_proposed with at least one managed skill create, patch/update, merge, or archive and decision=null; use outcome=no_skill_needed with skills=[] and the decision described above. New skills use action=create and must include id, title, summary, routing_description, category, body_markdown, targets, support_files with text content, routing_validation, and reason. Targets must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, routing_description, category, targets, body_markdown, support_files, or pinned; set unchanged nullable fields to null. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and nullable merged title/summary/routing_description/category/targets/body_markdown/support_files/routing_validation fields) or action=archive (include id, base_checksum, reason). Consolidations preserve archived source content. Valid proposals are activated and exported automatically. Never propose merge or archive for pinned or user-authored skills.\n",
     );
     format!(
         "{POLICY}{}",
@@ -1024,10 +1047,52 @@ mod routing_decision_tests {
         invalid["decision"]["reason"] = json!("observed");
         invalid["decision"]["remedy"] = json!("create_skill");
         assert!(no_skill_needed_decision(&invalid, &[]).is_err());
+        assert!(no_skill_needed_decision(&json!({"skills": []}), &[]).is_err());
+    }
+
+    #[test]
+    fn skill_writer_outcomes_are_explicit_and_exhaustive() {
+        let proposal = json!({"action": "create"});
         assert!(
-            no_skill_needed_decision(&json!({"skills": []}), &[])
+            no_skill_needed_decision(
+                &json!({
+                    "skills": [proposal.clone()],
+                    "outcome": "skills_proposed",
+                    "decision": null
+                }),
+                &[proposal],
+            )
+            .unwrap()
+            .is_none()
+        );
+        for remedy in [
+            "improve_tool_description",
+            "improve_hint_routing",
+            "insufficient_repeated_evidence",
+            "generic_reasoning",
+            "one_off_task",
+            "no_action",
+        ] {
+            assert!(
+                no_skill_needed_decision(
+                    &json!({
+                        "skills": [],
+                        "outcome": "no_skill_needed",
+                        "decision": {"reason": "No reusable skill mutation is warranted.", "remedy": remedy}
+                    }),
+                    &[],
+                )
                 .unwrap()
-                .is_none()
+                .is_some(),
+                "remedy {remedy}"
+            );
+        }
+        assert!(
+            no_skill_needed_decision(
+                &json!({"skills": [], "outcome": "unsupported", "decision": {}}),
+                &[],
+            )
+            .is_err()
         );
     }
 }

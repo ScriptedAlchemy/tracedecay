@@ -1070,6 +1070,7 @@ mod tests {
                     ..tracedecay_sessions::runtime::git_correlation::BackfillStats::default()
                 },
                 backfill_page_saturated: true,
+                reprojected_legacy_head: false,
             },
         );
 
@@ -1106,6 +1107,7 @@ mod tests {
                     ..Default::default()
                 },
                 backfill_page_saturated: false,
+                reprojected_legacy_head: false,
             },
             later_failure:
                 tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Unavailable(

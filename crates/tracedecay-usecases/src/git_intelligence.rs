@@ -40,7 +40,7 @@ use serde::Serialize;
 pub use tracedecay_application::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
-    GitIntelligenceError, GitReadPort, NativeHistoricalBlobReaderV1,
+    GitIntelligenceError, GitReadPort,
 };
 use tracedecay_domain::git::{
     GitBlameAvailabilityV1, GitBlameLineV1, GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1,
@@ -52,6 +52,7 @@ use tracedecay_domain::git::{
 };
 use tracedecay_domain::research::time::UtcMicros;
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
+use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_repository::GitRepositoryError;
 
@@ -282,9 +283,11 @@ impl NativeGitIntelligence {
 
     /// Read one exact commit/path blob through the mounted Git authority.
     ///
-    /// The `gix` read itself lives beside its port in
-    /// [`tracedecay_application::NativeHistoricalBlobReaderV1`] so extracted
-    /// crates mount the same production read. It opens no subprocess and
+    /// The `gix` read itself is
+    /// [`tracedecay_query::native_git::NativeHistoricalBlobReaderV1`], mounted
+    /// on the port declared beside the request values in
+    /// `tracedecay_application::git`, so extracted crates mount the same
+    /// production read. It opens no subprocess and
     /// exposes no revision expression, traversal, ref mutation, or object
     /// write surface.
     #[hotpath::measure(label = "usecases.git_intelligence.historical_blob")]

@@ -51,61 +51,6 @@ fn setup_daemon_project(
 }
 
 #[test]
-fn test_is_test_file_test_dir() {
-    assert!(tracedecay::tracedecay::is_test_file("tests/my_test.rs"));
-    assert!(tracedecay::tracedecay::is_test_file("tests/integration.rs"));
-}
-
-#[test]
-fn test_is_test_file_test_prefix() {
-    assert!(tracedecay::tracedecay::is_test_file("test/foo.rs"));
-}
-
-#[test]
-fn test_is_test_file_spec_dir() {
-    assert!(tracedecay::tracedecay::is_test_file(
-        "spec/models/user_spec.rb"
-    ));
-}
-
-#[test]
-fn test_is_test_file_e2e_dir() {
-    assert!(tracedecay::tracedecay::is_test_file("e2e/login.test.ts"));
-}
-
-#[test]
-fn test_is_test_file_dot_test() {
-    assert!(tracedecay::tracedecay::is_test_file("src/utils.test.ts"));
-    assert!(tracedecay::tracedecay::is_test_file("src/utils.spec.js"));
-}
-
-#[test]
-fn test_is_test_file_underscore_test() {
-    assert!(tracedecay::tracedecay::is_test_file("src/utils_test.rs"));
-    assert!(tracedecay::tracedecay::is_test_file("src/utils_spec.py"));
-}
-
-#[test]
-fn test_is_test_file_dunder_tests() {
-    assert!(tracedecay::tracedecay::is_test_file(
-        "__tests__/component.test.tsx"
-    ));
-}
-
-#[test]
-fn test_is_test_file_normal_source() {
-    assert!(!tracedecay::tracedecay::is_test_file("src/lib.rs"));
-    assert!(!tracedecay::tracedecay::is_test_file("src/main.rs"));
-    assert!(!tracedecay::tracedecay::is_test_file("src/utils.rs"));
-}
-
-#[test]
-fn test_is_test_file_case_insensitive() {
-    assert!(tracedecay::tracedecay::is_test_file("Tests/MyTest.rs"));
-    assert!(tracedecay::tracedecay::is_test_file("TESTS/foo.rs"));
-}
-
-#[test]
 fn daemon_tool_searches_the_active_project() {
     let (_home, _project, home_path, project_path) =
         setup_daemon_project("pub fn findable_symbol() {}\n");

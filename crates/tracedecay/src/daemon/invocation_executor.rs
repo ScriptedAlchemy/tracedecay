@@ -12,7 +12,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationProblem, ProjectRuntimeRequestLeaseV1,
-    WorkApplicationOutcomeV1, cancel,
+    WorkApplicationOutcomeV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_usecases::operation_stream::OperationRequestControls;
@@ -557,7 +557,11 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
     }
 }
 
+/// Settles one in-process invocation. `request_cancellations` is the owning
+/// service's table: a caller-side cancellation or deadline is relayed to the
+/// daemon-side registration through it when no pre-admitted token exists.
 async fn settle_in_process_invocation(
+    request_cancellations: &tracedecay_daemon_service::RequestCancellationRegistryV1,
     request_id: &str,
     invocation: tokio::task::JoinHandle<DaemonInvocationResponse>,
     remaining: Duration,
@@ -597,7 +601,7 @@ async fn settle_in_process_invocation(
         () = tokio::time::sleep(remaining) => true,
     };
     if !has_admitted_cancellation {
-        cancel(request_id);
+        request_cancellations.cancel(request_id);
     }
     match policy {
         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
@@ -701,6 +705,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
             )?;
             let executor = self.clone();
             let admitted_cancellation = self.admitted_cancellation.clone();
+            let request_cancellations = self.invocation.service.request_cancellations().clone();
             tokio::spawn(async move {
                 let request_id = request.request_id.clone();
                 let invocation = tokio::spawn(hotpath::future!(
@@ -708,6 +713,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
                     label = "daemon.invocation.invoke_once"
                 ));
                 settle_in_process_invocation(
+                    &request_cancellations,
                     &request_id,
                     invocation,
                     remaining,

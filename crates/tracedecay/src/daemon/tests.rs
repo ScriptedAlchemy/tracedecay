@@ -116,7 +116,12 @@ async fn wait_for_mcp_routes(client_instance_id: &str, expected: &[ObservedMcpRo
                 .get(client_instance_id)
                 .cloned()
                 .unwrap_or_default();
-            if observed.len() >= expected.len() {
+            let replay_count = observed_first_request_replays()
+                .lock()
+                .expect("first request replay observer")
+                .get(client_instance_id)
+                .map_or(0, Vec::len);
+            if observed.len() >= expected.len() && replay_count >= expected.len() {
                 assert_eq!(observed, expected);
                 return;
             }
@@ -240,6 +245,13 @@ fn test_store_administration_for_profile(profile_root: &std::path::Path) -> Stor
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
             .expect("load test profile identity");
     StoreAdministration::default().with_profile_identity(profile_identity)
+}
+
+async fn prewarm_test_profile_runtime(store_administration: &StoreAdministration) {
+    store_administration
+        .registered_profile_database()
+        .await
+        .expect("prewarm exact test profile runtime");
 }
 
 #[cfg(unix)]

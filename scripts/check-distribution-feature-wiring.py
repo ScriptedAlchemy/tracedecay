@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Validate source and packaged Cargo feature ownership for distribution builds."""
+"""Validate source and packaged Cargo feature ownership for distribution builds.
+
+The checks are public-contract and layering rules only: the packaged manifest
+must carry the source feature set, optional native dependencies must stay
+optional and feature-wired, the root package must not own FastEmbed, the
+supported `lang-*` surface must match the extraction owner, and each language
+feature must compile in isolation. How a feature is forwarded through
+intermediate crates is Cargo's job; resolved behavior is proven by the
+packaged-artifact builds and launch checks in check-distribution-acceptance.sh.
+"""
 
 from __future__ import annotations
 
@@ -41,27 +50,9 @@ REQUIRED_CLI_FEATURE_MEMBERS = {
     },
     "hotpath-mcp": {"hotpath", "hotpath/hotpath-mcp"},
 }
-REQUIRED_ROOT_SEMANTIC_MEMBERS = {
-    "tracedecay-semantic/semantic-fastembed",
-    "tracedecay-usecases/semantic-fastembed",
-    "tracedecay-code-index-runtime/semantic-fastembed",
-}
 REQUIRED_SEMANTIC_MEMBERS = {
     "dep:fastembed",
     "fastembed/ort-download-binaries-rustls-tls",
-}
-LANGUAGE_TIERS = ("lite", "medium", "full")
-CODE_INDEX_LOCAL_TIER_MEMBERS = {
-    "lite": {"lang-markdown"},
-    "medium": set(),
-    "full": {"lang-markdown"},
-}
-# Composition-root tiers forward to every crate that actually owns that
-# tier. `medium` still lives only on tracedecay-code-index.
-ROOT_TIER_FORWARDING = {
-    "lite": {"tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"},
-    "medium": {"tracedecay-code-index/medium"},
-    "full": {"tracedecay-code-index/full", "tracedecay-code-index-runtime/full"},
 }
 
 
@@ -139,12 +130,12 @@ def language_feature_names(features: dict) -> set[str]:
     return {name for name in features if name.startswith("lang-")}
 
 
-def require_language_forwarding(
+def require_language_surface(
     name: str,
     features: dict,
     authority_features: set[str],
-    dependency: str,
 ) -> None:
+    """The public `lang-*` surface must advertise exactly the owner's languages."""
     actual_features = language_feature_names(features)
     if actual_features != authority_features:
         missing = sorted(authority_features - actual_features)
@@ -158,33 +149,6 @@ def require_language_forwarding(
             f"distribution acceptance: {name} language features differ from "
             "tracedecay-code-extraction: " + "; ".join(details)
         )
-
-    for feature in sorted(authority_features):
-        expected = [f"{dependency}/{feature}"]
-        if features.get(feature) != expected:
-            raise SystemExit(
-                f"distribution acceptance: {name} {feature} must forward exactly to "
-                f"{expected[0]}"
-            )
-
-
-def require_tier_forwarding(
-    name: str,
-    features: dict,
-    expected_by_tier: dict[str, set[str]],
-) -> None:
-    for tier in LANGUAGE_TIERS:
-        expected = expected_by_tier[tier]
-        members = features.get(tier)
-        if (
-            not isinstance(members, list)
-            or len(members) != len(expected)
-            or set(members) != expected
-        ):
-            raise SystemExit(
-                f"distribution acceptance: {name} {tier} must forward only to "
-                + ", ".join(sorted(expected))
-            )
 
 
 def require_isolated_language_features_compile(
@@ -254,48 +218,22 @@ def validate(
             "distribution acceptance: source manifest is missing required features: "
             + ", ".join(missing)
         )
-    root_semantic_members = root_features.get("semantic-fastembed")
+    # Layering rule, not topology: the native semantic runtime is owned by
+    # tracedecay-semantic (checked below) and never by the composition root.
     if "fastembed" in dependency_package_names(root_packaged):
         raise SystemExit(
             "distribution acceptance: root package must not own fastembed"
         )
-    if (
-        not isinstance(root_semantic_members, list)
-        or set(root_semantic_members) != REQUIRED_ROOT_SEMANTIC_MEMBERS
-    ):
-        raise SystemExit(
-            "distribution acceptance: root semantic-fastembed must forward to the "
-            "semantic and usecases owners"
-        )
     require_optional_dependencies_wired("root", root_packaged, root_features)
 
-    code_index_features = require_matching_features(
+    require_matching_features(
         "tracedecay-code-index", code_index_source, code_index_packaged
     )
     extraction_features = require_matching_features(
         "tracedecay-code-extraction", extraction_source, extraction_packaged
     )
-    language_features = language_feature_names(extraction_features)
-    require_language_forwarding(
-        "root", root_features, language_features, "tracedecay-code-index"
-    )
-    require_language_forwarding(
-        "code-index",
-        code_index_features,
-        language_features,
-        "tracedecay-code-extraction",
-    )
-    require_tier_forwarding("root", root_features, ROOT_TIER_FORWARDING)
-    require_tier_forwarding(
-        "code-index",
-        code_index_features,
-        {
-            tier: {
-                f"tracedecay-code-extraction/{tier}",
-                *CODE_INDEX_LOCAL_TIER_MEMBERS.get(tier, set()),
-            }
-            for tier in LANGUAGE_TIERS
-        },
+    require_language_surface(
+        "root", root_features, language_feature_names(extraction_features)
     )
     require_optional_dependencies_wired(
         "tracedecay-code-extraction", extraction_packaged, extraction_features
@@ -358,17 +296,22 @@ def main() -> int:
     extraction_manifest = repo / "crates/tracedecay-code-extraction/Cargo.toml"
     semantic_manifest = repo / "crates/tracedecay-semantic/Cargo.toml"
     cli_manifest = repo / "crates/tracedecay-cli/Cargo.toml"
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    # Source manifests default to this checkout; packaged manifests must be
+    # the extracted `.crate` trees, so they have no default — comparing a
+    # manifest with itself is not package verification.
     parser.add_argument("--root-source", type=Path, default=root_manifest)
-    parser.add_argument("--root-packaged", type=Path, default=root_manifest)
+    parser.add_argument("--root-packaged", type=Path, required=True)
     parser.add_argument("--code-index-source", type=Path, default=code_index_manifest)
-    parser.add_argument("--code-index-packaged", type=Path, default=code_index_manifest)
+    parser.add_argument("--code-index-packaged", type=Path, required=True)
     parser.add_argument("--extraction-source", type=Path, default=extraction_manifest)
-    parser.add_argument("--extraction-packaged", type=Path, default=extraction_manifest)
+    parser.add_argument("--extraction-packaged", type=Path, required=True)
     parser.add_argument("--semantic-source", type=Path, default=semantic_manifest)
-    parser.add_argument("--semantic-packaged", type=Path, default=semantic_manifest)
+    parser.add_argument("--semantic-packaged", type=Path, required=True)
     parser.add_argument("--cli-source", type=Path, default=cli_manifest)
-    parser.add_argument("--cli-packaged", type=Path, default=cli_manifest)
+    parser.add_argument("--cli-packaged", type=Path, required=True)
     parser.add_argument("--check-extraction-manifest", type=Path)
     parser.add_argument("--cargo-config", type=Path)
     parser.add_argument("--offline", action="store_true")

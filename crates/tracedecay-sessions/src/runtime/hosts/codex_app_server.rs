@@ -219,7 +219,16 @@ pub fn run_prompt_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_execution(prompt, config, thread_source, None)
+    run_prompt_with_optional_execution(prompt, config, thread_source, None, None)
+}
+
+pub fn run_prompt_with_codex_app_server_response_schema(
+    prompt: &str,
+    config: &CodexAppServerSummaryConfig,
+    thread_source: &str,
+    response_schema: &Value,
+) -> Result<CodexAppServerSummary> {
+    run_prompt_with_optional_execution(prompt, config, thread_source, Some(response_schema), None)
 }
 
 /// Work-attempt execution bindings for one Codex app-server spawn: the
@@ -243,13 +252,14 @@ pub fn run_work_with_codex_app_server(
     thread_source: &str,
     execution: CodexAppServerWorkExecution<'_>,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_execution(prompt, config, thread_source, Some(execution))
+    run_prompt_with_optional_execution(prompt, config, thread_source, None, Some(execution))
 }
 
 fn run_prompt_with_optional_execution(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
+    response_schema: Option<&Value>,
     execution: Option<CodexAppServerWorkExecution<'_>>,
 ) -> Result<CodexAppServerSummary> {
     hotpath::measure_block!("sessions.hosts.codex_app_server.run", {
@@ -321,6 +331,7 @@ fn run_prompt_with_optional_execution(
             config,
             thread_source,
             model,
+            response_schema,
             execution.as_ref().map(|execution| execution.cwd),
             execution
                 .as_ref()
@@ -340,6 +351,7 @@ fn run_codex_protocol(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
     model: Option<&str>,
+    response_schema: Option<&Value>,
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<CodexAppServerSummary> {
@@ -397,6 +409,9 @@ fn run_codex_protocol(
         });
         if let Some(model) = model {
             turn_params["model"] = json!(model);
+        }
+        if let Some(response_schema) = response_schema {
+            turn_params["outputSchema"] = response_schema.clone();
         }
         send_json(
             &mut stdin,
@@ -610,6 +625,17 @@ fn wait_for_turn_summary(
                     }
                 }
                 Some("turn/completed") => {
+                    if value.pointer("/params/turn/status").and_then(Value::as_str)
+                        == Some("failed")
+                    {
+                        let error = value
+                            .pointer("/params/turn/error")
+                            .cloned()
+                            .unwrap_or_else(|| json!("unknown app-server turn failure"));
+                        return Err(TraceDecayError::Config {
+                            message: format!("codex app-server turn failed: {error}"),
+                        });
+                    }
                     let provider_request_id = value
                         .pointer("/params/turn/id")
                         .and_then(Value::as_str)
@@ -877,6 +903,38 @@ mod tests {
             Err(err) => panic!("missing provider turn id is a typed absence: {err}"),
         };
         assert_eq!(summary.provider_request_id, None);
+    }
+
+    #[test]
+    fn turn_summary_preserves_failed_terminal_error() {
+        let (tx, rx) = mpsc::channel();
+        assert!(
+            tx.send(Ok(json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "failed-thread",
+                    "turn": {
+                        "status": "failed",
+                        "error": {"message": "configured model is unsupported"}
+                    }
+                }
+            })
+            .to_string()))
+                .is_ok()
+        );
+
+        let error = wait_for_turn_summary(
+            &rx,
+            Instant::now() + Duration::from_secs(1),
+            "failed-thread".to_owned(),
+        )
+        .expect_err("failed turns must not become empty summaries");
+
+        assert!(
+            error
+                .to_string()
+                .contains("configured model is unsupported")
+        );
     }
 
     #[test]

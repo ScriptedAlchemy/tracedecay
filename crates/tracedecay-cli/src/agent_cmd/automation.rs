@@ -49,7 +49,6 @@ pub(super) async fn install_codex_daemon_automation(
         enabled: Some(true),
         backend: Some(AutomationBackend::CodexAppServer),
         host_mode: Some(AutomationHostMode::Standalone),
-        model_id: Some(Some("gpt-5.6-mini".to_owned())),
         memory_curator: codex_daemon_interval_task(15 * 60),
         session_reflector: codex_daemon_interval_task(15 * 60),
         skill_writer: AutomationTaskPatch {
