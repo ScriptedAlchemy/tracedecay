@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::automation::artifacts::sha256_json;
 use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
 use crate::automation::config::AutomationConfig;
+use crate::automation::host_io::HostIo;
 use crate::automation::lifecycle::{
     AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunPublication,
     AutomationRunSettlementGuard, RetainedAutomationRun,
@@ -200,6 +201,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
     let sessions_db = project_automation_sessions(cg).await?;
     run_skill_writer_for_store_with_publication(
         SkillWriterStoreRuntime {
+            host_io: cg.host_io(),
             dashboard_root: cg.store_layout().dashboard_root.clone(),
             sessions_db,
             analytics_project_root: Some(cg.project_root()),
@@ -217,6 +219,7 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
 }
 
 pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
+    host_io: HostIo,
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
@@ -259,6 +262,7 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
         };
     run_skill_writer_for_store(
         SkillWriterStoreRuntime {
+            host_io,
             dashboard_root: user_automation_root(profile_root),
             sessions_db,
             analytics_project_root: None,
@@ -275,6 +279,7 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
 }
 
 pub(super) struct SkillWriterStoreRuntime<'a> {
+    pub(super) host_io: HostIo,
     pub(super) dashboard_root: PathBuf,
     pub(super) sessions_db: RegisteredGlobalDbLeaseV1,
     pub(super) analytics_project_root: Option<&'a Path>,
@@ -352,6 +357,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
             settlement_guard,
         } = publication;
         let SkillWriterStoreRuntime {
+            host_io,
             dashboard_root,
             sessions_db,
             analytics_project_root,
@@ -550,6 +556,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                 .await?;
         }
         let (report, record, committed_receipt) = match finalize_skill_writer_success(
+            &host_io,
             &finalizer,
             &profile_root,
             analytics_project_root,
@@ -640,6 +647,7 @@ fn skill_validation_repairs_summary(validation_repairs: &[Value]) -> Result<Valu
 }
 
 pub(super) async fn finalize_skill_writer_success(
+    host_io: &HostIo,
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
     project_root: Option<&std::path::Path>,
@@ -665,6 +673,7 @@ pub(super) async fn finalize_skill_writer_success(
     let curation_decision =
         evaluate_skill_curation(config, authority, evidence_hash.as_deref(), proposals)?;
     let proposal_outcome = validate_and_apply_skill_proposals(
+        host_io,
         profile_root,
         project_root,
         run_id,

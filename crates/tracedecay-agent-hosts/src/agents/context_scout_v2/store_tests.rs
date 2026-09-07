@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tokio::sync::Barrier;
 
 use super::*;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -429,6 +430,53 @@ async fn restart_generation_snapshot_includes_a_live_claim_without_requeueing_it
 }
 
 #[tokio::test]
+async fn concurrent_startups_discover_one_entry_but_only_one_claims_it() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let pending = entry(project_id, 5);
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+
+    let claim_boundary = Arc::new(Barrier::new(2));
+    let contender = |claim_lease| {
+        let store = Arc::clone(&store);
+        let pending = pending.clone();
+        let claim_boundary = Arc::clone(&claim_boundary);
+        async move {
+            assert_eq!(
+                store.startup(UtcMicros(10), 8).await,
+                ContextScoutDurableStartupOutcomeV1::Ready {
+                    entries: vec![pending.clone()],
+                    truncated: false,
+                }
+            );
+            claim_boundary.wait().await;
+            store
+                .claim(pending.work.address, UtcMicros(10), claim_lease)
+                .await
+        }
+    };
+    let (first, second) = tokio::join!(contender(lease(47, 50)), contender(lease(48, 50)));
+    assert!(
+        matches!(
+            (&first, &second),
+            (
+                ContextScoutDurableClaimOutcomeV1::Claimed(_),
+                ContextScoutDurableClaimOutcomeV1::Empty,
+            ) | (
+                ContextScoutDurableClaimOutcomeV1::Empty,
+                ContextScoutDurableClaimOutcomeV1::Claimed(_),
+            )
+        ),
+        "discovery must yield one durable claim and one typed empty outcome: {first:?}, {second:?}"
+    );
+}
+
+#[tokio::test]
 async fn older_work_generation_cannot_replace_newer_durable_entry() {
     let (_temporary, database) = database().await;
     let project_id = [8; 16];
@@ -683,4 +731,106 @@ async fn cancellation_tombstone_blocks_stale_generation_but_allows_newer_work() 
         }
     );
     assert!(Arc::strong_count(&store) >= 1);
+}
+
+/// `1be14bdaa` lets startup answer from the read path when the reconciliation
+/// would change nothing, so startup no longer takes the exclusive writer lane
+/// to *discover* work. Discovery is not acquisition: two routes starting
+/// concurrently both see the same unclaimed entry, and exactly one of them
+/// converts that sighting into a durable claim.
+#[tokio::test]
+async fn concurrent_read_first_startups_discover_one_entry_and_claim_it_once() {
+    let (_temporary, database) = database().await;
+    let project_id = [9; 16];
+    let pending = {
+        let store =
+            ProjectContextScoutDurableStoreV1::from_project_database(database.clone(), project_id)
+                .expect("owned project store");
+        let pending = entry(project_id, 1);
+        assert_eq!(
+            store.enqueue(pending.clone()).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        pending
+    };
+
+    // Nothing has expired, so both startups take the read-first path.
+    let (left, right) = tokio::join!(
+        ProjectContextScoutDurableStoreV1::startup_from_project_database(
+            database.clone(),
+            project_id,
+            UtcMicros(10),
+            8,
+        ),
+        ProjectContextScoutDurableStoreV1::startup_from_project_database(
+            database.clone(),
+            project_id,
+            UtcMicros(10),
+            8,
+        ),
+    );
+    let (left_store, left_startup) = left.expect("left startup");
+    let (right_store, right_startup) = right.expect("right startup");
+    for (side, startup) in [("left", &left_startup), ("right", &right_startup)] {
+        let ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated } = startup else {
+            panic!("{side} startup must be ready, got {startup:?}");
+        };
+        assert_eq!(
+            entries,
+            &vec![pending.clone()],
+            "{side} startup must discover the unclaimed entry"
+        );
+        assert!(!truncated, "{side} startup page must not be truncated");
+    }
+
+    // Both saw it; only one may own it.
+    let (left_claim, right_claim) = tokio::join!(
+        left_store.claim(pending.work.address, UtcMicros(11), lease(31, 40)),
+        right_store.claim(pending.work.address, UtcMicros(11), lease(32, 40)),
+    );
+    let outcomes = [&left_claim, &right_claim];
+    let claimed = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, ContextScoutDurableClaimOutcomeV1::Claimed(_)))
+        .count();
+    assert_eq!(
+        claimed, 1,
+        "exactly one concurrent startup may hold the durable claim: \
+         left={left_claim:?} right={right_claim:?}"
+    );
+    let empty = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, ContextScoutDurableClaimOutcomeV1::Empty))
+        .count();
+    assert_eq!(
+        empty, 1,
+        "the losing startup must be told the entry is taken, not that the store is \
+         unavailable: left={left_claim:?} right={right_claim:?}"
+    );
+    let ContextScoutDurableClaimOutcomeV1::Claimed(winner) = outcomes
+        .iter()
+        .find(|outcome| matches!(outcome, ContextScoutDurableClaimOutcomeV1::Claimed(_)))
+        .expect("one winner")
+    else {
+        unreachable!()
+    };
+    assert_eq!(winner.entry, pending);
+
+    // The durable state agrees: a third startup finds nothing unclaimed.
+    let (_third, third_startup) = ProjectContextScoutDurableStoreV1::startup_from_project_database(
+        database,
+        project_id,
+        UtcMicros(12),
+        8,
+    )
+    .await
+    .expect("third startup");
+    assert_eq!(
+        third_startup,
+        ContextScoutDurableStartupOutcomeV1::Ready {
+            entries: Vec::new(),
+            truncated: false,
+        },
+        "the claimed entry must not be offered again before its lease expires"
+    );
 }

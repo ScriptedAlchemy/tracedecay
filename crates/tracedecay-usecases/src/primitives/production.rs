@@ -1275,12 +1275,30 @@ fn update_storage_status_history(
     database_bytes: u64,
     observed_at: i64,
 ) -> (Vec<StorageStatusHistoryPointV1>, String) {
-    // The lock serializes the read-modify-write of one history file, but it is
-    // process-global: every project's storage-status read funnels through it.
-    // A blocking acquire let one stalled write convoy every concurrent status
-    // read daemon-wide, so contention degrades to the current sample as a
-    // typed bounded state instead of waiting.
-    let _guard = match storage_status_history_lock().try_lock() {
+    update_storage_status_history_with_lock(
+        storage_status_history_lock(),
+        history_path,
+        project_id,
+        store_path,
+        database_bytes,
+        observed_at,
+    )
+}
+
+fn update_storage_status_history_with_lock(
+    history_lock: &Mutex<()>,
+    history_path: &Path,
+    project_id: Option<String>,
+    store_path: String,
+    database_bytes: u64,
+    observed_at: i64,
+) -> (Vec<StorageStatusHistoryPointV1>, String) {
+    // The production lock serializes the read-modify-write of one history
+    // file, but is process-global: every project's storage-status read funnels
+    // through it. A blocking acquire let one stalled write convoy every
+    // concurrent status read daemon-wide, so contention degrades to the
+    // current sample as a typed bounded state instead of waiting.
+    let _guard = match history_lock.try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::WouldBlock) => {
             return (
@@ -3825,10 +3843,12 @@ mod affected_tests_tests {
     fn storage_status_history_is_reloaded_from_durable_scope_file() {
         let directory = tempfile::tempdir().expect("history tempdir");
         let history_path = directory.path().join("storage-status-history-v1.json");
+        let history_lock = Mutex::new(());
         let project_id = Some("project.storage-status".to_owned());
         let store_path = "/project/.tracedecay/graph.db".to_owned();
 
-        let (first, first_coverage) = update_storage_status_history(
+        let (first, first_coverage) = update_storage_status_history_with_lock(
+            &history_lock,
             &history_path,
             project_id.clone(),
             store_path.clone(),
@@ -3839,8 +3859,14 @@ mod affected_tests_tests {
         assert_eq!(first_coverage, "durable_project_store_history");
         assert!(history_path.is_file());
 
-        let (second, second_coverage) =
-            update_storage_status_history(&history_path, project_id, store_path, 8192, 2);
+        let (second, second_coverage) = update_storage_status_history_with_lock(
+            &history_lock,
+            &history_path,
+            project_id,
+            store_path,
+            8192,
+            2,
+        );
         assert_eq!(second.len(), 2);
         assert_eq!(second[0].database_bytes, 4096);
         assert_eq!(second[1].database_bytes, 8192);
@@ -3851,17 +3877,20 @@ mod affected_tests_tests {
     fn storage_status_history_records_changes_not_reads() {
         let directory = tempfile::tempdir().expect("history tempdir");
         let history_path = directory.path().join("storage-status-history-v1.json");
+        let history_lock = Mutex::new(());
         let project_id = Some("project.storage-status".to_owned());
         let store_path = "/project/.tracedecay/graph.db".to_owned();
 
-        let (first, _) = update_storage_status_history(
+        let (first, _) = update_storage_status_history_with_lock(
+            &history_lock,
             &history_path,
             project_id.clone(),
             store_path.clone(),
             4096,
             1,
         );
-        let (repeated, repeated_coverage) = update_storage_status_history(
+        let (repeated, repeated_coverage) = update_storage_status_history_with_lock(
+            &history_lock,
             &history_path,
             project_id.clone(),
             store_path.clone(),
@@ -3874,8 +3903,14 @@ mod affected_tests_tests {
         assert_eq!(repeated[0].observed_at, 1);
         assert_eq!(repeated_coverage, "durable_project_store_history");
 
-        let (changed, _) =
-            update_storage_status_history(&history_path, project_id, store_path, 8192, 3);
+        let (changed, _) = update_storage_status_history_with_lock(
+            &history_lock,
+            &history_path,
+            project_id,
+            store_path,
+            8192,
+            3,
+        );
         assert_eq!(changed.len(), 2);
         assert_eq!(changed[1].database_bytes, 8192);
         assert_eq!(changed[1].observed_at, 3);
@@ -3886,17 +3921,21 @@ mod affected_tests_tests {
     /// bounded state; the prior blocking acquire convoyed every concurrent
     /// status read behind one stalled history write, which is how a metadata
     /// status tool timed out its admitted deadline on a busy profile.
+    ///
+    /// The fixture owns its lock explicitly so it cannot place an unrelated
+    /// history test into the production singleton's contended state.
     #[test]
     fn storage_status_history_lock_contention_is_a_typed_bounded_state() {
         let directory = tempfile::tempdir().expect("history tempdir");
         let history_path = directory.path().join("storage-status-history-v1.json");
+        let history_lock = Arc::new(Mutex::new(()));
 
-        let held = storage_status_history_lock()
-            .lock()
-            .expect("hold the global history lock");
+        let held = history_lock.lock().expect("hold the fixture history lock");
+        let reader_lock = Arc::clone(&history_lock);
         let (result_sender, result_receiver) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
-            let result = update_storage_status_history(
+            let result = update_storage_status_history_with_lock(
+                &reader_lock,
                 &history_path,
                 Some("project.storage-status".to_owned()),
                 "/project/.tracedecay/graph.db".to_owned(),
@@ -3947,9 +3986,11 @@ mod affected_tests_tests {
     fn invalid_storage_status_history_is_reset_without_claiming_full_history() {
         let directory = tempfile::tempdir().expect("history tempdir");
         let history_path = directory.path().join("storage-status-history-v1.json");
+        let history_lock = Mutex::new(());
         std::fs::write(&history_path, b"{not-json").expect("invalid history");
 
-        let (history, coverage) = update_storage_status_history(
+        let (history, coverage) = update_storage_status_history_with_lock(
+            &history_lock,
             &history_path,
             Some("project.storage-status".to_owned()),
             "/project/.tracedecay/graph.db".to_owned(),

@@ -100,7 +100,7 @@ impl Default for HermesSkillBridgeContracts {
 pub fn load_standard_hermes_skill_bridge(
     options: HermesSkillBridgeOptions,
 ) -> Result<HermesSkillBridgeSnapshot> {
-    let user_home = crate::agents::home_dir().ok_or_else(|| {
+    let user_home = super::host_io::home_dir().ok_or_else(|| {
         config_error("could not determine the user home for Hermes skill inventory")
     })?;
     load_standard_hermes_skill_bridge_from_user_home(&user_home, options)

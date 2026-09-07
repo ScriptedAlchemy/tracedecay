@@ -335,6 +335,7 @@ async fn projectless_skill_writer_uses_user_ledger() {
     );
 
     let run = run_user_skill_writer_with_backend_and_retrieval(
+        crate::automation::host_io::plain_file_host_io(),
         &harness.profile_root,
         Arc::clone(&harness.registry),
         &enabled_user_config(),
@@ -394,6 +395,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
         .await
         .expect("rejected reflector");
         let skill = run_user_skill_writer_with_backend_and_retrieval(
+            crate::automation::host_io::plain_file_host_io(),
             &harness.profile_root,
             Arc::clone(&harness.registry),
             &config,
@@ -433,6 +435,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
     .await
     .expect("empty reflector");
     let skill = run_user_skill_writer_with_backend_and_retrieval(
+        crate::automation::host_io::plain_file_host_io(),
         &harness.profile_root,
         Arc::clone(&harness.registry),
         &config,

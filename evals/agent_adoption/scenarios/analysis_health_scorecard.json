@@ -27,7 +27,8 @@
   "notes": "health scorecard; the compute_total/compute_grand_total duplication should surface in the redundancy dimension.",
   "expected_skill": "code-health",
   "allowed_skills": [
-    "code-health"
+    "code-health",
+    "check-health"
   ],
   "max_tracedecay_calls": 5
 }

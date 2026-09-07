@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use tempfile::tempdir;
 use tokio::sync::Barrier;
+use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 use tracedecay_automation_runtime::automation::run_ledger::{
@@ -85,15 +88,16 @@ async fn run_ledger_appends_jsonl_under_dashboard_root() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_ledger_keeps_concurrent_jsonl_writes_intact() {
     let temp = tempdir().unwrap();
-    let dashboard_root = std::sync::Arc::new(temp.path().join("dashboard"));
+    let dashboard_root = Arc::new(temp.path().join("dashboard"));
+    PrivateStoreIo::create_dir_all_durable(&dashboard_root).unwrap();
     let writers = 8;
     let lines_per_writer = 50;
-    let barrier = std::sync::Arc::new(Barrier::new(writers));
+    let barrier = Arc::new(Barrier::new(writers));
     let mut handles = Vec::new();
 
     for writer in 0..writers {
-        let dashboard_root = std::sync::Arc::clone(&dashboard_root);
-        let barrier = std::sync::Arc::clone(&barrier);
+        let dashboard_root = Arc::clone(&dashboard_root);
+        let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
             for line in 0..lines_per_writer {

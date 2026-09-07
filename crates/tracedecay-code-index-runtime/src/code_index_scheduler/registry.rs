@@ -521,6 +521,14 @@ pub struct CodeIndexServingScopeV1 {
     pub serving_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
 }
 
+/// Mounted scope identity without consulting either serving-generation seat.
+#[derive(Clone)]
+pub struct CodeIndexMountedScopeV1 {
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub shutting_down: Arc<AtomicBool>,
+}
+
 /// Outcome of retiring the retained generation from a failed branch
 /// publication. A no-match preserves a newer generation that won the race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4643,8 +4651,8 @@ impl CodeIndexSchedulerRegistryV1 {
         commit_prepared: impl FnOnce() -> Result<(), String>,
         prepared: crate::ports::PreparedQueryActivationViewV1,
         semantic_authority: Option<Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>>,
-        prepared_cache: Option<
-            tracedecay_usecases::semantic_runtime::PreparedProductionSemanticCacheCommitV1,
+        prepared_runtime: Option<
+            tracedecay_usecases::semantic_runtime::PreparedProductionSemanticRuntimeCommitV1,
         >,
         disabled_cache_generation: Option<&tracedecay_domain::VectorGenerationIdV1>,
         prepared_redundancy: tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
@@ -4687,8 +4695,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 "prepared query activation attempt is no longer desired".to_owned(),
             ));
         }
-        if let Some(prepared_cache) = prepared_cache {
-            if !prepared_cache.commit() {
+        if let Some(prepared_runtime) = prepared_runtime {
+            if !prepared_runtime.commit() {
                 if !attempt.preserves_existing_authority {
                     worktree.semantic_query_authority = None;
                     worktree.query_activation_revision =
@@ -4700,7 +4708,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     );
                 }
                 return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "prepared semantic cache became stale before coherent installation".to_owned(),
+                    "prepared semantic runtime became stale before coherent installation"
+                        .to_owned(),
                 ));
             }
         } else if semantic_authority.is_none()
@@ -5044,49 +5053,15 @@ impl CodeIndexSchedulerRegistryV1 {
         })
     }
 
-    /// The code generation this scope is currently serving.
-    ///
-    /// One selection, owned by the scheduler, for every caller that needs the
-    /// generation queries pin: the seated serving generation when the graph
-    /// seat exists, otherwise the durable publication the text owner serves
-    /// through the same scope-checked freshness ladder queries use. A quietly
-    /// remounted partitioned generation deliberately leaves the graph seat
-    /// empty forever while exact/lexical keep serving from the text owner, so
-    /// consulting only the seat would defer forever. Historical generations
-    /// are never resolved here: `None` means neither seat is available yet,
-    /// which callers must treat as deferred, not as a mismatch.
-    pub async fn current_serving_generation_for_scope(
-        &self,
-        project_root: &Path,
-        scope: &tracedecay_application::ResolvedScope,
-    ) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
-        if let Some(seated) = self
-            .serving_code_scope(project_root)
-            .await
-            .and_then(|serving| serving.serving_generation)
-        {
-            return Some(seated);
-        }
-        let text = self.latest_text_fresh_for_scope(scope).await?;
-        let generation_id = text.metadata().manifest().generation_id.clone();
-        match self
-            .published_generation(project_root, &generation_id)
-            .await
-        {
-            Some(Ok(generation)) => generation,
-            Some(Err(error)) => {
-                tracing::warn!(
-                    event = "code_index_serving_generation",
-                    outcome = "unreadable",
-                    error = %error,
-                    project_root = %project_root.display(),
-                    generation = %generation_id,
-                    "the text-serving generation could not be read from the durable store"
-                );
-                None
-            }
-            None => None,
-        }
+    pub async fn mounted_code_scope(&self, project_root: &Path) -> Option<CodeIndexMountedScopeV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root)?;
+        Some(CodeIndexMountedScopeV1 {
+            repository_id: worktree.repository_id.clone(),
+            worktree_id: worktree.worktree_id.clone(),
+            shutting_down: Arc::clone(&worktree.shutting_down),
+        })
     }
 
     #[hotpath::measure(label = "daemon.code_index.registry.install_semantic", future = true)]
