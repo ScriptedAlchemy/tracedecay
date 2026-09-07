@@ -93,6 +93,7 @@ use tracedecay_runtime_core::resident_memory::{
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod noop_reconcile_tests;
+mod search_permit_release;
 mod semantic_schedule_order_tests;
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
@@ -4667,6 +4668,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
             .expect("lexical score domain"),
             budget: base.budget,
             base,
+            control: &ReadySemanticControlV1,
         })
         .expect("lexical retrieval over the reopened artifact");
     let RetrieverOutcome::Complete(lexical_batch) = lexical else {

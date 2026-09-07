@@ -864,6 +864,16 @@ where
                             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
                             "exact_cursor_mismatch",
                         ),
+                        // A lane that observed the request control mid-scan
+                        // unwound cooperatively; `search_terminated` above
+                        // normally names the precise reason first, so this
+                        // only keeps the typed state when it did not.
+                        QuerySearchExecutionErrorV1::Retrieval(
+                            tracedecay_query::retrieval::RetrievalPortError::Cancelled,
+                        ) => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::Cancelled,
+                            code_search::CodeIndexSearchUnavailableReasonV1::Cancelled.as_str(),
+                        ),
                         QuerySearchExecutionErrorV1::InvalidScope(_)
                         | QuerySearchExecutionErrorV1::InvalidPolicy(_) => (
                             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,

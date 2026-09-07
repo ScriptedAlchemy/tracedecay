@@ -66,6 +66,7 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever,
 };
+use tracedecay_query::retrieval::graph::GraphExecutionControl;
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
@@ -468,6 +469,16 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
+    }
+}
+
+impl GraphExecutionControl for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
     }
 }
 
@@ -969,6 +980,7 @@ where
                 lexical_profile_revision: prototype.lexical_profile_revision.clone(),
                 score_domain: prototype.lexical_score_domain.clone(),
                 budget: request.budget,
+                control: &ActiveControl,
             })
             .map_err(|error| format!("lexical lane {class}: {error}"))?;
         let lexical_wall = lexical_started.elapsed();

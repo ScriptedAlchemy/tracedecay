@@ -49,6 +49,7 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever, ExactLiteralV1,
 };
+use tracedecay_query::retrieval::graph::GraphExecutionControl;
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
@@ -62,8 +63,25 @@ use tracedecay_query::retrieval::lexical::{
     MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
     VerifiedCodeLexicalArtifactV1,
 };
-use tracedecay_query::retrieval::ports::{ExactTermPostingReadPort, LexicalPostingReadPort};
+use tracedecay_query::retrieval::ports::{
+    ExactTermPostingReadPort, LexicalPostingReadPort, RetrievalPortError,
+};
 use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1};
+
+/// The request authority every uncancelled fixture request runs under.
+pub(crate) struct FixtureGraphExecutionControl;
+
+impl GraphExecutionControl for FixtureGraphExecutionControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
+pub(crate) static ACTIVE_CONTROL: FixtureGraphExecutionControl = FixtureGraphExecutionControl;
 
 struct ArtifactControl {
     cancelled: bool,
@@ -216,6 +234,24 @@ impl CancelAtObservation {
             cancellation_observation,
             observations: AtomicUsize::new(0),
         }
+    }
+
+    /// How many times the controlled operation consulted this authority.
+    fn observations(&self) -> usize {
+        self.observations.load(Ordering::SeqCst)
+    }
+}
+
+/// The same cancel-at-observation semantics for lane-level request control:
+/// the `cancellation_observation`-th consultation and every later one report
+/// cancellation.
+impl GraphExecutionControl for CancelAtObservation {
+    fn is_cancelled(&self) -> bool {
+        CodeIndexExecutionControlV1::is_cancelled(self)
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
     }
 }
 
@@ -1252,6 +1288,100 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         .retrieve_lexical(&request)
         .expect("one-shot lexical query");
     assert_eq!(artifact, expected);
+}
+
+/// The lexical row scan is cooperatively cancellable on both production
+/// row sources. Over a real multi-file corpus whose every chunk matches the
+/// query, a request cancelled after its `k`-th control consultation unwinds
+/// with the typed cancellation error and stops consulting the control at that
+/// checkpoint — far short of the candidate set — while the same request under
+/// an active control completes, agrees byte-for-byte between the sealed
+/// artifact and the in-memory projection, and is stable across runs.
+#[test]
+fn lexical_scan_cancellation_unwinds_artifact_and_in_memory_sources_before_completion() {
+    let fixture = real_lexical_source_fixture_with_files(24);
+    let (pages, source_receipt) = drain_verified_pages(&fixture, 128);
+    let metadata = fixture.metadata.clone();
+    let chunks = pages
+        .iter()
+        .flat_map(|page| page.chunks().iter().cloned())
+        .collect::<Vec<_>>();
+    let in_memory = LexicalLane::new(
+        CodeLexicalProjectionAdapterV1::new_admitted(
+            metadata.clone(),
+            chunks,
+            page_symbol_qualified_names(&pages),
+        )
+        .expect("in-memory lexical projection"),
+    );
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let artifact_path = directory.path().join("cancellable-lexical.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata).expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    let artifact = LexicalLane::new(
+        CodeLexicalArtifactReaderV1::open_with_control(
+            &artifact_path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        )
+        .expect("reopen sealed artifact"),
+    );
+
+    fn widget_request<'a>(
+        generation: &CodeGenerationId,
+        control: &'a dyn GraphExecutionControl,
+    ) -> LexicalLaneRequest<'a> {
+        let mut request = lexical_request("widget", &["widget"], &[], &[], 0, 64);
+        request.generation = generation.clone();
+        request.control = control;
+        request
+    }
+    let generation = verified.generation();
+    let request = widget_request(generation, &ACTIVE_CONTROL);
+
+    let artifact_complete = artifact
+        .retrieve_lexical(&request)
+        .expect("uncancelled artifact scan completes");
+    let in_memory_complete = in_memory
+        .retrieve_lexical(&request)
+        .expect("uncancelled in-memory scan completes");
+    assert_eq!(artifact_complete, in_memory_complete);
+    let candidates = complete(artifact_complete.clone()).candidates.len();
+    assert!(
+        candidates >= 24,
+        "every fixture file must contribute a matching row, got {candidates}"
+    );
+    assert_eq!(
+        artifact
+            .retrieve_lexical(&request)
+            .expect("repeated uncancelled artifact scan"),
+        artifact_complete,
+        "an active control leaves the ranked result deterministic across runs"
+    );
+
+    let cancel_at = 6;
+    let lanes: [(&dyn LexicalLaneRetriever, &str); 2] =
+        [(&artifact, "artifact"), (&in_memory, "in-memory")];
+    for (lane, source) in lanes {
+        let cancelled = CancelAtObservation::new(cancel_at);
+        assert_eq!(
+            lane.retrieve_lexical(&widget_request(generation, &cancelled)),
+            Err(RetrievalPortError::Cancelled),
+            "{source}: a cancelled scan unwinds with the typed cancellation error"
+        );
+        assert_eq!(
+            cancelled.observations(),
+            cancel_at,
+            "{source}: the scan stops at the cancelling checkpoint instead of visiting the \
+             remaining {candidates} candidates"
+        );
+    }
 }
 
 /// Regression: a qualified-symbol query is one whole technical token, and no
@@ -5224,6 +5354,7 @@ pub(crate) fn lexical_request(
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(QUERY_LEXICAL_SCORE_DOMAIN_V1),
         budget: budget(max_candidates),
+        control: &ACTIVE_CONTROL,
     }
 }
 

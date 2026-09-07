@@ -17,6 +17,7 @@ use tracedecay_domain::{
     RetrieverOutcome, ScoreDomainId, split_subtokens, technical_tokens,
 };
 
+use super::graph::GraphExecutionControl;
 use super::ports::{
     CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
     RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest, contract_error,
@@ -197,7 +198,6 @@ pub struct LexicalFieldFilterV1 {
 
 /// Typed lexical-lane request for identifier, phrase, token, field, and
 /// bounded fuzzy retrieval.
-#[derive(Debug, PartialEq, Eq)]
 pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
@@ -212,6 +212,29 @@ pub struct LexicalLaneRequest<'a> {
     pub lexical_profile_revision: ComponentRevision,
     pub score_domain: ScoreDomainId,
     pub budget: RetrievalBudget,
+    /// The live request authority the lane consults between bounded units of
+    /// row work ([`lexical_checkpoint`]). The candidate-source bound keeps one
+    /// request's hydration finite, but a caller that has already settled —
+    /// cancelled, past its deadline, or revoked — must not keep the shared
+    /// search execution permit occupied while the remaining rows decode and
+    /// score. Cancellation unwinds the scan with
+    /// [`RetrievalPortError::Cancelled`] instead of an empty or partial batch.
+    pub control: &'a dyn GraphExecutionControl,
+}
+
+/// The lexical lane's cooperative cancellation checkpoint.
+///
+/// Called before each candidate row is decoded and scored, and between the
+/// scan's phases, so cancellation performs at most one further row visit
+/// after the signal. An uncancelled request never observes it, which keeps
+/// candidate order, evidence, and coverage identical to an unchecked scan.
+pub(crate) fn lexical_checkpoint(
+    control: &dyn GraphExecutionControl,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        return Err(RetrievalPortError::Cancelled);
+    }
+    Ok(())
 }
 
 /// Per-occurrence lexical-lane evidence with its field score breakdown.
@@ -503,6 +526,7 @@ where
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
+        lexical_checkpoint(request.control)?;
         let outcome = match self.postings.read_lexical_postings(request) {
             Ok(outcome) => outcome,
             // A missing lexical authority rejects the request as a typed

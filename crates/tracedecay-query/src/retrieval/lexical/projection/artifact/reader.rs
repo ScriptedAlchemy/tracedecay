@@ -41,6 +41,7 @@ use super::{
     sqlite_corrupt, sqlite_error,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
+use crate::retrieval::graph::GraphExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
     RetrievalPortError, contract_error, lane_candidate_cap,
@@ -56,7 +57,7 @@ use super::super::{
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
     MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
-    field_admitted,
+    field_admitted, lexical_checkpoint,
 };
 
 #[derive(Clone)]
@@ -932,12 +933,17 @@ fn visit_document_ids(
 /// Stream each candidate row with all request-relevant term frequencies from
 /// one SQLite statement. The correlated posting lookup seeks the maintained
 /// document index; it never emits the row BLOB once per matching term.
+///
+/// `control` is consulted before every row leaves SQLite, so a cancelled or
+/// expired request stops after the row already stepped instead of decoding
+/// and scoring the rest of its admitted candidate set.
 fn visit_lexical_rows(
     connection: &Connection,
     documents: &DocumentQueryV1,
     terms: &BTreeSet<String>,
     metrics: &ArtifactQueryMetricsV1,
     layout: LexicalArtifactLayoutV1,
+    control: &dyn GraphExecutionControl,
     mut visitor: impl FnMut(
         u32,
         String,
@@ -1033,6 +1039,7 @@ fn visit_lexical_rows(
             .map_err(map_query_sql_error)?;
         let mut visited = 0u64;
         while let Some(row) = rows.next().map_err(map_query_sql_error)? {
+            lexical_checkpoint(control)?;
             let document = u32::try_from(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
                 .map_err(contract_error)?;
             let chunk_id: String = row.get(1).map_err(map_query_sql_error)?;
@@ -1084,9 +1091,9 @@ const ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1: usize = 16;
 /// the larger build-time limit of a particular linked SQLite library.
 const ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1: usize = 999;
 /// Caps request-projected text/blob input, and therefore the largest
-/// request-relevant frequency aggregate SQLite can return as one row. Live
-/// cancellation belongs above this read-port boundary, so the port keeps each
-/// individual SQLite call deterministically bounded instead.
+/// request-relevant frequency aggregate SQLite can return as one row. The
+/// lexical row stream checks the request control between rows, never inside
+/// one SQLite call, so each individual call stays deterministically bounded.
 const ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1: usize =
     ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1 * MAX_LEXICAL_QUERY_TERM_BYTES_V1;
 /// A phrase prefilter may legitimately name more documents than request text
@@ -1095,9 +1102,10 @@ const ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1: usize =
 const ARTIFACT_NGRAM_CANDIDATE_JSON_BYTES_V1: usize =
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / 8;
 /// Bitmap queries may inspect only this many source-page shards per port call.
-/// The read port carries no execution-control handle, so this fixed work bound
-/// is the cancellation/deadline yield authority before control returns to the
-/// caller. A 4 KiB work unit leaves authority for blob decode and intersection.
+/// The n-gram prefilter has no per-shard checkpoint, so this fixed work bound
+/// is what keeps one prefilter finite before the row stream's per-row
+/// cancellation checkpoints take over. A 4 KiB work unit leaves authority for
+/// blob decode and intersection.
 const ARTIFACT_NGRAM_QUERY_MAX_SHARDS_V1: usize =
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / (4 * 1024);
 /// One encoded source-page shard is retained only while it is decoded and
@@ -1482,10 +1490,12 @@ impl<'a> ArtifactQueryV1<'a> {
         &self,
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
+        let control = request.control;
         let fuzzy = self.fuzzy_expansions(request)?;
         let prepared = PreparedLexicalQueryV1::new(request);
         let terms = lexical_terms(&prepared, &fuzzy);
         let stats = self.lexical_stats(&terms)?;
+        lexical_checkpoint(control)?;
         let mut phrase_queries = BTreeMap::new();
         for (_, normalized) in &prepared.phrases {
             let query = ngram_document_query(
@@ -1509,6 +1519,7 @@ impl<'a> ArtifactQueryV1<'a> {
             &BTreeSet::new(),
             &self.metrics,
             self.layout,
+            control,
             |_, chunk_id, bytes, _| {
                 let row =
                     decode_artifact_row(self.layout, self.receipt.generation(), &chunk_id, &bytes)
@@ -1535,6 +1546,7 @@ impl<'a> ArtifactQueryV1<'a> {
             &terms,
             &self.metrics,
             self.layout,
+            control,
             |document, chunk_id, bytes, frequencies| {
                 let row =
                     decode_artifact_row(self.layout, self.receipt.generation(), &chunk_id, &bytes)
@@ -2891,6 +2903,8 @@ mod tests {
         ngram_document_query, query_ngrams, retain_bounded, term_frequency, union_document_queries,
         visit_document_ids, visit_lexical_rows,
     };
+    use crate::retrieval::graph::GraphExecutionControl;
+    use crate::retrieval::ports::RetrievalPortError;
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
     struct AlwaysActiveControl;
@@ -2902,6 +2916,46 @@ mod tests {
 
         fn is_deadline_exceeded(&self) -> bool {
             false
+        }
+    }
+
+    impl GraphExecutionControl for AlwaysActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn elapsed_micros(&self) -> u64 {
+            0
+        }
+    }
+
+    /// A request authority that reports cancellation from its `cancel_at`-th
+    /// consultation onwards, counting every consultation it receives.
+    struct CancelAtObservation {
+        observations: AtomicUsize,
+        cancel_at: usize,
+    }
+
+    impl CancelAtObservation {
+        fn new(cancel_at: usize) -> Self {
+            Self {
+                observations: AtomicUsize::new(0),
+                cancel_at,
+            }
+        }
+
+        fn observations(&self) -> usize {
+            self.observations.load(Ordering::SeqCst)
+        }
+    }
+
+    impl GraphExecutionControl for CancelAtObservation {
+        fn is_cancelled(&self) -> bool {
+            self.observations.fetch_add(1, Ordering::SeqCst) + 1 >= self.cancel_at
+        }
+
+        fn elapsed_micros(&self) -> u64 {
+            0
         }
     }
 
@@ -3614,8 +3668,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn lexical_row_stream_batches_term_frequencies_in_one_indexed_probe_at_scale() {
+    /// A V10 row/posting fixture where every one of `documents` rows matches
+    /// the term `alpha` (frequency `document % 3 + 1`) plus one irrelevant
+    /// posting, returned with the encoded body-text field it was built under.
+    fn lexical_row_stream_fixture(documents: i64) -> (Connection, String) {
         let connection = Connection::open_in_memory().expect("in-memory SQLite");
         connection
             .execute_batch(
@@ -3637,7 +3693,7 @@ mod tests {
             .expect("lexical row fixture schema");
         let field =
             super::encode_field(super::LexicalFieldV1::BodyText).expect("encoded lexical field");
-        for document in 0..2_048i64 {
+        for document in 0..documents {
             connection
                 .execute(
                     "INSERT INTO rows(document_id, chunk_id, row) VALUES (?1, ?2, ?3)",
@@ -3661,6 +3717,66 @@ mod tests {
                 )
                 .expect("irrelevant posting");
         }
+        (connection, field)
+    }
+
+    /// Cancellation reaches the row stream between rows: a request cancelled
+    /// after `k` consultations decodes exactly `k - 1` rows, unwinds with the
+    /// typed cancellation error, and never visits the remaining candidates.
+    /// The same stream under an active control visits every row, so the
+    /// checkpoint changes nothing for an uncancelled request.
+    #[test]
+    fn lexical_row_stream_unwinds_at_the_first_checkpoint_after_cancellation() {
+        let (connection, field) = lexical_row_stream_fixture(256);
+        let documents = DocumentQueryV1::term(field, "alpha".to_owned());
+        let terms = BTreeSet::from(["alpha".to_owned()]);
+
+        let control = CancelAtObservation::new(8);
+        let mut visited = 0usize;
+        let error = visit_lexical_rows(
+            &connection,
+            &documents,
+            &terms,
+            &ArtifactQueryMetricsV1::default(),
+            LexicalArtifactLayoutV1::V10,
+            &control,
+            |_, _, _, _| {
+                visited += 1;
+                Ok(())
+            },
+        )
+        .expect_err("a cancelled request must not stream to completion");
+        assert_eq!(error, RetrievalPortError::Cancelled);
+        assert_eq!(
+            visited, 7,
+            "every row before the cancelling checkpoint is visited and none after it"
+        );
+        assert_eq!(
+            control.observations(),
+            8,
+            "the stream stops consulting the control once it reports cancellation"
+        );
+
+        let mut complete = 0usize;
+        visit_lexical_rows(
+            &connection,
+            &documents,
+            &terms,
+            &ArtifactQueryMetricsV1::default(),
+            LexicalArtifactLayoutV1::V10,
+            &AlwaysActiveControl,
+            |_, _, _, _| {
+                complete += 1;
+                Ok(())
+            },
+        )
+        .expect("an uncancelled request streams every candidate row");
+        assert_eq!(complete, 256);
+    }
+
+    #[test]
+    fn lexical_row_stream_batches_term_frequencies_in_one_indexed_probe_at_scale() {
+        let (connection, field) = lexical_row_stream_fixture(2_048);
         let documents = DocumentQueryV1::term(field.clone(), "alpha".to_owned());
         let mut terms = (0..250)
             .map(|term| format!("absent-{term}"))
@@ -3676,6 +3792,7 @@ mod tests {
             &terms,
             &metrics,
             LexicalArtifactLayoutV1::V10,
+            &AlwaysActiveControl,
             |document, _chunk_id, row, frequencies| {
                 assert_eq!(row, document.to_le_bytes());
                 assert_eq!(
@@ -3729,6 +3846,7 @@ mod tests {
             &terms,
             &ArtifactQueryMetricsV1::default(),
             LexicalArtifactLayoutV1::V10,
+            &AlwaysActiveControl,
             |_, _, _, _| Ok(()),
         )
         .expect_err("combined document and term binds must be request-bounded");
@@ -3759,6 +3877,7 @@ mod tests {
             &terms,
             &ArtifactQueryMetricsV1::default(),
             LexicalArtifactLayoutV1::V10,
+            &AlwaysActiveControl,
             |_, _, _, _| Ok(()),
         )
         .expect_err("aggregate bound text must stay within a deterministic byte budget");
@@ -3882,6 +4001,7 @@ mod tests {
             &terms,
             &ArtifactQueryMetricsV1::default(),
             LexicalArtifactLayoutV1::V10,
+            &AlwaysActiveControl,
             |document, _, _, frequencies| {
                 v10_hits.push((
                     document,
@@ -3898,6 +4018,7 @@ mod tests {
             &terms,
             &ArtifactQueryMetricsV1::default(),
             LexicalArtifactLayoutV1::V11,
+            &AlwaysActiveControl,
             |document, _, _, frequencies| {
                 v11_hits.push((
                     document,
