@@ -836,6 +836,17 @@ fn systemd_socket_read_back_returns_none_for_unterminated_exec_start_quote() {
     );
 }
 
+/// Host-absolute fixture path: managed Remote Brain TLS paths must satisfy
+/// `Path::is_absolute`, which a bare `/etc/...` literal fails on Windows, and
+/// that refusal would pre-empt the property each test actually exercises.
+fn absolute_fixture_path(posix: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+    } else {
+        PathBuf::from(posix)
+    }
+}
+
 fn remote_tls_config(
     listen: &str,
     certificate_chain: impl Into<PathBuf>,
@@ -854,8 +865,8 @@ fn remote_tls_config(
 fn systemd_service_round_trips_remote_tls_listener_paths() {
     let remote_tls = remote_tls_config(
         "192.0.2.10:7443",
-        "/etc/trace decay/server%$\"chain\\part.pem",
-        "/etc/trace decay/server%$key.pem",
+        absolute_fixture_path("/etc/trace decay/server%$\"chain\\part.pem"),
+        absolute_fixture_path("/etc/trace decay/server%$key.pem"),
     );
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
@@ -896,8 +907,8 @@ fn managed_service_rejects_relative_remote_tls_paths() {
 fn managed_service_rejects_remote_tls_path_control_characters() {
     let remote_tls = remote_tls_config(
         "192.0.2.10:7443",
-        "/etc/tracedecay/server.pem\nEnvironment=INJECTED",
-        "/etc/tracedecay/server-key.pem",
+        absolute_fixture_path("/etc/tracedecay/server.pem\nEnvironment=INJECTED"),
+        absolute_fixture_path("/etc/tracedecay/server-key.pem"),
     );
 
     let error =

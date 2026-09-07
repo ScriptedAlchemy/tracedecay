@@ -23,6 +23,17 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
+/// Host-absolute fixture path: store locators require `Path::is_absolute`,
+/// which a bare `/...` literal fails on Windows, where the same fixture is
+/// spelled `C:\...`.
+pub(super) fn absolute_fixture_path(posix: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+    } else {
+        PathBuf::from(posix)
+    }
+}
+
 pub(super) fn incarnation() -> StoreIncarnationV1 {
     StoreIncarnationV1::new(1).unwrap()
 }
@@ -99,7 +110,7 @@ impl StoreRuntimeResolver for TestResolver {
         Box::pin(async move {
             Ok(ResolvedStoreLocator::new(
                 locator,
-                PathBuf::from(format!("/verified/{call}")),
+                absolute_fixture_path(&format!("/verified/{call}")),
             ))
         })
     }
@@ -115,7 +126,7 @@ impl StoreRuntimeResolver for TestResolver {
             key.incarnation,
             LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
-        let path = PathBuf::from(format!(
+        let path = absolute_fixture_path(&format!(
             "/verified/graph/{:?}/{}",
             key.shard_id.scope,
             key.incarnation.get()

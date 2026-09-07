@@ -25,8 +25,11 @@ pub(super) fn vscode_storage_root(
     home: &std::path::Path,
     extension_id: &str,
 ) -> std::path::PathBuf {
+    // Joined per component to match the source's native spelling; the task
+    // paths derived from this root are compared against stored cursor keys.
     tracedecay::agents::vscode_data_dir(home)
-        .join("User/globalStorage")
+        .join("User")
+        .join("globalStorage")
         .join(extension_id)
         .join("tasks")
 }
