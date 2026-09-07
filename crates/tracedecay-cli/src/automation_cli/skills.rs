@@ -143,6 +143,7 @@ fn deploy_skills_to_current_project(
         );
     Ok(
         tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project(
+            &tracedecay_agent_hosts::host_io(),
             profile_root,
             &project_root,
         ),
