@@ -105,7 +105,7 @@ impl DaemonLcmEffectService {
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         let result = self.compress_phases(request).await;
-        observe_compression_outcome(&result);
+        observe_compression_outcome(result.as_ref());
         result
     }
 
@@ -118,12 +118,7 @@ impl DaemonLcmEffectService {
         let result = self
             .compress_retained_phases(request, convergence_candidate)
             .await;
-        observe_compression_outcome(
-            &result
-                .as_ref()
-                .map(|bounded| bounded.response.clone())
-                .map_err(|error| (*error).clone()),
-        );
+        observe_compression_outcome(result.as_ref().map(|bounded| &bounded.response));
         result
     }
 
@@ -402,8 +397,9 @@ pub async fn lcm_session_boundary_for_test(
 
 /// Terminal compression outcomes for profiling, including deferrals and
 /// failures: a lane that only counts commits hides exactly the retried and
-/// cancelled work a compaction investigation needs to see.
-fn observe_compression_outcome(result: &Result<LcmCompressionResponse, LcmError>) {
+/// cancelled work a compaction investigation needs to see. Borrows the
+/// outcome so classifying a retained page never copies its response payload.
+fn observe_compression_outcome(result: Result<&LcmCompressionResponse, &LcmError>) {
     match result {
         Ok(response) if response.retry_status.is_some() => {
             hotpath::gauge!("daemon.lcm.compress.deferred").inc(1.0);
