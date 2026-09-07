@@ -1852,6 +1852,23 @@ impl GraphDb {
         Ok(())
     }
 
+    /// Stages a generation's rows in the shared staging database without
+    /// publishing it.
+    ///
+    /// This is the on-disk shape every sealed-replay code generation had
+    /// before generations sealed straight from their manifest: rows in the
+    /// staging container beside the sealed artifact the head serves from.
+    /// No current publication journey produces it, but databases that do
+    /// exist, and the release and recovery contracts over that shape stay
+    /// falsifiable only if tests can reach it.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn stage_generation_rows_unpublished(
+        &self,
+        manifest: std::sync::Arc<GraphGenerationManifest>,
+    ) -> Result<GraphCommit, GraphDbError> {
+        self.apply_generation_unverified(manifest, &|| Ok(()))
+    }
+
     /// Test surface for
     /// [`Self::release_sealed_generation_staging_rows_for_relational_head`].
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]

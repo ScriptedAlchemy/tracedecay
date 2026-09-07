@@ -202,6 +202,96 @@ fn publish_sealed(
         .unwrap()
 }
 
+/// Puts `manifest`'s rows in the shared staging database before it is
+/// published: the on-disk shape of every sealed-replay code generation
+/// published before generations sealed straight from their manifest. Release
+/// and recovery over those rows stay under contract through this fixture.
+fn stage_rows_before_publish(
+    registered: &RegisteredGraph,
+    root: &Path,
+    manifest: &GraphGenerationManifest,
+) {
+    registered
+        .registry
+        .resolve(registration(registered.binding.clone(), root))
+        .unwrap()
+        .stage_generation_rows_unpublished(Arc::new(manifest.clone()))
+        .unwrap();
+}
+
+/// A dependency-free sealed-replay generation seals straight from its
+/// manifest: no staging row is ever written for it, it is sealed-only from
+/// its first instant, and the release sweep has nothing to delete.
+///
+/// Fails if publication stages the rows first (counts come back `(2, 1)`),
+/// if the ledger still claims staging rows for it (`is_generation_sealed_only`
+/// false), or if the artifact does not serve reads and telemetry.
+#[test]
+fn dependency_free_sealed_head_seals_directly_without_staging_rows() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:direct", "code");
+    let manifest = rich_manifest(identity.clone(), "direct-g1", "direct");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:direct-g1",
+        None,
+        '0',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (0, 0)
+    );
+    assert!(
+        database
+            .is_generation_sealed_only(&manifest.identity())
+            .unwrap()
+    );
+    assert!(commit.snapshot.serves_from_sealed_store());
+    assert!(receipt_for_generation(temp.path(), "direct-g1").is_some());
+    assert_snapshot_reads(&commit.snapshot, &identity, "direct");
+    let telemetry = commit
+        .snapshot
+        .projection_telemetry(GraphProjectionTelemetryRequest {
+            namespace: identity.namespace.clone(),
+            projection: identity.projection.clone(),
+            cancellation: Arc::new(TestCancellation),
+        })
+        .unwrap()
+        .expect("sealed projection telemetry must resolve");
+    assert_eq!(telemetry.entity_count, 2);
+    assert_eq!(telemetry.relation_count, 1);
+
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap(),
+        SealedStagingRelease::AlreadyReleased
+    );
+    assert_snapshot_reads(&commit.snapshot, &identity, "direct");
+}
+
+/// A sealed head whose rows are already in the staging database (a database
+/// written before direct sealing) releases them once and keeps serving from
+/// the artifact.
 #[test]
 fn dependency_free_sealed_head_releases_staging_and_keeps_serving() {
     let temp = TempDir::new().unwrap();
@@ -217,6 +307,7 @@ fn dependency_free_sealed_head_releases_staging_and_keeps_serving() {
         None,
         '1',
     );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
     let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
     let database = registered
         .registry
@@ -227,6 +318,12 @@ fn dependency_free_sealed_head_releases_staging_and_keeps_serving() {
             .staging_generation_row_counts(&manifest.identity())
             .unwrap(),
         (2, 1)
+    );
+    assert!(
+        !database
+            .is_generation_sealed_only(&manifest.identity())
+            .unwrap(),
+        "a generation with staging rows must not be claimed sealed-only"
     );
 
     let (control, probe) = control_and_probe();
@@ -310,6 +407,7 @@ fn release_retains_rows_without_an_installed_sealed_store() {
         None,
         '2',
     );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
     let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
     let database = registered
         .registry
@@ -342,6 +440,11 @@ fn release_retains_rows_without_an_installed_sealed_store() {
     assert_snapshot_reads(&commit.snapshot, &manifest.projection, "retained");
 }
 
+/// A dependency-bearing generation stages through the shared database (its
+/// endpoints resolve against the base's staging rows), and release keeps its
+/// rows. The base carries staging rows here: a directly sealed base is
+/// sealed-only, and staging a dependent against it is the typed
+/// `require_exact_dependencies` conflict.
 #[test]
 fn release_retains_dependency_bearing_generation_rows() {
     let temp = TempDir::new().unwrap();
@@ -357,6 +460,7 @@ fn release_retains_dependency_bearing_generation_rows() {
         None,
         '3',
     );
+    stage_rows_before_publish(&registered, temp.path(), &base);
     publish_sealed(
         &registered,
         temp.path(),
@@ -436,22 +540,10 @@ fn missing_sealed_only_artifact_requires_reset_and_allows_republish() {
         .registry
         .resolve(registration(registered.binding.clone(), temp.path()))
         .unwrap();
-    let (control, probe) = control_and_probe();
-    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert_eq!(
-        registered
-            .registry
-            .release_sealed_generation_staging_rows(
-                registration(registered.binding.clone(), temp.path()),
-                &mut authority,
-                &context,
-                &record.publication.key.projection,
-            )
-            .unwrap(),
-        SealedStagingRelease::Released {
-            entities: 2,
-            relations: 1,
-        }
+    assert!(
+        database
+            .is_generation_sealed_only(&manifest.identity())
+            .unwrap()
     );
     drop(commit);
     database
@@ -930,23 +1022,6 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
         .registry
         .resolve(registration(registered.binding.clone(), temp.path()))
         .unwrap();
-    let (control, probe) = control_and_probe();
-    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    assert_eq!(
-        registered
-            .registry
-            .release_sealed_generation_staging_rows(
-                registration(registered.binding.clone(), temp.path()),
-                &mut authority,
-                &context,
-                &g1_record.publication.key.projection,
-            )
-            .unwrap(),
-        SealedStagingRelease::Released {
-            entities: 2,
-            relations: 1,
-        }
-    );
     assert!(database.is_generation_sealed_only(&g1.identity()).unwrap());
     drop(g1_commit);
 

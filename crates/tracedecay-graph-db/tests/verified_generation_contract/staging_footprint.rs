@@ -238,6 +238,21 @@ fn publish_sealed(
         .unwrap()
 }
 
+/// Puts `manifest`'s rows in the shared staging database before it is
+/// published: the on-disk shape of every sealed-replay code generation
+/// published before generations sealed straight from their manifest. A
+/// generation published this way keeps its staging rows until the release
+/// sweep deletes them, which is the footprint contract these tests pin.
+fn stage_rows_before_publish(
+    registered: &RegisteredGraph,
+    root: &Path,
+    manifest: &GraphGenerationManifest,
+) {
+    probe_lease(registered, root)
+        .stage_generation_rows_unpublished(Arc::new(manifest.clone()))
+        .unwrap();
+}
+
 /// Publishes one already-journaled replay, exactly as
 /// [`publish_sealed`] does but with no in-hand manifest — the inline arm the
 /// memory graph uses.
@@ -384,6 +399,7 @@ fn publish_and_release(
         None,
         input,
     );
+    stage_rows_before_publish(registered, root, &manifest);
     let commit = publish_sealed(registered, root, authority, &record, &manifest);
     assert_snapshot_reads(&commit.snapshot, &identity, &marker);
     assert_projection_page_and_telemetry(&commit.snapshot, &identity);
@@ -564,6 +580,7 @@ fn sealed_generations_release_staging_rows_without_a_resident_lease() {
             None,
             input,
         );
+        stage_rows_before_publish(&registered, temp.path(), &manifest);
         let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
         sealed.push((identity, marker, manifest, commit));
     }
@@ -574,7 +591,7 @@ fn sealed_generations_release_staging_rows_without_a_resident_lease() {
                 .staging_generation_row_counts(&manifest.identity())
                 .unwrap(),
             (0, 0),
-            "a freshly sealed generation still has its staging rows"
+            "the legacy shape under test keeps its staging rows beside the artifact"
         );
     }
 
@@ -804,6 +821,7 @@ fn release_sweep_retries_idle_sealed_reader_hibernation() {
         None,
         '5',
     );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
     let commit = publish_sealed(&registered, temp.path(), &mut authority, &replay, &manifest);
     let database = probe_lease(&registered, temp.path());
 
@@ -890,13 +908,16 @@ fn release_sweep_retries_idle_sealed_reader_hibernation() {
     assert_snapshot_reads(&commit.snapshot, &identity, "retry-idle");
 }
 
-/// A remount after release must adopt the sealed store and must not re-stage
-/// rows into the shared container.
+/// A remount of a generation with no staging rows must adopt the sealed store
+/// and must not re-stage rows into the shared container.
+///
+/// `staged_rows_released` picks how the rows came to be absent: released by
+/// the sweep from a database that staged them (the legacy shape), or never
+/// written because the generation sealed straight from its manifest.
 ///
 /// Fails if `recover_verified_snapshot` rebuilds staging rows, if remounted
 /// reads diverge, or if `is_generation_sealed_only` is no longer true.
-#[test]
-fn remount_after_release_serves_from_the_sealed_store() {
+fn remount_without_staging_rows_case(staged_rows_released: bool) {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -910,7 +931,18 @@ fn remount_after_release_serves_from_the_sealed_store() {
         None,
         '1',
     );
+    if staged_rows_released {
+        stage_rows_before_publish(&registered, temp.path(), &manifest);
+    }
     let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let expected_release = if staged_rows_released {
+        SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        }
+    } else {
+        SealedStagingRelease::AlreadyReleased
+    };
     assert_eq!(
         release_sealed_head(
             &registered,
@@ -918,10 +950,7 @@ fn remount_after_release_serves_from_the_sealed_store() {
             &mut authority,
             &record.publication.key.projection,
         ),
-        SealedStagingRelease::Released {
-            entities: 2,
-            relations: 1,
-        }
+        expected_release
     );
     assert_snapshot_reads(&commit.snapshot, &identity, "remounted");
     assert_projection_page_and_telemetry(&commit.snapshot, &identity);
@@ -968,6 +997,16 @@ fn remount_after_release_serves_from_the_sealed_store() {
             .unwrap(),
         "remount recovery must keep the generation sealed-only"
     );
+}
+
+#[test]
+fn remount_after_release_serves_from_the_sealed_store() {
+    remount_without_staging_rows_case(true);
+}
+
+#[test]
+fn remount_of_a_directly_sealed_generation_serves_from_the_sealed_store() {
+    remount_without_staging_rows_case(false);
 }
 
 /// Every sealed artifact container under the graph's sealed root, by bytes.
@@ -1018,10 +1057,8 @@ fn sealed_artifact_container_is_byte_identical_across_reopens() {
             &mut authority,
             &record.publication.key.projection,
         ),
-        SealedStagingRelease::Released {
-            entities: 2,
-            relations: 1,
-        }
+        SealedStagingRelease::AlreadyReleased,
+        "a directly sealed generation never had staging rows to release"
     );
     // Reads reopen the hibernated artifact; dropping the snapshot and closing
     // the store release it again.
@@ -1081,6 +1118,7 @@ fn hibernated_engine_defers_retirement_without_opening() {
         None,
         '1',
     );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
     let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
     assert_eq!(
         release_sealed_head(
@@ -1094,12 +1132,8 @@ fn hibernated_engine_defers_retirement_without_opening() {
             relations: 1,
         }
     );
-    let open = probe_lease(&registered, temp.path());
-    assert!(
-        open.staging_engine_is_open(),
-        "publish + release must have opened the lazy engine"
-    );
-    drop(open);
+    // Staging the rows and releasing them each opened the lazy engine once;
+    // the direct seal in between never did, and nothing holds it open now.
     drop(commit);
     assert_engine_hibernated(&registered, temp.path());
 
@@ -1182,6 +1216,7 @@ fn hibernated_engine_release_sweep_opens_once_and_rehibernates() {
         None,
         '2',
     );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
     let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
     assert_eq!(
         release_sealed_head(
@@ -1242,21 +1277,21 @@ fn corrupt_sealed_containers(root: &Path) -> usize {
 ///
 /// This is the graph-db half of the daemon's
 /// `corrupt_graph_restart_repairs_through_canonical_serialized_activation`:
-/// publish a sealed code generation, release its duplicate staging rows,
-/// restart, and destroy the sealed container. Recovery then has neither
-/// staging rows nor a usable artifact, so the canonical serialized activation
-/// path republishes the same head with the hydrated manifest.
+/// publish a sealed code generation, restart, and destroy the sealed
+/// container. With no staging rows (the direct-seal shape) recovery has
+/// nothing to serve from, so the canonical serialized activation path
+/// republishes the same head with the hydrated manifest and rebuilds the
+/// artifact from it — without staging a row.
 ///
-/// `retain_manifest` picks which staging arm runs: production hands
-/// publication an `Arc::clone` of a manifest it still holds (the shared arm),
-/// while a sole-owned `Arc` moves its rows into the owned arm. Both must
-/// restore every released row.
+/// `staged_rows_retained` runs the legacy shape instead: the rows the
+/// artifact was derived from are still in the staging database, so recovery
+/// must discard the corrupt artifact and prove the stored rows, and the
+/// republish must be a no-op reseat rather than a recovered-digest mismatch.
 ///
-/// Fails if that republication cannot restore the released rows - either
-/// because the staged prefix is refused against the leftover projection
-/// commit, or because the proof runs over a partial row set and reports a
-/// recovered-digest mismatch that quarantines a healthy generation.
-fn corrupt_sealed_artifact_repair_case(retain_manifest: bool, release_staging_rows: bool) {
+/// Fails if the republication cannot rebuild a corrupt artifact, stages rows
+/// to do it, or, in the retained arm, reports a recovered-digest mismatch
+/// that quarantines a healthy generation.
+fn corrupt_sealed_artifact_repair_case(staged_rows_retained: bool) {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -1270,21 +1305,10 @@ fn corrupt_sealed_artifact_repair_case(retain_manifest: bool, release_staging_ro
         None,
         '3',
     );
-    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
-    if release_staging_rows {
-        assert_eq!(
-            release_sealed_head(
-                &registered,
-                temp.path(),
-                &mut authority,
-                &record.publication.key.projection,
-            ),
-            SealedStagingRelease::Released {
-                entities: 2,
-                relations: 1,
-            }
-        );
+    if staged_rows_retained {
+        stage_rows_before_publish(&registered, temp.path(), &manifest);
     }
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
     drop(commit);
     assert!(registered.close().unwrap());
     drop(registered);
@@ -1309,23 +1333,21 @@ fn corrupt_sealed_artifact_repair_case(retain_manifest: bool, release_staging_ro
         &context,
         &record.publication.key.projection,
     );
-    if release_staging_rows {
-        assert!(
-            recovered.is_err(),
-            "a corrupt artifact with released rows has nothing to recover from"
-        );
-    } else {
+    if staged_rows_retained {
         // The staging rows are still the authority: a corrupt derived
         // artifact must be discarded and the stored rows must prove.
         let snapshot = recovered.expect("retained staging rows must recover a corrupt artifact");
         assert_snapshot_reads(&snapshot, &identity, "repaired");
         drop(snapshot);
+    } else {
+        assert!(
+            recovered.is_err(),
+            "a corrupt artifact with no staging rows has nothing to recover from"
+        );
     }
 
     // The canonical serialized activation path: the same head, republished
     // from the hydrated manifest.
-    let supplied = Arc::new(manifest.clone());
-    let retained = retain_manifest.then(|| Arc::clone(&supplied));
     let repaired = registered
         .registry
         .publish_verified(
@@ -1333,35 +1355,61 @@ fn corrupt_sealed_artifact_repair_case(retain_manifest: bool, release_staging_ro
             &mut authority,
             &context,
             &record.publication.key,
-            Some(supplied),
+            Some(Arc::new(manifest.clone())),
         )
-        .expect("republishing the adopted head must repair the released rows");
-    drop(retained);
+        .expect("republishing the adopted head must repair the corrupt artifact");
     assert_snapshot_reads(&repaired.snapshot, &identity, "repaired");
     assert_projection_page_and_telemetry(&repaired.snapshot, &identity);
+    let serves_from_sealed_store = repaired.snapshot.serves_from_sealed_store();
     drop(repaired);
 
     let database = probe_lease(&registered, temp.path());
-    assert_eq!(
-        database
-            .staging_generation_row_counts(&manifest.identity())
-            .unwrap(),
-        manifest.row_counts(),
-        "the repair must restore every released row before it proves the digest"
-    );
+    let staged_rows = database
+        .staging_generation_row_counts(&manifest.identity())
+        .unwrap();
+    if staged_rows_retained {
+        assert_eq!(
+            staged_rows,
+            manifest.row_counts(),
+            "the reseat must keep every retained row"
+        );
+    } else {
+        assert_eq!(
+            staged_rows,
+            (0, 0),
+            "a direct rebuild must not stage rows to repair the artifact"
+        );
+        assert!(
+            serves_from_sealed_store,
+            "the repaired head must serve from the rebuilt artifact"
+        );
+        assert!(
+            database
+                .is_generation_sealed_only(&manifest.identity())
+                .unwrap()
+        );
+        let containers = sealed_artifact_containers(temp.path());
+        assert_eq!(
+            containers.len(),
+            1,
+            "the repair rebuilds exactly one artifact"
+        );
+        for (container, bytes) in containers {
+            assert_ne!(
+                bytes,
+                b"corrupt sealed graph".to_vec(),
+                "{} must have been rebuilt",
+                container.display()
+            );
+        }
+    }
 }
 
-/// The production arm: the publisher keeps its own `Arc` to the manifest, so
-/// staging borrows the rows instead of moving them.
+/// The direct-seal shape: no staging rows exist, so the repair rebuilds the
+/// artifact from the hydrated manifest alone.
 #[test]
-fn corrupt_sealed_artifact_repair_restages_shared_manifest_rows() {
-    corrupt_sealed_artifact_repair_case(true, true);
-}
-
-/// The sole-owned arm: staging moves the manifest's rows page by page.
-#[test]
-fn corrupt_sealed_artifact_repair_restages_owned_manifest_rows() {
-    corrupt_sealed_artifact_repair_case(false, true);
+fn corrupt_sealed_artifact_repair_rebuilds_the_artifact_from_the_manifest() {
+    corrupt_sealed_artifact_repair_case(false);
 }
 
 /// The retained-rows arm: the sealed artifact is destroyed while the staging
@@ -1370,7 +1418,7 @@ fn corrupt_sealed_artifact_repair_restages_owned_manifest_rows() {
 /// reseat rather than a recovered-digest mismatch.
 #[test]
 fn corrupt_sealed_artifact_repair_proves_retained_staging_rows() {
-    corrupt_sealed_artifact_repair_case(true, false);
+    corrupt_sealed_artifact_repair_case(true);
 }
 
 /// A probe that answers `Cancelled` once it has been polled `cancel_after`
@@ -1460,6 +1508,7 @@ fn a_cancelled_release_never_leaves_a_row_set_recovery_cannot_serve() {
             None,
             '4',
         );
+        stage_rows_before_publish(&registered, temp.path(), &manifest);
         let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
         drop(commit);
 
@@ -1608,22 +1657,23 @@ fn two_page_manifest(
     .unwrap()
 }
 
-/// Restaging a generation whose staging-row release was interrupted must
-/// restore every released row, not just the pages a row count still misses.
+/// A generation whose staging-row release was interrupted must come back to a
+/// serving state on remount, and the rows the release left behind must be
+/// swept, not read as the generation.
 ///
 /// The release deletes bounded pages of arbitrary identities, so the rows it
 /// leaves behind are not the ordered prefix the staging pipeline builds. At a
 /// one-page geometry any deletion drops the count below the only page's
-/// `range.end` and the replay is forced anyway; at this two-page geometry the
-/// survivors still out-count the *first* page, and treating that count as
-/// proof of the page's presence skipped the exact rows the release had
-/// removed. The replay then reported success while the recovered digest no
-/// longer matched the head, so the generation could not be served at all.
+/// `range.end`; at this two-page geometry the survivors still out-count the
+/// *first* page, which is the row set a count heuristic misreads as
+/// complete. The repair rebuilds the artifact from the manifest alone, and
+/// the next release sweep deletes whatever the interrupted one left.
 ///
-/// Fails if a remount after an interrupted release cannot serve the full row
-/// set, or if the restage leaves fewer rows than the manifest.
+/// Fails if a remount after an interrupted release cannot serve the
+/// generation, if the repair stages rows it does not need, or if the sweep
+/// leaves the partial row set in the container.
 #[test]
-fn a_partially_released_generation_restages_every_row_it_lost() {
+fn a_partially_released_generation_is_repaired_from_its_manifest_and_swept() {
     let entity_count = NATIVE_STAGE_PAGE_MUTATIONS + 2 * RELEASE_PAGE_MUTATIONS;
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
@@ -1645,6 +1695,7 @@ fn a_partially_released_generation_restages_every_row_it_lost() {
         None,
         '5',
     );
+    stage_rows_before_publish(&registered, temp.path(), &manifest);
     drop(publish_sealed(
         &registered,
         temp.path(),
@@ -1740,18 +1791,46 @@ fn a_partially_released_generation_restages_every_row_it_lost() {
                          neither recovery ({error}) nor republication ({republish}) could serve"
                     )
                 });
+            assert!(
+                repaired.snapshot.serves_from_sealed_store(),
+                "the repair must rebuild the artifact, not read the partial rows"
+            );
             assert_snapshot_reads(&repaired.snapshot, &identity, "interrupted");
             drop(repaired);
         }
     }
-    let restaged = {
-        let database = probe_lease(&registered, temp.path());
+    let database = probe_lease(&registered, temp.path());
+    assert_eq!(
         database
             .staging_generation_row_counts(&manifest.identity())
-            .unwrap()
-    };
+            .unwrap(),
+        counts,
+        "the repair must not restage the rows the interrupted release removed"
+    );
+    // The leftover partial row set is redundant beside the rebuilt artifact;
+    // the ordinary sweep deletes it. The release reports the sealed row set
+    // it made redundant, not the number of leftovers it happened to delete.
     assert_eq!(
-        restaged, full,
-        "every released row must be restaged, not skipped by a row count"
+        release_sealed_head(
+            &registered,
+            temp.path(),
+            &mut authority,
+            &record.publication.key.projection,
+        ),
+        SealedStagingRelease::Released {
+            entities: full.0,
+            relations: full.1,
+        }
+    );
+    assert_eq!(
+        database
+            .staging_generation_row_counts(&manifest.identity())
+            .unwrap(),
+        (0, 0)
+    );
+    assert!(
+        database
+            .is_generation_sealed_only(&manifest.identity())
+            .unwrap()
     );
 }

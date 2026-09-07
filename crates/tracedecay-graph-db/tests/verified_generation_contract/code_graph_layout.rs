@@ -546,6 +546,14 @@ fn retired_legacy_replay_without_a_head_releases_its_verified_sealed_staging_row
         )),
         "production no-head replay semantics classify the sole active replay as pending"
     );
+    // The legacy shape under test: the generation's rows already sit in the
+    // staging database when its sealed artifact is built.
+    registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap()
+        .stage_generation_rows_unpublished(Arc::new(generation.clone()))
+        .unwrap();
     let (control, probe) = control_and_probe();
     let commit = registered
         .registry

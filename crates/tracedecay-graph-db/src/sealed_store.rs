@@ -71,8 +71,8 @@ use crate::state::{
 };
 use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphEntity, GraphFormatVersion, GraphGenerationManifestIdentity, GraphNamespace,
-    GraphProjectionId, GraphRelation, GraphWriteBatch, NeverCancelled,
+    GraphEntity, GraphFormatVersion, GraphGenerationManifest, GraphGenerationManifestIdentity,
+    GraphNamespace, GraphProjectionId, GraphRelation, GraphWriteBatch, NeverCancelled,
 };
 
 /// Opens and verifies one dependency-free sealed generation without opening
@@ -366,14 +366,14 @@ fn sealed_store_io_failure(context: &str, error: std::io::Error) -> GraphDbError
 /// projection-state node per written namespace, and the format marker.
 ///
 /// Node and edge ids are dense and assigned in push order, so identical row
-/// streams build byte-identical containers. `staging_nodes` maps each staging
-/// entity handle to its sealed id, which is how edges find their endpoints
+/// streams build byte-identical containers whichever [`SealedRowSource`]
+/// supplied them. The caller keeps its own map from source row to the sealed
+/// [`NodeId`] `push_entity` returns, which is how edges find their endpoints
 /// without re-resolving identities through an index.
 struct SealedCompactRows {
     builder: IncrementalCompactStoreBuilder,
     next_node: u64,
     next_edge: u64,
-    staging_nodes: HashMap<NodeId, NodeId>,
 }
 
 impl SealedCompactRows {
@@ -382,7 +382,6 @@ impl SealedCompactRows {
             builder: IncrementalCompactStoreBuilder::new(),
             next_node: 0,
             next_edge: 0,
-            staging_nodes: HashMap::new(),
         }
     }
 
@@ -408,27 +407,16 @@ impl SealedCompactRows {
     }
 
     /// Writes one entity as it is stored under `namespace`/`projection` and
-    /// binds its staging handle so relations can reach it.
+    /// returns its sealed node so relations can reach it.
     fn push_entity(
         &mut self,
-        staging_node: NodeId,
         namespace: &GraphNamespace,
         projection: &GraphProjectionId,
         entity: &GraphEntity,
-    ) -> Result<(), GraphDbError> {
+    ) -> Result<NodeId, GraphDbError> {
         let labels = entity_labels(namespace, projection, &entity.labels);
         let properties = entity_properties(namespace, projection, entity);
-        let node = self.push_node(&labels, properties)?;
-        if self.staging_nodes.insert(staging_node, node).is_some() {
-            return Err(GraphDbError::Corrupt {
-                message: "sealed build enumerated the same entity twice".to_owned(),
-            });
-        }
-        Ok(())
-    }
-
-    fn sealed_endpoint(&self, staging_node: NodeId) -> Option<NodeId> {
-        self.staging_nodes.get(&staging_node).copied()
+        self.push_node(&labels, properties)
     }
 
     /// Writes one relation: the native edge between two already-written
@@ -636,10 +624,110 @@ impl GraphDb {
                 });
             }
         }
-        let (store, staging_proof) =
-            build_or_open_sealed_store(self, identity, expected, &database_path, check)?;
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(self),
+            identity,
+            expected,
+            &database_path,
+            check,
+        )?;
         self.install_sealed_generation_store(locator, store)?;
         Ok(SealedStoreInstall::Installed { staging_proof })
+    }
+
+    /// Seals a dependency-free generation straight from its verified
+    /// manifest, without staging a row: the compact container is built from
+    /// the manifest, written once, reopened read-only, proven against
+    /// `expected`, and installed for reads. Returns the sealed generation's
+    /// commit, read back from the proven artifact.
+    ///
+    /// Every failure boundary recovers from durable state that already
+    /// exists. Cancellation or a crash before the artifact directory is
+    /// renamed into place leaves no container (the next attempt clears the
+    /// build directory and rebuilds from the replay journal's manifest); a
+    /// crash after it leaves a complete, receipted artifact the next attempt
+    /// adopts by digest. Nothing about this build is recoverable *only* from
+    /// process memory. An artifact from an earlier seal of this exact
+    /// generation is adopted without a build.
+    ///
+    /// `Ok(None)` means the sealed-store lane cannot serve this database
+    /// (kill-switch set, memory-backed, or no reopen configuration), so the
+    /// caller must stage and prove the generation the ordinary way.
+    #[hotpath::measure(label = "graph_db.sealed_store.seal_direct", impl_type = "GraphDb")]
+    pub(crate) fn seal_generation_from_manifest(
+        &self,
+        manifest: &GraphGenerationManifest,
+        expected: &GraphRecoveredGenerationDigestV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Option<GraphCommit>, GraphDbError> {
+        if sealed_store_disabled() {
+            return Ok(None);
+        }
+        let Some(reopen) = self.inner.reopen.as_ref() else {
+            return Ok(None);
+        };
+        let Some(database_path) = reopen.config.path.clone() else {
+            return Ok(None);
+        };
+        check()?;
+        manifest.validate_checked(check)?;
+        let identity = manifest.identity();
+        if !identity.dependencies.is_empty() {
+            return Err(GraphDbError::invalid(
+                "a direct sealed build requires a dependency-free generation",
+            ));
+        }
+        let locator =
+            GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+        if let Some(existing) = self.sealed_generation_reader(&locator)
+            && existing.recovered_digest() != expected.as_str()
+            && let Some(refusal) = self.sealed_write_refusal(&locator)
+        {
+            // Different content is already sealed and serving under this
+            // exact locator: the same immutability refusal a conflicting
+            // restage gets, not a silent rebuild underneath its readers.
+            return Err(refusal);
+        }
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(manifest),
+            &identity,
+            expected,
+            &database_path,
+            check,
+        )?;
+        self.install_sealed_generation_store(locator.clone(), store)?;
+        // The generation normally exists only as this sealed artifact: it is
+        // sealed-only from its first instant, and no lease remembered for it
+        // may claim staging rows in the durable-row ledger. A database written
+        // before generations sealed directly may still hold this generation's
+        // rows beside the artifact; those stay in the ledger so the ordinary
+        // release deletes them instead of leaking them under a sealed-only
+        // claim. A hibernated staging engine is not opened to find out: the
+        // generation stays in the ledger and the next release sweep, which
+        // opens the engine once anyway, settles it from the durable rows.
+        let staging_rows = match self.try_read_open_engine()? {
+            Some(guard) => {
+                let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+                Some(crate::state::projection_node_counts(
+                    database,
+                    &locator.physical_namespace()?,
+                    &locator.projection.projection,
+                )?)
+            }
+            None => None,
+        };
+        if staging_rows == Some((0, 0)) {
+            let mut state = self.wait_verified_generations_write()?;
+            state.stored.remove(&locator);
+            state.sealed_only.insert(locator.clone());
+        }
+        check()?;
+        let commit = self
+            .generation_commit(&locator)?
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "sealed generation is missing its projection commit".to_owned(),
+            })?;
+        Ok(Some(commit))
     }
 
     /// Opens an existing sealed store for `identity` without building one.
@@ -867,16 +955,40 @@ impl GraphDb {
     }
 }
 
+/// Where a sealed build reads the generation's rows from.
+///
+/// Both sources yield the recovered digest's row stream in its canonical
+/// order — sorted, unique entities, then sorted, unique relations — so the two
+/// build byte-identical containers for the same generation, and the reopen
+/// proof against the relational authority's digest is the same proof.
+pub(crate) enum SealedRowSource<'a> {
+    /// The generation is staged in this shared staging database, which also
+    /// resolves the dependency-generation endpoints its relations reach.
+    Staging(&'a GraphDb),
+    /// The verified manifest hydrated from the durable replay journal. Only a
+    /// dependency-free generation may seal this way: every relation endpoint
+    /// is one of its own entities, so no staging row is ever needed, written,
+    /// or read. The journal and the code generation it names remain the
+    /// recovery source for every failure boundary of the build.
+    Manifest(&'a GraphGenerationManifest),
+}
+
 /// Builds (or adopts) the sealed store for `identity` and returns the
 /// reopened, digest-verified reader.
+///
+/// The returned `Option<u64>` is the staging proof: `Some(canonical_bytes)`
+/// only when this call enumerated the *staging* database's rows and the
+/// reopened artifact reproduced the authority's digest. A manifest-sourced
+/// build never read the staging container, so it proves nothing about it.
 #[hotpath::measure(label = "graph_db.sealed_store.build")]
 fn build_or_open_sealed_store(
-    source: &GraphDb,
+    rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     database_path: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(Arc<SealedGenerationStore>, Option<u64>), GraphDbError> {
+    let staging_sourced = matches!(rows, SealedRowSource::Staging(_));
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
     let directory = sealed_generation_directory(&root, &physical_namespace);
@@ -901,7 +1013,7 @@ fn build_or_open_sealed_store(
     remove_sealed_directory(&staging);
     std::fs::create_dir_all(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let built = build_sealed_container(source, identity, &staging, check)
+    let built = build_sealed_container(rows, identity, &staging, check)
         .inspect_err(|_| remove_sealed_directory(&staging));
     let (entities, relations) = built?;
     let receipt = SealedStoreReceiptV1 {
@@ -929,13 +1041,13 @@ fn build_or_open_sealed_store(
         }
     }
     match open_sealed_store(&directory, identity, expected) {
-        // This call enumerated the staging database's rows into the copy and
-        // the reopen digest matched the authority's expectation: together
-        // that is the staging container's own proof, sized by the canonical
-        // bytes the reopen hashed.
+        // When this call enumerated the staging database's rows into the
+        // copy and the reopen digest matched the authority's expectation,
+        // together that is the staging container's own proof, sized by the
+        // canonical bytes the reopen hashed.
         Ok(Some(store)) => {
-            let canonical_bytes = store.canonical_bytes;
-            Ok((store, Some(canonical_bytes)))
+            let staging_proof = staging_sourced.then_some(store.canonical_bytes);
+            Ok((store, staging_proof))
         }
         Ok(None) => {
             remove_sealed_directory(&directory);
@@ -950,26 +1062,170 @@ fn build_or_open_sealed_store(
     }
 }
 
-/// Streams the generation's verified rows from the staging database into a
-/// compact store and writes it as the sealed container under `staging` in one
-/// durable pass. Returns the written `(entities, relations)` counts.
+/// Streams the generation's verified rows into a compact store and writes it
+/// as the sealed container under `staging` in one durable pass. Returns the
+/// written `(entities, relations)` counts.
 ///
 /// The row set is exactly the recovered digest's: the sorted, unique entity
 /// and relation enumerations of the physical namespace, plus every
 /// dependency-generation endpoint those relations reach, each written once
-/// in its own namespace. Each staging read guard is held for one bounded
-/// chunk so concurrent writers and readers of the shared staging database
-/// wait milliseconds, not a build. `check` runs per row; a cancelled or
-/// failed build has written nothing under `staging` that the caller keeps —
-/// the container appears complete or not at all, and the next attempt
-/// rebuilds from the same staged rows.
+/// in its own namespace. `check` runs per row; a cancelled or failed build
+/// has written nothing under `staging` that the caller keeps — the container
+/// appears complete or not at all, and the next attempt rebuilds from the
+/// same source.
 fn build_sealed_container(
-    source: &GraphDb,
+    rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(usize, usize), GraphDbError> {
     let physical_namespace = identity.physical_namespace()?;
+    let mut sealed = SealedCompactRows::new();
+    let (entity_count, relation_count, dependency_namespaces_written) = match rows {
+        SealedRowSource::Staging(source) => {
+            push_staged_rows(source, identity, &physical_namespace, &mut sealed, check)?
+        }
+        SealedRowSource::Manifest(manifest) => {
+            let counts =
+                push_manifest_rows(manifest, identity, &physical_namespace, &mut sealed, check)?;
+            (counts.0, counts.1, BTreeMap::new())
+        }
+    };
+
+    // Finalization: one projection commit per written namespace, in
+    // namespace order, then the format marker at the final sequence. The
+    // physical namespace's commit binds the dependency-closure digest — the
+    // recovered proof requires it, and it is what marks these rows as a
+    // *sealed* generation rather than an unfinished stage.
+    let mut sequence = 0_u64;
+    for (namespace, projection) in &dependency_namespaces_written {
+        check()?;
+        sequence += 1;
+        let commit =
+            sealed_namespace_commit(namespace, projection, identity, sequence, None, check)?;
+        sealed.push_projection_commit(namespace, projection, &commit)?;
+    }
+    sequence += 1;
+    let commit = sealed_namespace_commit(
+        &physical_namespace,
+        &identity.projection.projection,
+        identity,
+        sequence,
+        Some(identity.dependency_closure_digest(check)?),
+        check,
+    )?;
+    sealed.push_projection_commit(
+        &physical_namespace,
+        &identity.projection.projection,
+        &commit,
+    )?;
+    sealed.push_format_marker(sequence)?;
+    check()?;
+    sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))?;
+    Ok((entity_count, relation_count))
+}
+
+/// Pushes a dependency-free generation's rows straight from its verified
+/// manifest: the entities in identity order, then the relations in identity
+/// order, each endpoint resolved by binary search over the entity identities.
+/// Entity nodes are the first `entities.len()` sealed ids, so the search
+/// index *is* the endpoint's node.
+///
+/// Refuses, typed, a manifest that carries dependencies or whose rows are
+/// not in canonical order: the recovered digest is defined over the sorted,
+/// unique row set, and the manifest constructor sorts and deduplicates, so
+/// anything else here is a corrupted manifest, not a different build.
+fn push_manifest_rows(
+    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
+    physical_namespace: &GraphNamespace,
+    sealed: &mut SealedCompactRows,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(usize, usize), GraphDbError> {
+    if !identity.dependencies.is_empty() {
+        return Err(GraphDbError::invalid(
+            "a direct sealed build requires a dependency-free generation",
+        ));
+    }
+    let projection = &identity.projection.projection;
+    let entities = &manifest.entities;
+    hotpath::measure_block!("graph_db.sealed_store.direct.entities", {
+        for (index, entity) in entities.iter().enumerate() {
+            check()?;
+            if index
+                .checked_sub(1)
+                .is_some_and(|prior| entities[prior].identity >= entity.identity)
+            {
+                return Err(GraphDbError::Corrupt {
+                    message: "graph generation manifest entities are not in canonical order"
+                        .to_owned(),
+                });
+            }
+            let node = sealed.push_entity(physical_namespace, projection, entity)?;
+            if node.as_u64() != index as u64 {
+                return Err(GraphDbError::Corrupt {
+                    message: "sealed build entity ids diverged from manifest order".to_owned(),
+                });
+            }
+        }
+        Ok::<(), GraphDbError>(())
+    })?;
+    hotpath::measure_block!("graph_db.sealed_store.direct.relations", {
+        let relations = &manifest.relations;
+        for (index, relation) in relations.iter().enumerate() {
+            check()?;
+            if index
+                .checked_sub(1)
+                .is_some_and(|prior| relations[prior].identity >= relation.identity)
+            {
+                return Err(GraphDbError::Corrupt {
+                    message: "graph generation manifest relations are not in canonical order"
+                        .to_owned(),
+                });
+            }
+            let mut endpoints = [NodeId::new(0); 2];
+            for (slot, endpoint) in endpoints.iter_mut().zip([&relation.from, &relation.to]) {
+                if endpoint.projection != identity.projection {
+                    return Err(GraphDbError::Corrupt {
+                        message: "sealed build relation escapes its dependency closure".to_owned(),
+                    });
+                }
+                let index = entities
+                    .binary_search_by(|entity| entity.identity.cmp(&endpoint.identity))
+                    .map_err(|_| GraphDbError::Corrupt {
+                        message: format!(
+                            "local relation endpoint `{}` is absent from the candidate generation",
+                            endpoint.identity
+                        ),
+                    })?;
+                *slot = NodeId::new(index as u64);
+            }
+            sealed.push_relation(
+                physical_namespace,
+                projection,
+                &relation.storage_relation()?,
+                endpoints[0],
+                endpoints[1],
+            )?;
+        }
+        Ok::<(), GraphDbError>(())
+    })?;
+    Ok((entities.len(), manifest.relations.len()))
+}
+
+/// Pushes a staged generation's rows out of the shared staging database.
+///
+/// Each staging read guard is held for one bounded chunk so concurrent
+/// writers and readers of the shared staging database wait milliseconds, not
+/// a build. Returns the row counts and the dependency namespaces whose
+/// endpoints were copied, each with its projection.
+fn push_staged_rows(
+    source: &GraphDb,
+    identity: &GraphGenerationManifestIdentity,
+    physical_namespace: &GraphNamespace,
+    rows: &mut SealedCompactRows,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(usize, usize, BTreeMap<GraphNamespace, GraphProjectionId>), GraphDbError> {
     // Physical namespace -> projection identity for the generation and its
     // dependency closure; an endpoint outside this map escapes the closure.
     let namespace_projection = physical_namespace_projection_map(identity)?;
@@ -983,13 +1239,13 @@ fn build_sealed_container(
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
             let entity_nodes = projection_entity_nodes_sorted_checked(
                 database,
-                &physical_namespace,
+                physical_namespace,
                 &identity.projection.projection,
                 check,
             )?;
             let relation_locators = projection_relation_nodes_sorted_checked(
                 database,
-                &physical_namespace,
+                physical_namespace,
                 &identity.projection.projection,
                 check,
             )?;
@@ -999,7 +1255,8 @@ fn build_sealed_container(
     // across guard reacquisitions.
     let entity_count = entity_nodes.len();
     let relation_count = relation_locators.len();
-    let mut rows = SealedCompactRows::new();
+    // Staging entity handle -> sealed node, for endpoint resolution.
+    let mut sealed_endpoints: HashMap<NodeId, NodeId> = HashMap::new();
 
     // 1. The generation's own entities, in recovered-digest order.
     hotpath::measure_block!("graph_db.sealed_store.copy.entities", {
@@ -1017,12 +1274,13 @@ fn build_sealed_container(
                     message: "sealed build entity disappeared during enumeration".to_owned(),
                 })?;
                 let entity = decode_entity(&record)?;
-                rows.push_entity(
-                    *node,
-                    &physical_namespace,
-                    &identity.projection.projection,
-                    &entity,
-                )?;
+                let sealed =
+                    rows.push_entity(physical_namespace, &identity.projection.projection, &entity)?;
+                if sealed_endpoints.insert(*node, sealed).is_some() {
+                    return Err(GraphDbError::Corrupt {
+                        message: "sealed build enumerated the same entity twice".to_owned(),
+                    });
+                }
             }
         }
         Ok::<(), GraphDbError>(())
@@ -1048,14 +1306,14 @@ fn build_sealed_container(
                 let mut endpoints = [NodeId::new(0); 2];
                 for (slot, staging_node) in endpoints.iter_mut().zip([stored.source, stored.target])
                 {
-                    *slot = match rows.sealed_endpoint(staging_node) {
-                        Some(node) => node,
+                    *slot = match sealed_endpoints.get(&staging_node) {
+                        Some(node) => *node,
                         None => {
                             let (namespace, _) =
                                 endpoint_cache.identity(store.as_ref(), staging_node)?;
                             let projection = namespace_projection
                                 .get(&namespace)
-                                .filter(|_| namespace != physical_namespace)
+                                .filter(|_| namespace != *physical_namespace)
                                 .ok_or_else(|| GraphDbError::Corrupt {
                                     message: "sealed build relation escapes its dependency closure"
                                         .to_owned(),
@@ -1067,27 +1325,18 @@ fn build_sealed_container(
                                 }
                             })?;
                             let entity = decode_entity(&record)?;
-                            rows.push_entity(
-                                staging_node,
-                                &namespace,
-                                &projection.projection,
-                                &entity,
-                            )?;
+                            let sealed =
+                                rows.push_entity(&namespace, &projection.projection, &entity)?;
                             dependency_namespaces_written
                                 .entry(namespace)
                                 .or_insert_with(|| projection.projection.clone());
-                            rows.sealed_endpoint(staging_node).ok_or_else(|| {
-                                GraphDbError::Corrupt {
-                                    message:
-                                        "sealed build lost a dependency endpoint it just wrote"
-                                            .to_owned(),
-                                }
-                            })?
+                            sealed_endpoints.insert(staging_node, sealed);
+                            sealed
                         }
                     };
                 }
                 rows.push_relation(
-                    &physical_namespace,
+                    physical_namespace,
                     &identity.projection.projection,
                     &stored.relation,
                     endpoints[0],
@@ -1097,40 +1346,7 @@ fn build_sealed_container(
         }
         Ok::<(), GraphDbError>(())
     })?;
-    drop(relation_locators);
-    drop(endpoint_cache);
-
-    // 3. Finalization: one projection commit per written namespace, in
-    // namespace order, then the format marker at the final sequence. The
-    // physical namespace's commit binds the dependency-closure digest — the
-    // recovered proof requires it, and it is what marks these rows as a
-    // *sealed* generation rather than an unfinished stage.
-    let mut sequence = 0_u64;
-    for (namespace, projection) in &dependency_namespaces_written {
-        check()?;
-        sequence += 1;
-        let commit =
-            sealed_namespace_commit(namespace, projection, identity, sequence, None, check)?;
-        rows.push_projection_commit(namespace, projection, &commit)?;
-    }
-    sequence += 1;
-    let commit = sealed_namespace_commit(
-        &physical_namespace,
-        &identity.projection.projection,
-        identity,
-        sequence,
-        Some(identity.dependency_closure_digest(check)?),
-        check,
-    )?;
-    rows.push_projection_commit(
-        &physical_namespace,
-        &identity.projection.projection,
-        &commit,
-    )?;
-    rows.push_format_marker(sequence)?;
-    check()?;
-    rows.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))?;
-    Ok((entity_count, relation_count))
+    Ok((entity_count, relation_count, dependency_namespaces_written))
 }
 
 /// Opens the artifact under `directory` and proves it against `expected`.
@@ -1275,8 +1491,8 @@ mod build_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        SEALED_STORE_DATABASE_FILE, build_or_open_sealed_store, sealed_generation_directory,
-        sealed_store_root,
+        SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
+        sealed_generation_directory, sealed_store_root,
     };
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
@@ -1396,7 +1612,7 @@ mod build_tests {
             Ok(())
         };
         let interrupted = build_or_open_sealed_store(
-            &database,
+            SealedRowSource::Staging(&database),
             &identity,
             &expected,
             &database_path,
@@ -1415,9 +1631,14 @@ mod build_tests {
             "an interrupted build must leave neither its staging directory nor an artifact"
         );
 
-        let (store, staging_proof) =
-            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
-                .unwrap();
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
         assert!(staging_proof.is_some(), "a fresh build carries its proof");
         assert_eq!(store.recovered_digest(), expected.as_str());
         assert_eq!((store.entity_count, store.relation_count), (9_000, 9_000));
@@ -1435,9 +1656,14 @@ mod build_tests {
         // Exact container identity across reopen: adoption, proof, serving
         // reads, and close never rewrite a byte of the sealed file.
         let written = std::fs::read(&artifact).unwrap();
-        let (adopted, adopted_proof) =
-            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
-                .unwrap();
+        let (adopted, adopted_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
         assert!(
             adopted_proof.is_none(),
             "adoption never re-enumerates staging rows"
@@ -1491,21 +1717,138 @@ mod build_tests {
         );
         let artifact = directory.join(SEALED_STORE_DATABASE_FILE);
 
-        let (first, _) =
-            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
-                .unwrap();
+        let (first, _) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
         let _ = first.database().close();
         let first_bytes = std::fs::read(&artifact).unwrap();
         std::fs::remove_dir_all(&directory).unwrap();
-        let (second, _) =
-            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
-                .unwrap();
+        let (second, _) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
         let _ = second.database().close();
         let second_bytes = std::fs::read(&artifact).unwrap();
         assert_eq!(second_bytes.len(), first_bytes.len());
         assert!(
             payload(&second_bytes) == payload(&first_bytes),
             "sealed section payloads differ between two builds of one generation"
+        );
+    }
+
+    /// The direct build's failure boundary and its identity with the staged
+    /// build. A build cancelled inside the manifest's row stream leaves
+    /// neither a staging directory nor an artifact; a crash image (a leftover
+    /// staging directory holding a partial container) is cleared by the next
+    /// attempt, which rebuilds from the manifest alone and proves the
+    /// reopened artifact against the same digest; and the container it
+    /// writes carries the same section payload the staged copy of the same
+    /// rows writes, so the sealed identity does not depend on which source
+    /// built it.
+    #[test]
+    fn direct_build_recovers_from_interruption_and_matches_the_staged_build() {
+        fn payload(bytes: &[u8]) -> &[u8] {
+            let data_offset = usize::try_from(grafeo_storage::file::format::DATA_OFFSET).unwrap();
+            assert!(
+                bytes.len() > data_offset,
+                "container holds no section payload"
+            );
+            &bytes[data_offset..]
+        }
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2_000, 3_000);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let artifact = directory.join(SEALED_STORE_DATABASE_FILE);
+
+        // Cancellation inside the row stream: nothing is left behind.
+        let checks = AtomicUsize::new(0);
+        let cancel_mid_build = || {
+            if checks.fetch_add(1, Ordering::Relaxed) >= 2_500 {
+                return Err(GraphDbError::Cancelled);
+            }
+            Ok(())
+        };
+        let interrupted = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &cancel_mid_build,
+        );
+        assert!(
+            matches!(interrupted, Err(GraphDbError::Cancelled)),
+            "mid-build cancellation must surface typed: {interrupted:?}"
+        );
+        assert!(
+            !staging.exists() && !directory.exists(),
+            "an interrupted direct build must leave neither its staging directory nor an artifact"
+        );
+
+        // A crash image: the process died after creating the staging
+        // directory and part of a container. The next attempt owns that
+        // directory and rebuilds from the manifest.
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join(SEALED_STORE_DATABASE_FILE), b"torn container").unwrap();
+        let (direct, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        assert!(
+            staging_proof.is_none(),
+            "a manifest-sourced build proves nothing about the staging database"
+        );
+        assert_eq!(direct.recovered_digest(), expected.as_str());
+        assert_eq!((direct.entity_count, direct.relation_count), (2_000, 3_000));
+        assert!(
+            !staging.exists(),
+            "the crash image must be replaced, not kept"
+        );
+        let _ = direct.database().close();
+        let direct_bytes = std::fs::read(&artifact).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        // The same rows, staged and copied out of the staging database.
+        let database = open_source(&database_path);
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+        let (staged, staged_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        assert!(staged_proof.is_some());
+        let _ = staged.database().close();
+        let staged_bytes = std::fs::read(&artifact).unwrap();
+        assert_eq!(staged_bytes.len(), direct_bytes.len());
+        assert!(
+            payload(&staged_bytes) == payload(&direct_bytes),
+            "the direct and staged builds of one generation must write the same sealed payload"
         );
     }
 
@@ -1561,9 +1904,14 @@ mod build_tests {
         database
             .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
             .unwrap();
-        let (store, staging_proof) =
-            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
-                .unwrap();
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
         assert!(staging_proof.is_some());
         assert_eq!(store.recovered_digest(), expected.as_str());
         assert_eq!(store.row_counts(), (600, 0));
@@ -1674,7 +2022,7 @@ mod cost_probe {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use super::{build_or_open_sealed_store, open_sealed_store};
+    use super::{SealedRowSource, build_or_open_sealed_store, open_sealed_store};
     use crate::generation::verify_recovered_generation;
     use crate::{
         GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability, GraphEntity,
@@ -1906,9 +2254,14 @@ mod cost_probe {
         // The sealed build: copy + (compact | replay) + durable close +
         // reopen + full post-reopen proof.
         let started = Instant::now();
-        let (store, staging_proof) =
-            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
-                .unwrap();
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
         let build_s = started.elapsed().as_secs_f64();
         assert!(staging_proof.is_some(), "fresh build must carry its proof");
         let directory = store.directory.clone();
