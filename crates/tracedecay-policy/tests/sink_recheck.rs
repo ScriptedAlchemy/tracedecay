@@ -30,7 +30,17 @@ fn sink_recheck_issues_a_fresh_proof_only_for_unchanged_authority() {
     let recheck = recheck_sink_admission(&evaluator, &proof, &current);
 
     assert_eq!(recheck.disposition, SinkRecheckDispositionV1::Admit);
-    assert!(recheck.admission_proof().is_some());
+    let admission = recheck
+        .admission_proof()
+        .expect("unchanged authority admits with a fresh proof");
+    // The admission proof digest binds the source decision digest and the
+    // fresh recheck decision digest; both must be byte-identical to the
+    // decisions the evaluator produced before decision construction hashed
+    // its material once.
+    assert_eq!(
+        admission.proof_digest().as_str(),
+        "sha256:5edfb9bf5933f773a0716a5104a0e045d13c6f11203f20a57a6e0b286a50e25a"
+    );
 }
 
 #[test]

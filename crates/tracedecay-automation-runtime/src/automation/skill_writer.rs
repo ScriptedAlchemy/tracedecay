@@ -748,7 +748,10 @@ fn skill_update_from_proposal(
         ));
     }
 
-    if object.contains_key("routing_description") {
+    if object
+        .get("routing_description")
+        .is_some_and(|value| !value.is_null())
+    {
         validate_routing_examples(proposal, &existing.host_skill_slug())?;
     }
     let update = ManagedSkillUpdate {
@@ -756,6 +759,7 @@ fn skill_update_from_proposal(
         summary: optional_proposal_string(object.get("summary"))?,
         routing_description: object
             .get("routing_description")
+            .filter(|value| !value.is_null())
             .map(|value| required_routing_description(Some(value)))
             .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
@@ -763,12 +767,16 @@ fn skill_update_from_proposal(
         body_markdown: optional_proposal_string(
             object.get("body_markdown").or_else(|| object.get("body")),
         )?,
-        support_files: if object.contains_key("support_files") {
+        support_files: if object
+            .get("support_files")
+            .is_some_and(|value| !value.is_null())
+        {
             Some(support_files_from_proposal(object.get("support_files"))?)
         } else {
             None
         },
         pinned: match object.get("pinned") {
+            Some(value) if value.is_null() => None,
             Some(value) => Some(
                 value
                     .as_bool()
@@ -839,7 +847,7 @@ fn proposal_targets_or_default(
 fn optional_proposal_targets(
     value: Option<&Value>,
 ) -> std::result::Result<Option<Vec<SkillInstallTarget>>, String> {
-    let Some(value) = value else {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     let array = value
@@ -916,6 +924,7 @@ fn required_proposal_string(
 
 fn optional_proposal_string(value: Option<&Value>) -> std::result::Result<Option<String>, String> {
     value
+        .filter(|value| !value.is_null())
         .map(|value| required_proposal_string(Some(value), "optional string field"))
         .transpose()
 }

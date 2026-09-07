@@ -282,8 +282,8 @@ impl McpServer {
                 global_db: self.registry_db.as_ref(),
                 project_registry_reads: self.project_registry_reads.as_deref(),
                 accounting_db: self.accounting_db.as_deref(),
-                registered_project_session_db: self.registered_session_db.clone(),
-                registered_profile_session_db: self.registered_user_session_db.clone(),
+                registered_project_session_db: self.project_session_db.clone(),
+                registered_profile_session_db: self.profile_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
                 dashboard_session_retrieval_service: self
                     .project_application_retrieval
@@ -341,15 +341,11 @@ impl McpServer {
                 session_sync_service: session_sync_service.as_deref(),
                 served_stale_graph_generation: std::sync::Arc::new(std::sync::OnceLock::new()),
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
-                    self.session_db.as_ref(),
-                    self.user_session_db.as_ref(),
+                    self.project_session_db.as_ref(),
+                    self.profile_session_db.as_ref(),
                 )
                 .with_profile_identity(self.profile_identity.clone())
                 .with_profile_retained_authority(self.profile_retained_authority.as_ref())
-                .with_registered_databases(
-                    self.registered_session_db.as_ref(),
-                    self.registered_user_session_db.as_ref(),
-                )
                 .with_lcm_authorities(
                     self.project_lcm_authority.as_deref(),
                     self.user_lcm_authority.as_deref(),

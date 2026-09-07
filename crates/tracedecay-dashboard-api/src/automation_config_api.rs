@@ -152,8 +152,8 @@ pub(crate) fn effective_automation_config(
     state: &DashboardState,
 ) -> tracedecay_domain::errors::Result<(ConfigurationRevisionId, AutomationConfig)> {
     let pinned = crate::config::cached_runtime_configuration(&state.project_root)?;
-    let config = from_configuration_snapshot(&pinned.snapshot)?;
-    Ok((pinned.revision_id, config))
+    let config = from_configuration_snapshot(pinned.snapshot())?;
+    Ok((pinned.revision_id().clone(), config))
 }
 
 fn config_payload(

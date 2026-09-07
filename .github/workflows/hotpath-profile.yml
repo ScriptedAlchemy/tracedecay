@@ -17,6 +17,17 @@ name: hotpath-profile
 
 on:
   pull_request:
+    # The profiled workload is the Rust indexing pipeline over the committed
+    # corpus; only these inputs can move its numbers, so dashboard, plugin,
+    # docs and script-only pull requests do not queue a comparison.
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "benchmark_data/index-bench/**"
+      - ".github/workflows/hotpath-profile.yml"
   workflow_dispatch:
 
 concurrency:

@@ -884,25 +884,6 @@ impl HostAdmissionTestRuntimeV1 {
             self.project_registered.as_ref(),
             Some(&self.profile_registered),
         )
-        .with_registered_databases(
-            self.project_registered.as_ref(),
-            Some(&self.profile_registered),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn unregistered_mcp_session_authorities_for_test(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> crate::mcp::tools::SessionAuthorities<'_> {
-        match scope {
-            HostAdmissionScope::Project => {
-                crate::mcp::tools::SessionAuthorities::new(self.project_registered.as_ref(), None)
-            }
-            HostAdmissionScope::Profile => {
-                crate::mcp::tools::SessionAuthorities::new(None, Some(&self.profile_registered))
-            }
-        }
     }
 
     #[cfg(test)]
@@ -993,12 +974,13 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
     ) -> Result<crate::config::PinnedRuntimeConfiguration> {
-        crate::config::load_runtime_configuration_for_registered_database_read_only(
+        crate::config::open_runtime_configuration_for_registered_database_read_only(
             project_root,
             layout,
             self.project_configuration_database_for_test()?,
         )
         .await
+        .map(|opened| opened.configuration)
     }
 
     #[cfg(test)]

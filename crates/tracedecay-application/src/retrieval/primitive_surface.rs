@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::ComplexityAnalysisV1;
 
 use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
@@ -381,10 +382,13 @@ pub struct NodeDetailsV1 {
     pub end_line: u32,
     pub signature: Option<String>,
     pub visibility: String,
-    pub branches: u32,
-    pub loops: u32,
-    pub max_nesting: u32,
-    pub cyclomatic_complexity: u32,
+    /// Exact counters; `None`, and listed in `unavailable_fields`, when
+    /// `complexity_analysis` reports the bounded walk did not cover the body.
+    pub branches: Option<u32>,
+    pub loops: Option<u32>,
+    pub max_nesting: Option<u32>,
+    pub cyclomatic_complexity: Option<u32>,
+    pub complexity_analysis: ComplexityAnalysisV1,
     pub cost_to_expand: NodeExpansionCostV1,
     pub unavailable_fields: Vec<String>,
 }

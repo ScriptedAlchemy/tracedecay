@@ -540,7 +540,8 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            authority_session.provider, o.snippet_text, ?3, frozen.generation
-    FROM session_occurrences AS o
+    FROM session_occurrences_fts
+    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
      AND frozen.generation = o.generation
@@ -555,19 +556,20 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
     anchor_owner_authority_predicate!(),
     "
       AND (?2 IS NULL OR o.source_provider = ?2)
+      AND session_occurrences_fts MATCH ?4
       AND instr(o.snippet_text, ?3) > 0
       ",
-    occurrence_root_keyset!("?4", "?5", "?6"),
+    occurrence_root_keyset!("?5", "?6", "?7"),
     "
       ",
-    occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
+    occurrence_row_length_bounds!("?8", "?9", "?10", "?11", "authority_session.provider"),
     "
-      AND length(CAST(o.snippet_text AS BLOB)) <= ?12
+      AND length(CAST(o.snippet_text AS BLOB)) <= ?13
       ",
-    root_occurrence_cursor_bound!("?11"),
+    root_occurrence_cursor_bound!("?12"),
     "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
-    LIMIT ?13"
+    LIMIT ?14"
 );
 
 pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(

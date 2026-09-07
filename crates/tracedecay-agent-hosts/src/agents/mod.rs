@@ -53,6 +53,7 @@ use tracedecay_domain::canonical_text::sha256_hex;
 use crate::errors::Result;
 use crate::errors::TraceDecayError;
 use crate::ports::mcp_tools::advertised_tools;
+use tracedecay_automation_runtime::automation::host_io::ManagedSkillExportReport;
 use tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary;
 
 pub use antigravity::AntigravityIntegration;
@@ -114,17 +115,6 @@ pub(crate) fn remove_managed_skill_prompt_index(
         target,
     )?;
     retired_memory_digest::remove_prompt_block(prompt_path)
-}
-
-/// Per-agent outcome of a managed-skill export refresh, keyed by agent id.
-/// `error` carries the failure message when the refresh failed; `exports`
-/// lists the destinations that were (re)written on success.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ManagedSkillExportReport {
-    pub agent: String,
-    pub exports: Vec<SkillInstallSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
@@ -1879,7 +1869,10 @@ fn is_cargo_target_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool 
     let mut saw_target = false;
     for component in path.components() {
         let value = component.as_os_str();
-        if saw_target && (path_component_eq(value, "debug") || path_component_eq(value, "release"))
+        if saw_target
+            && tracedecay_runtime_core::config::CARGO_PROFILE_DIRS
+                .iter()
+                .any(|profile| path_component_eq(value, profile))
         {
             return true;
         }
@@ -3495,6 +3488,27 @@ mod path_normalize_tests {
 
         let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
             .expect("PATH binary should be preferred over cargo target binary");
+
+        assert_eq!(
+            found,
+            normalize_path_separators(&path_bin.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn which_tracedecay_prefers_path_when_current_exe_is_perf_profile_target_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_bin = dir.path().join("bin").join(tracedecay_bin_name());
+        std::fs::create_dir_all(path_bin.parent().unwrap()).unwrap();
+        std::fs::write(&path_bin, "").unwrap();
+        let current_exe = dir
+            .path()
+            .join("checkout/target/perf")
+            .join(tracedecay_bin_name());
+        let path_var = std::env::join_paths([dir.path().join("bin")]).unwrap();
+
+        let found = which_tracedecay_from(Some(&current_exe), Some(path_var.as_os_str()), None)
+            .expect("PATH binary should be preferred over a perf-profile cargo target binary");
 
         assert_eq!(
             found,

@@ -18,12 +18,12 @@ use crate::{
 };
 
 use super::{
-    GRAPH_RELATION_READ_LIMIT, canonical_relation_kind, canonical_relation_kind_name,
-    cost_to_expand_verified, graph_name_matches, graph_occurrence_id, graph_symbol_corrupt,
-    graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths, node_not_found,
-    nodes_addressed_by_args, require_positive_depth, required_graph_file_path,
-    required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors, user_line,
-    verified_neighbor_value, verified_trait_dispatch_targets,
+    GRAPH_RELATION_READ_LIMIT, canonical_relation_kind, cost_to_expand_verified,
+    graph_name_matches, graph_occurrence_id, graph_symbol_corrupt, graph_symbol_end_line,
+    graph_symbol_location_value, graph_symbol_paths, node_not_found, nodes_addressed_by_args,
+    require_positive_depth, required_graph_file_path, required_graph_metadata,
+    single_graph_adjacency_batch, traverse_verified_neighbors, user_line, verified_neighbor_value,
+    verified_trait_dispatch_targets,
 };
 
 #[hotpath::measure(label = "mcp.graph.callers.total")]
@@ -107,7 +107,7 @@ pub async fn handle_callees(graph: &VerifiedGraphQuery, args: Value) -> Result<T
                 kind: metadata.kind.clone(),
                 file: required_graph_file_path(&result.symbol)?.to_owned(),
                 line: user_line(metadata.start_line),
-                edge_kind: canonical_relation_kind_name(result.edge_kind).to_owned(),
+                edge_kind: result.edge_kind.as_str().to_owned(),
                 dispatch_via_trait: false,
                 depth: Some(u32::try_from(result.depth).map_err(|_| {
                     graph_symbol_corrupt("callee traversal depth exceeds u32".to_owned())
@@ -223,12 +223,36 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
             let touched_files = vec![file_path.to_owned()];
             let file_size_bytes = bound_source_file_len(graph, file_path)?;
             let end_line = graph_symbol_end_line(metadata)?;
-            let cyclomatic_complexity = metadata.branches.checked_add(1).ok_or_else(|| {
-                graph_symbol_corrupt(format!(
-                    "verified graph symbol '{}' branch count overflows complexity",
-                    n.occurrence.as_str()
-                ))
-            })?;
+            let complexity = metadata.exact_complexity();
+            let cyclomatic_complexity = complexity
+                .map(|complexity| {
+                    complexity.cyclomatic().ok_or_else(|| {
+                        graph_symbol_corrupt(format!(
+                            "verified graph symbol '{}' branch count overflows complexity",
+                            n.occurrence.as_str()
+                        ))
+                    })
+                })
+                .transpose()?;
+            let mut unavailable_fields = vec![
+                "assertions",
+                "attrs_start_line",
+                "derives",
+                "docstring",
+                "is_async",
+                "returns",
+                "unchecked_calls",
+                "unsafe_blocks",
+            ];
+            if complexity.is_none() {
+                unavailable_fields.extend([
+                    "branches",
+                    "cyclomatic_complexity",
+                    "loops",
+                    "max_nesting",
+                ]);
+                unavailable_fields.sort_unstable();
+            }
             let line_count = end_line - metadata.start_line + 1;
             let output = hotpath::measure_block!(
                 "mcp.graph.node.serialize",
@@ -242,27 +266,16 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
                     end_line: user_line(end_line),
                     signature: metadata.signature.clone(),
                     visibility: metadata.visibility.clone(),
-                    branches: metadata.branches,
-                    loops: metadata.loops,
-                    max_nesting: metadata.max_nesting,
+                    branches: complexity.map(|complexity| complexity.branches),
+                    loops: complexity.map(|complexity| complexity.loops),
+                    max_nesting: complexity.map(|complexity| complexity.max_nesting),
                     cyclomatic_complexity,
+                    complexity_analysis: metadata.complexity_analysis,
                     cost_to_expand: NodeExpansionCostV1 {
                         body: u64::from(line_count) * 20,
                         full_file: file_size_bytes / 4,
                     },
-                    unavailable_fields: [
-                        "assertions",
-                        "attrs_start_line",
-                        "derives",
-                        "docstring",
-                        "is_async",
-                        "returns",
-                        "unchecked_calls",
-                        "unsafe_blocks",
-                    ]
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
+                    unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
                 })?
             );
             Ok(generic_tool_result(

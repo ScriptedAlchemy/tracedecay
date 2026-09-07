@@ -8,7 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use fs2::FileExt;
+use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
@@ -24,26 +28,365 @@ pub use connection::SnapshotConnection;
 pub use control::SnapshotReadControl;
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
+static NEXT_BACKUP_STAGING: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_BACKUP_PUBLISH: Cell<bool> = const { Cell::new(false) };
+}
 
 pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> io::Result<()> {
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let source = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(io::Error::other)?;
-        let mut destination = Connection::open_with_flags(
-            &destination,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )
+    tokio::task::spawn_blocking(move || backup_live_sqlite_database_sync(&source, &destination))
+        .await
+        .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
+}
+
+/// Online backup of a possibly-live `SQLite` family. This is the production
+/// Copy-mode authority: committed WAL frames are folded into one standalone
+/// file. Callers must not `fs::copy` a locked Windows store instead (#933).
+///
+/// The source is opened `SQLITE_OPEN_READ_ONLY` without `immutable=1`. That
+/// URI skips locking and ignores WAL/SHM; it is illegal on a changing family.
+/// Each attempt exclusively creates an owned staging file beside
+/// `destination` (`create_new`) and retires only that scratch. A colliding
+/// name is refused, not deleted. On Unix, `rename` atomically replaces an
+/// existing destination only when that path has no `-wal`/`-shm`/`-journal`
+/// sidecars; leftover dest journals stay with the old main and would be
+/// replayed against the new file. Elsewhere the public helper rejects an
+/// existing destination because displace/restore is not atomic and cannot
+/// keep the documented promise that the old file stays at its path until
+/// replace succeeds. Scratch callers always publish to a new path.
+/// A WAL family whose transient `-shm` is absent is copied as an offline
+/// unlocked family and folded in staging — opening it as a reader would
+/// reconstruct SHM in the source directory.
+fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
+    backup_live_sqlite_database_with(source, destination, || Ok(()))
+}
+
+fn backup_staging_path(destination: &Path, id: u64) -> PathBuf {
+    let mut staging = destination.as_os_str().to_os_string();
+    staging.push(format!(".{}.{id}.backup-partial", std::process::id()));
+    PathBuf::from(staging)
+}
+
+fn reserve_exclusive_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn reserve_attempt_staging(destination: &Path) -> io::Result<PathBuf> {
+    for _ in 0..32 {
+        let id = NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed);
+        let staging = backup_staging_path(destination, id);
+        match reserve_exclusive_file(&staging) {
+            Ok(file) => {
+                drop(file);
+                return Ok(staging);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve an exclusive SQLite backup staging file",
+    ))
+}
+
+fn retire_attempt_scratch(staging: &Path) -> io::Result<()> {
+    for member in [
+        with_suffix(staging, "-wal"),
+        with_suffix(staging, "-shm"),
+        with_suffix(staging, "-journal"),
+        staging.to_path_buf(),
+    ] {
+        match fs::remove_file(member) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn reject_aliased_backup_paths(source: &Path, destination: &Path) -> io::Result<()> {
+    if source == destination {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite backup source and destination are the same path",
+        ));
+    }
+    if destination.exists()
+        && crate::db::sqlite_generation_identity(source)
+            .ok()
+            .is_some_and(|source_id| {
+                crate::db::sqlite_generation_identity(destination).ok() == Some(source_id)
+            })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite backup source and destination are the same file",
+        ));
+    }
+    Ok(())
+}
+
+fn backup_live_sqlite_database_with(
+    source: &Path,
+    destination: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    reject_aliased_backup_paths(source, destination)?;
+    // Cancel/deadline before any exclusive create so an early failure cannot
+    // treat a colliding name as this attempt's deletable scratch.
+    checkpoint()?;
+    let staging = reserve_attempt_staging(destination)?;
+    match backup_offline_wal_family_without_shm(source, &staging, &checkpoint) {
+        Ok(true) => publish_complete_backup(&staging, destination),
+        Ok(false) => match run_online_backup(source, &staging, checkpoint) {
+            Ok(()) => publish_complete_backup(&staging, destination),
+            Err(error) => Err(retire_failed_backup(error, &[staging.as_path()])),
+        },
+        Err(error) => Err(retire_failed_backup(error, &[staging.as_path()])),
+    }
+}
+
+#[cfg(test)]
+fn fail_next_backup_publish() {
+    FAIL_NEXT_BACKUP_PUBLISH.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+fn first_backup_step(source: &Path) -> io::Result<StepResult> {
+    let probe_dir = source
+        .parent()
+        .ok_or_else(|| io::Error::other("backup probe source has no parent"))?;
+    let probe = probe_dir.join(format!(
+        "backup-probe-{}.db",
+        NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed)
+    ));
+    let source_conn = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    source_conn
+        .busy_timeout(Duration::ZERO)
         .map_err(io::Error::other)?;
-        let backup =
-            rusqlite::backup::Backup::new(&source, &mut destination).map_err(io::Error::other)?;
-        backup
-            .run_to_completion(128, Duration::from_millis(1), None)
-            .map_err(io::Error::other)
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
+    drop(reserve_exclusive_file(&probe)?);
+    let mut destination = Connection::open_with_flags(&probe, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    let backup =
+        rusqlite::backup::Backup::new(&source_conn, &mut destination).map_err(io::Error::other)?;
+    let step = backup.step(1).map_err(io::Error::other)?;
+    drop(backup);
+    drop(destination);
+    drop(source_conn);
+    retire_attempt_scratch(&probe)?;
+    Ok(step)
+}
+
+fn run_online_backup(
+    source: &Path,
+    staging_path: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    checkpoint()?;
+    let source = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    // Return Busy/Locked to the cooperative loop instead of blocking inside
+    // SQLite's busy handler. Cancel and deadline checkpoints run there.
+    source
+        .busy_timeout(Duration::ZERO)
+        .map_err(io::Error::other)?;
+    let mut staging = Connection::open_with_flags(staging_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    let backup = rusqlite::backup::Backup::new(&source, &mut staging).map_err(io::Error::other)?;
+    loop {
+        checkpoint()?;
+        match backup.step(128).map_err(io::Error::other)? {
+            StepResult::Done => break,
+            StepResult::More => {}
+            StepResult::Busy | StepResult::Locked => {
+                // Shared-lock waits stay cooperative: cancel and deadline
+                // checkpoints run on every retry, including Busy/Locked.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "SQLite online backup returned unexpected step result {other:?}"
+                )));
+            }
+        }
+    }
+    drop(backup);
+    drop(source);
+    fold_staging_to_standalone(staging, staging_path, checkpoint)
+}
+
+fn backup_offline_wal_family_without_shm(
+    source: &Path,
+    staging_path: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<bool> {
+    let source_state = family_state(source)?;
+    let wal = with_suffix(source, "-wal");
+    let shm = with_suffix(source, "-shm");
+    let has_durable_wal = source_state
+        .iter()
+        .any(|state| state.path == wal && state.bytes > 0);
+    let has_shm = source_state.iter().any(|state| state.path == shm);
+    if !has_durable_wal || has_shm {
+        return Ok(false);
+    }
+    // Offline / crash-image family: the files are unlocked. Byte-copy them
+    // into owned staging and fold there so the source directory is not
+    // rewritten with a reconstructed `-shm`.
+    checkpoint()?;
+    fs::copy(source, staging_path)?;
+    checkpoint()?;
+    fs::copy(&wal, with_suffix(staging_path, "-wal"))?;
+    let staging = Connection::open_with_flags(staging_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    fold_staging_to_standalone(staging, staging_path, checkpoint)?;
+    Ok(true)
+}
+
+fn fold_staging_to_standalone(
+    staging: Connection,
+    staging_path: &Path,
+    checkpoint: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    checkpoint()?;
+    // A WAL-mode backup file grows -wal/-shm the moment anything opens it.
+    // Fold to DELETE before publish so the caller receives one standalone file.
+    let mode: String = staging
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .map_err(io::Error::other)?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        return Err(io::Error::other(format!(
+            "SQLite left the backup staging file '{}' in journal mode '{mode}'",
+            staging_path.display()
+        )));
+    }
+    drop(staging);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        match fs::remove_file(with_suffix(staging_path, suffix)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    checkpoint()
+}
+
+fn publish_complete_backup(staging: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_BACKUP_PUBLISH.with(Cell::get) {
+        FAIL_NEXT_BACKUP_PUBLISH.with(|flag| flag.set(false));
+        return Err(retire_failed_backup(
+            io::Error::other("forced backup publish failure"),
+            &[staging],
+        ));
+    }
+    if destination.exists() {
+        return replace_existing_destination(staging, destination);
+    }
+    match fs::rename(staging, destination) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(retire_failed_backup(error, &[staging])),
+    }
+}
+
+#[cfg(unix)]
+fn destination_has_sqlite_sidecars(destination: &Path) -> io::Result<bool> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        match fs::symlink_metadata(with_suffix(destination, suffix)) {
+            Ok(metadata) if metadata.is_file() => return Ok(true),
+            Ok(_) => {
+                return Err(io::Error::other(format!(
+                    "SQLite destination sidecar '{}' is not a file",
+                    with_suffix(destination, suffix).display()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn retire_published_destination_sidecars(destination: &Path) -> io::Result<()> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        match fs::remove_file(with_suffix(destination, suffix)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn replace_existing_destination(staging: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        // rename(2) replaces the directory entry atomically. Failure leaves
+        // destination untouched; only this attempt's staging is retired.
+        // Dest sidecars stay bound to the old main: refuse rather than publish
+        // a new file that an ordinary open would journal-replay into the old
+        // contents.
+        if destination_has_sqlite_sidecars(destination)? {
+            return Err(retire_failed_backup(
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "SQLite backup cannot replace a destination that still has WAL, SHM, or rollback-journal sidecars",
+                ),
+                &[staging],
+            ));
+        }
+        match fs::rename(staging, destination) {
+            Ok(()) => retire_published_destination_sidecars(destination),
+            Err(error) => Err(retire_failed_backup(error, &[staging])),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = destination;
+        Err(retire_failed_backup(
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "SQLite backup cannot atomically replace an existing destination",
+            ),
+            &[staging],
+        ))
+    }
+}
+
+fn retire_failed_backup(error: io::Error, paths: &[&Path]) -> io::Error {
+    for path in paths {
+        if let Err(cleanup) = retire_attempt_scratch(path) {
+            return io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; failed to retire incomplete SQLite backup family '{}': {cleanup}",
+                    path.display()
+                ),
+            );
+        }
+    }
+    error
 }
 
 pub struct SnapshotDatabase {
@@ -286,6 +629,22 @@ enum SnapshotMode {
     DirectImmutable,
     Reflink,
     Copy,
+}
+
+fn snapshot_admission_bytes(
+    mode: SnapshotMode,
+    main_bytes: u64,
+    wal_bytes: u64,
+    shm_bytes: u64,
+) -> u64 {
+    match mode {
+        SnapshotMode::DirectImmutable => 0,
+        // Reflink still copies WAL/SHM beside the clone.
+        SnapshotMode::Reflink => wal_bytes.saturating_add(shm_bytes),
+        // Copy-mode publishes one standalone backup. SHM is never written.
+        // WAL frames can grow the logical size, so they remain an upper bound.
+        SnapshotMode::Copy => main_bytes.saturating_add(wal_bytes),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -579,22 +938,15 @@ fn prepare_one(
     } else {
         checkpointed_snapshot_mode()
     };
-    let mut copy_bytes = if matches!(mode, SnapshotMode::Copy) {
-        main.bytes
-    } else {
-        0
-    };
-    if !matches!(mode, SnapshotMode::DirectImmutable) {
-        for suffix in ["-wal", "-shm"] {
-            let source_member = with_suffix(source, suffix);
-            if let Some(state) = source_state
-                .iter()
-                .find(|state| state.path == source_member)
-            {
-                copy_bytes = copy_bytes.saturating_add(state.bytes);
-            }
-        }
-    }
+    let wal_bytes = source_state
+        .iter()
+        .find(|state| state.path == with_suffix(source, "-wal"))
+        .map_or(0, |state| state.bytes);
+    let shm_bytes = source_state
+        .iter()
+        .find(|state| state.path == with_suffix(source, "-shm"))
+        .map_or(0, |state| state.bytes);
+    let copy_bytes = snapshot_admission_bytes(mode, main.bytes, wal_bytes, shm_bytes);
     if family_state(source)? != source_state {
         return Err(changed_during_snapshot(source));
     }
@@ -674,7 +1026,11 @@ async fn finish_one(
         _scratch: scratch,
         _authority: prepared.authority,
         #[cfg(any(test, feature = "test-helpers"))]
-        copied_bytes: prepared.copy_bytes,
+        copied_bytes: if matches!(prepared.mode, SnapshotMode::Copy) {
+            fs::metadata(&prepared.target)?.len()
+        } else {
+            prepared.copy_bytes
+        },
     };
     snapshot.validate_source()?;
     Ok(snapshot)
@@ -686,21 +1042,29 @@ fn copy_snapshot_family(
     control: &SnapshotReadControl,
 ) -> io::Result<(PreparedSnapshot, Arc<ScratchDirectory>)> {
     control.checkpoint()?;
-    if matches!(prepared.mode, SnapshotMode::Copy) {
-        control.copy_file(&prepared.source, &prepared.target)?;
-    }
-    if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-        for suffix in ["-wal", "-shm"] {
-            let source_member = with_suffix(&prepared.source, suffix);
-            let Some(_) = prepared
-                .source_state
-                .iter()
-                .find(|state| state.path == source_member)
-            else {
-                continue;
-            };
-            control.copy_file(&source_member, &with_suffix(&prepared.target, suffix))?;
+    match prepared.mode {
+        SnapshotMode::Copy => {
+            // Production Copy-mode: online backup of the live family. Do not
+            // byte-copy locked Windows main/WAL/SHM files (lock 33; #933) and
+            // do not open the changing source with immutable=1.
+            backup_live_sqlite_database_with(&prepared.source, &prepared.target, || {
+                control.checkpoint()
+            })?;
         }
+        SnapshotMode::Reflink => {
+            for suffix in ["-wal", "-shm"] {
+                let source_member = with_suffix(&prepared.source, suffix);
+                let Some(_) = prepared
+                    .source_state
+                    .iter()
+                    .find(|state| state.path == source_member)
+                else {
+                    continue;
+                };
+                control.copy_file(&source_member, &with_suffix(&prepared.target, suffix))?;
+            }
+        }
+        SnapshotMode::DirectImmutable => {}
     }
     control.checkpoint()?;
     if family_state(&prepared.source)? != prepared.source_state {
@@ -1046,9 +1410,30 @@ fn read_only_uri(path: &Path) -> io::Result<String> {
 mod cancellation_tests;
 
 #[cfg(test)]
+#[path = "sqlite_read_snapshot_backup_tests.rs"]
+mod backup_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn copy_mode_admission_excludes_shm_and_charges_main_plus_wal() {
+        assert_eq!(
+            snapshot_admission_bytes(SnapshotMode::Copy, 100, 50, 32),
+            150
+        );
+        assert_eq!(
+            snapshot_admission_bytes(SnapshotMode::Reflink, 100, 50, 32),
+            82
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            snapshot_admission_bytes(SnapshotMode::DirectImmutable, 100, 50, 32),
+            0
+        );
+    }
 
     #[test]
     fn insufficient_scratch_space_is_storage_full_not_other() {
@@ -1237,11 +1622,16 @@ mod tests {
                  BEGIN IMMEDIATE;",
             )
             .unwrap();
+        let journal_mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         let wal = with_suffix(&path, "-wal");
         let shm = with_suffix(&path, "-shm");
         assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
         assert!(shm.is_file());
 
+        // Online backup of the live writer, not fs::copy of locked files (#933).
         let snapshot = open(&path).await.unwrap();
         assert_ne!(snapshot.identity_path, path);
 

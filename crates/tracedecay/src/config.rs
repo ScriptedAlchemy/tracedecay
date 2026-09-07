@@ -11,24 +11,21 @@ use tracedecay_application::clock::now_micros;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationSnapshotV1, ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-    SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
-    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
-    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
-    TELEMETRY_TIMINGS_SETTING_KEY, UserProfileId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, SOURCE_BINDINGS_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, UserProfileId,
 };
 
 use tracedecay_configuration::ConfigurationControlStore;
-use tracedecay_configuration::config::semantic_config_from_snapshot;
+use tracedecay_configuration::config::{
+    optional_text_setting, required_bool, required_unsigned, required_usize,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
@@ -606,12 +603,17 @@ pub use tracedecay_configuration::config::RuntimeConfigurationTarget;
 /// A complete resolved configuration pinned to one revision before a runtime
 /// component starts. No caller may re-read mutable legacy input after holding
 /// this value.
+///
+/// The shared runtime settings live in the embedded
+/// [`tracedecay_configuration::config::PinnedRuntimeConfiguration`], which is
+/// the one validated snapshot/revision binding; the composition root only
+/// layers its daemon-only policy on top. Both are materialized once at
+/// construction, so the fields stay private: there is no way to hold this
+/// value with settings that disagree with its snapshot.
 #[derive(Clone, Debug)]
 pub struct PinnedRuntimeConfiguration {
-    pub target: RuntimeConfigurationTarget,
-    pub revision_id: ConfigurationRevisionId,
-    pub snapshot: ConfigurationSnapshotV1,
-    pub config: TraceDecayConfig,
+    runtime: tracedecay_configuration::config::PinnedRuntimeConfiguration,
+    config: TraceDecayConfig,
 }
 
 impl PinnedRuntimeConfiguration {
@@ -623,17 +625,66 @@ impl PinnedRuntimeConfiguration {
         revision_id: ConfigurationRevisionId,
         snapshot: ConfigurationSnapshotV1,
     ) -> Result<Self> {
-        let config = runtime_config_from_snapshot(&target.project_root, &snapshot)?;
-        Ok(Self {
-            target,
-            revision_id,
-            snapshot,
-            config,
-        })
+        Self::from_runtime(
+            tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+                target,
+                revision_id,
+                snapshot,
+            )?,
+        )
     }
 
-    fn retarget(&self, target: RuntimeConfigurationTarget) -> Result<Self> {
-        Self::new(target, self.revision_id.clone(), self.snapshot.clone())
+    /// Layers the daemon-only settings over an already validated runtime pin.
+    /// Shared settings are taken from the pin, never decoded a second time.
+    pub fn from_runtime(
+        runtime: tracedecay_configuration::config::PinnedRuntimeConfiguration,
+    ) -> Result<Self> {
+        let config = TraceDecayConfig::from_runtime(&runtime)?;
+        Ok(Self { runtime, config })
+    }
+
+    pub fn into_runtime(self) -> tracedecay_configuration::config::PinnedRuntimeConfiguration {
+        self.runtime
+    }
+
+    pub fn target(&self) -> &RuntimeConfigurationTarget {
+        self.runtime.target()
+    }
+
+    pub fn revision_id(&self) -> &ConfigurationRevisionId {
+        self.runtime.revision_id()
+    }
+
+    pub fn snapshot(&self) -> &ConfigurationSnapshotV1 {
+        self.runtime.snapshot()
+    }
+
+    pub fn config(&self) -> &TraceDecayConfig {
+        &self.config
+    }
+
+    pub fn into_config(self) -> TraceDecayConfig {
+        self.config
+    }
+
+    /// Splits the daemon runtime shape from the runtime pin the configuration
+    /// control plane retains.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        TraceDecayConfig,
+        tracedecay_configuration::config::PinnedRuntimeConfiguration,
+    ) {
+        (self.config, self.runtime)
+    }
+
+    /// The same revision and settings routed under another root of the same
+    /// registered project. Only the non-authoritative route and the legacy
+    /// `root_dir` metadata change; nothing is decoded again.
+    fn with_project_root(mut self, project_root: &Path) -> Self {
+        self.runtime = self.runtime.with_project_root(project_root);
+        self.config.root_dir = project_root.to_string_lossy().to_string();
+        self
     }
 }
 
@@ -647,19 +698,9 @@ pub struct RuntimeConfigurationCache {
 }
 
 impl RuntimeConfigurationCache {
-    pub fn insert(&self, configuration: PinnedRuntimeConfiguration) -> Result<()> {
-        let expected = runtime_config_from_snapshot(
-            &configuration.target.project_root,
-            &configuration.snapshot,
-        )?;
-        if expected != configuration.config {
-            return Err(config_error(
-                "pinned runtime configuration does not match its resolved snapshot",
-            ));
-        }
-
-        let project_id = configuration.target.project_id.as_str().to_owned();
-        let project_root = configuration.target.project_root.clone();
+    pub fn insert(&self, configuration: PinnedRuntimeConfiguration) {
+        let project_id = configuration.target().project_id.as_str().to_owned();
+        let project_root = configuration.target().project_root.clone();
         self.by_project
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -668,7 +709,6 @@ impl RuntimeConfigurationCache {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(project_root, project_id);
-        Ok(())
     }
 
     pub fn for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration> {
@@ -709,10 +749,7 @@ impl RuntimeConfigurationCache {
                     "configuration authority unavailable: runtime snapshot cache is inconsistent",
                 )
             })?;
-        configuration.retarget(RuntimeConfigurationTarget {
-            project_id: configuration.target.project_id.clone(),
-            project_root: project_root.to_path_buf(),
-        })
+        Ok(configuration.with_project_root(project_root))
     }
 }
 
@@ -723,12 +760,7 @@ impl tracedecay_dashboard_api::config::DashboardConfigurationReadPort
         &self,
         project_root: &Path,
     ) -> Result<tracedecay_dashboard_api::config::PinnedRuntimeConfiguration> {
-        let configuration = self.for_root(project_root)?;
-        tracedecay_dashboard_api::config::PinnedRuntimeConfiguration::new(
-            configuration.target,
-            configuration.revision_id,
-            configuration.snapshot,
-        )
+        Ok(self.for_root(project_root)?.into_runtime())
     }
 
     fn is_in_gitignore(&self, project_root: &Path) -> bool {
@@ -749,10 +781,8 @@ pub fn install_dashboard_configuration_read_port() -> Result<()> {
 }
 
 /// Publishes one daemon-resolved snapshot for runtime and hook consumers.
-pub fn install_pinned_runtime_configuration(
-    configuration: PinnedRuntimeConfiguration,
-) -> Result<()> {
-    runtime_configuration_cache().insert(configuration)
+pub fn install_pinned_runtime_configuration(configuration: PinnedRuntimeConfiguration) {
+    runtime_configuration_cache().insert(configuration);
 }
 
 /// Builds a typed target from a resolved store layout. A missing project ID is
@@ -794,8 +824,8 @@ pub fn runtime_configuration_for_layout(
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     let configuration = runtime_configuration_cache()
         .for_project(&target.project_id)?
-        .retarget(target)?;
-    runtime_configuration_cache().insert(configuration.clone())?;
+        .with_project_root(&target.project_root);
+    runtime_configuration_cache().insert(configuration.clone());
     Ok(configuration)
 }
 
@@ -824,8 +854,8 @@ pub(crate) async fn resolve_runtime_configuration_for_registered_database(
         // The cache already holds a daemon-published pin (possibly a migrated
         // durable revision). Retarget it to this operation's non-authoritative
         // route and keep the fast path; do not reopen the store.
-        let configuration = configuration.retarget(target)?;
-        runtime_configuration_cache().insert(configuration.clone())?;
+        let configuration = configuration.with_project_root(&target.project_root);
+        runtime_configuration_cache().insert(configuration.clone());
         return Ok(configuration);
     }
     // Cold cache: adopt the durable current revision through the canonical
@@ -851,43 +881,30 @@ pub(crate) struct OpenedRuntimeConfiguration {
     pub(crate) registered_database: RegisteredGlobalDbLeaseV1,
 }
 
-fn usecase_runtime_configuration(
-    configuration: PinnedRuntimeConfiguration,
-) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
-    tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
-        configuration.target,
-        configuration.revision_id,
-        configuration.snapshot,
-    )
+impl OpenedRuntimeConfiguration {
+    /// Splits the daemon runtime shape from the bundle the configuration
+    /// control plane retains (runtime pin plus the exact registered store).
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        TraceDecayConfig,
+        tracedecay_configuration::config::OpenedRuntimeConfiguration,
+    ) {
+        let (config, runtime) = self.configuration.into_parts();
+        (
+            config,
+            tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
+                runtime,
+                self.registered_database,
+            ),
+        )
+    }
 }
 
-fn usecase_opened_runtime_configuration(
-    opened: OpenedRuntimeConfiguration,
-) -> Result<tracedecay_configuration::config::OpenedRuntimeConfiguration> {
-    Ok(
-        tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
-            usecase_runtime_configuration(opened.configuration)?,
-            opened.registered_database,
-        ),
-    )
-}
-
-pub(crate) fn root_runtime_configuration(
-    configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
-) -> Result<PinnedRuntimeConfiguration> {
-    PinnedRuntimeConfiguration::new(
-        configuration.target.clone(),
-        configuration.revision_id.clone(),
-        configuration.snapshot.clone(),
-    )
-}
-
-pub(crate) fn materialize_root_runtime_configuration(
-    configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
-) -> Result<TraceDecayConfig> {
-    Ok(root_runtime_configuration(configuration)?.config)
-}
-
+/// Root-owned pin cache behind the lower crate's
+/// [`tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort`].
+/// Publication layers the daemon-only settings over the published runtime pin
+/// once; a cached read hands the embedded runtime pin back without decoding.
 struct RootPinnedRuntimeConfigurationCache;
 
 impl tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort
@@ -897,100 +914,17 @@ impl tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort
         &self,
         configuration: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     ) -> Result<()> {
-        install_pinned_runtime_configuration(root_runtime_configuration(&configuration)?)
+        install_pinned_runtime_configuration(PinnedRuntimeConfiguration::from_runtime(
+            configuration,
+        )?);
+        Ok(())
     }
 
     fn cached_for_root(
         &self,
         project_root: &Path,
     ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
-        usecase_runtime_configuration(cached_runtime_configuration(project_root)?)
-    }
-}
-
-struct RootRuntimeConfigurationAuthority;
-
-impl tracedecay_configuration::config::RuntimeConfigurationAuthorityPort
-    for RootRuntimeConfigurationAuthority
-{
-    fn open<'a>(
-        &'a self,
-        project_root: &'a Path,
-        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
-        database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
-        'a,
-        tracedecay_configuration::config::OpenedRuntimeConfiguration,
-    > {
-        Box::pin(async move {
-            usecase_opened_runtime_configuration(
-                open_runtime_configuration_for_registered_database(project_root, layout, database)
-                    .await?,
-            )
-        })
-    }
-
-    fn open_read_only<'a>(
-        &'a self,
-        project_root: &'a Path,
-        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
-        database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
-        'a,
-        tracedecay_configuration::config::OpenedRuntimeConfiguration,
-    > {
-        Box::pin(async move {
-            usecase_opened_runtime_configuration(
-                open_runtime_configuration_for_registered_database_read_only(
-                    project_root,
-                    layout,
-                    database,
-                )
-                .await?,
-            )
-        })
-    }
-
-    fn resolve<'a>(
-        &'a self,
-        project_root: &'a Path,
-        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
-        database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
-        'a,
-        tracedecay_configuration::config::PinnedRuntimeConfiguration,
-    > {
-        Box::pin(async move {
-            usecase_runtime_configuration(
-                resolve_runtime_configuration_for_registered_database(
-                    project_root,
-                    layout,
-                    database,
-                )
-                .await?,
-            )
-        })
-    }
-
-    fn load_read_only<'a>(
-        &'a self,
-        project_root: &'a Path,
-        layout: &'a tracedecay_runtime_core::storage::StoreLayout,
-        database: RegisteredGlobalDbLeaseV1,
-    ) -> tracedecay_configuration::config::RuntimeConfigurationFuture<
-        'a,
-        tracedecay_configuration::config::PinnedRuntimeConfiguration,
-    > {
-        Box::pin(async move {
-            usecase_runtime_configuration(
-                load_runtime_configuration_for_registered_database_read_only(
-                    project_root,
-                    layout,
-                    database,
-                )
-                .await?,
-            )
-        })
+        Ok(cached_runtime_configuration(project_root)?.into_runtime())
     }
 }
 
@@ -1015,12 +949,11 @@ impl tracedecay_dashboard_api::DashboardPrAutoTrackReadPort for DaemonPrAutoTrac
     }
 }
 
+/// Installs the root-owned configuration read ports the lower crates reach
+/// through their process-global slots: the pin cache, the dashboard
+/// configuration reader, and the PR-autotrack reader. Idempotent.
 pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
     static INSTALLATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
-        tracedecay_configuration::config::install_runtime_configuration_authority(Arc::new(
-            RootRuntimeConfigurationAuthority,
-        ))
-        .map_err(|error| error.to_string())?;
         tracedecay_configuration::config::install_pinned_runtime_configuration_cache(Arc::new(
             RootPinnedRuntimeConfigurationCache,
         ))
@@ -1238,7 +1171,7 @@ async fn open_runtime_configuration_from_store(
     }
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
-    install_pinned_runtime_configuration(configuration.clone())?;
+    install_pinned_runtime_configuration(configuration.clone());
     Ok(configuration)
 }
 
@@ -1294,7 +1227,7 @@ async fn open_runtime_configuration_read_only_from_store(
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
-    install_pinned_runtime_configuration(configuration.clone())?;
+    install_pinned_runtime_configuration(configuration.clone());
     Ok(configuration)
 }
 
@@ -1312,22 +1245,6 @@ fn validate_registered_configuration_database(
             "configuration authority unavailable: registered database is not the exact project session shard",
         )),
     }
-}
-
-pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
-    project_root: &Path,
-    layout: &tracedecay_runtime_core::storage::StoreLayout,
-    database: RegisteredGlobalDbLeaseV1,
-) -> Result<PinnedRuntimeConfiguration> {
-    Ok(
-        open_runtime_configuration_for_registered_database_read_only(
-            project_root,
-            layout,
-            database,
-        )
-        .await?
-        .configuration,
-    )
 }
 
 fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) -> TraceDecayError {
@@ -1353,165 +1270,105 @@ pub fn cached_runtime_configuration_for_project_id(
     project_id: &str,
 ) -> Result<PinnedRuntimeConfiguration> {
     let target = runtime_configuration_target_for_project_id(project_root, project_id)?;
-    runtime_configuration_cache()
+    Ok(runtime_configuration_cache()
         .for_project(&target.project_id)?
-        .retarget(target)
+        .with_project_root(&target.project_root))
 }
 
 pub fn cached_sync_config(project_root: &Path) -> Result<SyncConfig> {
-    Ok(cached_runtime_configuration(project_root)?.config.sync)
+    Ok(cached_runtime_configuration(project_root)?
+        .into_config()
+        .sync)
 }
 
 pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
-    Ok(cached_runtime_configuration(project_root)?.config.telemetry)
+    Ok(cached_runtime_configuration(project_root)?
+        .into_config()
+        .telemetry)
 }
 
-/// Converts a complete typed snapshot into the runtime materialization without
-/// defaults, file reads, or environment reads. This is intentionally public so
-/// daemon composition can validate snapshot-to-runtime parity before publish.
-#[hotpath::measure(label = "daemon.config.parse")]
-pub fn runtime_config_from_snapshot(
-    project_root: &Path,
-    snapshot: &ConfigurationSnapshotV1,
-) -> Result<TraceDecayConfig> {
-    snapshot.validate().map_err(|error| {
-        config_error(format!("invalid resolved configuration snapshot: {error}"))
-    })?;
-
-    Ok(TraceDecayConfig {
-        version: 1,
-        root_dir: project_root.to_string_lossy().to_string(),
-        exclude: required_string_list(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
-        include: required_string_list(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
-        max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
-        extract_docstrings: required_bool(snapshot, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY)?,
-        track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
-        git_ignore: required_bool(snapshot, INDEX_GIT_IGNORE_SETTING_KEY)?,
-        diagnostics_prewarm: required_bool(snapshot, DIAGNOSTICS_PREWARM_SETTING_KEY)?,
-        native_graph_activation: required_bool(
-            snapshot,
-            INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-        )?,
-        semantic: semantic_config_from_snapshot(snapshot)?,
-        sync: SyncConfig {
-            auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
-            watch_linked_worktrees: required_bool(
-                snapshot,
-                SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
-            )?,
-            watch_debounce_ms: required_unsigned(snapshot, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY)?,
-            watch_max_delay_ms: required_unsigned(snapshot, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY)?,
-            watch_max_projects: required_usize(snapshot, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY)?,
-            read_refresh: required_bool(snapshot, SYNC_READ_REFRESH_SETTING_KEY)?,
-            read_cooldown_secs: required_unsigned(snapshot, SYNC_READ_COOLDOWN_SECS_SETTING_KEY)?,
-            session_start_sync: required_bool(snapshot, SYNC_SESSION_START_SYNC_SETTING_KEY)?,
-            session_start_stale_threshold_secs: required_unsigned(
-                snapshot,
-                SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
-            )?,
-            backstop_interval_mins: required_unsigned(
-                snapshot,
-                SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-            )?,
-            full_sync_escalation_files: required_usize(
-                snapshot,
-                SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-            )?,
-            max_concurrent_syncs: required_usize(snapshot, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY)?,
-            branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
-            orphan_db_gc_days: required_unsigned(snapshot, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)?,
-            auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
-            auto_track_pr_branches: required_bool(
-                snapshot,
-                SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-            )?,
-            auto_track_pr_poll_secs: required_unsigned(
-                snapshot,
-                SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-            )?,
-            retention: retention_config_from_snapshot(snapshot)?,
-        },
-        telemetry: TelemetryConfig {
-            timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
-        },
-    })
+impl TraceDecayConfig {
+    /// Layers the daemon-only policy over the shared runtime settings of an
+    /// already validated pin. The shared settings are copied from the pin, so
+    /// they agree with every other consumer by construction; only the
+    /// daemon-only sync, retention, and legacy metadata fields are decoded
+    /// here, from the same snapshot, without defaults, file reads, or
+    /// environment reads.
+    #[hotpath::measure(label = "daemon.config.parse")]
+    fn from_runtime(
+        runtime: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
+    ) -> Result<Self> {
+        let shared = runtime.config();
+        let snapshot = runtime.snapshot();
+        Ok(Self {
+            version: 1,
+            root_dir: runtime.target().project_root.to_string_lossy().to_string(),
+            exclude: shared.exclude.clone(),
+            include: shared.include.clone(),
+            max_file_size: shared.max_file_size,
+            extract_docstrings: shared.extract_docstrings,
+            track_call_sites: shared.track_call_sites,
+            git_ignore: shared.git_ignore,
+            diagnostics_prewarm: shared.diagnostics_prewarm,
+            native_graph_activation: shared.native_graph_activation,
+            semantic: shared.semantic.clone(),
+            sync: SyncConfig {
+                auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
+                watch_linked_worktrees: required_bool(
+                    snapshot,
+                    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+                )?,
+                watch_debounce_ms: required_unsigned(snapshot, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY)?,
+                watch_max_delay_ms: required_unsigned(
+                    snapshot,
+                    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+                )?,
+                watch_max_projects: required_usize(snapshot, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY)?,
+                read_refresh: required_bool(snapshot, SYNC_READ_REFRESH_SETTING_KEY)?,
+                read_cooldown_secs: required_unsigned(
+                    snapshot,
+                    SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+                )?,
+                session_start_sync: required_bool(snapshot, SYNC_SESSION_START_SYNC_SETTING_KEY)?,
+                session_start_stale_threshold_secs: required_unsigned(
+                    snapshot,
+                    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+                )?,
+                backstop_interval_mins: required_unsigned(
+                    snapshot,
+                    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+                )?,
+                full_sync_escalation_files: required_usize(
+                    snapshot,
+                    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+                )?,
+                max_concurrent_syncs: required_usize(
+                    snapshot,
+                    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+                )?,
+                branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
+                orphan_db_gc_days: required_unsigned(snapshot, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)?,
+                auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
+                auto_track_pr_branches: shared.sync.auto_track_pr_branches,
+                auto_track_pr_poll_secs: shared.sync.auto_track_pr_poll_secs,
+                retention: retention_config_from_snapshot(snapshot)?,
+            },
+            telemetry: TelemetryConfig {
+                timings: shared.telemetry.timings,
+            },
+        })
+    }
 }
 
 fn retention_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<RetentionConfig> {
-    let key = SettingKey::new(SYNC_RETENTION_SETTING_KEY).map_err(|error| {
-        config_error(format!(
-            "invalid runtime setting key '{SYNC_RETENTION_SETTING_KEY}': {error}"
-        ))
-    })?;
-    let retention = match snapshot.effective_values.get(&key) {
+    let retention = match optional_text_setting(snapshot, SYNC_RETENTION_SETTING_KEY)? {
         None => RetentionConfig::default(),
-        Some(ConfigurationValueV1::Text(value)) => {
-            serde_json::from_str(value).map_err(|error| {
-                config_error(format!("resolved retention setting is invalid: {error}"))
-            })?
-        }
-        Some(value) => {
-            return Err(config_error(format!(
-                "resolved configuration setting '{SYNC_RETENTION_SETTING_KEY}' has wrong type: expected text, got {:?}",
-                value.kind()
-            )));
-        }
+        Some(value) => serde_json::from_str(value).map_err(|error| {
+            config_error(format!("resolved retention setting is invalid: {error}"))
+        })?,
     };
     retention.validate()?;
     Ok(retention)
-}
-
-fn required_setting<'a>(
-    snapshot: &'a ConfigurationSnapshotV1,
-    key_name: &str,
-) -> Result<&'a ConfigurationValueV1> {
-    let key = SettingKey::new(key_name).map_err(|error| {
-        config_error(format!("invalid runtime setting key '{key_name}': {error}"))
-    })?;
-    snapshot.effective_values.get(&key).ok_or_else(|| {
-        config_error(format!(
-            "resolved configuration snapshot is missing required setting '{key_name}'",
-        ))
-    })
-}
-
-fn required_bool(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<bool> {
-    match required_setting(snapshot, key_name)? {
-        ConfigurationValueV1::Boolean(value) => Ok(*value),
-        value => Err(config_error(format!(
-            "resolved configuration setting '{key_name}' has wrong type: expected boolean, got {:?}",
-            value.kind()
-        ))),
-    }
-}
-
-fn required_unsigned(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<u64> {
-    match required_setting(snapshot, key_name)? {
-        ConfigurationValueV1::Unsigned(value) => Ok(*value),
-        value => Err(config_error(format!(
-            "resolved configuration setting '{key_name}' has wrong type: expected unsigned, got {:?}",
-            value.kind()
-        ))),
-    }
-}
-
-fn required_usize(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<usize> {
-    let value = required_unsigned(snapshot, key_name)?;
-    usize::try_from(value).map_err(|_| {
-        config_error(format!(
-            "resolved configuration setting '{key_name}' does not fit this platform",
-        ))
-    })
-}
-
-fn required_string_list(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<Vec<String>> {
-    match required_setting(snapshot, key_name)? {
-        ConfigurationValueV1::StringList(value) => Ok(value.clone()),
-        value => Err(config_error(format!(
-            "resolved configuration setting '{key_name}' has wrong type: expected string list, got {:?}",
-            value.kind()
-        ))),
-    }
 }
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {

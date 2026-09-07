@@ -10,10 +10,11 @@ test-threads = 8
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 archive.include = [
-    # Windows CI archives tests for separate runners. These ordinary binaries
-    # are executed by acceptance tests but are not Cargo test executables.
-    { path = "debug/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
-    { path = "debug/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
+    # Windows archives use the same perf profile as their prerequisite builds.
+    # Ordinary binaries and the compiled host fixture are not test executables.
+    { path = "perf/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/examples/tracedecay-host-cli-fixture.exe", relative-to = "target", on-missing = "error" },
 ]
 
 [profile.ci.junit]

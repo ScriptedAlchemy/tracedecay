@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { fetchEnvelope } from './envelope.ts';
 import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
 
 const PayloadSchema = z.object({ note: z.string() });
 
@@ -146,4 +147,23 @@ describe('fetchEnvelope', () => {
       fetchEnvelope('/api/x', PayloadSchema, { signal: controller.signal }),
     ).rejects.toBe(abort);
   });
+
+  // The 2xx, 405, and generic non-2xx branches each read a body; an abort
+  // during that read must stay an abort rather than becoming
+  // `unsupported_schema` or an `HTTP <status>` transport state.
+  it.each([200, 405, 500])(
+    'preserves an abort that lands while a %i body is still being read',
+    async (status) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init?: RequestInit) =>
+          responseWithBodyPendingUntilAbort(status, init?.signal),
+        ),
+      );
+      const controller = new AbortController();
+      const pending = fetchEnvelope('/api/x', PayloadSchema, { signal: controller.signal });
+      controller.abort();
+      await expect(pending).rejects.toThrow(/abort/i);
+    },
+  );
 });

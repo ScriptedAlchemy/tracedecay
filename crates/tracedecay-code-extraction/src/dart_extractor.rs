@@ -5,10 +5,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{ComplexityMetrics, DART_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Dart source files using tree-sitter.
@@ -138,6 +140,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -245,7 +248,13 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Library, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Library,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -269,6 +278,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -296,7 +306,7 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &path, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -320,6 +330,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -404,7 +415,13 @@ impl DartExtractor {
             b.end_position().column as u32
         });
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            sig_node,
+        );
         let metrics = body.map_or(ComplexityMetrics::default(), |b| {
             count_complexity(b, &DART_COMPLEXITY, state.source)
         });
@@ -431,6 +448,7 @@ impl DartExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -478,7 +496,7 @@ impl DartExtractor {
         } else {
             NodeKind::Class
         };
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -502,6 +520,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -559,7 +578,13 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Mixin, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Mixin,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -583,6 +608,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -626,7 +652,13 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Extension, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Extension,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -650,6 +682,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -691,7 +724,7 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -715,6 +748,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -769,7 +803,13 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -793,6 +833,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -827,7 +868,13 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::TypeAlias, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::TypeAlias,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -851,6 +898,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1093,7 +1141,13 @@ impl DartExtractor {
             b.end_position().column as u32
         });
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            sig_node,
+        );
         let metrics = body.map_or(ComplexityMetrics::default(), |b| {
             count_complexity(b, &DART_COMPLEXITY, state.source)
         });
@@ -1120,6 +1174,7 @@ impl DartExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1165,7 +1220,13 @@ impl DartExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Constructor,
+            &name,
+            decl_node,
+        );
         let metrics = count_complexity(decl_node, &DART_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -1190,6 +1251,7 @@ impl DartExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1263,7 +1325,13 @@ impl DartExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            decl_node,
+        );
         let metrics = count_complexity(decl_node, &DART_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -1288,6 +1356,7 @@ impl DartExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1343,7 +1412,13 @@ impl DartExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            decl_node,
+        );
         let metrics = count_complexity(decl_node, &DART_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -1368,6 +1443,7 @@ impl DartExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1465,7 +1541,13 @@ impl DartExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            name,
+            decl_node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1489,6 +1571,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1790,11 +1873,12 @@ impl DartExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::@{}", state.qualified_prefix(), annot_name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::AnnotationUsage,
             &annot_name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -1819,6 +1903,7 @@ impl DartExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

@@ -96,7 +96,7 @@ impl PinnedWorkExecutableBindingResolver {
             }
         })?;
         let Some(ConfigurationValueV1::WorkExecutableBindings(configured)) =
-            configuration.snapshot.effective_values.get(&key)
+            configuration.snapshot().effective_values.get(&key)
         else {
             return Err(WorkExecutableBindingError::Unavailable {
                 executable_id: "configuration.work-executable-bindings".to_owned(),
@@ -109,8 +109,8 @@ impl PinnedWorkExecutableBindingResolver {
             .collect();
         Ok(Self {
             bindings,
-            configuration_revision_id: configuration.revision_id.clone(),
-            configuration_snapshot_id: configuration.snapshot.snapshot_id.clone(),
+            configuration_revision_id: configuration.revision_id().clone(),
+            configuration_snapshot_id: configuration.snapshot().snapshot_id.clone(),
         })
     }
 }
@@ -306,11 +306,11 @@ mod tests {
         assert_eq!(resolved.verified_byte_length(), original.len() as u64);
         assert_eq!(
             resolved.configuration_revision_id(),
-            &configuration.revision_id
+            configuration.revision_id()
         );
         assert_eq!(
             resolved.configuration_snapshot_id(),
-            &configuration.snapshot.snapshot_id
+            &configuration.snapshot().snapshot_id
         );
 
         assert!(matches!(

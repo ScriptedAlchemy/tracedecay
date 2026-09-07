@@ -402,47 +402,85 @@ async fn persist_raw_predecessor_range(
     .await
 }
 
+/// Predecessor-range upsert for the `current` rows selected by a predicate.
+///
+/// Captures each selected message's exact preceding raw interval within its
+/// session. Host recognizers decide whether a row is native compaction
+/// evidence; the generic raw authority only preserves its bounded provenance.
+/// A session's first message has no predecessor, so the joins yield no row for
+/// it. The predicate only narrows which `current` rows are visited; every
+/// visited row is written with its own identity and relation.
+macro_rules! predecessor_range_upsert_sql {
+    ($current_predicate:literal) => {
+        concat!(
+            "INSERT INTO lcm_raw_predecessor_ranges (
+                 provider, message_id, session_id, from_store_id, to_store_id
+             )
+             SELECT current.provider, current.message_id, current.session_id,
+                    first.store_id, prior.store_id
+             FROM lcm_raw_messages AS current
+             JOIN lcm_raw_messages AS first
+               ON first.store_id = (
+                    SELECT candidate.store_id
+                    FROM lcm_raw_messages AS candidate
+                    WHERE candidate.provider = current.provider
+                      AND candidate.session_id = current.session_id
+                      AND candidate.store_id < current.store_id
+                    ORDER BY candidate.store_id
+                    LIMIT 1
+               )
+             JOIN lcm_raw_messages AS prior
+               ON prior.store_id = (
+                    SELECT candidate.store_id
+                    FROM lcm_raw_messages AS candidate
+                    WHERE candidate.provider = current.provider
+                      AND candidate.session_id = current.session_id
+                      AND candidate.store_id < current.store_id
+                    ORDER BY candidate.store_id DESC
+                    LIMIT 1
+               )
+             WHERE ",
+            $current_predicate,
+            "
+             ON CONFLICT(provider, message_id) DO UPDATE SET
+                 session_id = excluded.session_id,
+                 from_store_id = excluded.from_store_id,
+                 to_store_id = excluded.to_store_id"
+        )
+    };
+}
+
+const PREDECESSOR_RANGE_FOR_IDENTITY_SQL: &str =
+    predecessor_range_upsert_sql!("current.provider = ?1 AND current.message_id = ?2");
+const PREDECESSOR_RANGES_FOR_STORE_RANGE_SQL: &str =
+    predecessor_range_upsert_sql!("current.store_id > ?1 AND current.store_id <= ?2");
+
 pub(crate) async fn persist_raw_predecessor_range_for_identity(
     conn: &(impl Executor + ?Sized),
     provider: &str,
     message_id: &str,
 ) -> Result<(), LcmError> {
     // Capture the exact preceding raw interval in the same ingest transaction.
-    // Host recognizers decide whether this row is native compaction evidence;
-    // the generic raw authority only preserves its bounded provenance.
     conn.execute(
-        "INSERT INTO lcm_raw_predecessor_ranges (
-             provider, message_id, session_id, from_store_id, to_store_id
-         )
-         SELECT current.provider, current.message_id, current.session_id,
-                first.store_id, prior.store_id
-         FROM lcm_raw_messages AS current
-         JOIN lcm_raw_messages AS first
-           ON first.store_id = (
-                SELECT candidate.store_id
-                FROM lcm_raw_messages AS candidate
-                WHERE candidate.provider = current.provider
-                  AND candidate.session_id = current.session_id
-                  AND candidate.store_id < current.store_id
-                ORDER BY candidate.store_id
-                LIMIT 1
-           )
-         JOIN lcm_raw_messages AS prior
-           ON prior.store_id = (
-                SELECT candidate.store_id
-                FROM lcm_raw_messages AS candidate
-                WHERE candidate.provider = current.provider
-                  AND candidate.session_id = current.session_id
-                  AND candidate.store_id < current.store_id
-                ORDER BY candidate.store_id DESC
-                LIMIT 1
-           )
-         WHERE current.provider = ?1 AND current.message_id = ?2
-         ON CONFLICT(provider, message_id) DO UPDATE SET
-             session_id = excluded.session_id,
-             from_store_id = excluded.from_store_id,
-             to_store_id = excluded.to_store_id",
+        PREDECESSOR_RANGE_FOR_IDENTITY_SQL,
         params![provider, message_id],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Same per-message write as [`persist_raw_predecessor_range_for_identity`]
+/// for every raw message with `from_store_id < store_id <= to_store_id`, in
+/// one statement. Used by the summary-queue backfill, whose page is exactly
+/// such a store-id range.
+pub(crate) async fn persist_raw_predecessor_ranges_for_store_range(
+    conn: &(impl Executor + ?Sized),
+    from_store_id_exclusive: i64,
+    to_store_id_inclusive: i64,
+) -> Result<(), LcmError> {
+    conn.execute(
+        PREDECESSOR_RANGES_FOR_STORE_RANGE_SQL,
+        params![from_store_id_exclusive, to_store_id_inclusive],
     )
     .await?;
     Ok(())

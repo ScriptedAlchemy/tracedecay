@@ -52,16 +52,15 @@ fn codex_and_cursor_compaction_requests_never_carry_host_payload() {
     }
 }
 
+/// A profile store is either mounted as the registered profile-session
+/// lease or absent; there is no separately supplied "registered" alias. With
+/// no lease, profile admission is typed unavailable rather than accepted.
 #[tokio::test]
-async fn daemon_profile_ingest_rejects_an_unregistered_database() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let fixture = HostAdmissionTestRuntimeV1::profile(temp.path())
-        .await
-        .unwrap();
+async fn daemon_profile_ingest_without_a_registered_profile_store_is_unavailable() {
     let admission = host_admission_facade(
         None,
         HostAdmissionScope::Profile,
-        fixture.unregistered_mcp_session_authorities_for_test(HostAdmissionScope::Profile),
+        SessionAuthorities::default(),
     )
     .unwrap()
     .accept_replay("cursor", HostAdmissionScope::Profile);
@@ -71,6 +70,26 @@ async fn daemon_profile_ingest_rejects_an_unregistered_database() {
         admission.reason_code,
         Some("registered_authority_unavailable")
     );
+}
+
+/// The mounted profile-session lease is the admission authority: the same
+/// lease that ingests is the one host admission replays through.
+#[tokio::test]
+async fn daemon_profile_ingest_admits_through_the_mounted_profile_store() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let fixture = HostAdmissionTestRuntimeV1::profile(temp.path())
+        .await
+        .unwrap();
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(temp.path()).unwrap();
+    let authorities = fixture
+        .mcp_session_authorities()
+        .with_profile_identity(Some(std::sync::Arc::new(profile_identity)));
+    let admission = host_admission_facade(None, HostAdmissionScope::Profile, authorities)
+        .unwrap()
+        .accept_replay("cursor", HostAdmissionScope::Profile);
+
+    assert_eq!(admission.status, HostAdmissionStatus::AcceptedForReplay);
 }
 
 #[tokio::test]

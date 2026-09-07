@@ -771,11 +771,13 @@ fn doctor_read_response(
                 "LCM Doctor receipt could not be encoded",
             ),
         },
-        Err(_) => terminal_failure(
+        // The operator's only view of a failed diagnosis is this diagnostic,
+        // so it carries the typed store error instead of a bare failure.
+        Err(error) => terminal_failure(
             context,
             LcmAuthorityOperation::Doctor,
             started_at,
-            "LCM Doctor read failed",
+            &format!("LCM Doctor read failed: {error}"),
         ),
     }
 }

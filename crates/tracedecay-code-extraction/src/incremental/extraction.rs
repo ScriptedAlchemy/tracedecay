@@ -9,7 +9,7 @@ use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1
 use crate::parsed_extraction::{
     ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionDisposition,
     ParsedExtractionResetReason, ParsedExtractionScope, ParsedTraversalMetrics,
-    merge_changed_extraction, node_intersects_edit,
+    merge_changed_extraction, superseded_previous_nodes,
 };
 
 impl RetainedParseDocument {
@@ -219,22 +219,12 @@ fn merge_changed_artifact_unmeasured(
     edit: ParseInputEdit,
     old_end_row: u32,
 ) -> Option<ExtractionArtifactV1> {
-    let delta_ids = delta
-        .result
-        .nodes
-        .iter()
-        .filter(|node| node.kind != NodeKind::File)
-        .map(|node| node.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
+    let superseded = superseded_previous_nodes(&previous.result, &delta.result, edit)?;
     let affected_import_statements = previous
         .result
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Use)
-        .filter(|node| {
-            node_intersects_edit(node, edit.start_position, edit.old_end_position)
-                || delta_ids.contains(&node.id)
-        })
+        .filter(|node| node.kind == NodeKind::Use && superseded.contains(node.id.as_str()))
         .map(|node| {
             (
                 node.start_line,
@@ -244,12 +234,7 @@ fn merge_changed_artifact_unmeasured(
             )
         })
         .collect::<Vec<_>>();
-    let result = merge_changed_extraction(
-        &previous.result,
-        delta.result,
-        edit.start_position,
-        edit.old_end_position,
-    )?;
+    let result = merge_changed_extraction(&previous.result, delta.result, edit)?;
     let mut imports = previous
         .imports
         .iter()

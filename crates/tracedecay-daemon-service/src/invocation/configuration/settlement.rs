@@ -25,12 +25,13 @@ pub(super) async fn reconcile_configuration_runtime(
             return;
         }
     };
+    let revision_id = current.revision_id().clone();
     let installation = hotpath::measure_block!("daemon.service.configuration.activate", {
-        tracedecay_configuration::config::publish_pinned_runtime_configuration(current.clone())
+        tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
             .map_err(|error| error.to_string())
     });
     let (observed_revision_id, activation_error_code) = match installation {
-        Ok(()) => (Some(current.revision_id), None),
+        Ok(()) => (Some(revision_id), None),
         Err(error) => {
             tracing::warn!(
                 receipt_id = %receipt.receipt_id,

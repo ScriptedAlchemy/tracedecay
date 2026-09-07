@@ -119,7 +119,7 @@ async fn tick(
         // poll and, critically, no destructive disabled-state teardown.
         let Ok(cfg) =
             crate::config::cached_runtime_configuration_for_project_id(&root, &record.project_id)
-                .map(|configuration| configuration.config.sync)
+                .map(|configuration| configuration.into_config().sync)
         else {
             continue;
         };

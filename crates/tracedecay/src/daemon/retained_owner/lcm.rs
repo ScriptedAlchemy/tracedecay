@@ -5,13 +5,14 @@ use std::sync::Arc;
 use tracedecay_application::retained_surfaces::{
     LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmDagDepthStatusV1, LcmDagStatusV1,
     LcmDescribeRequestV1, LcmDoctorFindingKindV1, LcmDoctorFindingV1, LcmDoctorHealthStatusV1,
-    LcmDoctorHealthV1, LcmDoctorRequestV1, LcmDoctorResultV1, LcmExpandQueryRequestV1,
-    LcmExpandRequestV1, LcmGrepRequestV1, LcmLifecycleStatusV1, LcmLoadSessionRequestV1,
-    LcmPayloadCoverageStateV1, LcmPayloadCoverageV1, LcmPayloadGcStatusV1, LcmPayloadStatusV1,
-    LcmRedactionStatusV1, LcmRoleV1, LcmStatusRequestV1, LcmStatusResultV1, LcmStatusV1,
-    LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmTemporalModeV1, MessageRelationshipScopeV1,
-    MessageTypeFilterV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1, RetainedTimeFilterV1,
+    LcmDoctorHealthV1, LcmDoctorProjectionStateV1, LcmDoctorProjectionV1, LcmDoctorRequestV1,
+    LcmDoctorResultV1, LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1,
+    LcmLifecycleStatusV1, LcmLoadSessionRequestV1, LcmPayloadCoverageStateV1, LcmPayloadCoverageV1,
+    LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRedactionStatusV1, LcmRoleV1, LcmStatusRequestV1,
+    LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmTemporalModeV1,
+    MessageRelationshipScopeV1, MessageTypeFilterV1, RetainedOutcomeStatusV1,
+    RetainedSurfaceOperation, RetainedSurfaceResultV1, RetainedTimeFilterV1,
+    RetrievalWorkerStatusV1,
 };
 use tracedecay_application::{
     ApplicationOutcome, CancellationSignal, RequestContext, RetainedLcmExecutionPortV1,
@@ -29,6 +30,11 @@ use tracedecay_session_temporal_store::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
+use tracedecay_sessions::serving::{
+    SessionProjectionServingState, SessionProjectionServingStatus, SessionProjectionStaleReason,
+    SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
+    SessionProjectionWorkerRetryClass,
+};
 
 use super::receipts::evidence_outcome;
 use tracedecay_runtime_core::timeutil::SearchTimeBound;
@@ -106,6 +112,10 @@ impl<'a> ScopedRetrieval<'a> {
 }
 
 impl SessionApplicationRetrievalPortV1 for ScopedRetrieval<'_> {
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        self.inner.projection_serving_status()
+    }
+
     fn retrieve_admitted<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -507,12 +517,27 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
             ))
         })?;
         let health = lcm_doctor_health(report);
+        let projection = self.projection_serving_status().map(lcm_doctor_projection);
         let status = match health.status {
+            // A healthy store whose projection is still converging (or has no
+            // serving worker) is partial evidence: nothing is wrong with the
+            // schema, but what it serves is not yet the preserved history.
+            LcmDoctorHealthStatusV1::Complete
+                if projection.as_ref().is_some_and(|projection| {
+                    projection.state != LcmDoctorProjectionStateV1::Current
+                }) =>
+            {
+                RetainedOutcomeStatusV1::Partial
+            }
             LcmDoctorHealthStatusV1::Complete => RetainedOutcomeStatusV1::Complete,
             LcmDoctorHealthStatusV1::Partial => RetainedOutcomeStatusV1::Partial,
             LcmDoctorHealthStatusV1::Unavailable => RetainedOutcomeStatusV1::Unavailable,
             LcmDoctorHealthStatusV1::Locked => RetainedOutcomeStatusV1::Locked,
         };
+        // The health reason (a failed probe and its storage error, or a path
+        // API refusal) is the operator's only pointer to why diagnosis did
+        // not complete, so the result carries it at the top as well.
+        let reason = health.reason.clone();
         evidence_outcome(
             context,
             RetainedSurfaceOperation::LcmDoctor,
@@ -520,9 +545,81 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 status,
                 authority_outcome,
                 health: Some(health),
-                reason: None,
+                projection,
+                reason,
             }),
         )
+    }
+
+    /// The refresh worker's serving state for the diagnosed store. Only
+    /// project mounts own a worker; the profile authority is served without
+    /// one, so it reports nothing rather than a fabricated state.
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        match &self.authority {
+            DirectRetainedLcmAuthority::Project { retrieval, .. } => {
+                retrieval.projection_serving_status()
+            }
+            DirectRetainedLcmAuthority::Profile { .. } => None,
+        }
+    }
+}
+
+fn lcm_doctor_projection(status: SessionProjectionServingStatus) -> LcmDoctorProjectionV1 {
+    let (state, reason) = match &status.state {
+        SessionProjectionServingState::Current => (LcmDoctorProjectionStateV1::Current, None),
+        SessionProjectionServingState::Stale { reason } => (
+            LcmDoctorProjectionStateV1::Stale,
+            Some(match reason {
+                SessionProjectionStaleReason::HistoricalConvergence => {
+                    "historical_convergence".to_owned()
+                }
+                SessionProjectionStaleReason::HistoricalRetry { reason_code } => {
+                    format!("historical_retry:{reason_code}")
+                }
+                SessionProjectionStaleReason::HistoricalBlocked { reason_code } => {
+                    format!("historical_blocked:{reason_code}")
+                }
+            }),
+        ),
+        SessionProjectionServingState::Unavailable { reason } => (
+            LcmDoctorProjectionStateV1::Unavailable,
+            Some(
+                match reason {
+                    SessionProjectionUnavailableReason::WorkerMissing => "worker_missing",
+                    SessionProjectionUnavailableReason::WorkerRecovering => "worker_recovering",
+                    SessionProjectionUnavailableReason::WorkerStalled => "worker_stalled",
+                    SessionProjectionUnavailableReason::WorkerStopped => "worker_stopped",
+                }
+                .to_owned(),
+            ),
+        ),
+    };
+    LcmDoctorProjectionV1 {
+        state,
+        reason,
+        worker: RetrievalWorkerStatusV1 {
+            last_progress_at_unix_micros: status.last_progress_at_unix_micros,
+            backlog: status.backlog,
+            blocker: status.blocker.map(|blocker| {
+                match blocker {
+                    SessionProjectionWorkerBlocker::WorkerMissing => "worker_missing",
+                    SessionProjectionWorkerBlocker::WorkerPanicked => "worker_panicked",
+                    SessionProjectionWorkerBlocker::WorkerStopped => "worker_stopped",
+                    SessionProjectionWorkerBlocker::Storage => "storage",
+                    SessionProjectionWorkerBlocker::Projector => "projector",
+                    SessionProjectionWorkerBlocker::Deadline => "deadline",
+                }
+                .to_owned()
+            }),
+            retry_class: status.retry_class.map(|retry_class| {
+                match retry_class {
+                    SessionProjectionWorkerRetryClass::Storage => "storage",
+                    SessionProjectionWorkerRetryClass::Projector => "projector",
+                    SessionProjectionWorkerRetryClass::Deadline => "deadline",
+                }
+                .to_owned()
+            }),
+        },
     }
 }
 

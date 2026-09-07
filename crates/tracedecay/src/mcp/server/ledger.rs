@@ -102,7 +102,7 @@ impl McpServer {
                     "cannot read desired upload setting: {error}"
                 ))
             })?;
-        upload_enabled_from_desired_configuration(&desired.snapshot)
+        upload_enabled_from_desired_configuration(desired.snapshot())
     }
 
     /// Estimates the raw-file token cost ("before") for the given file
@@ -458,7 +458,7 @@ impl McpServer {
         let Ok(selected_server) = selected.retained_server() else {
             return;
         };
-        let Some(db) = self.session_db.clone() else {
+        let Some(db) = self.project_session_db.clone() else {
             return;
         };
         let thread_id = bounded_identifier(route.thread_id.as_deref()).and_then(|value| {

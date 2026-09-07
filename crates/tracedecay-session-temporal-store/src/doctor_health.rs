@@ -644,9 +644,10 @@ impl SessionTemporalHealthFinding {
 pub struct SessionTemporalHealthReport {
     status: SessionTemporalHealthStatus,
     findings: Vec<SessionTemporalHealthFinding>,
-    /// Fixed machine reason for path-API unavailability (for example
-    /// `uncheckpointed_wal`). Omitted when diagnosis ran against a
-    /// checkpointed immutable snapshot.
+    /// Why diagnosis could not complete: a fixed machine reason for path-API
+    /// unavailability (for example `synchronous_diagnosis_size_budget_exceeded`)
+    /// or a `<probe>: <storage error>` detail naming the read that failed.
+    /// Omitted when diagnosis ran to completion against an immutable snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -701,7 +702,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         record_session_doctor_cache_miss();
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
-            Err(error) => return unavailable_report(classify_database_error(&error)),
+            Err(error) => {
+                return unavailable_report_with_detail(
+                    classify_database_error(&error),
+                    "read_snapshot",
+                    &error,
+                );
+            }
         };
         let report = diagnose_snapshot(&snapshot).await;
         let after = session_temporal_store_fingerprint(database_path).ok();
@@ -724,7 +731,13 @@ async fn diagnose_snapshot(
 ) -> SessionTemporalHealthReport {
     let inventory = match snapshot_schema_inventory(conn).await {
         Ok(inventory) => inventory,
-        Err(error) => return unavailable_report(classify_engine_error(&error)),
+        Err(error) => {
+            return unavailable_report_with_detail(
+                classify_engine_error(&error),
+                "schema_inventory",
+                &error,
+            );
+        }
     };
     let temporal_tables = inventory
         .tables
@@ -759,7 +772,11 @@ async fn diagnose_snapshot(
             Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::MigrationGap, 1)),
             Err(error) => {
                 if is_engine_locked(&error) {
-                    return unavailable_report(SessionTemporalHealthStatus::Locked);
+                    return unavailable_report_with_detail(
+                        SessionTemporalHealthStatus::Locked,
+                        "schema_version",
+                        &error,
+                    );
                 }
                 status = SessionTemporalHealthStatus::Partial;
             }
@@ -803,10 +820,13 @@ async fn diagnose_snapshot(
                 drift,
             );
         }
-        Err(error) if is_engine_locked(&error) => {
-            return unavailable_report(SessionTemporalHealthStatus::Locked);
+        Err(error) => {
+            return unavailable_report_with_detail(
+                classify_engine_error(&error),
+                "column_shape",
+                &error,
+            );
         }
-        Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
     }
 
     for check in CHECKS {
@@ -832,7 +852,13 @@ async fn diagnose_snapshot(
                     reason: None,
                 };
             }
-            Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
+            Err(error) => {
+                return unavailable_report_with_detail(
+                    SessionTemporalHealthStatus::Unavailable,
+                    check_probe_name(check.kind),
+                    &error,
+                );
+            }
         }
     }
     findings.sort_by_key(SessionTemporalHealthFinding::kind);
@@ -1006,8 +1032,46 @@ fn is_engine_locked(error: &EngineError) -> bool {
     message.contains("locked") || message.contains("busy")
 }
 
-fn unavailable_report(status: SessionTemporalHealthStatus) -> SessionTemporalHealthReport {
-    unavailable_report_with_reason(status, None)
+/// The probe a failed check names in its `reason`, so an unavailable report
+/// says which read failed rather than a bare unavailable.
+fn check_probe_name(kind: SessionTemporalHealthFindingKind) -> &'static str {
+    match kind {
+        SessionTemporalHealthFindingKind::TriggerAuditDrift => "trigger_audit",
+        SessionTemporalHealthFindingKind::OccurrenceFtsCorruption => "occurrence_fts",
+        SessionTemporalHealthFindingKind::SummaryFtsCorruption => "summary_fts",
+        SessionTemporalHealthFindingKind::MissingAnchor => "missing_anchor",
+        SessionTemporalHealthFindingKind::MissingReceipt => "missing_receipt",
+        SessionTemporalHealthFindingKind::InvalidGeneration => "invalid_generation",
+        SessionTemporalHealthFindingKind::MultiActiveGeneration => "multi_active_generation",
+        SessionTemporalHealthFindingKind::CursorChainAbsent => "cursor_chain",
+        SessionTemporalHealthFindingKind::CursorKeyAbsent => "cursor_key",
+        SessionTemporalHealthFindingKind::OwnershipDrift => "ownership",
+        SessionTemporalHealthFindingKind::StuckRefresh => "stuck_refresh",
+        SessionTemporalHealthFindingKind::StuckBinding => "stuck_binding",
+        SessionTemporalHealthFindingKind::StuckProgress => "stuck_progress",
+        SessionTemporalHealthFindingKind::StuckReceipt => "stuck_receipt",
+        SessionTemporalHealthFindingKind::MigrationGap => "migration_gap",
+        SessionTemporalHealthFindingKind::CompatibilityDrift => "compatibility_drift",
+        SessionTemporalHealthFindingKind::RelationGraphUnavailable => "relation_graph",
+        SessionTemporalHealthFindingKind::RelationGraphCorruption => "relation_graph_corruption",
+        SessionTemporalHealthFindingKind::RelationGraphCycle => "relation_graph_cycle",
+        SessionTemporalHealthFindingKind::StaleSummaryClosure => "stale_summary_closure",
+    }
+}
+
+/// An unavailable or locked report that names the probe that failed and the
+/// storage error it failed with; the operator otherwise cannot tell a
+/// refused schema from a busy writer or a missing table.
+fn unavailable_report_with_detail(
+    status: SessionTemporalHealthStatus,
+    probe: &'static str,
+    error: &impl std::fmt::Display,
+) -> SessionTemporalHealthReport {
+    SessionTemporalHealthReport {
+        status,
+        findings: Vec::new(),
+        reason: Some(format!("{probe}: {error}")),
+    }
 }
 
 fn unavailable_report_with_reason(

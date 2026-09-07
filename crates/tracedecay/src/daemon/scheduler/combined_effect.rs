@@ -1192,7 +1192,7 @@ mod tests {
                 .current()
                 .await
                 .expect("combined admission configuration");
-            let configuration_revision_id = configuration.revision_id.clone();
+            let configuration_revision_id = configuration.revision_id().clone();
             let access = crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
                 &scope,
                 &project_root,

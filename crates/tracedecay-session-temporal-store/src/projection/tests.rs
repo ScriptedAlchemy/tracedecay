@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -33,95 +30,14 @@ use super::persist::persist_occurrences;
 use super::record_canonical_observation_effect;
 use crate::GlobalDbSessionTemporalStore;
 use crate::handle::SessionTemporalRegisteredDb;
+use crate::test_support::QueryCountingConnection;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
     open_registered_test_database_fixture,
 };
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
-use tracedecay_runtime_core::db::engine::{
-    Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
-};
-
-struct QueryCountingConnection<'a, T> {
-    inner: &'a T,
-    queries: AtomicUsize,
-}
-
-impl<'a, T> QueryCountingConnection<'a, T> {
-    fn new(inner: &'a T) -> Self {
-        Self {
-            inner,
-            queries: AtomicUsize::new(0),
-        }
-    }
-
-    fn query_count(&self) -> usize {
-        self.queries.load(Ordering::Relaxed)
-    }
-}
-
-impl<T: QueryExecutor> QueryExecutor for QueryCountingConnection<'_, T> {
-    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
-    where
-        P: IntoParams,
-    {
-        self.queries.fetch_add(1, Ordering::Relaxed);
-        self.inner.query(sql, params).await
-    }
-}
-
-impl<T: Executor> Executor for QueryCountingConnection<'_, T> {
-    async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
-    where
-        P: IntoParams,
-    {
-        self.inner.execute(sql, params).await
-    }
-
-    async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
-        self.inner.execute_batch(sql).await
-    }
-}
-
-impl<T: crate::handle::SessionTemporalQuery> crate::handle::SessionTemporalQuery
-    for QueryCountingConnection<'_, T>
-{
-    fn query<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> impl std::future::Future<Output = Result<Rows, tracedecay_runtime_core::db::engine::Error>> + Send
-    where
-        P: IntoParams + Send,
-    {
-        self.queries.fetch_add(1, Ordering::Relaxed);
-        crate::handle::SessionTemporalQuery::query(self.inner, sql, params)
-    }
-}
-
-impl<T: crate::handle::SessionTemporalExec> crate::handle::SessionTemporalExec
-    for QueryCountingConnection<'_, T>
-{
-    fn execute<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> impl std::future::Future<Output = Result<u64, tracedecay_runtime_core::db::engine::Error>> + Send
-    where
-        P: IntoParams + Send,
-    {
-        crate::handle::SessionTemporalExec::execute(self.inner, sql, params)
-    }
-
-    fn execute_batch(
-        &self,
-        sql: &str,
-    ) -> impl std::future::Future<Output = Result<(), tracedecay_runtime_core::db::engine::Error>> + Send
-    {
-        crate::handle::SessionTemporalExec::execute_batch(self.inner, sql)
-    }
-}
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
 
 fn fixture_session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()

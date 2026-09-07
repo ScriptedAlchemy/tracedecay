@@ -2,8 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 pub struct ElixirExtractor;
@@ -111,6 +113,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -175,7 +178,13 @@ impl ElixirExtractor {
         let name = Self::call_arg_name(state, node).unwrap_or_else(|| "?".to_string());
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -199,6 +208,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -226,7 +236,13 @@ impl ElixirExtractor {
         let start_line = node.start_position().row as u32;
         let sig = Self::first_line(state, node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
         let visibility = if is_private {
             Visibility::Private
         } else {
@@ -257,6 +273,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -281,7 +298,13 @@ impl ElixirExtractor {
         let start_line = node.start_position().row as u32;
         let sig = Self::first_line(state, node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -305,6 +328,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -329,7 +353,13 @@ impl ElixirExtractor {
             .map_or_else(|| "?".to_string(), |(n, _)| n.clone());
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
         let sig = Self::first_line(state, node);
 
         let graph_node = Node {
@@ -354,6 +384,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -373,7 +404,7 @@ impl ElixirExtractor {
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
         let name = Self::call_arg_name(state, node).unwrap_or_else(|| "?".to_string());
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -397,6 +428,7 @@ impl ElixirExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

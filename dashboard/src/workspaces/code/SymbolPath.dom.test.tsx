@@ -90,6 +90,7 @@ describe('Symbol connection panel', () => {
 function node(id: string, name: string) {
   return {
     assertions: null,
+    complexity_analysis: null,
     attrs_start_line: null,
     branches: null,
     degree: null,

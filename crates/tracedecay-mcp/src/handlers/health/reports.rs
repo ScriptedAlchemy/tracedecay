@@ -23,7 +23,7 @@ pub async fn handle_gini(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let named_values = hotpath::measure_block!(
+    let (named_values, incomplete_complexity_symbols) = hotpath::measure_block!(
         "mcp.health.gini.graph",
         verified_gini_values(graph, metric, scope, path_prefix)?
     );
@@ -66,6 +66,7 @@ pub async fn handle_gini(
             "total_items": total_items,
             "metric": metric,
             "scope": scope,
+            "incomplete_complexity_symbols": incomplete_complexity_symbols,
             "outliers": outliers,
         })
     );
@@ -78,12 +79,15 @@ pub async fn handle_gini(
     ))
 }
 
+/// Named metric values plus, for complexity metrics, the number of symbols
+/// left out because their bounded complexity walk did not cover the body:
+/// their counters are lower bounds, so they measure nothing here.
 fn verified_gini_values(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     metric: &str,
     scope: &str,
     path_prefix: Option<&str>,
-) -> Result<Vec<(String, f64)>> {
+) -> Result<(Vec<(String, f64)>, usize)> {
     let page = graph.symbols_page(None, MAX_GINI_SYMBOLS)?;
     if page.has_more {
         return Err(TraceDecayError::project_route(
@@ -122,37 +126,51 @@ fn verified_gini_values(
 
     match (metric, scope) {
         ("fan_in" | "fan_out", "file") => {
-            verified_gini_fan_values(graph, &symbols, metric == "fan_in")
+            verified_gini_fan_values(graph, &symbols, metric == "fan_in").map(|values| (values, 0))
         }
         ("lines", "file") => {
             let mut per_file = HashMap::<String, f64>::new();
             for (_, path, metadata) in symbols {
                 *per_file.entry(path).or_default() += f64::from(metadata.line_span);
             }
-            Ok(per_file.into_iter().collect())
+            Ok((per_file.into_iter().collect(), 0))
         }
-        ("members", _) => verified_gini_member_values(graph, &symbols),
-        (_, "symbol") => Ok(symbols
-            .into_iter()
-            .filter(|(_, _, metadata)| matches!(metadata.kind.as_str(), "function" | "method"))
-            .map(|(_, path, metadata)| {
-                let value = metadata
-                    .branches
-                    .saturating_add(metadata.loops)
-                    .saturating_add(metadata.max_nesting);
-                (format!("{path}:{}", metadata.simple_name), f64::from(value))
-            })
-            .collect()),
+        ("members", _) => verified_gini_member_values(graph, &symbols).map(|values| (values, 0)),
+        (_, "symbol") => {
+            let mut incomplete = 0usize;
+            let values = symbols
+                .into_iter()
+                .filter(|(_, _, metadata)| matches!(metadata.kind.as_str(), "function" | "method"))
+                .filter_map(|(_, path, metadata)| {
+                    let Some(complexity) = metadata.exact_complexity() else {
+                        incomplete += 1;
+                        return None;
+                    };
+                    let value = complexity
+                        .branches
+                        .saturating_add(complexity.loops)
+                        .saturating_add(complexity.max_nesting);
+                    Some((format!("{path}:{}", metadata.simple_name), f64::from(value)))
+                })
+                .collect();
+            Ok((values, incomplete))
+        }
         _ => {
+            let mut incomplete = 0usize;
             let mut per_file = HashMap::<String, f64>::new();
             for (_, path, metadata) in symbols {
-                let value = metadata
+                let Some(complexity) = metadata.exact_complexity() else {
+                    incomplete += 1;
+                    per_file.entry(path).or_default();
+                    continue;
+                };
+                let value = complexity
                     .branches
-                    .saturating_add(metadata.loops)
-                    .saturating_add(metadata.max_nesting);
+                    .saturating_add(complexity.loops)
+                    .saturating_add(complexity.max_nesting);
                 *per_file.entry(path).or_default() += f64::from(value);
             }
-            Ok(per_file.into_iter().collect())
+            Ok((per_file.into_iter().collect(), incomplete))
         }
     }
 }
@@ -326,7 +344,8 @@ pub async fn handle_health(
                         "score": r4(snap.equality),
                         "gini": r4(snap.gini),
                         "interpretation": gini_label(snap.gini),
-                        "source": "1 - gini(per_file_complexity)",
+                        "incomplete_complexity_symbols": snap.incomplete_complexity_symbols,
+                        "source": "1 - gini(per_file_complexity); symbols whose complexity walk hit its budget are excluded and counted",
                     },
                     "redundancy": {
                         "score": r4(snap.redundancy),

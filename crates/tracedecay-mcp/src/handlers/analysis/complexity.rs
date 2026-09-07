@@ -53,6 +53,9 @@ pub async fn handle_complexity(
                 let metadata = &symbol.metadata;
                 let incoming = fan_in.get(&symbol.occurrence).copied().unwrap_or(0);
                 let outgoing = fan_out.get(&symbol.occurrence).copied().unwrap_or(0);
+                // Counters are published only when the bounded walk covered
+                // the body; otherwise the analysis state stands in for them.
+                let complexity = metadata.exact_complexity();
                 json!({
                     "id": symbol.occurrence.as_str(),
                     "name": metadata.simple_name,
@@ -60,10 +63,11 @@ pub async fn handle_complexity(
                     "file": symbol.path,
                     "line": metadata.start_line,
                     "lines": metadata.line_span,
-                    "cyclomatic_complexity": metadata.branches.saturating_add(1),
-                    "branches": metadata.branches,
-                    "loops": metadata.loops,
-                    "max_nesting": metadata.max_nesting,
+                    "cyclomatic_complexity": complexity.map(|complexity| complexity.branches.saturating_add(1)),
+                    "branches": complexity.map(|complexity| complexity.branches),
+                    "loops": complexity.map(|complexity| complexity.loops),
+                    "max_nesting": complexity.map(|complexity| complexity.max_nesting),
+                    "complexity_analysis": metadata.complexity_analysis,
                     "fan_out": outgoing,
                     "fan_in": incoming,
                     "score": analysis_score(symbol, &fan_in, &fan_out),
@@ -72,7 +76,7 @@ pub async fn handle_complexity(
             .collect();
         json!({
             "formula": "lines + (fan_out × 3) + fan_in",
-            "note": "cyclomatic_complexity = branches + 1 (computed from AST during extraction)",
+            "note": "cyclomatic_complexity = branches + 1 (computed from AST during extraction); counters are null when complexity_analysis is not complete",
             "result_count": items.len(),
             "ranking": items,
         })
