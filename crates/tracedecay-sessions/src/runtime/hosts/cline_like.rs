@@ -428,7 +428,10 @@ fn snapshot_generation(contents: &str) -> TranscriptIngestResult<ObservationSour
     )?)
 }
 
-fn ui_messages_source_key(task_id: &str) -> String {
+/// The native source key of a task's `ui_messages.json` stream, which is
+/// ordered independently of the task's API conversation history.
+#[must_use]
+pub fn ui_messages_source_key(task_id: &str) -> String {
     format!("{task_id}{UI_MESSAGES_SOURCE_SUFFIX}")
 }
 

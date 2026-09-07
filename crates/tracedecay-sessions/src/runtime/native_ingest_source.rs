@@ -1,8 +1,16 @@
-//! Shared native ingest source identity for admission, cursor lookup, and tests.
+//! Shared native ingest source identity for admission and cursor lookup.
 //!
 //! Each host writes one [`ObservationSourceIdentityV1`] per independently
 //! ordered stream. Cursor lookup and projection fixtures must reconstruct that
-//! same identity instead of collapsing every provider onto `for_provider`.
+//! same identity instead of collapsing every stream of a session onto
+//! `for_provider`.
+//!
+//! Every host but one commits under the plain provider/session pair, so this
+//! is a constructor rather than a registry. Codex is the exception: its
+//! observations commit under the host-owned hashed v2 identity, while
+//! `for_provider` names only the pre-v2 legacy source. The provider dispatch
+//! remains here because callers such as restart cursor reads hold only the
+//! provider string.
 
 use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
 
@@ -11,15 +19,16 @@ use crate::runtime::source::TranscriptIngestResult;
 /// Source identity admission writes for one native stream.
 ///
 /// `source_key` names an independently appended stream inside the session
-/// (Cline `<task>:ui_messages`). `None` keeps the session's own single-source
-/// identity. Codex always uses its v2 canonical source key; callers must not
-/// substitute the pre-v2 session-only identity when reading that cursor.
+/// (a Cline task's `<task>:ui_messages`, from
+/// [`crate::runtime::cline_like::ui_messages_source_key`]). `None` keeps the
+/// session's own single-source identity. Codex uses its v2 canonical source
+/// key for the session stream.
 pub fn native_ingest_source_identity(
     provider: &str,
     session_id: &str,
     source_key: Option<&str>,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    if provider == "codex" {
+    if provider == "codex" && source_key.is_none() {
         return crate::runtime::codex::codex_observation_source_v2(session_id);
     }
     let provider = ProviderId::new(provider)?;
@@ -34,27 +43,10 @@ pub fn native_ingest_source_identity(
     })
 }
 
-/// Reconstruct the identity a host would write for `provider`/`session_id`.
-///
-/// Prefer [`native_ingest_source_identity`] when the caller already knows the
-/// explicit stream key. This helper exists for fixtures that only have the
-/// session id and must still hit the same cursor admission wrote.
-pub fn native_ingest_session_source_identity(
-    provider: &str,
-    session_id: &str,
-) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    native_ingest_source_identity(provider, session_id, None)
-}
-
-/// Cline-family UI stream key. API history keeps the task's own identity.
-#[must_use]
-pub fn cline_like_ui_source_key(session_id: &str) -> String {
-    format!("{session_id}:ui_messages")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::cline_like::ui_messages_source_key;
     use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
 
     #[test]
@@ -63,7 +55,7 @@ mod tests {
         let ui = native_ingest_source_identity(
             "cline",
             "task-1",
-            Some(&cline_like_ui_source_key("task-1")),
+            Some(&ui_messages_source_key("task-1")),
         )
         .unwrap();
         assert_ne!(api, ui);
@@ -88,8 +80,7 @@ mod tests {
     fn codex_lookup_uses_the_v2_authority_not_the_legacy_session_source() {
         let written =
             crate::runtime::codex::codex_observation_source_v2("codex-goal-dedupe").unwrap();
-        let looked_up =
-            native_ingest_session_source_identity("codex", "codex-goal-dedupe").unwrap();
+        let looked_up = native_ingest_source_identity("codex", "codex-goal-dedupe", None).unwrap();
         let legacy = ObservationSourceIdentityV1::for_provider(
             ProviderId::new("codex").unwrap(),
             SessionId::new("codex-goal-dedupe").unwrap(),

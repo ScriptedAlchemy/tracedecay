@@ -100,7 +100,7 @@ use crate::runtime::source::{
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
-#[cfg(all(test, not(feature = "test-helpers")))]
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) use observation::codex_observation_source_v2;
 /// The canonical Codex observation source identity. Codex observations commit
 /// under this v2 identity; `for_provider` names only the pre-v2 legacy source
