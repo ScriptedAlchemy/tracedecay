@@ -24,7 +24,8 @@ use tracedecay_semantic_contracts::{
 use super::journey_test_support::git;
 use super::*;
 use tracedecay_code_index_retention::code_index_generations::{
-    DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
+    DEFAULT_SUPERSEDED_GENERATION_FLOOR, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
+    plan_code_generation_retention,
 };
 use tracedecay_usecases::semantic_runtime::{
     ProjectSemanticActivationExt, project_semantic_retained_vector_generations,
@@ -64,6 +65,93 @@ fn initialize_git_project(root: &Path) {
     .expect("initial source");
     git(root, &["add", "."]);
     git(root, &["commit", "-qm", "initial"]);
+}
+
+/// Select no embedding producer through the public configuration authority
+/// before Git enrollment can schedule a model that is already cached locally.
+async fn disable_automatic_projection_before_indexing(isolation: &Path, project: &Path) {
+    assert!(!project.join(".git").exists());
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation,
+        [project.to_path_buf()],
+    )
+    .await
+    .expect("configuration-only project composition");
+    set_project_model_selection(&harness, project, None).await;
+    harness.shutdown().await;
+}
+
+async fn set_project_model_selection(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    selected_model: Option<&str>,
+) {
+    let graph = harness.server(project).expect("project server").cg().await;
+    let configuration = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("current production configuration");
+    let mut semantic = configuration.config.semantic.clone();
+    semantic.selected_model = selected_model.map(str::to_owned);
+    semantic.auto_download = false;
+    assert!(semantic.active_profile.is_none());
+    assert!(semantic.rollback_profile.is_none());
+    let request = tracedecay_application::ConfigurationSetRequestV1 {
+        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+            project_id: graph
+                .configuration_runtime()
+                .configuration_target()
+                .project_id
+                .clone(),
+        },
+        key: tracedecay_domain::configuration::SettingKey::new(
+            crate::config::SEMANTIC_RUNTIME_SETTING_KEY,
+        )
+        .expect("semantic setting key"),
+        value: tracedecay_domain::configuration::ConfigurationValueV1::Text(
+            serde_json::to_string(&semantic).expect("disabled projection configuration"),
+        ),
+        idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
+            format!(
+                "configuration.idempotency.retention-no-model.{}",
+                configuration.revision_id
+            ),
+        )
+        .expect("configuration idempotency key"),
+        expected_revision: configuration.revision_id,
+    };
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_configuration_set",
+            serde_json::to_value(request).expect("configuration request"),
+        )
+        .await
+        .expect("public model deselection");
+    assert!(
+        response.error.is_none(),
+        "model deselection failed: {response:?}"
+    );
+    assert_ne!(
+        response.result.as_ref().expect("configuration result")["isError"],
+        true
+    );
+    let observed = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("committed model selection");
+    assert_eq!(
+        observed.config.semantic.selected_model.as_deref(),
+        selected_model
+    );
+    let root_view = crate::config::runtime_config_from_snapshot(project, &observed.snapshot)
+        .expect("root runtime decodes the same committed snapshot");
+    assert_eq!(root_view.semantic, observed.config.semantic);
+    drop(graph);
 }
 
 fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
@@ -260,6 +348,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     let isolation = TempDir::new().expect("isolated production composition");
     let project_root = isolation.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
+    disable_automatic_projection_before_indexing(isolation.path(), &project_root).await;
     initialize_git_project(&project_root);
 
     let harness =
@@ -282,7 +371,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     assert!(
         project_semantic_retained_vector_generations(&canonical_root)
             .is_some_and(|roots| roots.generation_ids().is_empty()),
-        "the exact committed query-only profile is known-empty retention authority"
+        "the mounted profile has known-empty configured retention roots"
     );
     let vector_generation =
         publish_vector_generation(schedulers, &canonical_root, &first_source).await;
@@ -300,27 +389,49 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             .expect("published activation generation");
     drop(retained);
 
-    let mut latest = first_source.clone();
-    for revision in 1..=4 {
-        latest = publish_code_edit(schedulers, &canonical_root, &latest, revision).await;
-    }
-    let newer_vector_generation =
-        publish_vector_generation(schedulers, &canonical_root, &latest).await;
-    assert_ne!(newer_vector_generation, vector_generation);
     let code_store_root =
         tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
             &graph.store_layout().data_root.join("code-index-v1"),
             &canonical_root,
         );
-    let graph_replay_pool_root = graph.db().database_path().with_extension("graph-replay");
-    let plan = prepare_next_code_generation_retention_cancellable(
+    let mut latest = first_source.clone();
+    for revision in 1..=4 {
+        latest = publish_code_edit(schedulers, &canonical_root, &latest, revision).await;
+    }
+    let retained_plan = plan_code_generation_retention(
         &code_store_root,
         &BTreeSet::new(),
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        &|| false,
-        Some(&graph_replay_pool_root),
     )
-    .expect("code generation retention plan");
+    .expect("pointer-rooted code generation census");
+    assert!(
+        retained_plan
+            .superseded_generations
+            .iter()
+            .any(|generation| generation.generation_id == first_source),
+        "the first source remains sealed after four edits"
+    );
+    assert!(
+        !retained_plan
+            .collectable_generations
+            .iter()
+            .any(|generation| generation.generation_id == first_source),
+        "exact publication history remains live independently of the rollback floor"
+    );
+    for revision in 5..=MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 {
+        latest = publish_code_edit(schedulers, &canonical_root, &latest, revision).await;
+    }
+    let newer_vector_generation =
+        publish_vector_generation(schedulers, &canonical_root, &latest).await;
+    assert_ne!(newer_vector_generation, vector_generation);
+    // The next collection unit is newest-first; source eligibility belongs to
+    // the full census, independently of which bounded unit is selected first.
+    let plan = plan_code_generation_retention(
+        &code_store_root,
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .expect("code generation retention census");
     let first_candidate = plan
         .collectable_generations
         .iter()
@@ -333,6 +444,27 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
 
     let observations = resources.store_administration.store_telemetry_sampling();
     let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+    assert!(matches!(
+        crate::daemon::store_maintenance::resolve_vector_retention_inventory(
+            graph.as_ref(),
+            schedulers,
+            &observations,
+        )
+        .await,
+        crate::daemon::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
+    ));
+    assert_eq!(
+        crate::daemon::store_maintenance::run_code_generation_retention(
+            graph.as_ref(),
+            schedulers,
+            &observations,
+            &cancellation,
+        )
+        .await,
+        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
+        "an unknown census cannot discard a mounted vector provider's leases"
+    );
+    assert!(first_source_file.is_file());
     assert!(
         !crate::daemon::maintenance::generation::run_project_generation_maintenance(
             graph.as_ref(),
@@ -448,13 +580,39 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
         )
         .await
         .is_complete();
+        if !first_source_file.exists() {
+            let provider = restarted_schedulers
+                .semantic_vector_graph_provider(&canonical_root)
+                .await
+                .expect("restarted vector provider remains mounted");
+            let retained = provider
+                .graph_for_current()
+                .await
+                .expect("current vector graph remains readable");
+            let store =
+                GraphVectorGenerationStoreV1::read_only(&retained).expect("canonical vector store");
+            let census = store
+                .project_stage_census(Arc::clone(retained.cancellation()))
+                .expect("current vector census revision");
+            let source =
+                tracedecay_store::SemanticVectorSourceGenerationId::new(first_source.to_string())
+                    .expect("exact source generation identity");
+            assert!(
+                !store
+                    .source_generation_is_live(
+                        &source,
+                        census.revision,
+                        Arc::clone(retained.cancellation()),
+                    )
+                    .expect("exact source liveness at the observed revision"),
+                "vector cleanup must finish before its exact source-code deletion"
+            );
+        }
+        // A successful deletion requests another bounded code census before
+        // the aggregate maintenance tick can report complete.
         if converged {
             break;
         }
-        assert!(
-            first_source_file.is_file(),
-            "cleanup convergence must finish before source-code deletion"
-        );
     }
     assert!(converged, "replayed cleanup converges after restart");
     assert!(
@@ -635,8 +793,9 @@ fn age_scope_for_reconciliation(scope: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey() {
     use super::semantic_activation_journey_test::{
-        evaluate_native_profile, installed_selection_material, seed_distribution_fixture,
-        selection, set_semantic_profile, wait_for_semantic_generation,
+        evaluate_native_profile, install_project_distribution_fixture,
+        installed_selection_material, selection, set_semantic_profile,
+        wait_for_semantic_generation,
     };
 
     // Same byte-pinned FastEmbed prerequisite as the semantic activation
@@ -654,18 +813,6 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         return;
     };
     let _profile = crate::config::PinnedUserDataDir::new();
-    let lifecycle_root =
-        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
-    let lifecycle =
-        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
 
     let isolation = TempDir::new().expect("linked-worktree journey isolation");
     let primary = isolation.path().join("primary");
@@ -691,6 +838,30 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     )
     .await
     .expect("mounted linked-worktree production composition");
+    let lifecycle = install_project_distribution_fixture(&harness, &primary, &fixture_root).await;
+    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
+    let linked_project_id = tracedecay_domain::ProjectId::new(
+        harness
+            .project_id(&linked)
+            .await
+            .expect("linked project identity"),
+    )
+    .expect("typed linked project");
+    let linked_lifecycle = harness
+        .resources
+        .as_ref()
+        .expect("resources")
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("registry")
+        .project_semantic_lifecycle(&linked_project_id)
+        .await
+        .expect("linked lifecycle");
+    assert!(
+        Arc::ptr_eq(&lifecycle, &linked_lifecycle),
+        "linked worktrees retain one logical project selection owner"
+    );
     let resources = harness.resources.as_ref().expect("live harness resources");
     let primary_code_id = resources
         .invocation
@@ -991,4 +1162,353 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         .await
     );
     replayed.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mounted_default_off_retention_requires_an_empty_vector_census() {
+    let isolation = TempDir::new().expect("isolated default-off project");
+    let project_root = isolation.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    disable_automatic_projection_before_indexing(isolation.path(), &project_root).await;
+    initialize_git_project(&project_root);
+    let harness =
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project_root.clone()])
+            .await
+            .expect("mounted default-off project");
+    let resources = harness.resources.as_ref().unwrap();
+    let schedulers = &resources.invocation.code_index_schedulers;
+    let graph = harness.server(&project_root).unwrap().cg().await;
+    let root = graph.project_root().to_path_buf();
+    let configuration = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .unwrap();
+    assert!(configuration.config.semantic.selected_model.is_none());
+    assert!(configuration.config.semantic.active_profile.is_none());
+    assert!(configuration.config.semantic.rollback_profile.is_none());
+    assert!(
+        schedulers
+            .semantic_vector_graph_provider(&root)
+            .await
+            .is_some()
+    );
+    let first = schedulers.latest_generation_id(&root).await.unwrap();
+    let mut latest = first.clone();
+    for revision in 1..=MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 {
+        latest = publish_code_edit(schedulers, &root, &latest, revision).await;
+    }
+    let code_store =
+        tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
+            &graph.store_layout().data_root.join("code-index-v1"),
+            &root,
+        );
+    let plan = plan_code_generation_retention(
+        &code_store,
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .unwrap();
+    let candidate = plan
+        .collectable_generations
+        .iter()
+        .find(|candidate| candidate.generation_id == first)
+        .expect("the oldest exact generation has left durable pointer history");
+    let source_file = code_store
+        .join("code-generations-v1")
+        .join(&candidate.generation_file);
+    assert!(source_file.is_file());
+    let observations = crate::daemon::maintenance::StoreTelemetrySamplingRegistry::default();
+    // This is the durable default-off observation emitted while the semantic
+    // coordinator is unseated; the vector provider still belongs to the mount.
+    observations.record_semantic_vector_retention_unseated(&root);
+    let inventory = crate::daemon::store_maintenance::resolve_vector_retention_inventory(
+        graph.as_ref(),
+        schedulers,
+        &observations,
+    )
+    .await;
+    assert!(
+        matches!(
+            inventory,
+            crate::daemon::store_maintenance::VectorRetentionInventoryV1::SemanticUnseated
+        ),
+        "empty default-off inventory was refused: {:?}",
+        inventory.degraded_reason(),
+    );
+    let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+    assert_eq!(
+        crate::daemon::store_maintenance::run_code_generation_retention(
+            graph.as_ref(),
+            schedulers,
+            &observations,
+            &cancellation,
+        )
+        .await,
+        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::MoreWork,
+    );
+    assert!(
+        !source_file.exists(),
+        "an empty mounted vector store permits code cleanup"
+    );
+
+    publish_vector_generation(schedulers, &root, &latest).await;
+    assert!(matches!(
+        crate::daemon::store_maintenance::resolve_vector_retention_inventory(
+            graph.as_ref(),
+            schedulers,
+            &observations,
+        )
+        .await,
+        crate::daemon::store_maintenance::VectorRetentionInventoryV1::Refused { .. }
+    ));
+    assert_eq!(
+        crate::daemon::store_maintenance::run_code_generation_retention(
+            graph.as_ref(),
+            schedulers,
+            &observations,
+            &cancellation,
+        )
+        .await,
+        crate::daemon::store_maintenance::CodeGenerationRetentionOutcomeV1::Failed,
+        "disabled configuration alone cannot discard published vector state",
+    );
+    drop(graph);
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mounted_model_selection_is_isolated_by_logical_project_and_profile() {
+    let isolation = TempDir::new().expect("profile isolation");
+    let first = isolation.path().join("first");
+    let second = isolation.path().join("second");
+    std::fs::create_dir_all(&first).expect("first project");
+    std::fs::create_dir_all(&second).expect("second project");
+    disable_automatic_projection_before_indexing(isolation.path(), &first).await;
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [first.clone(), second.clone()],
+    )
+    .await
+    .expect("two logical projects");
+    let registry = harness
+        .resources
+        .as_ref()
+        .expect("resources")
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("profile registry");
+    let first_id = tracedecay_domain::ProjectId::new(
+        harness.project_id(&first).await.expect("first identity"),
+    )
+    .expect("typed first identity");
+    let second_id = tracedecay_domain::ProjectId::new(
+        harness.project_id(&second).await.expect("second identity"),
+    )
+    .expect("typed second identity");
+    let first_owner = registry
+        .project_semantic_lifecycle(&first_id)
+        .await
+        .expect("first owner");
+    let second_owner = registry
+        .project_semantic_lifecycle(&second_id)
+        .await
+        .expect("second owner");
+    assert!(!Arc::ptr_eq(&first_owner, &second_owner));
+    assert!(Arc::ptr_eq(
+        &first_owner,
+        &registry
+            .project_semantic_lifecycle(&first_id)
+            .await
+            .expect("same project owner")
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while second_owner.status().selected_model.as_deref() != Some(DEFAULT_FASTEMBED_MODEL_ID) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second project applies canonical startup selection");
+    assert!(
+        first_owner.status().selected_model.is_none(),
+        "another project's startup must preserve explicit None"
+    );
+
+    let other_isolation = TempDir::new().expect("second profile isolation");
+    let other_project = other_isolation.path().join("project");
+    std::fs::create_dir_all(&other_project).expect("other profile project");
+    disable_automatic_projection_before_indexing(other_isolation.path(), &other_project).await;
+    let other = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        other_isolation.path(),
+        [other_project.clone()],
+    )
+    .await
+    .expect("other profile");
+    let other_registry = other
+        .resources
+        .as_ref()
+        .expect("resources")
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("other registry");
+    let other_id = tracedecay_domain::ProjectId::new(
+        other
+            .project_id(&other_project)
+            .await
+            .expect("other identity"),
+    )
+    .expect("typed other identity");
+    let other_owner = other_registry
+        .project_semantic_lifecycle(&other_id)
+        .await
+        .expect("other owner");
+    assert!(!Arc::ptr_eq(&second_owner, &other_owner));
+    assert!(other_owner.status().selected_model.is_none());
+    assert_eq!(
+        second_owner.status().selected_model.as_deref(),
+        Some(DEFAULT_FASTEMBED_MODEL_ID)
+    );
+    other.shutdown().await;
+    assert_eq!(
+        second_owner.status().selected_model.as_deref(),
+        Some(DEFAULT_FASTEMBED_MODEL_ID),
+        "closing a different profile must preserve this selection"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn semantic_shutdown_drains_project_startup_selection_before_returning() {
+    let isolation = TempDir::new().expect("startup shutdown isolation");
+    let project = isolation.path().join("project");
+    std::fs::create_dir_all(&project).expect("project directory");
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .expect("production project composition");
+    let resources = harness.resources.as_ref().expect("resources");
+    let registry = resources
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("retained registry");
+    let project_id = tracedecay_domain::ProjectId::new(
+        harness
+            .project_id(&project)
+            .await
+            .expect("project identity"),
+    )
+    .expect("typed identity");
+    let owner = registry
+        .project_semantic_lifecycle(&project_id)
+        .await
+        .expect("project owner");
+    let graph = harness.server(&project).expect("server").cg().await;
+    let configuration = Arc::clone(graph.configuration_runtime());
+    let schedulers = resources.invocation.code_index_schedulers.clone();
+    let selection = owner.configuration_selection_guard().await;
+    owner
+        .select_model(None, false)
+        .expect("clear selected material");
+    let before = owner.status();
+    assert!(
+        configuration
+            .client()
+            .current()
+            .await
+            .expect("current config")
+            .config
+            .semantic
+            .selected_model
+            .is_some(),
+        "startup would change this owner without cancellation"
+    );
+    assert!(
+        crate::daemon::project_composition::retain_project_semantic_startup(
+            registry.as_ref(),
+            project.clone(),
+            schedulers.clone(),
+            Arc::clone(&configuration),
+            Some(Arc::clone(&owner)),
+            false,
+        )
+    );
+    // This current-thread runtime runs the admitted startup task to the held
+    // configuration gate before beginning the terminal drain.
+    tokio::task::yield_now().await;
+    let shutdown = tokio::spawn({
+        let registry = Arc::clone(&registry);
+        async move { registry.shutdown_terminal_tasks().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "terminal drain must retain startup selection waiting at its owner gate"
+    );
+    assert!(
+        !crate::daemon::project_composition::retain_project_semantic_startup(
+            registry.as_ref(),
+            project.clone(),
+            schedulers,
+            configuration,
+            Some(Arc::clone(&owner)),
+            false,
+        ),
+        "terminal admission must reject later startup selection"
+    );
+    shutdown.abort();
+    assert!(
+        shutdown
+            .await
+            .expect_err("first drain was cancelled")
+            .is_cancelled()
+    );
+    let retry = tokio::spawn({
+        let registry = Arc::clone(&registry);
+        async move { registry.shutdown_terminal_tasks().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !retry.is_finished(),
+        "retry must still join the startup task retained across cancelled shutdown"
+    );
+    drop(selection);
+    retry
+        .await
+        .expect("retried shutdown task")
+        .expect("terminal drain");
+    assert_eq!(
+        owner.status(),
+        before,
+        "cancelled startup cannot select material after semantic shutdown"
+    );
+    tokio::task::yield_now().await;
+    assert_eq!(
+        owner.status(),
+        before,
+        "no detached startup worker remains after drain"
+    );
+    drop(graph);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn committed_semantic_selection_is_preserved_by_both_runtime_views() {
+    let isolation = TempDir::new().expect("configuration isolation");
+    let project = isolation.path().join("project");
+    std::fs::create_dir_all(&project).expect("project directory");
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
+    )
+    .await
+    .expect("production configuration route");
+    set_project_model_selection(&harness, &project, None).await;
+    set_project_model_selection(&harness, &project, Some(DEFAULT_FASTEMBED_MODEL_ID)).await;
+    harness.shutdown().await;
 }

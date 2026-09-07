@@ -6,7 +6,10 @@ use tracedecay_usecases::semantic_runtime::{
 
 #[tokio::test]
 async fn committed_query_routes_install_and_rollback_as_one_revision() {
-    let project = TempDir::new().expect("project root");
+    let temporary_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temporary root");
+    let project = TempDir::new_in(temporary_root).expect("canonical project root");
     git(project.path(), &["init", "-q", "-b", "main"]);
     git(project.path(), &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -87,6 +90,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let semantic_authority = Arc::new(
             tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
+                registry.semantic_lifecycle_owner_for_scope(&scope).await,
             )
             .expect("prepare semantic route"),
         );
@@ -435,6 +439,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let delayed_semantic_authority = Arc::new(
             tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                 semantic.clone(),
+                registry.semantic_lifecycle_owner_for_scope(&scope).await,
             )
             .expect("prepare delayed semantic route"),
         );
@@ -706,6 +711,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     let standalone_semantic = Arc::new(
         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
+            registry.semantic_lifecycle_owner_for_scope(&scope).await,
         )
         .expect("prepare standalone semantic route"),
     );
@@ -742,6 +748,7 @@ async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
     let retry_semantic_authority = Arc::new(
         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
             semantic.clone(),
+            registry.semantic_lifecycle_owner_for_scope(&scope).await,
         )
         .expect("prepare committed semantic route"),
     );

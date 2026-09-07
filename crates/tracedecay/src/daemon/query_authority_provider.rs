@@ -237,10 +237,12 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         )
                     })?;
                 let semantic_authority = if semantic_enabled {
+                    let lifecycle_owner = registry.semantic_lifecycle_owner_for_scope(&scope).await;
                     let committed = committed.clone();
                     let authority = task::spawn_blocking(move || {
                         tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
                             committed,
+                            lifecycle_owner,
                         )
                     })
                     .await

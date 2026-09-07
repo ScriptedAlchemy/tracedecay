@@ -100,8 +100,7 @@ use crate::runtime::source::{
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
-#[cfg(test)]
-pub(crate) use observation::codex_observation_source_v2;
+pub use observation::codex_observation_source_v2;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
     try_admit_codex_jsonl_observations_for_profile,
@@ -2583,6 +2582,17 @@ fn hash_path(hasher: &mut Sha256, path: &Path) {
     hasher.update([0]);
 }
 
+/// The checkpoint identity is independent of the transcript's display location.
+pub(crate) fn codex_cursor_key(transcript_path: &Path) -> TranscriptCursorKey {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
+    hash_path(&mut hasher, transcript_path);
+    TranscriptCursorKey::opaque(format!(
+        "codex-v2:{}",
+        encode_lowercase_hex(&hasher.finalize())
+    ))
+}
+
 impl TranscriptSource for CodexSource {
     fn provider(&self) -> &'static str {
         PROVIDER
@@ -2594,13 +2604,7 @@ impl TranscriptSource for CodexSource {
     }
 
     fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
-        hash_path(&mut hasher, transcript_path);
-        TranscriptCursorKey::opaque(format!(
-            "codex-v2:{}",
-            encode_lowercase_hex(&hasher.finalize())
-        ))
+        codex_cursor_key(transcript_path)
     }
 
     fn discover_transcript_paths(

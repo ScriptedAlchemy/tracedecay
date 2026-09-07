@@ -27,7 +27,7 @@ use super::{
     GitIndexTransactionStoreRegistry, RepositoryMutationQueue,
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
-use crate::ports::build_application_catalog_snapshot;
+use crate::ports::ApplicationCatalogSnapshotFn;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
@@ -73,6 +73,7 @@ pub trait DaemonGitAuthoritySource: Send + Sync {
 }
 
 struct ProductionDaemonGitAuthoritySource {
+    catalog: ApplicationCatalogSnapshotFn,
     access: ProjectSourceAccessSnapshot,
     configuration: OwnedGlobalDbConfigurationControlStore,
     runtime: tokio::runtime::Handle,
@@ -161,8 +162,8 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         if !effective_capabilities.contains(capability_id) {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        let catalog = build_application_catalog_snapshot()
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let catalog =
+            (self.catalog)().map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let manifest = catalog
             .capability(capability_id)
             .ok_or(GitIndexTransactionPortError::PolicyDenied)?;
@@ -597,6 +598,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         access: ProjectSourceAccessSnapshot,
         configuration_database: RegisteredGlobalDbLeaseV1,
         runtime: tokio::runtime::Handle,
+        catalog: ApplicationCatalogSnapshotFn,
     ) -> Result<(), GitIndexTransactionPortError> {
         if self.shutdown_fenced.load(Ordering::SeqCst) {
             return Err(GitIndexTransactionPortError::DaemonUnavailable);
@@ -619,6 +621,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         entry
             .authority
             .install(Arc::new(ProductionDaemonGitAuthoritySource {
+                catalog,
                 access,
                 configuration:
                     OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(

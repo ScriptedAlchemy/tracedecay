@@ -27,7 +27,7 @@ use tracedecay_domain::configuration::{
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, TELEMETRY_TIMINGS_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -263,7 +263,7 @@ fn runtime_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<Tr
             snapshot,
             INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
         )?,
-        semantic: SemanticConfig::default(),
+        semantic: semantic_config_from_snapshot(snapshot)?,
         sync: SyncConfig {
             auto_track_pr_branches: required_bool(
                 snapshot,
@@ -278,6 +278,33 @@ fn runtime_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<Tr
             timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
         },
     })
+}
+
+/// Decode the resolved semantic setting for every runtime configuration view.
+pub fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<SemanticConfig> {
+    let key = SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).map_err(|error| {
+        config_error(format!(
+            "invalid runtime setting key '{SEMANTIC_RUNTIME_SETTING_KEY}': {error}"
+        ))
+    })?;
+    let semantic = match snapshot.effective_values.get(&key) {
+        None => SemanticConfig::default(),
+        Some(ConfigurationValueV1::Text(value)) => {
+            serde_json::from_str(value).map_err(|error| {
+                config_error(format!(
+                    "resolved semantic runtime setting is invalid: {error}"
+                ))
+            })?
+        }
+        Some(value) => {
+            return Err(config_error(format!(
+                "resolved configuration setting '{SEMANTIC_RUNTIME_SETTING_KEY}' has wrong type: expected text, got {:?}",
+                value.kind()
+            )));
+        }
+    };
+    semantic.validate()?;
+    Ok(semantic)
 }
 
 fn required_setting<'a>(

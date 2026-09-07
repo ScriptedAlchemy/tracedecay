@@ -183,7 +183,26 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 
     let session_id = "session.linked-worktree-follow-up";
     notify_workspace_open(linked_server.as_ref(), session_id, &linked).await;
-    let routed = files_for_session(primary_server.as_ref(), session_id).await;
+    // Project admission publishes a warming route. Retry only its typed graph
+    // readiness refusal before checking the exact linked-worktree answer.
+    let routed = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let routed = files_for_session(primary_server.as_ref(), session_id).await;
+            let warming = routed
+                .error
+                .as_ref()
+                .and_then(|error| error.data.as_ref())
+                .is_some_and(|data| {
+                    data["reason_code"] == "code-graph-unavailable" && data["retryable"] == true
+                });
+            if !warming {
+                break routed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("linked-worktree graph must become ready within the existing bound");
     assert!(
         routed.error.is_none(),
         "a follow-up on another daemon server must retain the linked route: {routed:?}"

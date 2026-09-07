@@ -21,7 +21,7 @@ use tracedecay_usecases::code_index::{
 
 use super::project_code_index_ignored_dependency_admission_port;
 use tracedecay_code_index_runtime::code_index_scheduler::{
-    CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
+    CodeGraphActivationPolicyV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
 };
 
 const PROJECT_ID: &str = "project.project-open-ignored-dependency";
@@ -29,6 +29,7 @@ const PROJECT_ID: &str = "project.project-open-ignored-dependency";
 struct Fixture {
     root: TempDir,
     _store: TempDir,
+    _database_scope: Option<tracedecay_runtime_core::db::DaemonDatabaseScope>,
     registry: CodeIndexSchedulerRegistryV1,
     scope: ResolvedScope,
     generation: CodeGenerationId,
@@ -37,6 +38,14 @@ struct Fixture {
 
 impl Fixture {
     async fn mount() -> Self {
+        Self::mount_inner(false).await
+    }
+
+    async fn mount_persistent() -> Self {
+        Self::mount_inner(true).await
+    }
+
+    async fn mount_inner(persistent_graph: bool) -> Self {
         let root = TempDir::new().expect("fixture root");
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.name", "TraceDecay Test"]);
@@ -67,10 +76,52 @@ export function generationAnchor() { return 1; }
 
         let store = TempDir::new().expect("store root");
         let registry = CodeIndexSchedulerRegistryV1::new(1);
-        registry
-            .mount_worktree(project_id(), root.path(), store.path().to_path_buf(), None)
-            .await
-            .expect("mount code-index scheduler");
+        let database_scope = if persistent_graph {
+            tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+                root.path(),
+                PROJECT_ID,
+            )
+            .expect("project enrollment");
+            let profile_root = store.path().join("profile");
+            let identity =
+                tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+                    .expect("isolated profile identity");
+            let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+                &profile_root,
+                91,
+                "project-open ignored-dependency graph",
+            )
+            .expect("daemon database scope");
+            let runtime = Arc::new(
+                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+                    .await
+                    .expect("graph runtime registry"),
+            );
+            let database = runtime
+                .project_memory(project_id(), [root.path().to_path_buf()])
+                .await
+                .expect("project graph database");
+            registry
+                .mount_worktree_with_graph_runtime(
+                    project_id(),
+                    root.path(),
+                    store.path().to_path_buf(),
+                    None,
+                    runtime.code_graph_seat_port(),
+                    database,
+                    CodeGraphActivationPolicyV1::Enabled,
+                    None,
+                )
+                .await
+                .expect("mount persistent graph-backed scheduler");
+            Some(scope)
+        } else {
+            registry
+                .mount_worktree(project_id(), root.path(), store.path().to_path_buf(), None)
+                .await
+                .expect("mount code-index scheduler");
+            None
+        };
         wait_for_initial_generation(&registry, root.path()).await;
         let baseline = latest(&registry, root.path()).await;
         let generation = baseline.generation();
@@ -93,6 +144,7 @@ export function generationAnchor() { return 1; }
         Self {
             root,
             _store: store,
+            _database_scope: database_scope,
             registry,
             scope,
             generation,
@@ -212,14 +264,24 @@ async fn foreign_request_context_scope_is_refused_before_scheduler_mutation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
-    let fixture = Fixture::mount().await;
+    let fixture = Fixture::mount_persistent().await;
     let context = request_context(fixture.scope.clone(), "writable");
+    let mut serving_changes = fixture
+        .registry
+        .subscribe_serving_generation_changes(fixture.root())
+        .await
+        .expect("mounted serving owner");
 
     let admitted = fixture
         .port(true)
         .admit(fixture.request(&context, &fixture.generation))
         .await
         .expect("verified ignored dependency admission");
+    assert!(
+        serving_changes.has_changed().expect("live serving owner"),
+        "committed admission must notify serving consumers before returning"
+    );
+    serving_changes.borrow_and_update();
     let serving = fixture
         .registry
         .latest_complete_ready_decoded_for_root_scope(fixture.root(), &fixture.scope)

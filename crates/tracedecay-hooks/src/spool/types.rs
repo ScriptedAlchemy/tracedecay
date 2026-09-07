@@ -184,6 +184,8 @@ pub enum HookSpoolError {
     InvalidLease,
     #[error("another live hook spool writer owns this host")]
     WriterLeaseHeld,
+    #[error("hook spool writer admission deadline expired")]
+    AdmissionTimedOut,
     #[error("hook spool writer lease was lost or expired")]
     WriterLeaseLost,
     #[error("hook spool must be reset or recreated: {reason}")]

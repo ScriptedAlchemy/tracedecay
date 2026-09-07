@@ -1,5 +1,7 @@
 //! `tracedecay_runtime` — daemon, store, and session-observation health, including the optional doctor report.
 
+use tracedecay_usecases::semantic_runtime::project_lifecycle_status;
+
 use super::*;
 
 /// Bound for the session-temporal doctor probe so a wedged sessions DB cannot
@@ -312,6 +314,7 @@ pub(crate) async fn handle_runtime(
         ),
     )
     .unwrap_or_else(|_| json!({}));
+    value["semantic_model"] = json!(project_lifecycle_status(cg.project_root()));
     Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,

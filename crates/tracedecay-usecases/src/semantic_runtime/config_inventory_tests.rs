@@ -307,3 +307,89 @@ async fn project_inventory_survives_restart_and_foreign_project_churn() {
         SemanticConfigurationBackendErrorV1::Conflict
     );
 }
+
+#[tokio::test]
+async fn absent_project_inventory_is_authoritative_until_profile_bootstrap() {
+    let directory = tempfile::tempdir().expect("isolated profile");
+    let runtime = RegisteredGlobalDbTestRuntime::profile(directory.path())
+        .await
+        .expect("profile database");
+    let project = ProjectId::new("project.absent-inventory").expect("project");
+    let store = ProductionSemanticRetrievalConfigurationStoreV1::open(
+        runtime.profile_database_arc(),
+        scope(&project, "repository.absent", "worktree.absent"),
+    )
+    .expect("configuration authority");
+    assert!(store.current_committed_state().await.unwrap().is_none());
+    let inventory = store
+        .configuration_inventory_page(
+            &SemanticConfigurationInventoryPageRequestV1::first(1).unwrap(),
+        )
+        .await
+        .expect("authoritative empty inventory")
+        .complete_receipt
+        .expect("complete inventory");
+    assert_eq!(inventory.revision(), None);
+    assert_eq!(inventory.scope_count(), 0);
+    assert_eq!(inventory.root_binding_count(), 0);
+    let roots = store
+        .configured_vector_roots_page(
+            &SemanticConfiguredVectorRootPageRequestV1::first(inventory.clone(), 1).unwrap(),
+        )
+        .await
+        .expect("empty configured roots");
+    assert!(roots.roots.is_empty());
+    let roots = roots.complete_receipt.expect("complete roots");
+    assert_eq!(roots.revision(), None);
+    assert_eq!(roots.root_count(), 0);
+    assert!(store.current_committed_state().await.unwrap().is_none());
+
+    // Another project's bootstrap cannot invalidate this project's absence.
+    let foreign = ProductionSemanticRetrievalConfigurationStoreV1::open(
+        runtime.profile_database_arc(),
+        scope(
+            &ProjectId::new("project.foreign-inventory").unwrap(),
+            "repository.foreign",
+            "worktree.foreign",
+        ),
+    )
+    .unwrap();
+    let (pin, state) = initial_state("a-foreign");
+    foreign.install_initial_state(&pin, &state).await.unwrap();
+    store
+        .configured_vector_roots_page(
+            &SemanticConfiguredVectorRootPageRequestV1::first(inventory.clone(), 1).unwrap(),
+        )
+        .await
+        .expect("foreign bootstrap preserves exact absence");
+
+    let (pin, state) = initial_state("b-local");
+    store.install_initial_state(&pin, &state).await.unwrap();
+    assert!(matches!(
+        store
+            .configured_vector_roots_page(
+                &SemanticConfiguredVectorRootPageRequestV1::first(inventory, 1).unwrap(),
+            )
+            .await,
+        Err(SemanticConfigurationBackendErrorV1::Conflict)
+    ));
+    let candidate = VectorGenerationIdV1::new(
+        ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+    );
+    assert!(matches!(
+        store
+            .is_vector_generation_configured(&roots, &candidate)
+            .await,
+        Err(SemanticConfigurationBackendErrorV1::Conflict)
+    ));
+    let published = store
+        .configuration_inventory_page(
+            &SemanticConfigurationInventoryPageRequestV1::first(1).unwrap(),
+        )
+        .await
+        .unwrap()
+        .complete_receipt
+        .unwrap();
+    assert!(published.revision().is_some());
+    assert_eq!(published.scope_count(), 1);
+}

@@ -1,11 +1,22 @@
+use std::cell::RefCell;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_semantic::SemanticModelLifecycleOwnerV1;
-use tracedecay_semantic_contracts::{DEFAULT_FASTEMBED_MODEL_ID, SemanticModelLifecycleStateV1};
+use tracedecay_application::configuration::ConfigurationSetRequestV1;
+use tracedecay_daemon_identity::profile_identity;
+use tracedecay_domain::configuration::{
+    ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationValueV1,
+    SEMANTIC_RUNTIME_SETTING_KEY, SettingKey,
+};
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticModelLifecycleStateV1,
+    SemanticModelLifecycleStatusV1,
+};
+
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use crate::common::{self, TestChildProcess, canonical_existing_path};
 
@@ -51,63 +62,164 @@ fn initialize_project(project: &Path) {
     );
 }
 
-fn install_semantic_fixture(home: &Path, fixture_root: &Path) {
-    let profile = home.join(".tracedecay");
-    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
-        .expect("isolated profile root");
-    let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(&profile);
-    let owner = SemanticModelLifecycleOwnerV1::open_default(&lifecycle_root)
-        .expect("isolated semantic lifecycle owner");
-    let model = owner
-        .catalog()
-        .get(DEFAULT_FASTEMBED_MODEL_ID)
-        .expect("production catalog contains default model");
-    let repository_root = lifecycle_root
-        .join("hf-hub-cache")
-        .join(format!("models--{}", model.model_code.replace('/', "--")));
-    let snapshot = repository_root
-        .join("snapshots")
-        .join(&model.source.revision);
-    for member in model.members.values() {
-        let destination = snapshot.join(&member.upstream_path);
-        std::fs::create_dir_all(destination.parent().expect("model member parent"))
-            .expect("cached model member directory");
-        std::fs::copy(fixture_root.join(&member.path), destination)
-            .expect("copy byte-pinned model member");
-    }
-    let reference = repository_root.join("refs").join(&model.source.revision);
-    std::fs::create_dir_all(reference.parent().expect("revision reference parent"))
-        .expect("revision reference directory");
-    std::fs::write(reference, &model.source.revision).expect("revision reference");
-    owner
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    owner
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    assert!(matches!(
-        owner.status().state,
-        Some(
-            SemanticModelLifecycleStateV1::Installed { .. }
-                | SemanticModelLifecycleStateV1::Ready { .. }
-        )
-    ));
+// Import genuine catalog members into the profile's shared verified artifact store
+// before the daemon starts. Project selection and readiness belong to the daemon.
+fn install_profile_semantic_fixture(home: &Path, fixture_root: &Path) -> String {
+    common::create_runtime().block_on(async {
+        let profile = home.join(".tracedecay");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
+            .expect("isolated profile root");
+        let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(&profile);
+        let identity = profile_identity::load_or_create(&profile)
+            .expect("canonical isolated profile identity");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("isolated profile runtime registry");
+        let owner = registry
+            .profile_semantic_lifecycle()
+            .await
+            .expect("canonical profile artifact owner");
+        let model = owner
+            .catalog()
+            .get(DEFAULT_FASTEMBED_MODEL_ID)
+            .expect("production catalog contains default model");
+        let repository_root = lifecycle_root
+            .join("hf-hub-cache")
+            .join(format!("models--{}", model.model_code.replace('/', "--")));
+        let snapshot = repository_root
+            .join("snapshots")
+            .join(&model.source.revision);
+        for member in model.members.values() {
+            let destination = snapshot.join(&member.upstream_path);
+            std::fs::create_dir_all(destination.parent().expect("model member parent"))
+                .expect("cached model member directory");
+            std::fs::copy(fixture_root.join(&member.path), destination)
+                .expect("copy byte-pinned model member");
+        }
+        let reference = repository_root.join("refs").join(&model.source.revision);
+        std::fs::create_dir_all(reference.parent().expect("revision reference parent"))
+            .expect("revision reference directory");
+        std::fs::write(reference, &model.source.revision).expect("revision reference");
+        owner
+            .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
+            .expect("select production semantic model");
+        owner
+            .acquire_blocking_for_tests()
+            .expect("install verified distribution fixture");
+        let digest = match owner.status().state.expect("installed model state") {
+            SemanticModelLifecycleStateV1::Installed {
+                artifact_digest, ..
+            }
+            | SemanticModelLifecycleStateV1::Ready {
+                artifact_digest, ..
+            } => artifact_digest,
+            state => panic!("expected installed production model, got {state:?}"),
+        };
+        drop(owner);
+        registry
+            .shutdown_terminal_tasks()
+            .await
+            .expect("join profile import workers");
+        registry
+            .close_retained_graph_runtimes_for_shutdown()
+            .await
+            .expect("close profile import runtime");
+        digest
+    })
 }
 
-fn wait_for_semantic_model_ready(home: &Path) {
-    let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(&home.join(".tracedecay"));
+fn select_project_semantic_model(binary: &Path, home: &Path, project: &Path) {
+    let observed = configuration_tool(binary, home, project, "configuration_observed_state", "{}");
+    let project_id = serde_json::from_value(observed["scope"]["project_id"].clone())
+        .expect("registered configuration project identity");
+    let expected_revision = serde_json::from_value(
+        observed["outcome"]["value"]["payload"][0]["desired_revision_id"].clone(),
+    )
+    .expect("current project configuration revision");
+    let request = ConfigurationSetRequestV1 {
+        layer: ConfigurationLayerIdV1::Project { project_id },
+        key: SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).expect("semantic runtime setting key"),
+        value: ConfigurationValueV1::Text(
+            serde_json::to_string(&SemanticConfig {
+                selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+                ..SemanticConfig::default()
+            })
+            .expect("semantic runtime configuration"),
+        ),
+        expected_revision,
+        idempotency_key: ConfigurationIdempotencyKey::new(
+            "configuration.idempotency.cli-semantic-model".to_owned(),
+        )
+        .expect("semantic configuration idempotency key"),
+    };
+    let committed = configuration_tool(
+        binary,
+        home,
+        project,
+        "configuration_set",
+        &serde_json::to_string(&request).expect("semantic model selection request"),
+    );
+    assert_eq!(
+        committed["scope"]["project_id"],
+        observed["scope"]["project_id"]
+    );
+    assert_eq!(committed["outcome"]["outcome"], "effect", "{committed}");
+}
+
+fn wait_for_project_semantic_material(
+    binary: &Path,
+    home: &Path,
+    project: &Path,
+    artifact_digest: &str,
+) {
+    let last_observation = RefCell::new(Value::Null);
     common::poll_until(
         Instant::now() + Duration::from_secs(60),
         Duration::from_millis(100),
         || {
-            let owner = SemanticModelLifecycleOwnerV1::open_default(&lifecycle_root).ok()?;
-            matches!(
-                owner.status().state,
-                Some(SemanticModelLifecycleStateV1::Ready { .. })
+            let output = tool(binary, home, project, "runtime", r#"{"format":"json"}"#);
+            if !output.status.success() {
+                *last_observation.borrow_mut() = json!({
+                    "stdout": String::from_utf8_lossy(&output.stdout),
+                    "stderr": String::from_utf8_lossy(&output.stderr),
+                });
+                return None;
+            }
+            let runtime = tool_payload(&output);
+            let lifecycle: Option<SemanticModelLifecycleStatusV1> = serde_json::from_value(
+                runtime
+                    .get("semantic_model")
+                    .expect("runtime must expose canonical project model lifecycle")
+                    .clone(),
             )
-            .then_some(())
+            .expect("canonical project model lifecycle status");
+            // These are activation's exact material prerequisites. Serving
+            // state can already describe a vector generation without a profile
+            // receipt, and cannot stand in for the selected model's lifecycle.
+            let installed = lifecycle.is_some_and(|status| {
+                status.selected_model.as_deref() == Some(DEFAULT_FASTEMBED_MODEL_ID)
+                    && matches!(status.state,
+                        Some(SemanticModelLifecycleStateV1::Installed {
+                            model_id, artifact_digest: installed_digest, ..
+                        } | SemanticModelLifecycleStateV1::Ready {
+                            model_id, artifact_digest: installed_digest, ..
+                        }) if model_id == DEFAULT_FASTEMBED_MODEL_ID
+                            && installed_digest == artifact_digest
+                    )
+            });
+            *last_observation.borrow_mut() = json!({
+                "semantic_model": runtime["semantic_model"],
+                "semantic_runtime": runtime["semantic_runtime"],
+            });
+            installed.then_some(())
         },
-        || "production daemon did not load the verified semantic model".to_owned(),
+        || {
+            format!(
+                "project {} did not admit the verified semantic material: {}",
+                project.display(),
+                last_observation.borrow(),
+            )
+        },
     );
 }
 
@@ -161,6 +273,23 @@ fn tool(binary: &Path, home: &Path, project: &Path, name: &str, arguments: &str)
     )
 }
 
+fn configuration_tool(
+    binary: &Path,
+    home: &Path,
+    project: &Path,
+    name: &str,
+    arguments: &str,
+) -> Value {
+    let output = tool(binary, home, project, name, arguments);
+    assert!(
+        output.status.success(),
+        "{name} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    serde_json::from_slice(&output.stdout).expect("typed configuration response")
+}
+
 #[test]
 #[ignore = "requires the byte-pinned FastEmbed distribution fixture"]
 fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
@@ -185,7 +314,7 @@ fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
     let home = canonical_existing_path(home.path());
     let project = canonical_existing_path(project.path());
     initialize_project(&project);
-    install_semantic_fixture(&home, &fixture_root);
+    let artifact_digest = install_profile_semantic_fixture(&home, &fixture_root);
     let _daemon = common::spawn_tracedecay_daemon_from(&home, &binary);
     let initialization = run_cli(&binary, &home, &project, &["init"]);
     assert!(
@@ -194,7 +323,8 @@ fn shipped_cli_activates_a_published_profile_for_strict_semantic_search() {
         String::from_utf8_lossy(&initialization.stdout),
         String::from_utf8_lossy(&initialization.stderr)
     );
-    wait_for_semantic_model_ready(&home);
+    select_project_semantic_model(&binary, &home, &project);
+    wait_for_project_semantic_material(&binary, &home, &project, &artifact_digest);
 
     let unavailable = tool(
         &binary,

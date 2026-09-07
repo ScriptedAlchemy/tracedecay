@@ -14,12 +14,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
 
 use super::journey_test_support::{git, tool_payload};
 use super::semantic_activation_journey_test::{
-    assert_semantic_probe_contribution, evaluate_native_profile, installed_selection_material,
-    seed_distribution_fixture, selection, set_semantic_profile, wait_for_semantic_generation,
+    assert_semantic_probe_contribution, evaluate_native_profile,
+    install_project_distribution_fixture, installed_selection_material, selection,
+    set_semantic_profile, wait_for_semantic_generation,
 };
 use super::*;
 
@@ -296,19 +296,6 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         return;
     };
     let _profile = crate::config::PinnedUserDataDir::new();
-    let lifecycle_root =
-        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
-    let lifecycle =
-        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
-
     let isolation = tempfile::TempDir::new().expect("journey isolation");
     let project = isolation.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source directory");
@@ -341,6 +328,8 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         .await
         .expect("production composition");
     let resources = harness.resources.as_ref().expect("live harness");
+    let lifecycle = install_project_distribution_fixture(&harness, &project, &fixture_root).await;
+    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
     let code_id = resources
         .invocation
         .code_index_schedulers

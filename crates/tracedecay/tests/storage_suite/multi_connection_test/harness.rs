@@ -11,17 +11,39 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::common;
+use rmcp::model::{ClientCapabilities, Implementation, InitializeRequestParams};
 use serde_json::{Value, json};
 
 pub(super) const PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
 pub(super) const CLIENT_COUNT: usize = 12;
 pub(super) const CONCURRENT_CLIENTS_PER_PATH: usize = 4;
 
-pub(super) struct ChildGuard(Child);
+pub(super) struct ChildGuard {
+    child: Child,
+    stderr_path: Option<PathBuf>,
+}
 
 impl ChildGuard {
     pub(super) fn new(child: Child) -> Self {
-        Self(child)
+        Self {
+            child,
+            stderr_path: None,
+        }
+    }
+
+    fn report_failure(&mut self) {
+        if std::thread::panicking() {
+            if let Some(path) = self.stderr_path.take() {
+                eprintln!(
+                    "child {} status before cleanup: {:?}; stderr {}:\n{}",
+                    self.child.id(),
+                    self.child.try_wait(),
+                    path.display(),
+                    std::fs::read_to_string(&path)
+                        .unwrap_or_else(|error| format!("unable to read stderr: {error}"))
+                );
+            }
+        }
     }
 }
 
@@ -29,19 +51,20 @@ impl std::ops::Deref for ChildGuard {
     type Target = Child;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.child
     }
 }
 
 impl std::ops::DerefMut for ChildGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.child
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        stop_child(&mut self.0);
+        self.report_failure();
+        stop_child(&mut self.child);
     }
 }
 
@@ -109,8 +132,9 @@ pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> ChildGuard {
 pub(super) fn spawn_daemon_with_stderr(
     home: &Path,
     socket_path: &Path,
-    stderr: std::fs::File,
+    stderr_path: &Path,
 ) -> ChildGuard {
+    let stderr = std::fs::File::create(stderr_path).expect("create daemon stderr");
     let mut child = ChildGuard::new(
         common::tracedecay_command_with_home(home)
             .args(["daemon", "run", "--socket"])
@@ -121,6 +145,7 @@ pub(super) fn spawn_daemon_with_stderr(
             .spawn()
             .expect("spawn daemon"),
     );
+    child.stderr_path = Some(stderr_path.to_owned());
     wait_for_socket(socket_path, &mut child);
     child
 }
@@ -229,6 +254,8 @@ pub(super) struct McpProxy {
 
 impl McpProxy {
     pub(super) fn spawn(home: &Path, project: &Path, socket_path: &Path, ordinal: usize) -> Self {
+        let stderr_path = home.join(format!("proxy-{ordinal}.stderr.log"));
+        let stderr = std::fs::File::create(&stderr_path).expect("create MCP proxy stderr");
         let mut child = ChildGuard::new(
             common::tracedecay_command_with_home(home)
                 .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
@@ -241,10 +268,11 @@ impl McpProxy {
                 .current_dir(project)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(stderr))
                 .spawn()
                 .expect("spawn MCP proxy"),
         );
+        child.stderr_path = Some(stderr_path);
         let stdin = child.stdin.take().expect("proxy stdin");
         let stdout = child.stdout.take().expect("proxy stdout");
         let (output_tx, output_rx) = std::sync::mpsc::channel();
@@ -256,7 +284,22 @@ impl McpProxy {
             pending: BTreeMap::new(),
             stdout_reader: Some(stdout_reader),
         };
-        proxy.request(1, "initialize", json!({}));
+        let initialize = InitializeRequestParams::new(
+            ClientCapabilities::default(),
+            Implementation::new("storage-owner-test", env!("CARGO_PKG_VERSION")),
+        );
+        proxy.request(
+            1,
+            "initialize",
+            serde_json::to_value(initialize).expect("initialize params"),
+        );
+        writeln!(
+            proxy.stdin,
+            "{}",
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        )
+        .expect("write initialized notification");
+        proxy.stdin.flush().expect("flush initialized notification");
         proxy.request(
             2,
             "tools/call",
@@ -326,6 +369,7 @@ impl McpProxy {
 
 impl Drop for McpProxy {
     fn drop(&mut self) {
+        self.child.report_failure();
         stop_child(&mut self.child);
         if let Some(stdout_reader) = self.stdout_reader.take() {
             let _ = stdout_reader.join();

@@ -93,11 +93,23 @@ async fn summary_table_counts(db: &HostAdmissionTestRuntimeV1) -> (i64, i64) {
 }
 
 async fn summary_fts_count(db: &HostAdmissionTestRuntimeV1, query: &str) -> i64 {
+    summary_fts_count_in_session(db, query, None).await
+}
+
+async fn summary_fts_count_in_session(
+    db: &HostAdmissionTestRuntimeV1,
+    query: &str,
+    session_id: Option<&str>,
+) -> i64 {
     db.lcm_grep_for_test(LcmGrepRequest {
         provider: "all".to_string(),
         query: query.to_string(),
-        scope: LcmScope::All,
-        session_id: None,
+        scope: if session_id.is_some() {
+            LcmScope::Session
+        } else {
+            LcmScope::All
+        },
+        session_id: session_id.map(str::to_owned),
         include_summaries: true,
         limit: 100,
         sort: LcmGrepSort::Relevance,
@@ -759,6 +771,64 @@ async fn immutable_publication_preserves_order_and_stales_transitive_descendants
     assert!(active.contains(&(parent.node_id.clone(), "stale".to_string())));
     assert!(active.contains(&(grandparent.node_id.clone(), "stale".to_string())));
     assert!(active.contains(&(successor.node_id.clone(), "available".to_string())));
+    assert_eq!(summary_fts_count(&db, "leaf").await, 1);
+    assert_eq!(summary_fts_count(&db, "parent").await, 0);
+    assert_eq!(summary_fts_count(&db, "grandparent").await, 0);
+
+    // A second successor needs the transitive predecessor closure, while none
+    // of those stale ancestors become current retrieval candidates again.
+    let latest_request = LcmImmutableSummaryPublication {
+        summary_id: "summary.leaf-v3".to_string(),
+        predecessor_summary_id: Some(successor.node_id.clone()),
+        draft: summary_draft(
+            "cursor",
+            "session-1",
+            0,
+            "leaf v3",
+            store_ids
+                .iter()
+                .copied()
+                .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                .collect(),
+        ),
+    };
+    let latest = db
+        .lcm_publish_immutable_summary(latest_request.clone())
+        .await
+        .expect("transitive successor publication");
+    let expected_edges = vec![
+        (leaf.node_id.clone(), successor.node_id.clone()),
+        (successor.node_id.clone(), latest.summary.node_id.clone()),
+    ];
+    assert_eq!(
+        db.lcm_summary_successor_edges_for_test().await.unwrap(),
+        expected_edges
+    );
+    drop(db);
+    let db = registered_lcm_runtime(&tmp).await;
+    let replay = db
+        .lcm_publish_immutable_summary(latest_request)
+        .await
+        .expect("reopened successor replay");
+    assert_eq!(
+        replay.disposition,
+        LcmSummaryPublicationDisposition::ExactReplay
+    );
+    assert_eq!(replay.summary, latest.summary);
+    assert_eq!(
+        db.lcm_summary_successor_edges_for_test().await.unwrap(),
+        expected_edges
+    );
+    assert_eq!(summary_fts_count(&db, "leaf").await, 1);
+    assert_eq!(summary_fts_count(&db, "parent").await, 0);
+    assert_eq!(summary_fts_count(&db, "grandparent").await, 0);
+    let active = db
+        .lcm_active_summary_availability_for_test("session-1")
+        .await
+        .unwrap();
+    assert!(active.contains(&(leaf.node_id, "stale".to_string())));
+    assert!(active.contains(&(successor.node_id, "stale".to_string())));
+    assert!(active.contains(&(latest.summary.node_id, "available".to_string())));
 }
 
 #[tokio::test]
@@ -936,4 +1006,64 @@ async fn boundary_link_does_not_reassign_summary_nodes() {
         .lcm_expand_summary_node_for_test("cursor", "session-2", &node.node_id)
         .await;
     assert!(matches!(target, Err(LcmError::SummaryNodeNotFound)));
+}
+
+#[tokio::test]
+async fn summary_grep_denies_dirty_raw_sources_before_convergence() {
+    let tmp = TempDir::new().unwrap();
+    let db = registered_lcm_runtime(&tmp).await;
+    let mut summaries = Vec::new();
+    for session_id in ["session-dirty", "session-clean"] {
+        let ids = insert_raw_messages(&db, "cursor", session_id, &["original source"]).await;
+        let summary = db
+            .lcm_insert_summary_node(summary_draft(
+                "cursor",
+                session_id,
+                0,
+                "visibilitycanary 東京",
+                vec![LcmSourceRef::RawMessage { store_id: ids[0] }],
+            ))
+            .await
+            .expect("publish available summary");
+        summaries.push(summary);
+    }
+    for query in ["visibilitycanary", "東京"] {
+        for session_id in ["session-dirty", "session-clean"] {
+            assert_eq!(
+                summary_fts_count_in_session(&db, query, Some(session_id)).await,
+                1
+            );
+        }
+    }
+    let revised = raw_message(
+        "cursor",
+        "session-dirty-message-1",
+        "session-dirty",
+        1,
+        "revised source",
+    );
+    assert!(
+        db.upsert_session_message_for_test(HostAdmissionScope::Profile, &revised)
+            .await
+            .expect("revise canonical raw source")
+    );
+    // The source-change trigger closes retrieval immediately, before the
+    // background convergence worker updates generation-bound availability.
+    let availability = db
+        .lcm_active_summary_availability_for_test("session-dirty")
+        .await
+        .expect("read pending generation availability");
+    assert!(availability.contains(&(summaries[0].node_id.clone(), "available".to_owned())));
+    for query in ["visibilitycanary", "東京"] {
+        assert_eq!(
+            summary_fts_count_in_session(&db, query, Some("session-dirty")).await,
+            0,
+            "FTS and LIKE reads must exclude the dirty session"
+        );
+        assert_eq!(
+            summary_fts_count_in_session(&db, query, Some("session-clean")).await,
+            1,
+            "the clean session remains available through both search paths"
+        );
+    }
 }

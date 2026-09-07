@@ -8,9 +8,7 @@ use tracedecay_sessions::runtime::codex::CodexSource;
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 
-use crate::codex::{
-    write_codex_rollout_with_goal_context, write_codex_rollout_with_structured_events, write_jsonl,
-};
+use crate::codex::{write_codex_rollout_with_structured_events, write_jsonl};
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, mark_test_project, open_project_session_db,
@@ -223,7 +221,37 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
     // Fixture-backed rollouts already checked in via write helpers.
     write_codex_rollout_with_goal_events(&home, &project, "codex-wf-goal");
     write_codex_rollout_with_structured_events(&home, &project, "codex-wf-structured");
-    write_codex_rollout_with_goal_context(&home, &project, "codex-wf-goal-context");
+    // Canonical capture accepts the provider's exact internal wrapper. The
+    // legacy prose fixture exercises a separate direct-ingest context path.
+    let context_path = home
+        .join(".codex/sessions/2026/01/02/rollout-2026-01-02T00-00-15-codex-wf-goal-context.jsonl");
+    write_jsonl(
+        &context_path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:15.000Z",
+                "type": "session_meta",
+                "payload": {"id": "codex-wf-goal-context", "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-02T00:00:15.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": concat!(
+                            "<codex_internal_context source=\"goal\">\n",
+                            "<objective>ensure all provider session messages are ingested</objective>\n",
+                            "Tokens remaining: 12000\n",
+                            "</codex_internal_context>"
+                        )
+                    }]
+                }
+            }),
+        ],
+    );
 
     let runtime = open_project_session_db(&project).await.unwrap();
     let _ = runtime

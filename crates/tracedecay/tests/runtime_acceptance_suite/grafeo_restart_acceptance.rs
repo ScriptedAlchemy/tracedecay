@@ -442,6 +442,7 @@ async fn get_fact(
 
 async fn get_selected_project_fact(
     handshake: &DaemonHandshake,
+    admitted_project_id: &str,
     project_id: &str,
     fact_id: &str,
     label: &str,
@@ -458,7 +459,10 @@ async fn get_selected_project_fact(
         }),
     )
     .await;
-    assert_eq!(envelope["scope"]["project_id"], project_id);
+    // A selector opens the target's read-only memory authority without
+    // replacing the caller's admitted project runtime or capability scope.
+    assert_eq!(envelope["scope"]["project_id"], admitted_project_id);
+    assert_ne!(admitted_project_id, project_id);
     let fact = available_fact(&application_payload(&envelope, "evidence")["fact"]);
     assert_eq!(fact["fact_id"], fact_id);
     assert_eq!(fact["owner"]["kind"], "project");
@@ -778,6 +782,7 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     let initial_b = wait_for_related_fact(&first_b, &added_b, "project", "initial B").await;
     let selected_b = get_selected_project_fact(
         &first_a,
+        &project_a_id,
         &project_b_id,
         &added_b.fact_id,
         "selected B through A",
@@ -882,6 +887,7 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     assert_eq!(
         get_selected_project_fact(
             &restarted_a,
+            &project_a_id,
             &project_b_id,
             &added_b.fact_id,
             "restarted selected B through A",

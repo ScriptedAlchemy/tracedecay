@@ -7633,6 +7633,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn freshness_probe_requires_reconcile(&mut self) -> bool {
         let freshness = self.freshness_fence.snapshot();
         if !freshness.verified_against_source
+            || freshness.freshness_unknown
+            || self.epoch.load(Ordering::Acquire) != freshness.reconciled_source_epoch
             || identity::GitMetadataFingerprintV1::capture(&self.project_root)
                 .differs_from(&freshness.git_metadata)
         {

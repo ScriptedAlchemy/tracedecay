@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_domain::ProjectId;
+use tracedecay_store_runtime::RegisteredSchemaConvergenceStatus;
 
 use super::bootstrap::run_git;
 use super::{
@@ -49,6 +50,24 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "remote recovery lifecycle");
     let engine = test_daemon_engine_for_profile(&profile_root);
+    engine
+        .store_administration
+        .install_long_lived_session_runtime_registry_for_test()
+        .await
+        .expect("install maintenance-enabled session registry");
+    let runtime_registry = engine
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = runtime_registry.block_registered_schema_convergence_for_test();
+    let profile_sessions = runtime_registry
+        .profile_sessions()
+        .await
+        .expect("profile sessions");
+    convergence_gate.wait_until_blocked().await;
+    // The profile worker holds the shared maintenance permit. A and B still
+    // mount with their own queued, counted convergence clients.
     let handshake_a = DaemonHandshake {
         project_path: Some(project_a_root.clone()),
         client_identity: client_identity.clone(),
@@ -68,11 +87,6 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
         .await
         .expect("mount active project B");
 
-    let runtime_registry = engine
-        .store_administration
-        .session_runtime_registry()
-        .await
-        .expect("session runtime registry");
     let old_a = runtime_registry
         .mounted_project_sessions(&project_a)
         .await
@@ -102,6 +116,26 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
     drop(server_a_database);
     drop(server_b_database);
 
+    let telemetry = engine.store_administration.store_telemetry_sampling();
+    let scope_a =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_a_root, &project_a)
+            .expect("canonical A scope");
+    let scope_b =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&project_b_root, &project_b)
+            .expect("canonical B scope");
+    let old_a_path = old_a.db_path().to_path_buf();
+    assert!(telemetry.registered_port(&old_a_path, &scope_a).is_some());
+    assert!(
+        telemetry
+            .registered_port(database_b.db_path(), &scope_b)
+            .is_some()
+    );
+    assert!(
+        telemetry
+            .registered_port(profile_sessions.db_path(), &scope_a)
+            .is_some()
+    );
+
     let profile_id = old_a.binding().shard_id.profile_id.clone();
     let session_sync = engine.store_administration.session_sync_service();
     let lifecycle = engine
@@ -114,6 +148,23 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
         .quiesce(&project_a, &old_a)
         .await
         .expect("quiesce exact project A");
+
+    assert!(
+        telemetry.registered_port(&old_a_path, &scope_a).is_none(),
+        "recovery releases A's exact counted session telemetry client"
+    );
+    assert!(
+        telemetry
+            .registered_port(database_b.db_path(), &scope_b)
+            .is_some(),
+        "recovery preserves B telemetry"
+    );
+    assert!(
+        telemetry
+            .registered_port(profile_sessions.db_path(), &scope_a)
+            .is_some(),
+        "recovery preserves profile telemetry"
+    );
 
     {
         let servers = engine.store_administration.project_servers().lock().await;
@@ -130,6 +181,10 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
                 .any(|key| { key.owner.project_id.as_deref() == Some(project_b.as_str()) })
         );
     }
+    assert_eq!(
+        runtime_registry.registered_schema_convergence_status(&old_a_binding.shard_id),
+        Some(RegisteredSchemaConvergenceStatus::Pending),
+    );
     drop(old_a);
     runtime_registry
         .retire_project_session_relation_graph(&project_a)
@@ -159,10 +214,31 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
         "a fresh B map read must not reuse a client from before A retirement"
     );
 
+    assert_eq!(
+        runtime_registry.registered_schema_convergence_status(&old_a_binding.shard_id),
+        None
+    );
+    assert_eq!(
+        runtime_registry.registered_schema_convergence_status(&database_b_binding.shard_id),
+        Some(RegisteredSchemaConvergenceStatus::Pending),
+        "retiring A must leave B's counted convergence worker queued",
+    );
+    assert_eq!(
+        runtime_registry.registered_schema_convergence_status(&profile_sessions.binding().shard_id),
+        Some(RegisteredSchemaConvergenceStatus::Running),
+        "retiring A must not abort the blocked profile worker",
+    );
+    let schedules_before_remount =
+        runtime_registry.registered_schema_convergence_schedule_count_for_test();
     let replacement_a = runtime_registry
         .project_sessions(project_a.clone(), [project_a_root.clone()])
         .await
         .expect("remount exact ProjectSessions A");
+    assert_eq!(
+        runtime_registry.registered_schema_convergence_schedule_count_for_test(),
+        schedules_before_remount + 1,
+        "the replacement owner must schedule its own convergence task",
+    );
     assert!(
         session_sync
             .rebind_project(&profile_id, &project_a, &replacement_a)
@@ -211,10 +287,15 @@ async fn recovery_quiesces_only_a_and_remounts_its_retry_route() {
         !still_live_b_database.shares_client_with(&database_b),
         "B's server lease remains a separate counted client through A recovery"
     );
+    assert!(
+        telemetry.registered_port(&old_a_path, &scope_a).is_some(),
+        "reopening A registers telemetry from its replacement owner"
+    );
     drop(still_live_b_database);
     drop(reopened_a_database);
     drop(still_mounted_b);
     drop(replacement_a);
 
+    drop(profile_sessions);
     engine.shutdown_all().await;
 }

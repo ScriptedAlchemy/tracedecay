@@ -242,6 +242,20 @@ impl StoreObservabilityRegistryV1 {
                         || incumbent.producer_revision != mount.producer_revision
                         || incumbent.configuration_revision != mount.configuration_revision
                     {
+                        tracing::warn!(
+                            event = "store_observability_mount_refused",
+                            reason = "incumbent_identity_mismatch",
+                            configuration_provenance_mismatch =
+                                core.configuration_provenance_revision
+                                    != mount.configuration_provenance_revision,
+                            authorized_scope_mismatch =
+                                incumbent.authorized_scope_ref != mount.authorized_scope_ref,
+                            producer_revision_mismatch =
+                                incumbent.producer_revision != mount.producer_revision,
+                            configuration_revision_mismatch =
+                                incumbent.configuration_revision != mount.configuration_revision,
+                            "observability mount conflicts with the registered store owner"
+                        );
                         return Err(StoreObservabilityMountErrorV1::Busy);
                     }
                     // The alias joins the incumbent's boot stream and stamps

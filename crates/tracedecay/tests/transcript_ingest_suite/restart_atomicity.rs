@@ -285,11 +285,15 @@ pub(super) async fn observation_source_cursor(
     session_id: &str,
     project: &Path,
 ) -> Option<ObservationSourceCursorV1> {
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new(provider).unwrap(),
-        SessionId::new(session_id).unwrap(),
-    )
-    .unwrap();
+    let source = if provider == "codex" {
+        tracedecay_sessions::runtime::codex::codex_observation_source_v2(session_id).unwrap()
+    } else {
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new(provider).unwrap(),
+            SessionId::new(session_id).unwrap(),
+        )
+        .unwrap()
+    };
     let project_id = test_project_id(project);
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
@@ -1337,12 +1341,14 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
         .unwrap();
     assert_eq!(first.messages_upserted, 2);
     assert_eq!(db.session_message_count().await.unwrap(), 2);
-    let path_key = db
-        .get_session("codex", "codex-restart")
-        .await
-        .expect("Codex session ingested")
-        .transcript_path
-        .expect("Codex durable transcript path");
+    assert_eq!(
+        db.get_session("codex", "codex-restart")
+            .await
+            .expect("Codex session ingested")
+            .transcript_path,
+        Some(path.to_str().unwrap().to_owned())
+    );
+    let path_key = source.cursor_key(&path).durable_text();
     let first_offset = db.get_parse_offset(&path_key).await.unwrap();
     assert_no_transcript_adjacent_fallback_writer(&db, &path);
     drop(db);
@@ -1727,12 +1733,14 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
             .messages_upserted,
         2
     );
-    let path_key = db
-        .get_session("codex", "codex-partial-append")
-        .await
-        .expect("Codex session ingested")
-        .transcript_path
-        .expect("Codex durable transcript path");
+    assert_eq!(
+        db.get_session("codex", "codex-partial-append")
+            .await
+            .expect("Codex session ingested")
+            .transcript_path,
+        Some(path.to_str().unwrap().to_owned())
+    );
+    let path_key = source.cursor_key(&path).durable_text();
     let committed = db.get_parse_offset(&path_key).await.unwrap();
     drop(db);
 

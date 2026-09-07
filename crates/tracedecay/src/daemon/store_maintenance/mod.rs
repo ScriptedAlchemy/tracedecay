@@ -314,10 +314,10 @@ fn log_semantic_vector_retention_degraded(
 /// offline protection set without reporting a degradation. `CensusScanning`
 /// is in-progress: the bounded census is still paging toward its exact pin
 /// set, so the pass defers instead of planning against a mid-scan inventory.
-/// `Offline` is a typed degradation for an unavailable vector runtime; the
-/// pass then plans against the offline protection set. `Refused` is
-/// fail-closed: the vector authority reported reset/corrupt/denied and no
-/// sweep may run.
+/// `Offline` is a typed degradation with no mounted vector provider; the pass
+/// then plans against the offline protection set. `Refused` is fail-closed:
+/// a mounted provider's inventory is unreadable or the vector authority
+/// reported reset/corrupt/denied, so no sweep may run.
 pub(super) enum VectorRetentionInventoryV1 {
     Online {
         sources: std::collections::BTreeSet<tracedecay_domain::CodeGenerationId>,
@@ -355,30 +355,63 @@ pub(super) async fn resolve_vector_retention_inventory(
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
 ) -> VectorRetentionInventoryV1 {
-    let expected_vector_revision =
-        match observations.semantic_vector_retention_read(graph.project_root()) {
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Observed { receipt } => {
-                receipt.revision
-            }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::SemanticUnseated => {
+    // A mounted provider can still own vector activation leases when a census
+    // or configuration read fails. Only an absent provider admits the offline
+    // protection set; unreadability is not evidence that its sources are dead.
+    let vector_provider = schedulers
+        .semantic_vector_graph_provider(graph.project_root())
+        .await;
+    let vector_provider_mounted = vector_provider.is_some();
+    let unavailable = |reason: String| {
+        if vector_provider_mounted {
+            VectorRetentionInventoryV1::Refused { reason }
+        } else {
+            VectorRetentionInventoryV1::Offline { reason }
+        }
+    };
+    let expected_vector_revision = match observations
+        .semantic_vector_retention_read(graph.project_root())
+    {
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::Observed { receipt } => {
+            receipt.revision
+        }
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::SemanticUnseated => {
+            let Some(provider) = vector_provider.as_ref() else {
                 return VectorRetentionInventoryV1::SemanticUnseated;
-            }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
-                return VectorRetentionInventoryV1::CensusScanning;
-            }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown => {
-                return VectorRetentionInventoryV1::Offline {
-                    reason: "vector_census_incomplete".to_owned(),
-                };
-            }
-        };
+            };
+            // Providers are mounted even with semantic search disabled.
+            // An exact empty first page proves there are no retained stages;
+            // a nonempty page must never be mistaken for disabled liveness.
+            let empty = async {
+                    let retained = provider.graph_for_current().await.map_err(|error| error.to_string())?;
+                    let store = tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1::read_only(&retained)
+                        .map_err(|error| error.to_string())?;
+                    let census = store.project_stage_census(std::sync::Arc::clone(retained.cancellation()))
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>(census.records.is_empty()
+                        && census.continuation.is_none()
+                        && census.complete_receipt.is_some())
+                }.await;
+            return match empty {
+                Ok(true) => VectorRetentionInventoryV1::SemanticUnseated,
+                Ok(false) => VectorRetentionInventoryV1::Refused {
+                    reason: "unseated_semantic_vector_stages_remain".to_owned(),
+                },
+                Err(reason) => VectorRetentionInventoryV1::Refused { reason },
+            };
+        }
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
+            return VectorRetentionInventoryV1::CensusScanning;
+        }
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown => {
+            return unavailable("vector_census_incomplete".to_owned());
+        }
+    };
     let Some(configuration) = graph
         .configuration_runtime()
         .semantic_configuration_inventory_authority()
     else {
-        return VectorRetentionInventoryV1::Offline {
-            reason: "configuration_inventory_unavailable".to_owned(),
-        };
+        return unavailable("configuration_inventory_unavailable".to_owned());
     };
     let project_root = graph.hook_store_layout().project_root.clone();
     let sources = tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
@@ -388,7 +421,10 @@ pub(super) async fn resolve_vector_retention_inventory(
         expected_vector_revision,
     )
     .await;
-    classify_vector_readable_sources(sources, configuration, expected_vector_revision)
+    match classify_vector_readable_sources(sources, configuration, expected_vector_revision) {
+        VectorRetentionInventoryV1::Offline { reason } => unavailable(reason),
+        inventory => inventory,
+    }
 }
 
 /// Map the mounted graph's readable-source read onto the retention inventory:
@@ -457,12 +493,12 @@ pub(in crate::daemon) enum CodeGenerationRetentionOutcomeV1 {
 /// graph when it is resolvable. A daemon without a seated semantic runtime
 /// (the default-off state) sweeps under the offline protection set as its
 /// ordinary quiet journey, and an in-progress census defers the sweep until
-/// its exact pin set is complete. When the graph runtime is unavailable —
-/// saturated capacity, failed activation, or nothing serving — the pass
+/// its exact pin set is complete. With no mounted vector provider, the pass
 /// degrades to the offline protection set (active pointer head, durable
-/// pointer index, rollback floor, and the serving generation) so sealed files
-/// cannot grow without bound while the graph is dark. Reset, corrupt, and
-/// denied vector authorities stay fail-closed and collect nothing.
+/// pointer index, rollback floor, and the serving generation). A mounted
+/// provider can retain source leases even while its graph or configuration is
+/// unreadable; that uncertainty, reset, corruption, and denial all refuse
+/// collection.
 #[hotpath::measure(
     label = "daemon.git.maintenance.code_generation_retention",
     future = true
@@ -554,8 +590,8 @@ async fn apply_code_generation_retention(
         log_code_generation_retention_degraded(observations, graph.project_root(), &failure);
     }
     // Published vectors live in the mounted code graph. When the graph is
-    // resolvable, its inventory is the exact vector pin set. Without a seated
-    // semantic runtime, and while the vector runtime is unavailable, the pass
+    // resolvable, its inventory is the exact vector pin set. Without a mounted
+    // semantic vector provider, the pass
     // plans against the offline protection set (active pointer head, durable
     // pointer index, rollback floor, plus the serving generation) instead of
     // letting sealed files grow without bound while the graph is dark. A
@@ -1167,7 +1203,9 @@ async fn collect_scope_root_proof_inputs(
     };
     let configuration_roots =
         tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
-            revision: configuration_receipt.revision().to_string(),
+            revision: configuration_receipt
+                .revision()
+                .map_or_else(|| "absent".to_owned(), |revision| revision.to_string()),
             terminal_count: configuration_receipt.root_binding_count(),
             digest: configuration_receipt.inventory_digest().as_str().to_owned(),
         };
@@ -1179,7 +1217,9 @@ async fn collect_scope_root_proof_inputs(
     .map_err(|_| "vector_dependency_inventory_digest_failed")?;
     let vector_dependencies =
         tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
-            revision: configured_root_receipt.revision().to_string(),
+            revision: configured_root_receipt
+                .revision()
+                .map_or_else(|| "absent".to_owned(), |revision| revision.to_string()),
             terminal_count: configured_root_receipt.root_count(),
             digest: vector_dependency_digest.as_str().to_owned(),
         };

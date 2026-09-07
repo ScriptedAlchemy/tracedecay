@@ -149,6 +149,34 @@ async fn codex_archived_rollout_is_ingested() {
         checkpoint.byte_offset,
         std::fs::metadata(&path).unwrap().len()
     );
+    let health = db
+        .runtime()
+        .session_ingest_health_for_test(
+            tracedecay_sessions::admission::HostAdmissionScope::Project,
+            Some("codex"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.tracked_transcripts, 1);
+    assert_eq!(health.pending_transcripts, 0);
+    assert_eq!(health.pending_bytes, 0);
+    let tail = b"\n";
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(tail)
+        .unwrap();
+    let health = db
+        .runtime()
+        .session_ingest_health_for_test(
+            tracedecay_sessions::admission::HostAdmissionScope::Project,
+            Some("codex"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.pending_transcripts, 1);
+    assert_eq!(health.pending_bytes, tail.len() as u64);
 }
 #[tokio::test]
 async fn codex_rollout_ingest_is_incremental() {

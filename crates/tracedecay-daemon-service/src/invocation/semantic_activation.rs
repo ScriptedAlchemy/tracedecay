@@ -90,7 +90,7 @@ impl DaemonInvocationService {
         // evaluation so a missing model is a fast typed refusal, not a
         // late one.
         let material = match semantic_activation_material(
-            tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(
+            tracedecay_usecases::semantic_runtime::project_lifecycle_status(
                 &project_root_path,
             )
             .as_ref(),

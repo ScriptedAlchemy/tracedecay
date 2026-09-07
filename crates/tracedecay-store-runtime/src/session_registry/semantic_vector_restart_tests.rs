@@ -159,6 +159,13 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for CancelRequestAfterAdoptionRuntime 
         self.inner.settle_published(settlement, authority)
     }
 
+    fn project_stage_census(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorStageCensusPage, GraphDbError> {
+        self.inner.project_stage_census(authority)
+    }
+
     fn reserve_one_generation(
         &self,
         after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,

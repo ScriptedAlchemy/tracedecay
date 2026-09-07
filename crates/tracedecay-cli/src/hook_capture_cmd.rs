@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{HookHostV1, NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1};
@@ -216,6 +216,11 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
 }
 
 pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
+    let Some(deadline) = Instant::now().checked_add(Duration::from_micros(
+        tracedecay_hooks::HookSynchronousDeadlineV1::start().remaining_micros(),
+    )) else {
+        return 1;
+    };
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,
         Err(()) => return 1,
@@ -240,13 +245,15 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
                                     &payload,
                                     material,
                                     now,
+                                    deadline,
                                 );
                                 if outcome == NativeHookCaptureOutcomeV1::Captured {
-                                    match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+                                    match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_until(
                                         tracedecay_hooks::hook_delivery_receipt_spool_root(
                                             &layout.data_root,
                                             source.host(),
                                         ),
+                                        deadline,
                                     ) {
                                         Ok(writer) => delivery_writer = Some(writer),
                                         Err(error) => delivery_open_error = Some(error),
@@ -311,7 +318,8 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         NativeHookCaptureOutcomeV1::Rejected
         | NativeHookCaptureOutcomeV1::Full
         | NativeHookCaptureOutcomeV1::ResetRequired
-        | NativeHookCaptureOutcomeV1::Unavailable => 1,
+        | NativeHookCaptureOutcomeV1::Unavailable
+        | NativeHookCaptureOutcomeV1::AdmissionTimedOut => 1,
     }
 }
 

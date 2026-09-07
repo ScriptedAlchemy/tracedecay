@@ -71,10 +71,11 @@ impl ModelArtifactStore {
                 })
                 .collect(),
         };
+        let session_runtime = &meta.manifest.payload.runtime;
         for member in &meta.members {
             let _file = open_cap_file(
                 &members_dir,
-                member_file_name(member.member.role),
+                member_file_name(member.member.role, Some(session_runtime)),
                 false,
                 true,
                 false,
@@ -190,7 +191,10 @@ impl ModelArtifactStore {
         }
         let mut file = open_cap_file(
             &session.members_dir,
-            member_file_name(role),
+            member_file_name(
+                member.member.role,
+                Some(&session.meta.manifest.payload.runtime),
+            ),
             false,
             true,
             false,
@@ -214,6 +218,23 @@ impl ModelArtifactStore {
         source: &Path,
         now_unix: u64,
     ) -> Result<ArtifactInventoryRecordV1, ArtifactImportErrorV1> {
+        // Different selection owners share immutable packages. Reusing an
+        // installed digest still verifies its canonical bytes under the store
+        // lock; it neither replaces the inventory row nor changes any lease.
+        {
+            let _lock = self.acquire_lock()?;
+            self.recover_locked()?;
+            if let Some(record) = self
+                .load_inventory_locked()?
+                .records
+                .get(&manifest.artifact_identity_digest().to_string())
+                && record.state == ArtifactInventoryStateV1::Installed
+            {
+                self.verify_manifest(manifest)?;
+                self.verify_artifact_record(record)?;
+                return Ok(record.clone());
+            }
+        }
         let mut session = self.begin_import(manifest, now_unix)?;
         let files = match inspect_local_package(source) {
             Ok(files) => files,
@@ -377,7 +398,10 @@ impl ModelArtifactStore {
             for staged in &session.meta.members {
                 let file = open_cap_file(
                     &session.members_dir,
-                    member_file_name(staged.member.role),
+                    member_file_name(
+                        staged.member.role,
+                        Some(&session.meta.manifest.payload.runtime),
+                    ),
                     true,
                     false,
                     false,
