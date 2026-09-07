@@ -693,6 +693,7 @@ mod tests {
 
     use super::DaemonNativeIntegrationServiceRegistry;
     use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+    use tracedecay_runtime_core::git::try_git_program;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     fn init_repository(root: &Path) {
@@ -702,7 +703,7 @@ mod tests {
             vec!["config", "user.name", "Fixture"],
             vec!["commit", "--allow-empty", "-m", "seed"],
         ] {
-            let status = Command::new("git")
+            let status = Command::new(try_git_program().expect("resolve the git program"))
                 .args(&arguments)
                 .current_dir(root)
                 .status()

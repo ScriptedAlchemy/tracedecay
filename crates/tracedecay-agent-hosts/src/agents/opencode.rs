@@ -322,6 +322,7 @@ impl AgentIntegration for OpenCodeIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
                 &prompt_path,
@@ -341,6 +342,7 @@ impl AgentIntegration for OpenCodeIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
                 &agents_md,

@@ -1,36 +1,28 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
-use tracedecay_agent_hosts::automation_runtime::automation::host_io as production_host_io;
-
-use crate::automation::host_io::{
-    HostIoRegistration, ManagedSkillExportReport, PluginFile, register,
-};
+use crate::automation::host_io::{HostIo, ManagedSkillExportReport, PluginFile};
 use crate::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, SkillInstallTarget,
 };
-use crate::errors::{Result as TdResult, TraceDecayError};
+use crate::errors::TraceDecayError;
 
 use super::*;
 
-/// Binds this test crate copy's host-io ports to the production surface.
+/// The production host I/O bundle, expressed in this test crate copy's types.
 ///
 /// This lib-test binary contains two copies of the crate: the `cfg(test)`
 /// copy under test and the plain lib copy that `tracedecay-agent-hosts`
-/// links and registers. Registration state is per copy, so the production
-/// registration alone leaves this copy's fail-closed ports empty. Every
-/// slot below delegates to the lib copy's registered production dispatcher;
-/// nothing is stubbed or re-implemented.
-fn register_production_host_io() {
-    tracedecay_agent_hosts::register_automation_host_io();
-
+/// links. `tracedecay_agent_hosts::host_io()` therefore returns the lib
+/// copy's `HostIo`, which is a distinct type here. Every callback below
+/// delegates to the same production implementation; nothing is stubbed or
+/// re-implemented.
+fn production_host_io() -> HostIo {
     fn export_to_agents(home: &Path, profile_root: &Path) -> Vec<ManagedSkillExportReport> {
         convert_reports(
-            production_host_io::export_managed_skills_to_agents(home, profile_root)
-                .expect("production export surface is registered"),
+            tracedecay_agent_hosts::host_io().export_managed_skills_to_agents(home, profile_root),
         )
     }
 
@@ -40,42 +32,26 @@ fn register_production_host_io() {
         profile_root: &Path,
     ) -> Vec<ManagedSkillExportReport> {
         convert_reports(
-            production_host_io::export_managed_skills_to_agent_hosts(
+            tracedecay_agent_hosts::host_io().export_managed_skills_to_agent_hosts(
                 home,
                 project_root,
                 profile_root,
-            )
-            .expect("production export surface is registered"),
+            ),
         )
     }
 
-    fn convert_reports(
-        reports: Vec<production_host_io::ManagedSkillExportReport>,
-    ) -> Vec<ManagedSkillExportReport> {
+    fn convert_reports(reports: Vec<impl serde::Serialize>) -> Vec<ManagedSkillExportReport> {
         // The two crate copies declare structurally identical serde types.
-        reports
-            .into_iter()
-            .map(|report| ManagedSkillExportReport {
-                agent: report.agent,
-                exports: serde_json::from_value(
-                    serde_json::to_value(report.exports).expect("serialize export summaries"),
-                )
-                .expect("export summaries round-trip between crate copies"),
-                error: report.error,
-            })
-            .collect()
-    }
-
-    fn resolve_on_path(program: &str, path_var: Option<&OsStr>) -> TdResult<Option<PathBuf>> {
-        production_host_io::resolve_on_path(program, path_var)
+        serde_json::from_value(serde_json::to_value(reports).expect("serialize export reports"))
+            .expect("export reports round-trip between crate copies")
     }
 
     fn codex_agent_files() -> &'static [PluginFile] {
         static FILES: OnceLock<Vec<PluginFile>> = OnceLock::new();
         FILES
             .get_or_init(|| {
-                production_host_io::codex_agent_files()
-                    .expect("production plugin-bundle surface is registered")
+                tracedecay_agent_hosts::host_io()
+                    .codex_agent_files()
                     .iter()
                     .map(|file| PluginFile {
                         relative: file.relative,
@@ -86,33 +62,14 @@ fn register_production_host_io() {
             .as_slice()
     }
 
-    fn with_write_intents(root: PathBuf, effect: &mut dyn FnMut()) {
-        production_host_io::with_host_config_write_intents(root, effect)
-            .expect("production write-intent surface is registered");
-    }
-
-    fn write_text(path: &Path, contents: &str, backup: Option<&Path>) -> TdResult<()> {
-        production_host_io::safe_write_text_file(path, contents, backup)
-    }
-
-    fn write_json(path: &Path, value: &serde_json::Value, backup: Option<&Path>) -> TdResult<()> {
-        production_host_io::safe_write_json_file(path, value, backup)
-    }
-
-    fn remove_host_file(path: &Path) -> std::io::Result<()> {
-        production_host_io::safe_remove_host_file(path)
-    }
-
-    register(HostIoRegistration {
+    HostIo {
         export_to_agents,
         export_to_agent_hosts,
-        write_text,
-        write_json,
-        remove_host_file,
-        resolve_on_path,
+        write_text: tracedecay_agent_hosts::agents::safe_write_text_file,
+        write_json: tracedecay_agent_hosts::agents::safe_write_json_file,
+        remove_host_file: tracedecay_agent_hosts::agents::safe_remove_host_file,
         codex_agent_files,
-        with_write_intents,
-    });
+    }
 }
 
 const INSTALLATION: &str = "test-installation";
@@ -150,11 +107,11 @@ fn child_names(dir: &Path) -> BTreeSet<String> {
 
 #[test]
 fn interrupted_manifest_atomic_write_keeps_v1_authoritative_and_public_retry_commits_v2() {
-    register_production_host_io();
+    let host_io = production_host_io();
     let temp = tempfile::tempdir().unwrap();
     let scope = MaterializationScope::global(MaterializationHost::Claude, temp.path().join("home"));
     let v1 = active_skill("# v1\n\nOriginal materialized skill.");
-    let first = materialize_skill(&scope, &v1, INSTALLATION).unwrap();
+    let first = materialize_skill(&host_io, &scope, &v1, INSTALLATION).unwrap();
     assert_eq!(first.action, MaterializeAction::Written);
 
     let dir = scope.skill_dir(&v1.host_skill_slug());
@@ -185,15 +142,15 @@ fn interrupted_manifest_atomic_write_keeps_v1_authoritative_and_public_retry_com
             .map(|(relative, bytes)| (relative.clone(), hex::encode(bytes)))
             .collect(),
     };
-    write_pending_materialization(&dir, &pending).unwrap();
+    write_pending_materialization(&host_io, &dir, &pending).unwrap();
 
     let blocked_intent_root = temp.path().join("blocked-write-intent-root");
     fs::write(&blocked_intent_root, b"not a directory").unwrap();
-    let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
-        apply_pending_materialization(&dir, &pending)
-    })
-    .expect("host I/O write-intent surface is registered in tests")
-    .unwrap_err();
+    let error =
+        tracedecay_agent_hosts::agents::with_host_config_write_intents(blocked_intent_root, || {
+            apply_pending_materialization(&host_io, &dir, &pending)
+        })
+        .unwrap_err();
     match error {
         TraceDecayError::Config { message } => {
             assert!(
@@ -211,7 +168,7 @@ fn interrupted_manifest_atomic_write_keeps_v1_authoritative_and_public_retry_com
     assert_eq!(fs::read(&manifest_path).unwrap(), v1_manifest_bytes);
     assert!(pending_path.is_file());
 
-    let retried = materialize_skill(&scope, &v2, INSTALLATION).unwrap();
+    let retried = materialize_skill(&host_io, &scope, &v2, INSTALLATION).unwrap();
     assert_ne!(retried.action, MaterializeAction::SkippedForeign);
     assert_ne!(retried.action, MaterializeAction::SkippedForked);
     assert!(

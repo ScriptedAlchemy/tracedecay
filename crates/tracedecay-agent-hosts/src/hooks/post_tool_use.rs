@@ -1,58 +1,6 @@
 //! Shared post-tool-use event helpers.
 
-use std::path::Path;
-
 use serde_json::Value;
-use tracedecay_hooks::DaemonHookEvent;
-
-use crate::ports::hook_runtime::HookRuntimeV1;
-
-/// Whether a write event that named no in-project path is still worth sending.
-///
-/// Codex `PostToolUse` carries nothing but the paths, so an empty list is not
-/// an event. Kiro's `postToolUse` also reports the session `cwd`, which the
-/// daemon uses for worktree and branch tracking, so it is sent either way.
-pub(super) enum EmptyPathPolicy {
-    Skip,
-    Send,
-}
-
-/// The tail every host's post-write daemon notification shares: gate on an
-/// initialized store, resolve the edited project-relative paths, apply the
-/// host's empty-path policy, and send one route-annotated event.
-///
-/// `rel_paths` is a closure because path extraction is the one genuinely
-/// host-specific step (Claude reads `tool_input.file_path`, Codex parses an
-/// `apply_patch` envelope, Cursor reads `file_path` plus `edits[]`, Kiro sweeps
-/// several path-shaped keys) and because it must not run for a project with no
-/// store, exactly as before.
-pub(super) async fn notify_edited_paths(
-    runtime: &HookRuntimeV1,
-    project_root: &Path,
-    parsed: &Value,
-    rel_paths: impl FnOnce() -> Vec<String>,
-    build_event: impl FnOnce(Vec<String>) -> DaemonHookEvent,
-    empty_paths: EmptyPathPolicy,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) {
-    if !runtime.is_project_initialized(project_root) {
-        return;
-    }
-    let rels = rel_paths();
-    if rels.is_empty() && matches!(empty_paths, EmptyPathPolicy::Skip) {
-        return;
-    }
-    super::notify_hook_event_with_optional_telemetry(
-        runtime,
-        project_root,
-        build_event(rels).with_route(Some(super::hook_route_metadata_from_parsed(
-            parsed,
-            project_root,
-        ))),
-        telemetry,
-    )
-    .await;
-}
 
 #[cfg(test)]
 fn tool_input_command(parsed: &Value) -> &str {

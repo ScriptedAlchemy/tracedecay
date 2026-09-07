@@ -7,6 +7,7 @@ use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
     RenameSymbolBindingV1,
 };
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::ports::project_runtime::{ProjectRuntime, RuntimeFuture};
 use tracedecay_configuration::UserSettingsDaemonClient;
 use tracedecay_dashboard_api::DashboardProjectRuntime;
@@ -26,6 +27,10 @@ use super::TraceDecay;
 impl ProjectRuntime for TraceDecay {
     fn project_root(&self) -> &Path {
         TraceDecay::project_root(self)
+    }
+
+    fn host_io(&self) -> HostIo {
+        tracedecay_agent_hosts::host_io()
     }
 
     fn db(&self) -> &Database {
