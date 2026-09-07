@@ -67,8 +67,8 @@ for c in $CHANNELS; do
 done
 
 # Fixed steering string used for the hermetic ablation conditions. It replaces
-# the user's ambient ~/.claude/CLAUDE.md (deliberately excluded in ablations via
-# --setting-sources) so steering is held constant across no-hints/no-skills
+# the user's ambient ~/.claude/CLAUDE.md (unreachable from the throwaway HOME)
+# so steering is held constant across no-hints/no-skills
 # instead of varying with whatever global memory the operator happens to run.
 STEER_TEXT="This repository has indexed code-relationship evidence available. Choose tools according to the evidence the task requires."
 
@@ -203,10 +203,16 @@ copy_auth_readonly() {
   chmod 400 "$dest"
 }
 
+# Endpoint-profile auth lives in settings.json `env`; see carry_claude_profile.py.
+copy_claude_endpoint_profile() {
+  python3 "$here/carry_claude_profile.py" "$1" "$2"
+}
+
 scrub_auth_copies() {
   rm -f "$CODEX_EVAL_CONFIG/auth.json" \
     "$CLAUDE_EVAL_CONFIG/.credentials.json" \
-    "$CLAUDE_EVAL_CONFIG/credentials.json"
+    "$CLAUDE_EVAL_CONFIG/credentials.json" \
+    "$CLAUDE_EVAL_CONFIG/settings.json"
 }
 trap scrub_auth_copies EXIT
 trap 'exit 130' INT TERM HUP
@@ -227,6 +233,8 @@ prepare_host_profiles() {
       "$CLAUDE_EVAL_CONFIG/.credentials.json"
     copy_auth_readonly "$REAL_CLAUDE_CONFIG/credentials.json" \
       "$CLAUDE_EVAL_CONFIG/credentials.json"
+    copy_claude_endpoint_profile "$REAL_CLAUDE_CONFIG/settings.json" \
+      "$CLAUDE_EVAL_CONFIG/settings.json"
   fi
 }
 
@@ -324,9 +332,8 @@ JSON
 # ---- ablation provisioning ------------------------------------------------- #
 # Channel isolation is hard because a globally-installed plugin bundles hooks
 # (hints) + skills + MCP together. To ablate ONE channel we build a hermetic,
-# componentized copy of the plugin per condition and load ONLY it, dropping the
-# ambient user config via --setting-sources so global hooks/skills/CLAUDE.md do
-# not leak in. Descriptions (MCP) are held constant across every condition via a
+# componentized copy of the plugin per condition and load ONLY it inside a
+# throwaway HOME, so global hooks/skills/CLAUDE.md cannot leak in. Descriptions (MCP) are held constant across every condition via a
 # fixed --mcp-config + --strict-mcp-config.
 #
 # Condition -> channels:
@@ -380,8 +387,10 @@ claude_extra_for() {
   provision_variant "$cond"
   local selected_mcp="$mcp_cfg"
   [[ "$cond" == "cli-only" ]] && selected_mcp="$empty_mcp_cfg"
-  # Drop ambient user config (global plugin + user CLAUDE.md); pin MCP explicitly.
-  CLAUDE_EXTRA=(--setting-sources project,local
+  # The user source is the throwaway profile, which holds only the carried
+  # endpoint/auth env and model (see copy_claude_endpoint_profile); ambient
+  # plugins, hooks, and CLAUDE.md cannot reach it. Pin MCP explicitly.
+  CLAUDE_EXTRA=(--setting-sources user,project,local
                 --strict-mcp-config --mcp-config "$selected_mcp"
                 --add-dir "$fdir"
                 --plugin-dir "$work/plugins/$cond")

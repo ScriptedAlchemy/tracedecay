@@ -28,6 +28,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::git::try_git_program;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
@@ -38,7 +39,7 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 fn git(root: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = Command::new(try_git_program().expect("resolve the git program"))
         .args(arguments)
         .current_dir(root)
         .output()
