@@ -395,7 +395,7 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]

@@ -1469,7 +1469,7 @@ pub(super) fn retain_project_semantic_startup(
                 }
                 Ok(()) => {}
                 Err(error) => {
-                    tracing::warn!(%error, project = %semantic_startup_project.display(), "semantic startup selection unavailable")
+                    tracing::warn!(%error, project = %semantic_startup_project.display(), "semantic startup selection unavailable");
                 }
             }
             log_daemon_event(

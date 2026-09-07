@@ -6002,9 +6002,13 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
             false
         }
     }
-    let source = (0..256)
-        .map(|ordinal| format!("pub fn subdivision_{ordinal}() -> usize {{ {ordinal} }}\n"))
-        .collect::<String>();
+    let source = (0..256).fold(String::new(), |mut source, ordinal| {
+        let _ = writeln!(
+            source,
+            "pub fn subdivision_{ordinal}() -> usize {{ {ordinal} }}"
+        );
+        source
+    });
     let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
     let store = TempDir::new().unwrap();
     let mut scheduler = scheduler(

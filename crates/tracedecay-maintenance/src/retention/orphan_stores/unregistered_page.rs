@@ -522,7 +522,7 @@ pub(in crate::retention) fn read_project_directory_page(
                 message: format!("read unregistered inventory record boundary: {error}"),
             }
         })?;
-        if boundary != [b'\n'] {
+        if boundary != *b"\n" {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "unregistered inventory cursor splits a committed record".to_owned(),
             });

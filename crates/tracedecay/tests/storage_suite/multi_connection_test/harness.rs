@@ -32,17 +32,17 @@ impl ChildGuard {
     }
 
     fn report_failure(&mut self) {
-        if std::thread::panicking() {
-            if let Some(path) = self.stderr_path.take() {
-                eprintln!(
-                    "child {} status before cleanup: {:?}; stderr {}:\n{}",
-                    self.child.id(),
-                    self.child.try_wait(),
-                    path.display(),
-                    std::fs::read_to_string(&path)
-                        .unwrap_or_else(|error| format!("unable to read stderr: {error}"))
-                );
-            }
+        if std::thread::panicking()
+            && let Some(path) = self.stderr_path.take()
+        {
+            eprintln!(
+                "child {} status before cleanup: {:?}; stderr {}:\n{}",
+                self.child.id(),
+                self.child.try_wait(),
+                path.display(),
+                std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| format!("unable to read stderr: {error}"))
+            );
         }
     }
 }

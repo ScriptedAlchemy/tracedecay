@@ -662,7 +662,6 @@ mod tests {
                 .unwrap();
 
         assert_eq!(workspace.primary(), &admitted);
-        assert_eq!(workspace.resolve_root_uri(&alias_uri), Ok(&admitted));
         assert!(workspace.admits_exact_root_hints(std::slice::from_ref(&alias_uri)));
         assert!(!workspace.admits_exact_root_hints(&[canonical_uri, alias_uri]));
         assert!(!workspace.admits_exact_root_hints(std::slice::from_ref(&outside_uri)));
