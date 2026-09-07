@@ -34,7 +34,8 @@ use tracedecay_store::{
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 use super::{
-    AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1,
+    AtomicGraphCancellationV1, GraphPublicationProbeV1, PUBLICATION_PROJECTION_IN_FLIGHT,
+    ResidentMemoryGuardedGraphCancellationV1, RetainedCodeGraphRuntimeV1,
     take_publication_projection_overlap_peak,
 };
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
@@ -194,6 +195,46 @@ fn assert_unverified_publication_state(
                 .is_none()
         );
     });
+}
+
+#[test]
+fn resident_memory_trip_is_permanent_for_one_publication_attempt() {
+    let pressure = Arc::new(
+        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
+            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
+        ),
+    );
+    let request_cancelled = Arc::new(AtomicBool::new(false));
+    let attempt = ResidentMemoryGuardedGraphCancellationV1::new(
+        Arc::clone(&request_cancelled),
+        Arc::clone(&pressure),
+    );
+
+    assert!(!attempt.is_cancelled());
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+    assert!(attempt.is_cancelled());
+    assert!(attempt.refused_by_resident_memory());
+
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    assert!(
+        attempt.is_cancelled(),
+        "pressure recovery must not revive the publication attempt that tripped"
+    );
+    assert!(attempt.refused_by_resident_memory());
+
+    request_cancelled.store(true, Ordering::Release);
+    assert!(attempt.is_cancelled());
+    assert!(
+        !attempt.refused_by_resident_memory(),
+        "explicit request cancellation keeps its identity after a pressure trip"
+    );
+
+    let next_attempt =
+        ResidentMemoryGuardedGraphCancellationV1::new(Arc::new(AtomicBool::new(false)), pressure);
+    assert!(
+        !next_attempt.is_cancelled(),
+        "recovered pressure admits a distinct publication attempt"
+    );
 }
 
 fn journal_publication_without_head(
@@ -1347,10 +1388,51 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         .expect("retain the code graph runtime")
         .with_resident_memory_pressure(&pressure);
 
-    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+    // Start under nominal pressure, let the real publication claim the corpus
+    // build permit and enter manifest projection, then trip the watermark.
+    // Holding the short publication gate keeps the attempt alive after that
+    // phase so this cannot collapse into an over-budget admission test.
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    let publication_gate = runtime
+        .publication_locks
+        .gate
+        .lock()
+        .expect("hold publication gate after manifest projection");
+    let _ = take_publication_projection_overlap_peak();
     let not_cancelled = Arc::new(AtomicBool::new(false));
-    let refused =
-        runtime.publish_verified_snapshot(latest.generation(), Arc::clone(&not_cancelled));
+    let refused = std::thread::scope(|scope| {
+        let publisher = scope.spawn(|| {
+            runtime.publish_verified_snapshot(latest.generation(), Arc::clone(&not_cancelled))
+        });
+        let projection_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let build_claimed = match runtime.publication_locks.build.try_lock() {
+                Ok(build) => {
+                    drop(build);
+                    false
+                }
+                Err(std::sync::TryLockError::WouldBlock) => true,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    panic!("publication build permit was poisoned")
+                }
+            };
+            if build_claimed
+                && (PUBLICATION_PROJECTION_IN_FLIGHT.load(Ordering::Acquire) != 0
+                    || take_publication_projection_overlap_peak() != 0)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() <= projection_deadline,
+                "publication never entered manifest projection"
+            );
+            std::thread::yield_now();
+        }
+        pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+        drop(publication_gate);
+        publisher.join().expect("join pressured publisher")
+    });
+    let _ = take_publication_projection_overlap_peak();
     match refused {
         Err(GraphDbError::BudgetExhausted { kind, limit }) => {
             assert_eq!(kind, tracedecay_graph_db::GraphBudgetKind::ResidentMemory);

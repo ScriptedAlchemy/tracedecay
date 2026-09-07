@@ -687,16 +687,15 @@ impl LatestCompleteCodeIndexV1 {
             retained
                 .publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
                 .map_err(CodeGraphProjectionError::from)
-                .map_err(|error| {
+                .inspect_err(|error| {
                     // The publication stopped at the measured-RSS watermark.
                     // Record the typed refusal before the error reaches the
                     // scheduler so status reports `refused` with its reason
                     // instead of a `pending` graph that will never seat;
                     // exact and lexical serving stay installed.
-                    if is_resident_memory_refusal(&error) {
+                    if is_resident_memory_refusal(error) {
                         self.refuse_graph_activation(RESIDENT_MEMORY_GRAPH_REFUSAL_REASON);
                     }
-                    error
                 })
         )?;
         let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(

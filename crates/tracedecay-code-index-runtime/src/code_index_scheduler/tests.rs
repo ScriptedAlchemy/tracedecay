@@ -13525,36 +13525,124 @@ async fn text_freshness_query_during_owner_work_schedules_a_follow_up_pass() {
         .hold_reconcile_pass_for_test(fixture.path())
         .await
         .expect("mounted worktree");
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("mounted scheduler");
+    let reconcile_control = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tracedecay_usecases::code_index::DaemonCodeIndexControlV1::new(
+            Arc::clone(&scheduler.epoch),
+            Arc::clone(&scheduler.shutting_down),
+        )
+    };
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     git(fixture.path(), &["commit", "-qam", "external"]);
 
-    let (latest, current) = registry
-        .latest_text_serving_freshness_for_scope(&scope)
+    let callers = 32;
+    let start = Arc::new(tokio::sync::Barrier::new(callers + 1));
+    let requests = (0..callers)
+        .map(|_| {
+            let registry = registry.clone();
+            let scope = scope.clone();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                registry
+                    .latest_text_serving_freshness_for_scope(&scope)
+                    .await
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait().await;
+    for request in requests {
+        let (latest, current) = request
+            .await
+            .expect("freshness query joins")
+            .expect("the seated text owner keeps serving during owner work");
+        assert_eq!(
+            latest.metadata().manifest().generation_id,
+            initial,
+            "every query is answered from the retained text generation"
+        );
+        assert!(
+            !current,
+            "a source the queries could not verify is reported stale, never current"
+        );
+    }
+    let first_follow_up = registry
+        .pending_wake_micros_for_scope(&scope)
         .await
-        .expect("the seated text owner keeps serving during owner work");
+        .filter(|pending| *pending != 0)
+        .expect("the concurrent queries leave one coalesced follow-up");
+    let _ = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await;
     assert_eq!(
-        latest.metadata().manifest().generation_id,
-        initial,
-        "the query is answered from the retained text generation"
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(first_follow_up),
+        "repeated reads preserve the one pending follow-up instead of restamping it"
     );
     assert!(
-        !current,
-        "a source the query could not verify is reported stale, never current"
+        !reconcile_control.is_cancelled(),
+        "freshness reads do not cancel or restart the owner pass"
     );
+
+    // Model the next worker pass claiming that wake while its owner authority
+    // remains held. A source edit observed during this pass must leave another
+    // coalesced follow-up, not disappear with the claimed arrival.
+    drop(owner_pass);
+    let next_owner_pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+    registry.clear_pending_wake_for_scope(&scope).await;
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n");
+    git(
+        fixture.path(),
+        &["commit", "-qam", "external during follow-up"],
+    );
+    let (_, current) = registry
+        .latest_text_serving_freshness_for_scope(&scope)
+        .await
+        .expect("retained text remains available during the follow-up pass");
+    assert!(!current);
     assert!(
         registry
             .pending_wake_micros_for_scope(&scope)
             .await
             .is_some_and(|pending| pending != 0),
-        "the query must leave a follow-up wake for the worker to re-run the freshness ladder"
+        "the source edit during the follow-up pass leaves the next necessary wake"
     );
 
-    // Release the worker: the follow-up pass alone must reconcile the commit.
-    drop(owner_pass);
+    // Release the worker: one BusyFollowUp pass must reconcile the latest
+    // source directly, without publishing or retrying the superseded edit.
+    drop(next_owner_pass);
     drop(admission);
     let next = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
     assert_ne!(next.metadata().manifest().generation_id, initial);
+    let current = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture current source");
+    assert_eq!(
+        next.metadata().snapshot().content_identity,
+        current.snapshot.content_identity,
+        "the pass serves the edit that arrived during its predecessor"
+    );
+    let busy_follow_ups = registry
+        .event_to_ready_receipts()
+        .into_iter()
+        .filter(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp)
+        .count();
+    assert_eq!(
+        busy_follow_ups, 1,
+        "coalesced reads and superseding edits produce one completed follow-up pass"
+    );
     registry.shutdown().await;
 }
 
@@ -14576,6 +14664,24 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
         latest.interactive_graph_store().is_err(),
         "a budget-refused native graph must not gain a substitute store"
     );
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted worktree freshness");
+    match freshness.code_graph_serving {
+        Some(
+            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
+                reason,
+            },
+        ) => assert_eq!(
+            reason,
+            super::graph_activation::RESIDENT_MEMORY_GRAPH_REFUSAL_REASON,
+            "the graph refusal keeps the canonical resident-memory reason"
+        ),
+        other => panic!(
+            "text serving must not turn the refused graph into strict graph readiness: {other:?}"
+        ),
+    }
 
     super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, false);
     registry.shutdown().await;

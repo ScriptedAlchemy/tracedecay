@@ -3127,10 +3127,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
-                // Writer wait starts when the wake is observed and ends when
-                // this pass holds every gate it needs to run; a pass that
-                // spends its budget here is blocked on a sibling holder, not
-                // on its own source work.
+                // This aggregate starts when the wake is observed and ends
+                // when the pass holds every admission/publication gate it
+                // needs. It deliberately does not attribute the span to the
+                // SQL writer alone.
                 let pass_wake_observed_at = Instant::now();
                 // A quarantined or backing-off panic unit must not consume the
                 // pending arrival: the wake stays outstanding so a later
@@ -3172,7 +3172,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                 };
-                let writer_wait_micros =
+                let wake_to_gates_held_micros =
                     u64::try_from(pass_wake_observed_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 let scheduler = Arc::clone(&worker_scheduler);
                 let graph_activation_enabled = worker_graph_activation.policy().is_enabled();
@@ -3428,7 +3428,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     queue_delay_micros = ?arrival
                         .wake_micros()
                         .map(|wake_micros| started_micros.saturating_sub(wake_micros).max(0)),
-                    writer_wait_micros,
+                    wake_to_gates_held_micros,
                     retained_text = retained_text_metadata
                         .as_ref()
                         .map(|metadata| metadata.manifest().generation_id.as_str()),

@@ -245,6 +245,9 @@ impl GraphCancellation for ResidentMemoryGuardedGraphCancellationV1 {
         if self.request.load(Ordering::Acquire) {
             return true;
         }
+        if self.tripped.load(Ordering::Acquire) {
+            return true;
+        }
         if let tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1::OverBudget {
             observed_bytes,
             limit_bytes,
