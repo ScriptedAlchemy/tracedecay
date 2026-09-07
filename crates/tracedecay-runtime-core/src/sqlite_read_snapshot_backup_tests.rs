@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::thread;
@@ -341,6 +343,51 @@ fn exclusive_staging_refuses_a_collision_without_deleting_it() {
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert_eq!(sqlite_generation_identity(&path).unwrap(), identity);
+}
+
+#[test]
+fn early_source_open_error_skips_colliding_scratch_and_retires_only_owned_staging() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("missing.db");
+    let destination = temp.path().join("snapshot.db");
+    // Occupy the next candidate staging names with foreign scratch. The
+    // reservation must step past them without opening, truncating, or
+    // deleting them, and the source-open failure must retire only the name
+    // this attempt exclusively created.
+    let next = super::NEXT_BACKUP_STAGING.load(Ordering::Relaxed);
+    let foreign: BTreeSet<PathBuf> = (next..next + 16)
+        .map(|id| super::backup_staging_path(&destination, id))
+        .collect();
+    for path in &foreign {
+        fs::write(path, b"foreign-scratch").unwrap();
+    }
+
+    let error = backup_live_sqlite_database_with(&source, &destination, || Ok(()))
+        .expect_err("missing source must fail after staging is reserved");
+
+    assert_ne!(
+        error.kind(),
+        io::ErrorKind::AlreadyExists,
+        "colliding scratch names must be skipped, not fatal: {error}"
+    );
+    assert!(!destination.exists());
+    for path in &foreign {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            b"foreign-scratch",
+            "{} must survive untouched",
+            path.display()
+        );
+    }
+    let remaining: BTreeSet<PathBuf> = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().contains(".backup-partial"))
+        .collect();
+    assert_eq!(
+        remaining, foreign,
+        "only this attempt's reserved staging may be retired"
+    );
 }
 
 #[test]

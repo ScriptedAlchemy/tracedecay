@@ -60,8 +60,7 @@ fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Re
     backup_live_sqlite_database_with(source, destination, || Ok(()))
 }
 
-fn backup_staging_path(destination: &Path) -> PathBuf {
-    let id = NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed);
+fn backup_staging_path(destination: &Path, id: u64) -> PathBuf {
     let mut staging = destination.as_os_str().to_os_string();
     staging.push(format!(".{}.{id}.backup-partial", std::process::id()));
     PathBuf::from(staging)
@@ -80,7 +79,8 @@ fn reserve_exclusive_file(path: &Path) -> io::Result<File> {
 
 fn reserve_attempt_staging(destination: &Path) -> io::Result<PathBuf> {
     for _ in 0..32 {
-        let staging = backup_staging_path(destination);
+        let id = NEXT_BACKUP_STAGING.fetch_add(1, Ordering::Relaxed);
+        let staging = backup_staging_path(destination, id);
         match reserve_exclusive_file(&staging) {
             Ok(file) => {
                 drop(file);
