@@ -1263,6 +1263,11 @@ async fn skill_writer_runner_retains_no_skill_needed_without_deployment() {
     .unwrap();
 
     assert_eq!(backend.calls(), 1);
+    assert_eq!(run.ledger_record.backend_attempt_count, 1);
+    assert_ne!(
+        run.ledger_record.error.as_deref(),
+        Some("session_evidence_unavailable")
+    );
     assert_eq!(run.report["status"], "no_skill_needed");
     assert_eq!(run.report["decision"], decision);
     assert_eq!(run.report["created_skills"], json!([]));
