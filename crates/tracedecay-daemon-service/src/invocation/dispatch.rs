@@ -208,24 +208,13 @@ impl DaemonInvocationService {
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project. A pre-admitted
-        // lease already stored the canonicalize result; reuse it.
-        let canonical_root = match (project_root, project_admission) {
-            (Some(project_root), Some(project_admission)) => project_admission
-                .admitted_canonical_root()
-                .map(ToOwned::to_owned)
-                .or_else(|| project_root.canonicalize().ok()),
-            (Some(project_root), None) => project_root.canonicalize().ok(),
-            (None, _) => None,
-        };
+        // lease already holds the exact registered-root key.
         let runtimes = match (project_root, project_admission) {
-            (Some(project_root), Some(project_admission)) => {
-                self.project_runtimes.request_runtimes_with_admission(
-                    project_root,
-                    canonical_root.as_deref(),
-                    project_admission,
-                )
-            }
+            (Some(project_root), Some(project_admission)) => self
+                .project_runtimes
+                .request_runtimes_with_admission(project_root, project_admission),
             _ => {
+                let canonical_root = project_root.and_then(|root| root.canonicalize().ok());
                 hotpath::future!(
                     self.project_runtimes
                         .request_runtimes(project_root, canonical_root.as_deref()),
@@ -235,6 +224,8 @@ impl DaemonInvocationService {
             }
         };
         let project_runtime_admitted = runtimes.is_admitted();
+        let registered_project_root = runtimes.resolved_root;
+        let publication = runtimes.publication;
         let feedback_runtime = runtimes.feedback;
         let observations = feedback_runtime
             .as_ref()
@@ -576,7 +567,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::FeedbackImpact,
                     PrimitiveRequest::Impact(request),
@@ -594,7 +586,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::AffectedTests,
                     PrimitiveRequest::AffectedFileTests(request),
@@ -612,7 +605,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::TestResults,
                     PrimitiveRequest::RecentTestResults(page),
@@ -631,7 +625,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
@@ -667,7 +662,8 @@ impl DaemonInvocationService {
                 };
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
@@ -687,7 +683,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_callable_code(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
@@ -716,9 +713,15 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::NotFoundOrNotAuthorized,
                     );
                 }
+                let Some(configuration_runtime) = configuration_runtime else {
+                    return match project_root {
+                        Some(_) => missing_registered_owner_problem(publication, request_id),
+                        None => runtime_mounting_problem(request_id),
+                    };
+                };
                 Box::pin(execute_configuration(
                     request_id,
-                    configuration_runtime,
+                    Some(configuration_runtime),
                     surface_operation,
                     request,
                     observed_at,
