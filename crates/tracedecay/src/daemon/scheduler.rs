@@ -1517,29 +1517,11 @@ async fn maybe_run_global_retention(
         );
         return;
     };
-    let succeeded = match retention {
-        Ok(reports) => {
-            for report in reports {
-                if report.applied && report.rows > 0 {
-                    log_daemon_event(
-                        "retention_prune",
-                        &[
-                            ("scope", "global".to_string()),
-                            ("table", report.table.to_string()),
-                            ("rows", report.rows.to_string()),
-                            (
-                                "window_days",
-                                report
-                                    .window_days
-                                    .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
-                            ),
-                        ],
-                    );
-                }
-            }
-            true
-        }
-        Err(_) => {
+    // An interrupted pass still reports the slices it committed; only the
+    // cadence outcome distinguishes it from a complete drain.
+    let (committed, succeeded) = match retention {
+        Ok(reports) => (reports, true),
+        Err(interruption) => {
             log_daemon_event(
                 "retention_prune",
                 &[
@@ -1548,9 +1530,27 @@ async fn maybe_run_global_retention(
                     ("failure", "retention_pass_failed".to_string()),
                 ],
             );
-            false
+            (interruption.committed, false)
         }
     };
+    for report in committed {
+        if report.applied && report.rows > 0 {
+            log_daemon_event(
+                "retention_prune",
+                &[
+                    ("scope", "global".to_string()),
+                    ("table", report.table.to_string()),
+                    ("rows", report.rows.to_string()),
+                    (
+                        "window_days",
+                        report
+                            .window_days
+                            .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
+                    ),
+                ],
+            );
+        }
+    }
     reservation.finish(std::time::Instant::now(), succeeded);
 }
 
