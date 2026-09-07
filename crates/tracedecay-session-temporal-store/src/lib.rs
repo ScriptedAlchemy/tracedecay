@@ -13,6 +13,8 @@ mod schema_constants;
 mod support;
 #[cfg(test)]
 mod test_registered_impls;
+#[cfg(test)]
+mod test_support;
 pub use handle::{
     SessionTemporalAccess, SessionTemporalExec, SessionTemporalQuery, SessionTemporalRegisteredDb,
     SessionTemporalWriteTxn,
