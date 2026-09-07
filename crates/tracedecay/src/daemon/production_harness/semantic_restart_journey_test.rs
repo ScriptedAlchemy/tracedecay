@@ -346,7 +346,7 @@ async fn strict_semantic_answers_again_after_daemon_restart_without_rebuild() {
     );
     assert!(
         matches!(
-            semantic_source_coherence(&retained, &serving),
+            semantic_source_coherence(&retained, serving.manifest()),
             SemanticSourceCoherenceOutcomeV1::Coherent(_)
         ),
         "the retained vectors must be admitted for the restarted serving generation: \

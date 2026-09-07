@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, ContentDigest,
-    ManifestDigest, ProjectionBatchReceiptV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, canonical_sha256,
+    DomainError, ManifestDigest, ProjectionBatchReceiptV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, canonical_sha256, code_source_full_replay_digest,
 };
 
 pub use tracedecay_domain::VectorGenerationIdV1;
@@ -979,6 +979,24 @@ impl PublishedVectorGenerationV1 {
 
     pub fn source_manifest_digest(&self) -> &ManifestDigest {
         &self.source_manifest_digest
+    }
+
+    /// Generation-neutral source identity derived from this vector
+    /// generation's independently authenticated accepted rows.
+    pub fn accepted_source_full_replay_digest(&self) -> Result<ManifestDigest, DomainError> {
+        let source = self
+            .vectors
+            .iter()
+            .map(|(chunk, vector)| {
+                if chunk != &vector.chunk_id {
+                    return Err(DomainError::SnapshotMismatch {
+                        field: "accepted vector source chunk identity",
+                    });
+                }
+                Ok((chunk.clone(), vector.chunk_digest.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        code_source_full_replay_digest(&source)
     }
 
     pub fn base_generation(&self) -> Option<&VectorGenerationIdV1> {
