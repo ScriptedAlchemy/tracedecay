@@ -493,6 +493,7 @@ impl DaemonInvocationState {
                 self.code_index_schedulers.clone(),
                 graph_runtime.code_graph_seat_port(),
                 Arc::clone(&graph_publication_database),
+                graph_runtime.semantic_vector_operation_task_owner(),
             ),
         );
         let semantic_schedule = semantic_runtime

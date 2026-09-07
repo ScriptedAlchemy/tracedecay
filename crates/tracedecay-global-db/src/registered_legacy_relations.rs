@@ -55,8 +55,10 @@ fn inspection_error(error: impl std::fmt::Display) -> TraceDecayError {
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
 
     use tempfile::TempDir;
+    use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
     use tracedecay_runtime_core::db::{
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
         enter_daemon_database_scope,
@@ -127,7 +129,12 @@ mod tests {
                 .expect("legacy database metadata")
                 .len();
             let error = if daemon_attach {
-                match RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(database_owner).await {
+                match RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+                    database_owner,
+                    Arc::new(RuntimeOperationTaskOwnerV1::new()),
+                )
+                .await
+                {
                     Ok(_) => panic!("daemon attach must reject legacy relation shape"),
                     Err(error) => error,
                 }
