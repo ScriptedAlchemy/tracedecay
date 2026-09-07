@@ -1554,10 +1554,19 @@ pub struct CodeIndexCapabilityManifestV1 {
     pub manifest_digest: ManifestDigest,
 }
 
+/// Capability identity is deliberately generation-independent.
+///
+/// `generation_id` is provenance, not capability: two generations that sealed
+/// the same source under the same runtime revisions, coverage, sanitization
+/// receipts, and privacy identity offer the identical indexing authority, and
+/// a checkout that reseals the same commit must not be refused as
+/// capability-incompatible. The manifest still carries its `generation_id`,
+/// and `CodeIndexPublishedGenerationV1` still refuses a capability manifest
+/// naming a different generation than its own, so the pairing stays bound —
+/// by that invariant rather than by this digest.
 #[derive(Serialize)]
 struct CodeIndexCapabilityManifestDigestInput<'a> {
     domain: &'static str,
-    generation_id: &'a CodeGenerationId,
     chunk_schema_revision: &'a str,
     chunker_revision: &'a ChunkerRevision,
     language_descriptor_revisions: &'a [LanguageDescriptorRevision],
@@ -1575,7 +1584,6 @@ impl CodeIndexCapabilityManifestV1 {
     pub fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&CodeIndexCapabilityManifestDigestInput {
             domain: CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN,
-            generation_id: &self.generation_id,
             chunk_schema_revision: &self.chunk_schema_revision,
             chunker_revision: &self.chunker_revision,
             language_descriptor_revisions: &self.language_descriptor_revisions,
@@ -2175,6 +2183,50 @@ mod tests {
             tampered.validate(),
             Err(DomainError::DigestMismatch)
         ));
+    }
+
+    #[test]
+    fn capability_identity_survives_a_new_generation_but_not_a_new_capability() {
+        let sealed = capability_manifest();
+        // The same source resealed under a new generation id — a checkout, a
+        // detached HEAD, a rollback that mints a fresh generation.
+        let mut resealed = sealed.clone();
+        resealed.generation_id = id("generation.v1.0cbc773a.00000002.resealed");
+        resealed.manifest_digest = resealed.compute_digest().expect("digest computable");
+        assert_eq!(
+            sealed.manifest_digest, resealed.manifest_digest,
+            "a new generation id must not change capability identity"
+        );
+
+        // A real capability or coverage change still refuses.
+        for changed in [
+            {
+                let mut changed = sealed.clone();
+                changed.chunker_revision = id("chunker.v2");
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.privacy_key_epoch = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.source_coverage.files_eligible = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.sanitization_receipts = vec![id("receipt.other")];
+                changed
+            },
+        ] {
+            assert_ne!(
+                sealed.manifest_digest,
+                changed.compute_digest().expect("digest computable"),
+                "a capability, privacy, coverage, or sanitization change must refuse reuse"
+            );
+        }
     }
 
     #[test]

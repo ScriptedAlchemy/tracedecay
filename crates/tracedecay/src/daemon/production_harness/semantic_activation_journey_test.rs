@@ -1315,10 +1315,23 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     let graph_before_retry = graph_bytes(&generations).await;
     let core_before_failure = search(&harness, &project, false).await;
     assert_ne!(core_before_failure["semantic"]["status"], "complete");
+    // A vector generation identity binds the code generation it projected, so
+    // the retry checkout's own publication is a different identity from V2's
+    // even over byte-identical content: what the live pointer holds here is
+    // `retry_vector`, and V2's vectors are only a retained artifact no
+    // committed activation currently pins. Prove that, then unbind the live
+    // pointer so the exact retry below has to restore V2's retained vectors
+    // over this checkout rather than serve anything already warm.
+    assert!(
+        !tracedecay_usecases::semantic_runtime::unbind_project_semantic_cache_if_current(
+            &project,
+            second_vector.generation_id(),
+        )
+    );
     assert!(
         tracedecay_usecases::semantic_runtime::unbind_project_semantic_cache_if_current(
             &project,
-            second_vector.generation_id(),
+            retry_vector.generation_id(),
         )
     );
     lifecycle
