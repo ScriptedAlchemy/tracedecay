@@ -251,6 +251,47 @@ impl std::fmt::Display for LspSemanticRequestError {
     }
 }
 
+/// Typed outcome of a diagnostics collection after the analyzer initialized.
+///
+/// A quiet window with no publication is a broker policy decision, while a
+/// closed process, broken transport, or malformed protocol frame is evidence
+/// against the analyzer. Keeping that distinction here prevents the shared
+/// supervisor from treating every failed refresh as the same lifecycle event.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum LspRefreshError {
+    #[error("{message}")]
+    NoPublication { message: String },
+    #[error("{message}")]
+    ProcessExited { message: String },
+    #[error("{message}")]
+    Transport { message: String },
+    #[error("{message}")]
+    InvalidResponse { message: String },
+}
+
+impl LspRefreshError {
+    pub fn analyzer_event(&self) -> AnalyzerEvent {
+        match self {
+            Self::NoPublication { .. } => AnalyzerEvent::Retired,
+            Self::ProcessExited { .. } => AnalyzerEvent::Crashed,
+            Self::Transport { .. } => AnalyzerEvent::TransportFailed,
+            Self::InvalidResponse { .. } => AnalyzerEvent::InvalidResponse,
+        }
+    }
+
+    pub fn is_policy_retirement(&self) -> bool {
+        matches!(self, Self::NoPublication { .. })
+    }
+}
+
+impl From<LspRefreshError> for TraceDecayError {
+    fn from(error: LspRefreshError) -> Self {
+        Self::Config {
+            message: error.to_string(),
+        }
+    }
+}
+
 pub async fn collect_document_diagnostics(
     command: &str,
     args: &[String],
@@ -275,6 +316,7 @@ pub async fn collect_document_diagnostics_with_timeouts(
     client
         .collect_document_diagnostics(project_root, documents, timeouts)
         .await
+        .map_err(TraceDecayError::from)
 }
 
 pub struct StdioLspClient {
@@ -284,8 +326,8 @@ pub struct StdioLspClient {
     next_request_id: ConnectionLocalRequestSequence,
     stdin: FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
     reader: FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
-    child: tokio::process::Child,
-    stderr_task: JoinHandle<()>,
+    child: Option<tokio::process::Child>,
+    stderr_task: Option<JoinHandle<()>>,
 }
 
 impl StdioLspClient {
@@ -415,8 +457,8 @@ impl StdioLspClient {
             next_request_id: ConnectionLocalRequestSequence::starting_at(2),
             stdin,
             reader,
-            child,
-            stderr_task,
+            child: Some(child),
+            stderr_task: Some(stderr_task),
         })
     }
 
@@ -816,7 +858,7 @@ impl StdioLspClient {
         project_root: &Path,
         documents: Vec<LspDocument>,
         timeouts: LspRefreshTimeouts,
-    ) -> Result<Vec<CodeDiagnostic>> {
+    ) -> std::result::Result<Vec<CodeDiagnostic>, LspRefreshError> {
         let mut uri_to_document = BTreeMap::new();
         let mut expected_versions = BTreeMap::new();
         for document in documents {
@@ -839,7 +881,8 @@ impl StdioLspClient {
                     }),
                     timeouts.message_io,
                 )
-                .await?;
+                .await
+                .map_err(refresh_transport_error)?;
                 1
             } else {
                 let version = current_version + 1;
@@ -860,7 +903,8 @@ impl StdioLspClient {
                     }),
                     timeouts.message_io,
                 )
-                .await?;
+                .await
+                .map_err(refresh_transport_error)?;
                 version
             };
             self.document_versions.insert(uri.clone(), version);
@@ -883,19 +927,26 @@ impl StdioLspClient {
             if now >= deadline {
                 break;
             }
-            let Some(message) = read_message_until(&mut self.reader, deadline, timeouts).await?
-            else {
-                break;
-            };
+            let message =
+                match read_refresh_message_until(&mut self.reader, deadline, timeouts).await? {
+                    RefreshMessagePoll::Message(message) => message,
+                    RefreshMessagePoll::Quiet => break,
+                    RefreshMessagePoll::Closed => return Err(self.closed_refresh_error()),
+                };
             if message.method.as_deref() != Some("textDocument/publishDiagnostics") {
                 continue;
             }
-            let Some(params) = message.params else {
-                continue;
-            };
-            let Ok(published) = serde_json::from_value::<PublishDiagnosticsParams>(params) else {
-                continue;
-            };
+            let params = message
+                .params
+                .ok_or_else(|| LspRefreshError::InvalidResponse {
+                    message: "LSP publishDiagnostics notification omitted params".to_owned(),
+                })?;
+            let published =
+                serde_json::from_value::<PublishDiagnosticsParams>(params).map_err(|error| {
+                    LspRefreshError::InvalidResponse {
+                        message: format!("failed to decode LSP publishDiagnostics params: {error}"),
+                    }
+                })?;
             if !is_current_diagnostic_publication(&published, &expected_versions) {
                 continue;
             }
@@ -918,9 +969,78 @@ impl StdioLspClient {
         // diagnostics of the one file that did report. Only treat the batch as a
         // genuine timeout when nothing arrived at all.
         if diagnostics_by_uri.is_empty() && !uri_to_document.is_empty() {
-            return Err(refresh_timed_out(timeouts));
+            return Err(LspRefreshError::NoPublication {
+                message: format!(
+                    "LSP diagnostics collection timed out after {} ms without a publication",
+                    timeouts.refresh.as_millis()
+                ),
+            });
         }
         Ok(diagnostics_by_uri.into_values().flatten().collect())
+    }
+
+    fn closed_refresh_error(&mut self) -> LspRefreshError {
+        match self.child.as_mut().map(tokio::process::Child::try_wait) {
+            Some(Ok(Some(status))) => LspRefreshError::ProcessExited {
+                message: format!(
+                    "LSP server '{}' exited while collecting diagnostics ({status})",
+                    self.command
+                ),
+            },
+            Some(Ok(None)) => LspRefreshError::Transport {
+                message: format!(
+                    "LSP server '{}' closed its diagnostics transport",
+                    self.command
+                ),
+            },
+            Some(Err(error)) => LspRefreshError::Transport {
+                message: format!(
+                    "failed to inspect LSP server '{}' after its diagnostics transport closed: {error}",
+                    self.command
+                ),
+            },
+            None => LspRefreshError::Transport {
+                message: format!(
+                    "LSP server '{}' has no live diagnostics process",
+                    self.command
+                ),
+            },
+        }
+    }
+
+    /// Terminates and waits for a retired process. The shared client slot
+    /// stores this future when an in-flight owner is dropped, and no successor
+    /// may acquire that slot until the future completes.
+    pub(crate) async fn reap(mut self) -> Result<()> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => child
+                .kill()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("failed to reap LSP server '{}': {error}", self.command),
+                })?,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to inspect LSP server '{}' before reaping it: {error}",
+                        self.command
+                    ),
+                });
+            }
+        }
+        if let Some(stderr_task) = self.stderr_task.take() {
+            stderr_task.await.map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to join LSP stderr reader for '{}': {error}",
+                    self.command
+                ),
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -940,8 +1060,12 @@ fn is_current_diagnostic_publication(
 
 impl Drop for StdioLspClient {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
-        self.stderr_task.abort();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+        if let Some(stderr_task) = self.stderr_task.as_ref() {
+            stderr_task.abort();
+        }
     }
 }
 
@@ -1060,6 +1184,46 @@ fn semantic_transport_error(error: TraceDecayError) -> LspSemanticRequestError {
     }
 }
 
+fn refresh_transport_error(error: TraceDecayError) -> LspRefreshError {
+    LspRefreshError::Transport {
+        message: error.to_string(),
+    }
+}
+
+enum RefreshMessagePoll {
+    Message(JsonRpcMessage),
+    Quiet,
+    Closed,
+}
+
+async fn read_refresh_message_until(
+    reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
+    deadline: tokio::time::Instant,
+    timeouts: LspRefreshTimeouts,
+) -> std::result::Result<RefreshMessagePoll, LspRefreshError> {
+    match read_content_length_frame_until(reader, deadline).await {
+        Ok(FramePoll::Frame(frame)) => serde_json::from_slice(&frame)
+            .map(RefreshMessagePoll::Message)
+            .map_err(|error| LspRefreshError::InvalidResponse {
+                message: format!("failed to parse LSP message: {error}"),
+            }),
+        Ok(FramePoll::Pending) => Ok(RefreshMessagePoll::Quiet),
+        Ok(FramePoll::Closed) => Ok(RefreshMessagePoll::Closed),
+        Err(AsyncContentLengthError::Io(error)) => Err(LspRefreshError::Transport {
+            message: format!("failed to read LSP frame: {error}"),
+        }),
+        Err(AsyncContentLengthError::Codec(error)) => Err(LspRefreshError::InvalidResponse {
+            message: format!("failed to decode LSP Content-Length frame: {error:?}"),
+        }),
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspRefreshError::InvalidResponse {
+            message: format!(
+                "partial LSP diagnostics frame timed out after {} ms",
+                timeouts.refresh.as_millis()
+            ),
+        }),
+    }
+}
+
 fn cancel_request_message(request_id: u64) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -1114,7 +1278,7 @@ fn frame_write_error(error: AsyncContentLengthError) -> TraceDecayError {
     TraceDecayError::Config { message }
 }
 
-fn file_uri(path: &Path) -> String {
+pub(crate) fn file_uri(path: &Path) -> String {
     let absolute = if path.is_absolute() {
         PathBuf::from(path)
     } else {

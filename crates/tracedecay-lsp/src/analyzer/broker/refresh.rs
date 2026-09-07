@@ -2,16 +2,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
 
-use super::super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use super::super::client::{LspDocument, LspRefreshError, LspRefreshTimeouts, StdioLspClient};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
+use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
 use super::{CodeDiagnostic, EngineState};
+use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
     pub(crate) workspace_root: PathBuf,
     pub(crate) documents: Vec<LspDocument>,
-    pub(crate) client: Arc<Mutex<Option<StdioLspClient>>>,
+    pub(crate) client: Arc<SharedAnalyzerClient>,
 }
 
 /// Each analyzer may wait behind at most this many independent workspace-root
@@ -200,26 +202,120 @@ async fn collect_refresh_batch(
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
-    let mut client_slot = batch.client.lock().await;
-    let mut client = match client_slot.take() {
-        Some(client) => client,
-        None => {
-            StdioLspClient::start_with_timeouts(&command, &args, &batch.workspace_root, timeouts)
-                .await
-                .map_err(|error| RefreshFailure::crashed(&error))?
-        }
-    };
-    match client
-        .collect_document_diagnostics(&project_root, batch.documents, timeouts)
+    let shared = batch.client;
+    let mut client_slot = shared
+        .client()
         .await
-    {
+        .map_err(|error| RefreshFailure::crashed(&error))?;
+    let mut use_of_analyzer = if let Some(client) = client_slot.take() {
+        RefreshUseOfAnalyzer::new(&shared, client_slot, shared.current_attempt(), Some(client))
+    } else {
+        // Restart exhaustion is a stable health state
+        // (`MAX_ANALYZER_RESTARTS`), not an invitation for this lane to
+        // start the analyzer the semantic lane was just refused.
+        let Some(attempt) = shared.begin_start() else {
+            return Err(RefreshFailure::crashed_message(format!(
+                "analyzer '{command}' is retired: restart budget exhausted"
+            )));
+        };
+        let mut use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, client_slot, attempt, None);
+        use_of_analyzer.client = match StdioLspClient::start_with_timeouts(
+            &command,
+            &args,
+            &batch.workspace_root,
+            timeouts,
+        )
+        .await
+        {
+            Ok(client) => Some(client),
+            Err(error) => {
+                use_of_analyzer.retire(AnalyzerEvent::StartupFailed);
+                return Err(RefreshFailure::crashed(&error));
+            }
+        };
+        if shared.mark_ready(attempt).is_none() {
+            // Superseded while holding the client lock cannot happen; if it
+            // ever does, this client is not the session's analyzer.
+            return Err(RefreshFailure::crashed_message(format!(
+                "analyzer '{command}' start was superseded"
+            )));
+        }
+        use_of_analyzer
+    };
+    let result = match use_of_analyzer.client.as_mut() {
+        Some(client) => {
+            client
+                .collect_document_diagnostics(&project_root, batch.documents, timeouts)
+                .await
+        }
+        None => Err(LspRefreshError::Transport {
+            message: format!("analyzer '{command}' client slot was empty"),
+        }),
+    };
+    match result {
         Ok(diagnostics) => {
-            *client_slot = Some(client);
+            use_of_analyzer.restore(AnalyzerEvent::Ready);
             Ok((ordinal, diagnostics))
         }
         Err(error) => {
-            *client_slot = None;
-            Err(RefreshFailure::crashed(&error))
+            let failure = RefreshFailure::client(&error);
+            use_of_analyzer.retire(error.analyzer_event());
+            Err(failure)
+        }
+    }
+}
+
+/// One refresh's use of the shared analyzer, concluded exactly once.
+///
+/// A refresh task can be aborted at any await while it holds the client out of
+/// the slot, which drops the process with it. Without this guard the supervisor
+/// would keep describing that incarnation as live, and the next caller would
+/// serve its replacement on the retired attempt.
+struct RefreshUseOfAnalyzer<'a> {
+    shared: &'a SharedAnalyzerClient,
+    client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+    client: Option<StdioLspClient>,
+    attempt: u32,
+    concluded: bool,
+}
+
+impl<'a> RefreshUseOfAnalyzer<'a> {
+    fn new(
+        shared: &'a SharedAnalyzerClient,
+        client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+        attempt: u32,
+        client: Option<StdioLspClient>,
+    ) -> Self {
+        Self {
+            shared,
+            client_slot,
+            client,
+            attempt,
+            concluded: false,
+        }
+    }
+
+    fn restore(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+        if let Some(client) = self.client.take() {
+            self.client_slot.replace(client);
+        }
+    }
+
+    fn retire(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+    }
+}
+
+impl Drop for RefreshUseOfAnalyzer<'_> {
+    fn drop(&mut self) {
+        if !self.concluded {
+            self.shared.record(self.attempt, AnalyzerEvent::Retired);
+        }
+        if let Some(client) = self.client.take() {
+            self.client_slot.retire(client);
         }
     }
 }
@@ -231,6 +327,17 @@ pub(crate) struct RefreshFailure {
 }
 
 impl RefreshFailure {
+    fn client(error: &LspRefreshError) -> Self {
+        Self {
+            state: if error.is_policy_retirement() {
+                EngineState::Available
+            } else {
+                EngineState::Crashed
+            },
+            message: error.to_string(),
+        }
+    }
+
     fn crashed(error: &TraceDecayError) -> Self {
         Self::crashed_message(error.to_string())
     }
