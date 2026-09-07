@@ -11,9 +11,9 @@ use tempfile::{TempDir, tempdir};
 use tracedecay_application::{
     ApplicationOperation, AuthorityReceipt, CancellationContext, CancellationSignal,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectTermination, IdempotencyKey,
-    PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
-    SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
+    OperationTermination, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext,
+    RequestId, ResolvedScope, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
+    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
     source_edit_reconciliation_operation, source_edit_rollback_operation,
 };
 use tracedecay_code_index::graph_projection::{
@@ -483,6 +483,28 @@ pub(super) struct EffectUnknownFixture {
     pub(super) result: SourceEditApplicationResult,
 }
 
+fn assert_effect_unknown_boundary(result: &SourceEditApplicationResult) {
+    let effect = result.effect.as_ref();
+    let reached_boundary = matches!(&result.outcome, SourceEditOutcome::EffectUnknown { .. })
+        && effect.is_some_and(|effect| {
+            effect.execution.termination == OperationTermination::EffectUnknown
+                && effect.reconciliation == ReconciliationState::Pending
+                && effect.receipt.outcome == EffectTermination::EffectUnknown
+                && effect.receipt.committed_state.is_none()
+        });
+
+    assert!(
+        reached_boundary,
+        "source-edit fault injection must stop after durable intent and before settlement; \
+         actual outcome: {:#?}; execution phase: {:#?}; reconciliation phase: {:#?}; \
+         committed receipt: {:#?}",
+        result.outcome,
+        effect.map(|effect| effect.execution.termination),
+        effect.map(|effect| effect.reconciliation),
+        effect.map(|effect| &effect.receipt),
+    );
+}
+
 const MOVE_SOURCE_PREIMAGE: &[u8] = b"pub fn keep() {}\n\npub fn moved() {}\n";
 const MOVE_SOURCE_POSTIMAGE: &[u8] = b"pub fn keep() {}\n";
 const MOVE_DESTINATION_PREIMAGE: &[u8] = b"pub fn existing() {}\n";
@@ -638,14 +660,25 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     drop(held_candidate);
     let result = execution.unwrap();
 
-    assert!(matches!(
-        result.outcome,
-        SourceEditOutcome::EffectUnknown { .. }
-    ));
-    assert_eq!(
-        result.effect.as_ref().unwrap().receipt.outcome,
-        EffectTermination::EffectUnknown
-    );
+    assert_effect_unknown_boundary(&result);
+    // Prove the outcome came from the injected publication fault, not from a
+    // digest mismatch or some other refusal that happens to read as
+    // `EffectUnknown`: the message carries the `file_authority::publish` step
+    // that failed, and the step differs per host with the injection above.
+    #[cfg(not(windows))]
+    const INJECTED_PUBLISH_STEP: &str = "create source edit temporary file";
+    #[cfg(windows)]
+    const INJECTED_PUBLISH_STEP: &str = "atomically publish source edit candidate";
+    match &result.outcome {
+        SourceEditOutcome::EffectUnknown { message } => assert!(
+            message.contains("requires reconciliation: ")
+                && message.contains(INJECTED_PUBLISH_STEP),
+            "EffectUnknown must name the injected publication fault ({INJECTED_PUBLISH_STEP:?}): {message}"
+        ),
+        other => {
+            panic!("expected EffectUnknown from the injected publication fault, got {other:?}")
+        }
+    }
     let fixture = EffectUnknownFixture {
         project,
         graph,
