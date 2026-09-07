@@ -71,6 +71,7 @@ mod runtime_query;
 mod runtime_service;
 mod semantic_evaluation;
 pub mod session_pool;
+pub use model_catalog::{CatalogErrorV1, admit_production_model_selection};
 // Test-support constructors. Dependent crates opt in through `test-helpers`
 // exactly like the query kernel's `*_for_test` surface.
 #[cfg(any(test, feature = "test-helpers"))]
