@@ -1055,8 +1055,9 @@ fn recover_named_store_quarantine_inner(
     ) {
         Ok(journal) => journal,
         Err(failure) => {
+            let actual_path = receipt_actual_path(data_root, &quarantine_path);
             return Ok(Some(QuarantineRecoveryOutcome::Retained {
-                actual_path: quarantine_path.clone(),
+                actual_path,
                 quarantine_path,
                 failure: Some(failure),
             }));
@@ -1859,7 +1860,6 @@ pub(super) fn read_pending_quarantine_receipts_controlled(
 /// Prefer the quarantined path while it is still a regular directory. Once a
 /// restore rename has succeeded, even if its parent sync or journal cleanup
 /// failed, expose the original path as the bytes' actual observed location.
-#[cfg(test)]
 fn receipt_actual_path(original_path: &Path, quarantine_path: &Path) -> PathBuf {
     let quarantine_is_directory = std::fs::symlink_metadata(quarantine_path)
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());

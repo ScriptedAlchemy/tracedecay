@@ -2792,6 +2792,53 @@ fn legacy_journal_without_identity_fails_closed_and_preserves_exact_bytes() {
 }
 
 #[test]
+fn unreadable_pre_rename_journal_reports_the_observed_original_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/unreadable-pre-rename-journal");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"original bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    std::fs::rename(&quarantine_path, &data_root).unwrap();
+    std::fs::remove_file(&journal_path).unwrap();
+    std::fs::create_dir(&journal_path).unwrap();
+
+    let outcomes = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
+
+    let [
+        QuarantineRecoveryOutcome::Retained {
+            actual_path,
+            quarantine_path: retained_quarantine_path,
+            failure: Some(failure),
+        },
+    ] = outcomes.as_slice()
+    else {
+        panic!("unreadable journal must retain the observed store: {outcomes:#?}");
+    };
+    assert_eq!(actual_path, &data_root);
+    assert_eq!(retained_quarantine_path, &quarantine_path);
+    assert_eq!(
+        failure.operation,
+        CollectionMutationOperation::ProbeRecoveryJournal
+    );
+    assert_eq!(failure.target_path, journal_path);
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"original bytes"
+    );
+}
+
+#[test]
 fn unregistered_pre_rename_journal_clears_at_exact_original() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
