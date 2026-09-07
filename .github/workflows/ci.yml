@@ -70,6 +70,13 @@ jobs:
           shared-key: ci-dev-${{ runner.os }}
           cache-on-failure: true
 
+      - name: Enable kache
+        id: kache
+        uses: ./.github/actions/kache
+        with:
+          lane: dev-dogfood
+          max-size: 512MiB
+
       - name: Build checked-out TraceDecay CLI
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
@@ -85,6 +92,13 @@ jobs:
           TRACEDECAY_BIN: target/debug/tracedecay
           TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
           TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+
+      - name: Save kache store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.kache.outputs.store-path }}
+          key: ${{ steps.kache.outputs.cache-key }}
 
   # One dev-profile `tracedecay` binary for every job that only exercises the
   # built CLI against a host (Hermes, Claude Code, OpenCode). Each of those
@@ -119,6 +133,13 @@ jobs:
           shared-key: ci-dev-${{ runner.os }}
           cache-on-failure: true
 
+      - name: Enable kache
+        id: kache
+        uses: ./.github/actions/kache
+        with:
+          lane: dev-cli
+          max-size: 512MiB
+
       - name: Build tracedecay binary
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
@@ -129,6 +150,13 @@ jobs:
           path: target/debug/tracedecay
           if-no-files-found: error
           retention-days: 1
+
+      - name: Save kache store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.kache.outputs.store-path }}
+          key: ${{ steps.kache.outputs.cache-key }}
 
   commit-messages:
     name: Commit Messages
@@ -285,6 +313,13 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
+      - name: Enable kache
+        id: kache
+        uses: ./.github/actions/kache
+        with:
+          lane: test
+          max-size: 2GiB
+
       # Every `crates/tracedecay` integration target declares
       # `required-features = ["test-helpers"]`, because the fixture surface it
       # gates is used by `tests/common/mod.rs`. Those targets are selected here
@@ -413,6 +448,13 @@ jobs:
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
+
+      - name: Save kache store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.kache.outputs.store-path }}
+          key: ${{ steps.kache.outputs.cache-key }}
 
   windows-build:
     name: Build Windows tests
@@ -664,11 +706,25 @@ jobs:
         with:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
+      - name: Enable kache
+        id: kache
+        uses: ./.github/actions/kache
+        with:
+          lane: clippy
+          max-size: 1GiB
+
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check lean build
         run: cargo check -p tracedecay --no-default-features --locked
+
+      - name: Save kache store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.kache.outputs.store-path }}
+          key: ${{ steps.kache.outputs.cache-key }}
 
   # Additive visibility lint. Not a required check yet — introduce Hawk, then
   # promote once the workspace is clean under `-D warnings`.
@@ -806,8 +862,22 @@ jobs:
           shared-key: ci-dev-${{ runner.os }}
           cache-on-failure: true
 
+      - name: Enable kache
+        id: kache
+        uses: ./.github/actions/kache
+        with:
+          lane: dev-dashboard
+          max-size: 512MiB
+
       - name: Run dashboard integration tests
         run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
+
+      - name: Save kache store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.kache.outputs.store-path }}
+          key: ${{ steps.kache.outputs.cache-key }}
 
   hermes-integration:
     name: Hermes integration (stock)
