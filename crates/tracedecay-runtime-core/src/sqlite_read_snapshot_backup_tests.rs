@@ -5,14 +5,16 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
 use super::{
     SnapshotReadControl, backup_live_sqlite_database, backup_live_sqlite_database_sync,
-    backup_live_sqlite_database_with, backup_staging_path, family_state, open, open_foreign_in,
+    backup_live_sqlite_database_with, family_state, first_backup_step, open, open_foreign_in,
     with_suffix,
 };
+use crate::db::sqlite_generation_identity;
 
 fn wal_writer(path: &std::path::Path) -> Connection {
     let writer = Connection::open(path).unwrap();
@@ -34,6 +36,49 @@ fn integrity_ok(path: &std::path::Path) -> String {
         .unwrap()
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .unwrap()
+}
+
+fn seed_existing_destination(path: &std::path::Path, marker: &str) -> (u64, Vec<u8>) {
+    Connection::open(path)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (99, '{marker}');"
+        ))
+        .unwrap();
+    (
+        sqlite_generation_identity(path).unwrap(),
+        fs::read(path).unwrap(),
+    )
+}
+
+fn assert_destination_survived(path: &std::path::Path, identity: u64, bytes: &[u8]) {
+    assert_eq!(
+        fs::read(path).expect("existing destination must remain"),
+        bytes,
+        "failed backup must not rewrite destination bytes"
+    );
+    assert_eq!(
+        sqlite_generation_identity(path).unwrap(),
+        identity,
+        "failed backup must not replace the destination file identity"
+    );
+    assert_no_attempt_scratch(path);
+}
+
+fn assert_no_attempt_scratch(destination: &std::path::Path) {
+    let Some(parent) = destination.parent() else {
+        return;
+    };
+    let stem = destination.file_name().unwrap().to_string_lossy();
+    for entry in fs::read_dir(parent).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            !(name.starts_with(&*stem) && name.contains(".backup-partial")),
+            "attempt-owned scratch leaked: {name}"
+        );
+    }
 }
 
 fn snapshot_ids(path: &std::path::Path) -> Vec<i64> {
@@ -168,53 +213,15 @@ fn live_backup_cancellation_retires_partial_scratch_and_never_publishes_destinat
     assert_eq!(error.kind(), io::ErrorKind::Interrupted);
     assert!(
         !destination.exists(),
-        "incomplete backup must not be published"
+        "incomplete backup must not be published onto a new destination"
     );
-    assert!(
-        !backup_staging_path(&destination).exists(),
-        "cancelled backup must retire its staging file"
-    );
+    assert_no_attempt_scratch(&destination);
     assert_eq!(family_state(&source).unwrap(), before);
-    drop(writer);
-}
-
-#[test]
-fn cancelled_backup_retires_staging_family_and_allows_rollback_and_reopen() {
-    let temp = TempDir::new().unwrap();
-    let source = temp.path().join("live.db");
-    let destination = temp.path().join("snapshot.db");
-    let writer = wal_writer(&source);
-    let staging = backup_staging_path(&destination);
-    fs::write(&staging, b"stale partial database").unwrap();
-    for suffix in ["-wal", "-shm", "-journal"] {
-        fs::write(with_suffix(&staging, suffix), b"stale partial sidecar").unwrap();
-    }
-
-    let error = backup_live_sqlite_database_with(&source, &destination, || {
-        Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "cancel before opening the source",
-        ))
-    })
-    .expect_err("cancelled backup must fail");
-
-    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-    assert!(
-        std::iter::once(staging.clone())
-            .chain(
-                ["-wal", "-shm", "-journal"]
-                    .into_iter()
-                    .map(|suffix| with_suffix(&staging, suffix)),
-            )
-            .all(|member| !member.exists()),
-        "cancellation must retire the complete private staging family"
-    );
-    assert!(!destination.exists());
 
     writer
         .execute_batch(
             "BEGIN IMMEDIATE;
-             INSERT INTO durable(id, value) VALUES (2, 'rolled-back');
+             INSERT INTO durable(value) VALUES (zeroblob(1));
              ROLLBACK;",
         )
         .unwrap();
@@ -222,13 +229,238 @@ fn cancelled_backup_retires_staging_family_and_allows_rollback_and_reopen() {
 
     backup_live_sqlite_database_sync(&source, &destination).unwrap();
     assert_eq!(integrity_ok(&destination), "ok");
-    assert_eq!(snapshot_ids(&destination), [0, 1]);
+    assert_eq!(
+        Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM durable", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "the cancelled attempt must release its read transaction, and the source rollback must stay absent after a successful retry and reopen"
+    );
+}
+
+#[test]
+fn live_backup_preserves_existing_destination_when_source_cannot_be_opened() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("missing.db");
+    let destination = temp.path().join("snapshot.db");
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
+
+    backup_live_sqlite_database_with(&source, &destination, || Ok(()))
+        .expect_err("unreadable source must fail without touching destination");
+    assert_destination_survived(&destination, identity, &bytes);
+}
+
+#[test]
+fn live_backup_preserves_existing_destination_when_cancelled_before_first_step() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+        .unwrap();
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
+
+    let error = backup_live_sqlite_database_with(&source, &destination, || {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "SQLite read snapshot cancelled",
+        ))
+    })
+    .expect_err("first checkpoint cancel must not touch destination");
+
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert_destination_survived(&destination, identity, &bytes);
+}
+
+#[test]
+fn live_backup_preserves_existing_destination_when_cancelled_after_copying() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE durable(value BLOB NOT NULL);
+             INSERT INTO durable(value) VALUES (zeroblob(33554432));",
+        )
+        .unwrap();
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
+    let checkpoints = AtomicUsize::new(0);
+    let error = backup_live_sqlite_database_with(&source, &destination, || {
+        if checkpoints.fetch_add(1, Ordering::Relaxed) >= 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "SQLite read snapshot cancelled",
+            ));
+        }
+        Ok(())
+    })
+    .expect_err("mid-copy cancel must not replace destination");
+
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert_destination_survived(&destination, identity, &bytes);
+}
+
+#[test]
+fn live_backup_preserves_existing_destination_when_publish_fails() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
+        )
+        .unwrap();
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
+    super::fail_next_backup_publish();
+
+    let error = backup_live_sqlite_database_with(&source, &destination, || Ok(()))
+        .expect_err("publish failure must leave the prior snapshot in place");
+
+    assert!(error.to_string().contains("publish"));
+    assert_destination_survived(&destination, identity, &bytes);
+}
+
+#[test]
+fn exclusive_staging_refuses_a_collision_without_deleting_it() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("owned.backup-partial");
+    fs::write(&path, b"foreign-scratch").unwrap();
+    let identity = sqlite_generation_identity(&path).unwrap();
+    let bytes = fs::read(&path).unwrap();
+
+    let error = super::reserve_exclusive_file(&path)
+        .expect_err("create_new must refuse a pre-existing scratch name");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(sqlite_generation_identity(&path).unwrap(), identity);
+}
+
+#[test]
+fn retiring_owned_staging_removes_the_complete_sqlite_family() {
+    let temp = TempDir::new().unwrap();
+    let destination = temp.path().join("snapshot.db");
+    let staging = super::reserve_attempt_staging(&destination).unwrap();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        fs::write(with_suffix(&staging, suffix), b"attempt-owned sidecar").unwrap();
+    }
+
+    super::retire_attempt_scratch(&staging).unwrap();
+
+    assert!(
+        std::iter::once(staging.clone())
+            .chain(
+                ["-wal", "-shm", "-journal"]
+                    .into_iter()
+                    .map(|suffix| with_suffix(&staging, suffix)),
+            )
+            .all(|member| !member.exists())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_backup_replaces_an_existing_destination_atomically() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
+        )
+        .unwrap();
+    seed_existing_destination(&destination, "stale");
+
+    backup_live_sqlite_database(&source, &destination)
+        .await
+        .unwrap();
+
+    assert_eq!(integrity_ok(&destination), "ok");
+    assert_eq!(snapshot_ids(&destination), [1]);
+    assert_eq!(snapshot_ids_text(&destination), ["fresh"]);
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn live_backup_refuses_to_replace_an_existing_destination() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
+        )
+        .unwrap();
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
+
+    let error = backup_live_sqlite_database(&source, &destination)
+        .await
+        .expect_err("Windows cannot atomically replace an existing destination");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_destination_survived(&destination, identity, &bytes);
+}
+
+#[test]
+fn live_backup_rejects_source_destination_alias() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'self');",
+        )
+        .unwrap();
+    let identity = sqlite_generation_identity(&source).unwrap();
+    let bytes = fs::read(&source).unwrap();
+
+    let error = backup_live_sqlite_database_with(&source, &source, || Ok(()))
+        .expect_err("backing up a path onto itself must be rejected");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(fs::read(&source).unwrap(), bytes);
+    assert_eq!(sqlite_generation_identity(&source).unwrap(), identity);
+}
+
+#[test]
+fn rollback_journal_exclusive_lock_makes_the_first_backup_step_busy() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("locked.db");
+    let writer = Connection::open(&source).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE durable(value TEXT NOT NULL);
+             INSERT INTO durable(value) VALUES ('held');
+             BEGIN EXCLUSIVE;",
+        )
+        .unwrap();
+
+    let step = first_backup_step(&source).expect("probe the exclusive reader conflict");
+    assert!(
+        matches!(step, StepResult::Busy | StepResult::Locked),
+        "DELETE-journal EXCLUSIVE must exclude backup readers, got {step:?}"
+    );
+    writer.execute_batch("ROLLBACK;").unwrap();
+    drop(writer);
 }
 
 #[test]
 fn live_backup_deadline_interrupts_busy_locked_retries() {
     let temp = TempDir::new().unwrap();
-    let source = temp.path().join("live.db");
+    let source = temp.path().join("locked.db");
     let destination = temp.path().join("snapshot.db");
     let writer = Connection::open(&source).unwrap();
     writer
@@ -242,6 +474,12 @@ fn live_backup_deadline_interrupts_busy_locked_retries() {
              BEGIN EXCLUSIVE;",
         )
         .unwrap();
+    let step = first_backup_step(&source).expect("fixture must actually contend");
+    assert!(
+        matches!(step, StepResult::Busy | StepResult::Locked),
+        "deadline test requires a Busy/Locked observation first, got {step:?}"
+    );
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
     let control = SnapshotReadControl::new(
         std::time::Instant::now() + Duration::from_millis(50),
         || false,
@@ -250,8 +488,7 @@ fn live_backup_deadline_interrupts_busy_locked_retries() {
         .expect_err("Busy/Locked retries must honour the snapshot deadline");
 
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-    assert!(!destination.exists());
-    assert!(!backup_staging_path(&destination).exists());
+    assert_destination_survived(&destination, identity, &bytes);
     writer.execute_batch("ROLLBACK;").unwrap();
     drop(writer);
 }
@@ -378,6 +615,30 @@ async fn copied_snapshot_survives_absent_and_cleaned_writer_sidecars() {
         snapshot.attach_token().unwrap().verified_path().unwrap(),
         snapshot.path()
     );
+}
+
+#[tokio::test]
+async fn copied_snapshot_does_not_claim_freshness_after_the_source_changes() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.db");
+    let writer = wal_writer(&source);
+    let snapshot = open_foreign_in(
+        &source,
+        &temp.path().join("scratch"),
+        SnapshotReadControl::unlimited(),
+    )
+    .await
+    .unwrap();
+    snapshot.validate_source().unwrap();
+    writer
+        .execute("INSERT INTO durable(id, value) VALUES (2, 'later')", [])
+        .unwrap();
+
+    assert!(
+        snapshot.validate_source().is_err(),
+        "a successful backup is not a freshness claim after the source family changes"
+    );
+    assert!(snapshot.attach_token().unwrap().verified_path().is_err());
 }
 
 #[cfg(windows)]
