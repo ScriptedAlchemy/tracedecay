@@ -103,7 +103,20 @@ pub(super) const AUTHORITY_SCHEMA: &str = "
     );
 ";
 
-pub(super) const IMMUTABILITY_TRIGGERS: &str = "
+/// Delete guards on the anchor identity and alias tables.
+///
+/// A scoped observation-authority reset drops exactly these two inside its
+/// maintenance transaction, removes the anchors the reset observation stream
+/// bound, and reinstalls every guard from
+/// [`RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL`] before it commits.
+pub const RETRIEVAL_ANCHOR_DELETE_GUARD_TRIGGERS: &[&str] = &[
+    "retrieval_anchors_immutable_delete",
+    "retrieval_anchor_aliases_immutable_delete",
+];
+
+/// Idempotent DDL for every retrieval-anchor immutability trigger; the single
+/// authority both schema installation and scoped maintenance reinstall from.
+pub const RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL: &str = "
     CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_update
     BEFORE UPDATE ON retrieval_anchors BEGIN
         SELECT RAISE(ABORT, 'retrieval anchors are immutable');
@@ -743,7 +756,7 @@ pub async fn install_retrieval_anchor_schema(
     )
     .await
     .map_err(|error| database_error(operation, error))?;
-    conn.execute_batch(IMMUTABILITY_TRIGGERS)
+    conn.execute_batch(RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL)
         .await
         .map_err(|error| database_error(operation, error))
 }

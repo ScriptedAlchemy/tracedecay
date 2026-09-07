@@ -361,6 +361,10 @@ fn handle_reset_authority(
         report.cleared_derived_temporal_rows
     );
     println!(
+        "  cleared {} observation-bound retrieval anchor and alias row(s)",
+        report.cleared_retrieval_anchor_rows
+    );
+    println!(
         "the authority content re-derives from the preserved transcripts at the \
          next daemon open"
     );
