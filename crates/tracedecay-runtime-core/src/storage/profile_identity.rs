@@ -129,13 +129,18 @@ mod tests {
     use super::*;
     use crate::storage::PROFILE_IDENTITY_FILENAME;
 
+    /// Publishes the fixture record through the same private record authority
+    /// the daemon mints with, so the reader admits the file on every platform
+    /// and the negative cases below exercise parsing rather than admission.
     fn write_identity(path: &std::path::Path, body: &[u8]) {
-        std::fs::write(path, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        let temporary = path.with_extension("json.tmp");
+        DatabaseAuthority::publish_record_atomically(
+            &temporary,
+            path,
+            body,
+            PROFILE_IDENTITY_RECORD_NAME,
+        )
+        .unwrap();
     }
 
     #[test]

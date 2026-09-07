@@ -189,6 +189,7 @@ async fn retained_vector_generation(
         .await
         .expect("retain the serving semantic vector graph");
     let store = GraphVectorGenerationStoreV1::read_only_generation(&retained, vector_id)
+        .await
         .expect("read the retained vector generation store")?;
     store
         .generation(vector_id, Arc::clone(retained.cancellation()))
