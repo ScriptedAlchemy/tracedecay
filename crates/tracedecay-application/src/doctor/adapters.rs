@@ -17,6 +17,8 @@ use crate::error::ApplicationContractError;
 use crate::feedback::FeedbackCompletedPublicationV1;
 
 use super::report::{DoctorReportComposerV1, DoctorReportV1};
+#[cfg(test)]
+use super::sources::SemanticOwnerStateV1;
 use super::sources::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
     AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
@@ -25,7 +27,7 @@ use super::sources::{
     HostIntegrationReadV1, IngestRefusalCensusReadV1, LanguageServerDoctorPort,
     LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1, OperationalAuditDoctorPort,
     OperationalAuditReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
-    StorageDoctorPort,
+    SemanticOwnerDoctorPort, SemanticOwnerReadV1, StorageDoctorPort,
 };
 use super::types::{DoctorCoverageCompletenessV1, DoctorStorageFindingV1};
 
@@ -278,7 +280,7 @@ impl AdvisoryFeedbackDoctorPort for AdvisoryFeedbackDoctorAdapterV1 {
     }
 }
 
-/// Adapter over the code/semantic index mount state (`SemanticIndex` family).
+/// Adapter over the code-index mount state (`SemanticIndex` family).
 pub struct CodeIndexMountDoctorAdapterV1 {
     read: CodeIndexMountReadV1,
 }
@@ -296,6 +298,28 @@ impl CodeIndexMountDoctorPort for CodeIndexMountDoctorAdapterV1 {
         &'a self,
         _context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, CodeIndexMountReadV1> {
+        let read = self.read.clone();
+        Box::pin(async move { read })
+    }
+}
+
+/// Adapter over the independently scheduled semantic owner.
+pub struct SemanticOwnerDoctorAdapterV1 {
+    read: SemanticOwnerReadV1,
+}
+
+impl SemanticOwnerDoctorAdapterV1 {
+    #[must_use]
+    pub fn from_read(read: SemanticOwnerReadV1) -> Self {
+        Self { read }
+    }
+}
+
+impl SemanticOwnerDoctorPort for SemanticOwnerDoctorAdapterV1 {
+    fn semantic_owner<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, SemanticOwnerReadV1> {
         let read = self.read.clone();
         Box::pin(async move { read })
     }
@@ -495,8 +519,10 @@ pub struct DoctorKernelInputsV1 {
     pub advisory_feedback: AdvisoryFeedbackReadV1,
     /// Live language-server/analyzer read (`LanguageServer` family).
     pub language_server: LanguageServerReadV1,
-    /// Code/semantic index mount read (`SemanticIndex` family).
+    /// Code-index mount read (`SemanticIndex` family).
     pub code_index: CodeIndexMountReadV1,
+    /// Independent semantic activation-owner read (`SemanticIndex` family).
+    pub semantic_owner: SemanticOwnerReadV1,
     /// Canonical durable Plan-26 feedback read (`Observability` family).
     pub observability: ObservabilityReadV1,
     /// Durable ingest-coverage refusal census (`Observability` family).
@@ -527,6 +553,7 @@ pub async fn compose_doctor_report(
         AdvisoryFeedbackDoctorAdapterV1::from_read(inputs.advisory_feedback.clone());
     let language_server = LanguageServerDoctorAdapterV1::from_read(inputs.language_server.clone());
     let code_index = CodeIndexMountDoctorAdapterV1::from_read(inputs.code_index.clone());
+    let semantic_owner = SemanticOwnerDoctorAdapterV1::from_read(inputs.semantic_owner.clone());
     let observability = ObservabilityDoctorAdapterV1::from_read(inputs.observability.clone())
         .with_refusals(inputs.ingest_refusals.clone());
     let storage = StorageDoctorAdapterV1::from_read(inputs.storage.clone());
@@ -539,6 +566,7 @@ pub async fn compose_doctor_report(
         .with_advisory_feedback(&advisory_feedback)
         .with_language_server(&language_server)
         .with_code_index(&code_index)
+        .with_semantic_owner(&semantic_owner)
         .with_observability(&observability)
         .with_storage(&storage);
 
@@ -835,6 +863,10 @@ mod tests {
             },
             code_index: CodeIndexMountReadV1::Observed {
                 state: CodeIndexMountStateV1::Mounted,
+                coverage: DoctorCoverageCompletenessV1::Complete,
+            },
+            semantic_owner: SemanticOwnerReadV1::Observed {
+                state: SemanticOwnerStateV1::Ready,
                 coverage: DoctorCoverageCompletenessV1::Complete,
             },
             observability: ObservabilityReadV1::Observed {
