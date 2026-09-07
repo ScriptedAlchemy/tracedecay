@@ -112,6 +112,17 @@ pub fn plain_host_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Spells every `git` argument plainly (see [`plain_host_path`]).
+///
+/// Arguments that are not verbatim disk paths — flags, refs, relative paths,
+/// every Unix argument — are returned unchanged, so a command builder can
+/// apply this to its whole argument list instead of guessing which positions
+/// carry a resolved path (`git worktree add <path>` refuses a `\\?\` root
+/// with "could not create leading directories ... Invalid argument").
+pub fn plain_git_args<'a>(args: &'a [&str]) -> impl Iterator<Item = PathBuf> + 'a {
+    args.iter().map(|arg| plain_host_path(Path::new(arg)))
+}
+
 /// Drops `.` and resolves `..` lexically, without touching the filesystem.
 ///
 /// This is a separate step rather than part of canonicalization because the
@@ -179,7 +190,7 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 mod tests {
     use super::{
         canonicalize_existing_prefix, collapse_relative_components,
-        normalize_source_edit_relative_path, plain_host_path, same_canonical_path,
+        normalize_source_edit_relative_path, plain_git_args, plain_host_path, same_canonical_path,
     };
     use std::path::{Path, PathBuf};
 
@@ -278,6 +289,30 @@ mod tests {
                 "{preserved} must be handed on unchanged"
             );
         }
+    }
+
+    #[test]
+    fn git_argument_lists_only_rewrite_the_verbatim_disk_paths() {
+        let args = [
+            "worktree",
+            "add",
+            r"\\?\D:\a\_temp\tmp\.tmpiS0e8W-admission-wt",
+            "-b",
+            "feature/admission",
+            "src/lib.rs",
+        ];
+        assert_eq!(
+            plain_git_args(&args).collect::<Vec<_>>(),
+            [
+                "worktree",
+                "add",
+                r"D:\a\_temp\tmp\.tmpiS0e8W-admission-wt",
+                "-b",
+                "feature/admission",
+                "src/lib.rs",
+            ]
+            .map(PathBuf::from)
+        );
     }
 
     #[test]

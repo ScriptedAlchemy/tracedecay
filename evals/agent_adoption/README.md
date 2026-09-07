@@ -77,6 +77,8 @@ paths, so do **not** commit run artifacts.
 | `CLAUDE_MODELS` | `opus sonnet` | space-separated `claude --model` matrix |
 | `CODEX_MODELS` | `gpt-5.5 gpt-5.6-terra` | space-separated `codex exec -m` matrix |
 | `SCENARIO_TIMEOUT` | `240` | per scenario wall-clock seconds |
+| `REPS` | `1` | repetitions per scenario x host x model x condition cell; `>1` suffixes transcripts with `__r<N>` and the grader pools the repetitions, so a cell of n=15 gives a usable exact-binomial interval instead of a single draw |
+| `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
 | `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 
@@ -95,8 +97,15 @@ The runner points `TRACEDECAY_DATA_DIR` at a throwaway dir and sets
 touch your real tracedecay store, and `tracedecay init` stays fast (indexing the
 multi-thousand-node global DB is what makes a naive `init` hang). Each host gets
 a throwaway `HOME` and config directory. Only its auth file is copied in, mode
-`0400`; the copy is deleted on runner exit. The real Claude/Codex profile is
-never loaded or mutated.
+`0400`; the copy is deleted on runner exit. For Claude the `env` and `model`
+keys of the real `settings.json` travel too, because a profile aimed at a
+non-Anthropic endpoint authenticates through `ANTHROPIC_BASE_URL` /
+`ANTHROPIC_API_KEY` there rather than through `.credentials.json`; permissions,
+plugins, hooks, and every other key stay behind. The real Claude/Codex profile
+is never loaded or mutated. Name the model exactly as the profile does
+(`CLAUDE_MODELS='k3[1m]'`, not `opus`) so transcripts and scoreboards carry the
+model that actually answered; an alias resolved through
+`ANTHROPIC_DEFAULT_*_MODEL` would be mislabelled.
 
 Live runs build a debug `tracedecay` binary from the checked-out candidate
 branch with ordinary Cargo and use it for fixture setup, MCP, hooks, and the
@@ -276,11 +285,13 @@ hooks + skills + MCP together, so cleanly removing *one* channel requires a
 hermetic, componentized plugin. For every condition `run.sh`:
 
 * copies `plugin/` into `$work/plugins/<condition>` and strips the ablated part
-  (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` for
-  `no-skills`/`bare`, and MCP manifests for `cli-only`),
+  (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` plus
+  `commands/` for `no-skills`/`bare` — Claude exposes plugin commands as
+  `tracedecay:*` skills too — and MCP manifests for `cli-only`),
   substituting the hook binary path;
-* launches `claude` with a throwaway `HOME`, `--setting-sources project,local`
-  (drops the ambient user config, global plugin, and user `CLAUDE.md`),
+* launches `claude` with a throwaway `HOME` whose user settings hold only the
+  carried endpoint/auth env (the ambient user config, global plugin, and user
+  `CLAUDE.md` are unreachable), `--setting-sources user,project,local`,
   `--strict-mcp-config --mcp-config <hermetic tracedecay server>` (descriptions
   held constant), `--plugin-dir <the componentized copy>`, and `--add-dir
   <fixture>`;
@@ -354,6 +365,22 @@ against the fixture path. Run it with `EVAL_INCLUDE_DEFERRED=1`.
 
 Scenarios may declare `expected_skill` and `allowed_skills`. Omitted allowed
 skills defaults to the expected skill; explicit `[]` marks a no-skill case.
+Claude exposes plugin `commands/` as `tracedecay:*` skills alongside `skills/`,
+so a scenario whose task is exactly one workflow command's job (for example
+`check-health` for the health scorecard, `find-impact` for the impact case)
+lists that command in `allowed_skills`; routing to it is a correct workflow,
+not a false trigger.
+
+Claude Code (2.1.x) defers MCP tool schemas behind `ToolSearch` once a server's
+definitions exceed its context budget; only tools the server marks
+`anthropic/alwaysLoad` are in the prompt from turn one. For TraceDecay that is
+a small core (`search`, `grep`, `context`, `callers`, `status`,
+`active_project`, `storage_status`). Every other graph tool — `impact`,
+`health`, `redundancy`, `affected_tests`, `body`, `outline`, `rename_preview`
+— is a name the model must load first. Read `bare`/`no-skills` adoption with
+that in mind: "pure MCP-description pull" only applies to the always-loaded
+core, and a `ToolSearch` call in a transcript marks the model discovering a
+deferred tool, not an unnecessary detour.
 `max_tracedecay_calls` bounds graph/CLI calls independently of `max_tool_calls`.
 The grader reports per-skill true positives, misses, false positives, and no-skill
 over-trigger counts. Explicit host invocation is evidence; prose naming a skill

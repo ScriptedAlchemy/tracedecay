@@ -43,24 +43,198 @@ fn every_steering_mutation_branch_requires_a_persisted_write_intent() {
     }
 }
 
+/// The heading shipped releases through v0.1.0-beta.37 wrote as the block's
+/// identity, closed by the end sentinel those releases already emitted.
+const SHIPPED_HEADING: &str = "## TraceDecay: mandatory tool routing";
+/// The heading the release before that used for the same block.
+const OLDEST_HEADING: &str = "## Prefer tracedecay MCP tools";
+
+fn shipped_block(heading: &str, body: &str) -> String {
+    format!("{heading}\n\n{body}\n\n{}", STEERING_SENTINELS.end)
+}
+
 fn steering_mutation_cases() -> Vec<(&'static str, Option<Vec<u8>>)> {
     vec![
         (
-            "owned-end refresh",
+            "current-sentinel refresh",
             Some(
                 format!(
-                    "operator rules\n\n{PROMPT_MARKER}\n\nstale rules\n\n{PROMPT_END_MARKER}\n"
+                    "operator rules\n\n{}\n",
+                    STEERING_SENTINELS.render("## Older heading\n\nstale rules")
+                )
+                .into_bytes(),
+            ),
+        ),
+        (
+            "shipped-heading refresh",
+            Some(
+                format!(
+                    "operator rules\n\n{}\n",
+                    shipped_block(SHIPPED_HEADING, "stale rules")
                 )
                 .into_bytes(),
             ),
         ),
         (
             "heading fallback",
-            Some(format!("operator rules\n\n{PROMPT_MARKER}\n\nstale rules\n").into_bytes()),
+            Some(format!("operator rules\n\n{SHIPPED_HEADING}\n\nstale rules\n").into_bytes()),
         ),
         ("existing append", Some(b"operator rules\n".to_vec())),
         ("missing create", None),
     ]
+}
+
+#[test]
+fn every_historical_steering_shape_converges_on_update_and_preserves_peers() {
+    let block = steering_block_text();
+    let historical_shapes = [
+        (
+            "shipped heading with end sentinel",
+            shipped_block(
+                SHIPPED_HEADING,
+                "You MUST use it. 1% chance. No rationalizing.",
+            ),
+        ),
+        (
+            "oldest heading with end sentinel",
+            shipped_block(
+                OLDEST_HEADING,
+                "Before reading source files, use tracedecay.",
+            ),
+        ),
+        (
+            "oldest heading without end sentinel",
+            format!("{OLDEST_HEADING}\n\nBefore reading source files, use tracedecay."),
+        ),
+    ];
+    for (shape, stale) in historical_shapes {
+        let root = tempfile::tempdir().unwrap();
+        let steering = root.path().join("tracedecay.md");
+        let original =
+            format!("# Team steering\n\nkeep me\n\n{stale}\n\n## Operator section\n\nand me\n");
+        std::fs::write(&steering, &original).unwrap();
+
+        install_steering_rules(&steering).unwrap();
+
+        let updated = std::fs::read_to_string(&steering).unwrap();
+        assert_eq!(
+            updated,
+            format!("# Team steering\n\nkeep me\n\n{block}\n\n## Operator section\n\nand me\n"),
+            "{shape}: update must replace the whole owned block in place and keep both peers"
+        );
+        assert!(
+            !updated.contains("MUST") && !updated.contains("rationaliz"),
+            "{shape}: no historical forcing may survive the migration"
+        );
+
+        install_steering_rules(&steering).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&steering).unwrap(),
+            updated,
+            "{shape}: a current reinstall is idempotent"
+        );
+    }
+}
+
+#[test]
+fn every_historical_steering_shape_is_removed_on_uninstall() {
+    for stale in [
+        shipped_block(SHIPPED_HEADING, "stale mandate"),
+        shipped_block(OLDEST_HEADING, "stale mandate"),
+        format!("{OLDEST_HEADING}\n\nstale mandate"),
+        steering_block_text(),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let steering = root.path().join("tracedecay.md");
+        std::fs::write(
+            &steering,
+            format!("keep me\n\n{stale}\n\n## Operator section\n\nand me\n"),
+        )
+        .unwrap();
+
+        remove_steering_rules(&steering).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&steering).unwrap(),
+            "keep me\n\n## Operator section\n\nand me\n",
+            "uninstall must remove the owned block and only that block"
+        );
+    }
+}
+
+#[test]
+fn duplicate_and_mixed_steering_blocks_converge_deterministically() {
+    let block = steering_block_text();
+    let mixed = format!(
+        "keep me\n\n{}\n\n## Operator section\n\nand me\n\n{}\n\n{block}\n\ntail peer\n",
+        shipped_block(SHIPPED_HEADING, "stale mandate"),
+        shipped_block(OLDEST_HEADING, "older mandate"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let steering = root.path().join("tracedecay.md");
+    std::fs::write(&steering, &mixed).unwrap();
+
+    install_steering_rules(&steering).unwrap();
+
+    let converged = std::fs::read_to_string(&steering).unwrap();
+    assert_eq!(
+        converged,
+        format!("keep me\n\n{block}\n\n## Operator section\n\nand me\n\ntail peer\n"),
+        "mixed markers must collapse onto one current block at the first owned position"
+    );
+    assert_eq!(owned_steering_ranges(&converged).len(), 1);
+
+    std::fs::write(&steering, &mixed).unwrap();
+    remove_steering_rules(&steering).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&steering).unwrap(),
+        "keep me\n\n## Operator section\n\nand me\n\ntail peer\n",
+        "uninstall must remove every owned block, historical and current"
+    );
+}
+
+#[test]
+fn steering_doctor_judges_sentinels_and_bytes_not_prose() {
+    fn doctor(home: &Path) -> DoctorCounters {
+        let mut counters = DoctorCounters::new();
+        doctor_check_steering(&mut counters, home);
+        counters
+    }
+    let home = tempfile::tempdir().unwrap();
+    let steering = steering_path(home.path());
+    std::fs::create_dir_all(steering.parent().unwrap()).unwrap();
+
+    std::fs::write(
+        &steering,
+        "tracedecay MCP tools are great, use tracedecay_grep\n",
+    )
+    .unwrap();
+    assert_eq!(
+        doctor(home.path()).issues,
+        1,
+        "prose mentioning tracedecay without the ownership sentinel is not an install"
+    );
+
+    std::fs::write(&steering, shipped_block(SHIPPED_HEADING, "stale mandate")).unwrap();
+    assert_eq!(
+        doctor(home.path()).issues,
+        1,
+        "a shipped historical block is outdated until update converges it"
+    );
+
+    install_steering_rules(&steering).unwrap();
+    let healthy = doctor(home.path());
+    assert_eq!((healthy.issues, healthy.warnings), (0, 0));
+
+    let edited = std::fs::read_to_string(&steering)
+        .unwrap()
+        .replace("tracedecay_grep", "rg");
+    std::fs::write(&steering, edited).unwrap();
+    assert_eq!(
+        doctor(home.path()).issues,
+        1,
+        "an edited owned block is stale even though its sentinels are intact"
+    );
 }
 
 #[test]
@@ -92,7 +266,7 @@ fn every_steering_mutation_branch_refuses_a_stale_target() {
 
 #[test]
 fn every_steering_mutation_branch_converges_through_the_same_writer() {
-    let block = prompt_rules_text();
+    let block = steering_block_text();
     for (case, original) in steering_mutation_cases() {
         let root = tempfile::tempdir().unwrap();
         let steering = root.path().join("tracedecay.md");
