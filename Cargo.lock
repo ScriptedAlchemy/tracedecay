@@ -6383,6 +6383,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-private-fs",
  "tracedecay-runtime-core",
 ]
 
@@ -6903,6 +6904,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-search-eval",
  "tracedecay-sessions",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

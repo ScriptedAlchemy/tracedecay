@@ -2,24 +2,19 @@ use tracedecay_automation_runtime::automation::agent_targets::{
     install_codex_managed_agents, remove_managed_agents,
 };
 
-fn ensure_host_io() {
-    // `install_codex_managed_agents` reads generated agent bytes through the
-    // automation-runtime host-io port; this integration binary does not go
-    // through `tracedecay::register_runtime_ports`, so bind the agent-hosts
-    // surface the same way skill_targets_test does.
-    tracedecay_agent_hosts::register_automation_host_io();
+/// The production host I/O bundle the Codex installer hands `agent_targets`.
+fn host_io() -> tracedecay_automation_runtime::automation::host_io::HostIo {
+    tracedecay_agent_hosts::host_io()
 }
 
 #[test]
 fn codex_managed_agents_export_to_user_agents_dir() {
-    ensure_host_io();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
 
-    let summary = install_codex_managed_agents(home).unwrap();
+    let summary = install_codex_managed_agents(&host_io(), home).unwrap();
 
-    let canonical =
-        tracedecay_automation_runtime::automation::host_io::codex_agent_files().unwrap();
+    let canonical = host_io().codex_agent_files();
     assert!(!canonical.is_empty());
     assert_eq!(summary.exported_count, canonical.len());
     assert_eq!(summary.output, home.join(".codex/agents"));
@@ -58,14 +53,13 @@ fn codex_managed_agents_export_to_user_agents_dir() {
 
 #[test]
 fn managed_agent_removal_uses_manifest_and_preserves_user_files() {
-    ensure_host_io();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
     std::fs::create_dir_all(home.join(".codex/agents")).unwrap();
     std::fs::write(home.join(".codex/agents/user-agent.toml"), "not tracedecay").unwrap();
 
-    let installed = install_codex_managed_agents(home).unwrap();
-    remove_managed_agents(&home.join(".codex/agents")).unwrap();
+    let installed = install_codex_managed_agents(&host_io(), home).unwrap();
+    remove_managed_agents(&host_io(), &home.join(".codex/agents")).unwrap();
 
     for entry in installed.exported {
         assert!(

@@ -17,8 +17,9 @@ use crate::recovery::{
     validate_or_initialize_format,
 };
 use crate::state::{
-    EntityOwnerColumns, FormatState, indexed_entity_node, latest_projection, load_entity_locator,
-    outgoing_relation_projections, projection_entities, projection_relations, publication,
+    EntityOwnerColumns, ExistingRowsV1, FormatState, indexed_entity_node, latest_projection,
+    load_entity_locator, outgoing_relation_projections, projection_entities, projection_relations,
+    publication,
 };
 use crate::verified_marker::{ContainerIdentity, GenerationMarkers};
 use crate::{
@@ -1352,6 +1353,7 @@ impl GraphDb {
             batch,
             metadata,
             endpoint_namespaces,
+            ExistingRowsV1::Probe,
             &self.inner.poisoned,
             check,
         )?;
@@ -1382,6 +1384,7 @@ impl GraphDb {
     /// HNSW index. Callers that serve vector search from the written rows
     /// use [`Self::apply_locked`] instead, which keeps the persisted index
     /// aligned with every committed vector row.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_locked_without_vector_index_maintenance(
         &self,
         database: &GrafeoDB,
@@ -1389,6 +1392,7 @@ impl GraphDb {
         batch: GraphWriteBatch,
         metadata: mutation::CommitMetadata,
         endpoint_namespaces: &mutation::RelationEndpointNamespaces,
+        existing_rows: ExistingRowsV1<'_>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
         let commit = mutation::apply(
@@ -1397,6 +1401,7 @@ impl GraphDb {
             batch,
             metadata,
             endpoint_namespaces,
+            existing_rows,
             &self.inner.poisoned,
             check,
         )?;

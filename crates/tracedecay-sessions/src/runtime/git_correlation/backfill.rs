@@ -1,9 +1,7 @@
 use tracedecay_capture::normalize_timestamp_secs;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use super::attribution::{
-    publish_graph_evidence, publish_graph_evidence_controlled, stable_backfill_span,
-};
+use super::attribution::{publish_graph_evidence_controlled, stable_backfill_span};
 use super::store::GitCorrelationSessionStore;
 
 use super::{
@@ -835,13 +833,14 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
         }
     }
     if !opts.dry_run && (!published_spans.is_empty() || !published_commits.is_empty()) {
-        let (spans_written, commits_attributed) = publish_graph_evidence(
-            session_store,
-            "git-backfill",
-            &published_spans,
-            &published_commits,
-        )
-        .map_err(|_| BackfillSkipReason::GitError)?;
+        let (spans_written, commits_attributed) = session_store
+            .publish_graph_evidence_owned(
+                "git-backfill".to_owned(),
+                published_spans,
+                published_commits,
+            )
+            .await
+            .map_err(|_| BackfillSkipReason::GitError)?;
         stats.spans_written = stats.spans_written.saturating_add(spans_written);
         stats.commits_attributed = stats.commits_attributed.saturating_add(commits_attributed);
     }

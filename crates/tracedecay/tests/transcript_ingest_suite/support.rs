@@ -7,28 +7,30 @@
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
+use tracedecay_runtime_core::path_safety::{canonicalize_path_or_existing_parent, plain_host_path};
 
-fn normalize_path_text(raw: &str) -> String {
-    let raw = raw.strip_prefix("\\\\?\\").unwrap_or(raw);
-    let unc_path;
-    let raw = if let Some(rest) = raw.strip_prefix("UNC\\") {
-        unc_path = format!("\\\\{rest}");
-        unc_path.as_str()
-    } else {
-        raw
-    };
-    let path = Path::new(raw);
-    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let text = normalized.to_string_lossy();
-    text.strip_prefix("\\\\?\\").unwrap_or(&text).to_string()
+/// One filesystem identity, one spelling: resolves aliases (`/var` firmlinks,
+/// symlinked family roots) and drops the Windows verbatim prefix
+/// `canonicalize` adds.
+pub fn normalize_path_text(raw: &str) -> String {
+    let plain = plain_host_path(Path::new(raw));
+    plain_host_path(&canonicalize_path_or_existing_parent(&plain))
+        .to_string_lossy()
+        .into_owned()
+}
+
+pub fn assert_path_text_eq(actual: &str, expected: &Path) {
+    assert_eq!(
+        normalize_path_text(actual),
+        normalize_path_text(&expected.to_string_lossy()),
+        "stored path {actual:?} does not name {}",
+        expected.display()
+    );
 }
 
 pub fn assert_metadata_path_eq(actual: &serde_json::Value, expected: &Path) {
     let actual = actual.as_str().expect("metadata path should be a string");
-    assert_eq!(
-        normalize_path_text(actual),
-        normalize_path_text(&expected.to_string_lossy())
-    );
+    assert_path_text_eq(actual, expected);
 }
 
 /// Initializes `project` as a tracedecay project the ingest resolvers accept

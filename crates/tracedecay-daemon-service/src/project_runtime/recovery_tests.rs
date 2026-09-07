@@ -197,7 +197,7 @@ async fn request_admission_cannot_cross_project_runtime_registries() {
         .admit_request(&project, None)
         .expect("first registry admission");
 
-    let snapshot = second.request_runtimes_with_admission(&project, None, &admission);
+    let snapshot = second.request_runtimes_with_admission(&project, &admission);
     assert!(!snapshot.is_admitted());
     assert!(snapshot.feedback.is_none());
     assert!(snapshot.lsp_owner.is_none());
@@ -229,7 +229,7 @@ async fn captured_admission_continues_after_quiescence_installs_its_fence() {
     .await
     .expect("quiescence installs its fence");
 
-    let continuation = registry.request_runtimes_with_admission(&project, None, &admission);
+    let continuation = registry.request_runtimes_with_admission(&project, &admission);
     assert!(
         continuation.is_admitted(),
         "a nested route must settle through the exact captured outer admission"

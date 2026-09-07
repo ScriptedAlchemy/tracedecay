@@ -1068,6 +1068,136 @@ async fn canonical_fallback_finds_a_component_without_an_alias_runtime() {
     );
 }
 
+/// Project-open registers owners under `Path::canonicalize()` (`\\?\C:\...` on
+/// Windows). Later storage-status / primitive lookups arrive with the ordinary
+/// handshake spelling. Admission already treats those as one project; `get`
+/// and `read` must resolve the same registered owner instead of answering
+/// "still mounting" forever.
+#[tokio::test]
+async fn get_and_read_resolve_an_owner_registered_under_a_windows_verbatim_spelling() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let registered = PathBuf::from(r"\\?\C:\Users\test\project");
+    let request = PathBuf::from(r"C:\Users\test\project");
+    registry.publish(registered, TestFirst(7)).await.unwrap();
+
+    assert_eq!(
+        registry.get::<TestFirst>(&request).await,
+        Some(TestFirst(7)),
+        "an ordinary Windows request spelling must reach the verbatim registered owner"
+    );
+    assert_eq!(
+        registry
+            .read::<TestFirst, _, _>(&request, |owner| owner.0)
+            .await,
+        Some(7),
+        "primitive-style read must use the same admitted-root resolution as get"
+    );
+    assert_eq!(
+        registry.publication_state(&request),
+        Some(ProjectRuntimePublicationStateV1::Warming),
+        "publication stage must resolve through the same admitted root as get"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_registered_spellings_refuse_instead_of_selecting_an_owner() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let ordinary = PathBuf::from(r"C:\Users\test\ambiguous");
+    let verbatim = PathBuf::from(r"\\?\C:\Users\test\ambiguous");
+    registry
+        .publish(ordinary.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    registry.publish(verbatim, TestFirst(2)).await.unwrap();
+
+    assert!(
+        registry.get::<TestFirst>(&ordinary).await.is_none(),
+        "two registered spellings that could name different authorities must not select the first map entry"
+    );
+    assert!(
+        !registry
+            .request_runtimes(Some(&ordinary), None)
+            .await
+            .is_admitted(),
+        "an ambiguous root is a lookup miss, not a warming admitted runtime"
+    );
+}
+
+#[tokio::test]
+async fn stale_publication_failure_cannot_poison_a_newer_ready_attempt() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("publication-attempt-fence");
+    registry
+        .publish(project.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    let stale = registry
+        .begin_publication(&project)
+        .expect("first publication attempt");
+    let quiescence = registry
+        .quiesce_roots(&BTreeSet::from([project.clone()]))
+        .await
+        .expect("retire the first runtime under a replacement fence");
+    drop(quiescence);
+    registry
+        .publish(project.clone(), TestFirst(2))
+        .await
+        .expect("replacement runtime");
+    let current = registry
+        .begin_publication(&project)
+        .expect("replacement publication attempt");
+
+    assert!(!registry.mark_publication_failed(&stale));
+    assert!(registry.mark_publication_ready(&current));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Ready)
+    );
+}
+
+#[tokio::test]
+async fn failed_publication_can_reopen_and_reach_ready() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("publication-reopen");
+    registry
+        .publish(project.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    let failed = registry
+        .begin_publication(&project)
+        .expect("failed publication attempt");
+
+    assert!(registry.mark_publication_failed(&failed));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Failed)
+    );
+
+    let reopened = registry
+        .begin_publication(&project)
+        .expect("fresh publication attempt");
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Warming)
+    );
+    assert!(registry.mark_publication_ready(&reopened));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Ready)
+    );
+}
+
+#[tokio::test]
+async fn get_does_not_treat_a_different_project_as_an_equivalent_root() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    registry.publish(root("alpha"), TestFirst(1)).await.unwrap();
+
+    assert!(
+        registry.get::<TestFirst>(&root("beta")).await.is_none(),
+        "linked or foreign roots must not collapse onto another project's owner"
+    );
+}
+
 #[tokio::test]
 async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
     let registry = Arc::new(ProjectRuntimeRegistryV1::default());
@@ -1298,4 +1428,34 @@ async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn semantic_owner_registration_task_is_cancelled_and_joined() {
+    let owner = RegisteredSemanticOwnerTaskV1::new();
+    let cancellation = owner.cancellation();
+    let (started, worker_started) = tokio::sync::oneshot::channel();
+    let (finished, worker_finished) = tokio::sync::oneshot::channel();
+    assert!(owner.spawn(async move {
+        started
+            .send(())
+            .expect("semantic owner task start receiver");
+        cancellation.cancelled().await;
+        finished
+            .send(())
+            .expect("semantic owner task finish receiver");
+    }));
+    worker_started
+        .await
+        .expect("semantic owner registration task started");
+
+    owner.cancel_and_join().await;
+
+    worker_finished
+        .await
+        .expect("semantic owner registration task finished");
+    assert!(
+        !owner.has_retained_task(),
+        "joining must release the task handle"
+    );
 }

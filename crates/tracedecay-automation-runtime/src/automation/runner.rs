@@ -14,6 +14,7 @@ use super::backend::{
     BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
+use super::host_io::HostIo;
 use super::lifecycle::{
     AgentRunFinalizer, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
     AutomationRunLedgerPublication, AutomationRunResult, BackendTaskRun, SchedulerGate,
@@ -184,6 +185,7 @@ struct CombinedReviewPublication<'a> {
 
 #[hotpath::measure(future = true, label = "automation.run.user_session")]
 pub async fn run_user_session_automation_with_backend(
+    host_io: HostIo,
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
@@ -196,6 +198,7 @@ pub async fn run_user_session_automation_with_backend(
     let _duration = super::scheduler_metrics::DurationGuard::run();
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_session_automation_with_backend_and_retrieval(
+        host_io,
         profile_root,
         session_registry,
         config,
@@ -211,6 +214,7 @@ pub async fn run_user_session_automation_with_backend(
 }
 
 pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
+    host_io: HostIo,
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
@@ -240,6 +244,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
     )
     .await?;
     let skill_writer = run_user_skill_writer_with_backend_and_retrieval(
+        host_io,
         profile_root,
         session_registry,
         config,
@@ -1034,6 +1039,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
 
         let (skill_report, skill_record, skill_committed_receipt) =
             match finalize_skill_writer_success(
+                &cg.host_io(),
                 &skill_finalizer,
                 &skill_bundle.profile_root,
                 Some(cg.store_layout().project_root.as_path()),
