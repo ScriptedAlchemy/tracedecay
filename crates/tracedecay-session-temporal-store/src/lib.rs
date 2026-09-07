@@ -47,10 +47,9 @@ pub mod store;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
-use tracedecay_graph_db::GraphNamespace;
+use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
 
 use self::execution::{
     AuthorizedTaskSessionExecutionRequestV1, AuthorizedTemporalExecutionRequest,
@@ -72,8 +71,8 @@ use tracedecay_query::retrieval::evidence_lanes::{
 };
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_sessions::runtime::git_correlation::{
-    GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
-    recover_git_evidence_projection,
+    GitCorrelationError, GitEvidenceGraphHead, GitScopeFilter, git_evidence_projection_identity,
+    open_git_evidence_graph_view,
 };
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
@@ -126,14 +125,23 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // Absence is not an authoritative empty projection. Until Git
         // evidence has been published, callers cannot prove that no durable
         // session holds a matching worktree.
-        let Some(projection) =
-            recover_git_evidence_projection(runtime, &identity, Arc::new(AtomicBool::new(false)))?
-        else {
-            return Err(GitCorrelationError::Unavailable(
-                "verified Git-evidence projection has not been published".to_owned(),
-            ));
+        let view = match open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))?
+        {
+            GitEvidenceGraphHead::Indexed(view) => view,
+            GitEvidenceGraphHead::Unpublished => {
+                return Err(GitCorrelationError::Unavailable(
+                    "verified Git-evidence projection has not been published".to_owned(),
+                ));
+            }
+            // A pre-index head cannot be scoped through the graph either; its
+            // next publication re-projects it.
+            GitEvidenceGraphHead::Legacy { generation } => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "verified Git-evidence generation `{generation}` predates the indexed projector"
+                )));
+            }
         };
-        let session_ids = projection.session_ids_for_scope(filter).ok_or_else(|| {
+        let session_ids = view.session_ids_for_scope(filter)?.ok_or_else(|| {
             GitCorrelationError::Contract(
                 "Git scope resolution requires a non-empty filter".to_owned(),
             )
