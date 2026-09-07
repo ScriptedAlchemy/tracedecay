@@ -15,6 +15,7 @@
 //!    serve the new verified head.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
@@ -44,7 +45,10 @@ use tracedecay_store::{
 
 mod support;
 
-use support::{RegisteredGraph, TestCancellation, graph_path, registration};
+use support::{
+    RegisteredGraph, TestCancellation, capture_unclean_crash_image, crash_child_root, graph_path,
+    mark_durable_phase, registration, sidecar_wal_path,
+};
 
 /// Mirrors the runtime request probe the other graph-db contract suites use;
 /// the harness owns interruption state so a test can interrupt convergence.
@@ -383,10 +387,102 @@ fn stage_manifest(
     )
 }
 
-fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
-    let mut sidecar = path.as_os_str().to_owned();
-    sidecar.push(".wal");
-    std::path::PathBuf::from(sidecar)
+fn write_published_g1_leaving_wal(
+    root: &Path,
+    namespace: &str,
+    projection_id: &str,
+) -> RegisteredGraph {
+    let registered = RegisteredGraph::new_mounted(root).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection(namespace, projection_id);
+    let g1 = manifest(identity, "g1", "g1");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    drop(
+        registered
+            .registry
+            .publish_verified(
+                registration(registered.binding.clone(), root),
+                &mut authority,
+                &context,
+                &g1_record.publication.key,
+                None,
+            )
+            .unwrap(),
+    );
+    registered
+}
+
+fn apply_unverified_wal_debt(registered: &RegisteredGraph, root: &Path) {
+    let debt_namespace = GraphNamespace::new("crash-wal-debt").unwrap();
+    let debt_entity = GraphEntityId::new("entity:wal-debt").unwrap();
+    let live = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), root))
+        .unwrap();
+    live.apply_unverified(
+        GraphWriteBatch::new(
+            debt_namespace,
+            GraphProjectionId::new("unclean-shutdown").unwrap(),
+            SourceGeneration::new("source:wal-debt").unwrap(),
+            GraphWatermark::new("watermark:wal-debt").unwrap(),
+            vec![GraphMutation::UpsertEntity(entity(
+                debt_entity.as_str(),
+                "wal-debt",
+            ))],
+            Arc::new(TestCancellation),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    std::mem::forget(live);
+}
+
+fn linearize_g1_journal(
+    root: &Path,
+    namespace: &str,
+    projection_id: &str,
+) -> (
+    RelationalAuthority,
+    GraphPublicationReplayRecordV1,
+    GraphVerifiedHeadV1,
+) {
+    let registered = RegisteredGraph::new_mounted(root).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection(namespace, projection_id);
+    let g1 = manifest(identity, "g1", "g1");
+    let g1_record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &g1,
+        "publish:g1",
+        None,
+        'a',
+    );
+    let first = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &context,
+            &g1_record.publication.key,
+            None,
+        )
+        .unwrap();
+    let verified_head = first.head.clone();
+    drop(first);
+    assert!(registered.close().unwrap());
+    (authority, g1_record, verified_head)
 }
 
 fn marker_of(snapshot: &VerifiedGraphSnapshot, identity: &GraphProjectionIdentity) -> String {
@@ -632,49 +728,36 @@ fn torn_durable_store_is_quarantined_and_rebuilt_from_the_replay_journal() {
     assert_eq!(marker_of(&served, &identity), "g1");
 }
 
-/// The operator-profile fault shape: a SIGKILL mid-WAL-write leaves a
-/// current-version container whose serialized block no longer matches its
-/// CRC, plus a live WAL sidecar. The corrupted-but-current store reports the
-/// CRC fault deterministically; quarantine must adopt the container *and*
+/// Subprocess unclean-exit proof, not machine power-loss: a child reaches
+/// the durable WAL phase and exits without closing the store. The abandoned
+/// image is a current-version container plus a live WAL sidecar. After the
+/// parent copies that image, this test corrupts a serialized block so the
+/// CRC fault is deterministic; quarantine must adopt the container *and*
 /// the WAL sidecar so the forensic pair stays together, and the fresh store
 /// must rebuild from the replay journal.
 #[test]
 fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
-    let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    if let Some(root) = crash_child_root() {
+        let registered = write_published_g1_leaving_wal(&root, "crash", "crc");
+        mark_durable_phase(&root);
+        std::mem::forget(registered);
+        std::process::exit(0);
+    }
+
+    let journal = TempDir::new().unwrap();
+    let (mut authority, g1_record, verified_head) =
+        linearize_g1_journal(journal.path(), "crash", "crc");
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    let mut authority = RelationalAuthority::default();
     let identity = projection("crash", "crc");
-
-    let g1 = manifest(identity.clone(), "g1", "g1");
-    let g1_record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &g1,
-        "publish:g1",
-        None,
-        'a',
-    );
-    let first = registered
-        .registry
-        .publish_verified(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority,
-            &context,
-            &g1_record.publication.key,
-            None,
-        )
-        .unwrap();
-    let verified_head = first.head.clone();
-    drop(first);
     let projection_key = g1_record.publication.key.projection.clone();
 
-    // Snapshot the crash image while the store is open: the WAL sidecar is
-    // live because nothing has checkpointed, exactly the SIGKILL surface.
-    let source = graph_path(temp.path());
+    // Child publishes g1, reaches the durable WAL phase, and exits without
+    // a clean close. That is unclean process exit, not host power-loss. The
+    // abandoned image is copied only after the child is reaped — never while
+    // a live Windows handle still owns the store (issue #933).
     let crash = TempDir::new().unwrap();
-    copy_crash_image(temp.path(), crash.path());
+    capture_unclean_crash_image(crash.path());
     let crashed_container = graph_path(crash.path());
     let crashed_sidecar = sidecar_wal_path(&crashed_container);
     assert!(
@@ -695,8 +778,6 @@ fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
         !wal_segments.is_empty(),
         "the crash image must carry WAL segments"
     );
-    assert!(registered.close().unwrap());
-    let _ = source;
 
     // Flip authoritative leading bytes while keeping the length: the store
     // is still current-sized but its serialized sections no longer match
@@ -1045,21 +1126,6 @@ fn reset_required_shape_is_recreated_fresh_and_republished_from_the_manifest() {
     assert_eq!(marker_of(&snapshot, &identity), "g1");
 }
 
-/// Recursively copies a live store's container and sidecar to a second root —
-/// the crash image of a process killed without a clean close.
-fn copy_crash_image(from_root: &std::path::Path, to_root: &std::path::Path) {
-    let from = graph_path(from_root);
-    let to = graph_path(to_root);
-    std::fs::copy(&from, &to).unwrap();
-    let from_sidecar = sidecar_wal_path(&from);
-    let to_sidecar = sidecar_wal_path(&to);
-    std::fs::create_dir_all(&to_sidecar).unwrap();
-    for entry in std::fs::read_dir(&from_sidecar).unwrap() {
-        let entry = entry.unwrap();
-        std::fs::copy(entry.path(), to_sidecar.join(entry.file_name())).unwrap();
-    }
-}
-
 /// Highest sequence among non-empty `wal_<sequence>.log` segments — the same
 /// replay-debt signal the open-time collapse gates on.
 fn newest_wal_segment(sidecar: &std::path::Path) -> Option<u64> {
@@ -1084,67 +1150,28 @@ fn newest_wal_segment(sidecar: &std::path::Path) -> Option<u64> {
 /// (and the next open's replay cost) on every restart.
 #[test]
 fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
-    let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    if let Some(root) = crash_child_root() {
+        let registered = write_published_g1_leaving_wal(&root, "crash", "reopen-collapse");
+        apply_unverified_wal_debt(&registered, &root);
+        mark_durable_phase(&root);
+        std::mem::forget(registered);
+        std::process::exit(0);
+    }
+
+    let journal = TempDir::new().unwrap();
+    let (mut authority, g1_record, _verified_head) =
+        linearize_g1_journal(journal.path(), "crash", "reopen-collapse");
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
-    let mut authority = RelationalAuthority::default();
     let identity = projection("crash", "reopen-collapse");
-
-    let g1 = manifest(identity.clone(), "g1", "g1");
-    let g1_record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &g1,
-        "publish:g1",
-        None,
-        'a',
-    );
-    let first = registered
-        .registry
-        .publish_verified(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority,
-            &context,
-            &g1_record.publication.key,
-            None,
-        )
-        .unwrap();
-    drop(first);
     let projection_key = g1_record.publication.key.projection.clone();
-
-    // Commit one unverified mutation through the live store and snapshot the
-    // files before close. This is the exact engine-level state a process kill
-    // leaves behind: the row is durable only in the sidecar WAL, while the
-    // relational authority still names g1 as the sole verified generation.
     let debt_namespace = GraphNamespace::new("crash-wal-debt").unwrap();
     let debt_entity = GraphEntityId::new("entity:wal-debt").unwrap();
-    let live = registered
-        .registry
-        .resolve(registration(registered.binding.clone(), temp.path()))
-        .unwrap();
-    live.apply_unverified(
-        GraphWriteBatch::new(
-            debt_namespace.clone(),
-            GraphProjectionId::new("unclean-shutdown").unwrap(),
-            SourceGeneration::new("source:wal-debt").unwrap(),
-            GraphWatermark::new("watermark:wal-debt").unwrap(),
-            vec![GraphMutation::UpsertEntity(entity(
-                debt_entity.as_str(),
-                "wal-debt",
-            ))],
-            Arc::new(TestCancellation),
-        )
-        .unwrap(),
-    )
-    .unwrap();
 
-    // Copy the live store without closing it: the crash image of a process
-    // killed mid-rebuild.
+    // Child publishes g1, stages unverified WAL debt, and exits without a
+    // clean close. Subprocess unclean-exit only; the copy runs after reap.
     let crash_root = TempDir::new().unwrap();
-    copy_crash_image(temp.path(), crash_root.path());
-    drop(live);
-    assert!(registered.close().unwrap());
+    capture_unclean_crash_image(crash_root.path());
     let crash_path = graph_path(crash_root.path());
     let crash_sidecar = sidecar_wal_path(&crash_path);
     let debt_segment = newest_wal_segment(&crash_sidecar)
