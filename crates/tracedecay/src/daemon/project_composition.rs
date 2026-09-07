@@ -846,14 +846,12 @@ async fn production_project_server_inner(
                         Box::pin(store_administration.registered_profile_session_database()).await?;
                     Ok((database, started.elapsed()))
                 };
-            let (
-                (registered_project_session_db, project_sessions_elapsed),
-                (registered_user_session_db, profile_sessions_elapsed),
-            ) = Box::pin(join_independent_session_opens(
-                project_session_open,
-                profile_session_open,
-            ))
-            .await?;
+            let ((session_db, project_sessions_elapsed), (user_session_db, profile_sessions_elapsed)) =
+                Box::pin(join_independent_session_opens(
+                    project_session_open,
+                    profile_session_open,
+                ))
+                .await?;
             let session_runtime_registry =
                 Box::pin(store_administration.session_runtime_registry()).await?;
             tokio::select! {
@@ -869,7 +867,7 @@ async fn production_project_server_inner(
             if !project_database_is_read_only {
                 Box::pin(bind_verified_project_graph_runtime(
                     cg.db(),
-                    registered_project_session_db.as_ref(),
+                    session_db.as_ref(),
                 ))
                 .await?;
             }
@@ -878,8 +876,6 @@ async fn production_project_server_inner(
                 project_sessions_elapsed,
                 profile_sessions_elapsed,
             );
-            let session_db = registered_project_session_db.clone();
-            let user_session_db = registered_user_session_db.clone();
             Box::pin(invocation.service.mount_session_holder_databases([
                     registered_profile_db.clone(),
                     user_session_db.clone(),
@@ -1020,10 +1016,8 @@ async fn production_project_server_inner(
                     databases: crate::mcp::server::McpServerDaemonDatabases {
                         accounting: accounting_db,
                         registry: registry_db,
-                        project_sessions: session_db,
-                        user_sessions: user_session_db,
-                        registered_project_sessions: registered_project_session_db.clone(),
-                        registered_user_sessions: registered_user_session_db,
+                        project_sessions: session_db.clone(),
+                        profile_sessions: user_session_db,
                     },
                     host_admission_broker,
                     project_session_refresh_wake,
@@ -1161,7 +1155,7 @@ async fn production_project_server_inner(
                 log_full_setup_phase("source_edit_preview_ready");
                 Box::pin(ensure_git_index_transactions_for_mutation_owners(
                     store_administration,
-                    registered_project_session_db.clone(),
+                    session_db,
                     canonical_project_path,
                     key.owner.project_id.as_deref(),
                 ))

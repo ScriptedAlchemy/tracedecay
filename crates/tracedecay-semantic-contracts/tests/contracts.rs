@@ -335,6 +335,12 @@ fn manifest_retains_structural_and_canonical_failure_validation() {
     );
 
     assert!(Sha256DigestHex::new("A".repeat(64)).is_err());
+    let uppercase_wire = format!("\"{}\"", "A".repeat(64));
+    assert!(serde_json::from_str::<Sha256DigestHex>(&uppercase_wire).is_err());
+    assert_eq!(
+        serde_json::to_string(&digest('a')).expect("digest wire"),
+        format!("\"{}\"", "a".repeat(64))
+    );
 
     let canonical = sample_manifest()
         .to_canonical_bytes()
