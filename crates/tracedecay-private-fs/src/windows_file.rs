@@ -90,11 +90,43 @@ fn identity_information(information: FileInformation) -> io::Result<FileInformat
     Ok(information)
 }
 
+/// Reads the native last-write and change times from one open Windows handle.
+///
+/// `ChangeTime` advances for in-place writes even when a caller restores
+/// `LastWriteTime`, so the pair is an authoritative process-local cache
+/// witness for the opened file identity.
+pub fn change_token<H: AsRawHandle>(file: &H) -> io::Result<FileChangeToken> {
+    let mut information = MaybeUninit::<FILE_BASIC_INFO>::uninit();
+    // SAFETY: `file` owns a valid Windows file handle, and `information` points
+    // to writable memory sized for the API's complete output structure.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            information.as_mut_ptr().cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: A nonzero API result initializes every field of the output structure.
+    let information = unsafe { information.assume_init() };
+    Ok(FileChangeToken {
+        last_write_time: information.LastWriteTime,
+        change_time: information.ChangeTime,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use std::io::ErrorKind;
+    use std::fs::{self, FileTimes, OpenOptions};
+    use std::io::{ErrorKind, Seek, SeekFrom, Write};
 
-    use super::{file_information, identity_information};
+    use tempfile::tempdir;
+
+    use super::{change_token, file_information, identity_information};
 
     #[test]
     fn by_handle_information_preserves_partial_identity_and_link_count() {
@@ -144,45 +176,6 @@ mod tests {
         assert_eq!(information.file_index, 41);
         assert_eq!(information.number_of_links, 2);
     }
-}
-
-/// Reads the native last-write and change times from one open Windows handle.
-///
-/// `ChangeTime` advances for in-place writes even when a caller restores
-/// `LastWriteTime`, so the pair is an authoritative process-local cache
-/// witness for the opened file identity.
-pub fn change_token<H: AsRawHandle>(file: &H) -> io::Result<FileChangeToken> {
-    let mut information = MaybeUninit::<FILE_BASIC_INFO>::uninit();
-    // SAFETY: `file` owns a valid Windows file handle, and `information` points
-    // to writable memory sized for the API's complete output structure.
-    let succeeded = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileBasicInfo,
-            information.as_mut_ptr().cast(),
-            size_of::<FILE_BASIC_INFO>() as u32,
-        )
-    };
-    if succeeded == 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    // SAFETY: A nonzero API result initializes every field of the output structure.
-    let information = unsafe { information.assume_init() };
-    Ok(FileChangeToken {
-        last_write_time: information.LastWriteTime,
-        change_time: information.ChangeTime,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs::{self, FileTimes, OpenOptions};
-    use std::io::{Seek, SeekFrom, Write};
-
-    use tempfile::tempdir;
-
-    use super::change_token;
 
     #[test]
     fn change_token_detects_same_length_rewrite_with_restored_mtime() {
