@@ -1366,6 +1366,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "remote account open race");
     let engine = test_daemon_engine_for_profile(&profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
         administration: engine.store_administration.clone(),
         invocation: engine.invocation.clone(),
@@ -2828,6 +2829,13 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     assert!(portable_context_description.contains("3 calls maximum"));
     assert!(portable_context_description.contains("project graph is warming"));
 
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        while attempts.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("portable initialize warmup was not admitted");
     lifecycle.begin_draining();
     tokio::time::timeout(PHASE_TIMEOUT, lifecycle.wait_for_idle())
         .await
@@ -3269,6 +3277,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     )
     .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
