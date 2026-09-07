@@ -196,6 +196,7 @@ pub async fn validate_configured_vector_roots(
                     stage_revision,
                     Arc::clone(retained.cancellation()),
                 )
+                .await
                 .map_err(ProjectVectorRetentionFailure::from)?;
             let tracedecay_store::SemanticVectorPublishedGenerationDependencyLookup::Published(
                 dependency,
@@ -224,6 +225,7 @@ pub async fn validate_configured_vector_roots(
                         stage_revision,
                         Arc::clone(retained.cancellation()),
                     )
+                    .await
                     .map_err(ProjectVectorRetentionFailure::from)?;
                 return Ok((receipt, sources));
             }

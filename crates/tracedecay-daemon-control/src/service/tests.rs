@@ -836,17 +836,6 @@ fn systemd_socket_read_back_returns_none_for_unterminated_exec_start_quote() {
     );
 }
 
-/// Host-absolute fixture path: managed Remote Brain TLS paths must satisfy
-/// `Path::is_absolute`, which a bare `/etc/...` literal fails on Windows, and
-/// that refusal would pre-empt the property each test actually exercises.
-fn absolute_fixture_path(posix: &str) -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
-    } else {
-        PathBuf::from(posix)
-    }
-}
-
 fn remote_tls_config(
     listen: &str,
     certificate_chain: impl Into<PathBuf>,
@@ -863,11 +852,14 @@ fn remote_tls_config(
 
 #[test]
 fn systemd_service_round_trips_remote_tls_listener_paths() {
-    let remote_tls = remote_tls_config(
-        "192.0.2.10:7443",
-        absolute_fixture_path("/etc/trace decay/server%$\"chain\\part.pem"),
-        absolute_fixture_path("/etc/trace decay/server%$key.pem"),
-    );
+    let fixture = TempDir::new().expect("Remote Brain TLS fixture");
+    let tls_root = fixture.path().join("trace decay");
+    std::fs::create_dir_all(&tls_root).expect("Remote Brain TLS fixture directory");
+    let certificate_chain = tls_root.join("server%$ chain-part.pem");
+    let private_key = tls_root.join("server%$ key.pem");
+    std::fs::write(&certificate_chain, b"certificate chain").expect("certificate fixture");
+    std::fs::write(&private_key, b"private key").expect("private key fixture");
+    let remote_tls = remote_tls_config("192.0.2.10:7443", certificate_chain, private_key);
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
         socket_path: PathBuf::from("/tmp/tracedecay.sock"),
@@ -905,15 +897,25 @@ fn managed_service_rejects_relative_remote_tls_paths() {
 
 #[test]
 fn managed_service_rejects_remote_tls_path_control_characters() {
+    let fixture = TempDir::new().expect("Remote Brain TLS fixture");
+    let certificate_chain = fixture.path().join("server.pem");
+    let private_key = fixture.path().join("server-key.pem");
+    std::fs::write(&certificate_chain, b"certificate chain").expect("certificate fixture");
+    std::fs::write(&private_key, b"private key").expect("private key fixture");
+    let mut injected_certificate = certificate_chain.into_os_string();
+    injected_certificate.push("\nEnvironment=INJECTED");
     let remote_tls = remote_tls_config(
         "192.0.2.10:7443",
-        absolute_fixture_path("/etc/tracedecay/server.pem\nEnvironment=INJECTED"),
-        absolute_fixture_path("/etc/tracedecay/server-key.pem"),
+        PathBuf::from(injected_certificate),
+        private_key,
     );
 
-    let error =
-        super::service_spec_with_remote_tls("/usr/local/bin/tracedecay", None, Some(remote_tls))
-            .expect_err("control characters must not enter a service definition");
+    let error = super::service_spec_with_remote_tls(
+        fixture.path().join("tracedecay"),
+        None,
+        Some(remote_tls),
+    )
+    .expect_err("control characters must not enter a service definition");
 
     assert!(error.to_string().contains("control character"));
 }

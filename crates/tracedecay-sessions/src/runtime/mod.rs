@@ -13,6 +13,8 @@ pub(in crate::runtime) use hosts::{opencode_frontier, opencode_part_scan, openco
 pub mod git_correlation;
 mod host_scan;
 pub mod ingest;
+mod native_ingest_source;
+pub use native_ingest_source::native_ingest_source_identity;
 mod observation;
 pub use observation::snapshot_observation;
 pub(in crate::runtime) use observation::{ingest_byte_budget, jsonl_observation_admission};
