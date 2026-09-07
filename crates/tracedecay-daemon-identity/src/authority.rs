@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::File;
 #[cfg(not(windows))]
 use std::fs::OpenOptions;
@@ -55,7 +56,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct DaemonAuthorityRecord {
     pub pid: u32,
     pub process_run_id: String,
@@ -74,6 +75,28 @@ pub struct DaemonAuthorityRecord {
     pub brain_id: Option<BrainId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<UserProfileId>,
+}
+
+/// The persisted JSON keeps the live bearer token; diagnostics never do. The
+/// enclosing [`DaemonAuthority`] derives `Debug` through this redaction.
+impl fmt::Debug for DaemonAuthorityRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DaemonAuthorityRecord")
+            .field("pid", &self.pid)
+            .field("process_run_id", &self.process_run_id)
+            .field("started_at_unix_secs", &self.started_at_unix_secs)
+            .field("epoch", &self.epoch)
+            .field("version", &self.version)
+            .field("endpoint", &self.endpoint)
+            .field("http_application_endpoint", &self.http_application_endpoint)
+            .field("remote_brain_tls_endpoint", &self.remote_brain_tls_endpoint)
+            .field("auth_token", &"[REDACTED]")
+            .field("profile_root", &self.profile_root)
+            .field("brain_id", &self.brain_id)
+            .field("profile_id", &self.profile_id)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -523,6 +546,29 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
         );
+    }
+
+    #[test]
+    fn debug_output_redacts_the_auth_token_but_the_record_still_persists_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        let token = authority.auth_token().to_string();
+        assert_eq!(token.len(), 64);
+
+        let record_debug = format!("{:?}", authority.record());
+        let authority_debug = format!("{authority:?}");
+
+        assert!(!record_debug.contains(&token), "{record_debug}");
+        assert!(!authority_debug.contains(&token), "{authority_debug}");
+        assert!(record_debug.contains("[REDACTED]"));
+        assert!(record_debug.contains(&format!("epoch: {}", authority.record().epoch)));
+        assert_eq!(
+            serde_json::to_value(authority.record()).unwrap()["auth_token"],
+            token
+        );
+        assert_eq!(current_record(&profile).unwrap().unwrap().auth_token, token);
     }
 
     #[test]

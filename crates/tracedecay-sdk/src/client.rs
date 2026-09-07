@@ -32,11 +32,32 @@ pub enum ConnectionMode {
 }
 
 /// Shared authority settings for either connection mode.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConnectionSettings {
     base_url: String,
     project_id: String,
     token: String,
+}
+
+/// Diagnostics keep the endpoint and project but never the bearer token, and
+/// URL userinfo is stripped so an accepted `user:secret@host` cannot leak.
+impl fmt::Debug for ConnectionSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let base_url = reqwest::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|mut url| {
+                url.set_username("").ok()?;
+                url.set_password(None).ok()?;
+                Some(url.to_string())
+            })
+            .unwrap_or_else(|| "[invalid URL]".to_owned());
+        formatter
+            .debug_struct("ConnectionSettings")
+            .field("base_url", &base_url)
+            .field("project_id", &self.project_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Caller-owned bridge used by generated MCP-backed SDK operations.
@@ -127,8 +148,9 @@ impl ClientBuilder {
         let origin = self.origin.unwrap_or(default_origin);
         let origin_value = HeaderValue::from_str(&origin)
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
-        let authorization = HeaderValue::from_str(&format!("Bearer {}", settings.token))
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", settings.token))
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+        authorization.set_sensitive(true);
         let http = HttpClient::builder()
             .timeout(self.timeout)
             .build()

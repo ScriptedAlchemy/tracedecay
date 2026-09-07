@@ -263,6 +263,46 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
 }
 
 #[test]
+fn debug_output_redacts_bearer_and_userinfo_while_the_wire_keeps_the_bearer() {
+    const TOKEN: &str = "marker-bearer-must-never-print-4c1e";
+    const USERINFO: &str = "marker-userinfo-must-never-print-9b7d";
+    let response = json_response("200 OK", json!({}));
+    let (base_url, server) = serve(vec![response]);
+    let credentialed_base = base_url.replacen("http://", &format!("http://ops:{USERINFO}@"), 1);
+    for mode in [
+        ConnectionMode::local(&credentialed_base, "project.sdk", TOKEN),
+        ConnectionMode::remote(&credentialed_base, "project.sdk", TOKEN),
+    ] {
+        let mode_debug = format!("{mode:?}");
+        assert!(!mode_debug.contains(TOKEN), "{mode_debug}");
+        assert!(!mode_debug.contains(USERINFO), "{mode_debug}");
+        assert!(mode_debug.contains("project.sdk"), "{mode_debug}");
+        assert!(mode_debug.contains("[REDACTED]"), "{mode_debug}");
+    }
+    let builder = Client::builder(ConnectionMode::local(&base_url, "project.sdk", TOKEN));
+    let builder_debug = format!("{builder:?}");
+    assert!(!builder_debug.contains(TOKEN), "{builder_debug}");
+    let client = builder.build().unwrap();
+    let client_debug = format!("{client:?}");
+    assert!(!client_debug.contains(TOKEN), "{client_debug}");
+    assert!(
+        client_debug.contains("Sensitive"),
+        "authorization header must be marked sensitive: {client_debug}"
+    );
+
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
+    let error = client
+        .execute::<WorkflowListDefinitions>(&request)
+        .unwrap_err();
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    assert!(!format!("{error:?}").contains(TOKEN));
+    let requests = server.join().unwrap();
+    assert!(requests[0].contains(&format!("authorization: Bearer {TOKEN}\r\n")));
+}
+
+#[test]
 fn cancellation_and_stream_resume_use_lifecycle_routes() {
     let cancellation = json_response("202 Accepted", json!({"status": "requested"}));
     let event_body = concat!(
