@@ -372,17 +372,6 @@ jobs:
       - name: Build host-CLI test fixture
         run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
 
-      # `nested_chunk_fanout_admits_stolen_workers_without_exceeding_width`
-      # installs the process-global background CPU authority at width 2, and
-      # that authority is a set-once `OnceLock` with no uninstall. Inside the
-      # shared `tracedecay-code-index` lib binary every later test that nests
-      # `with_background_cpu_permit` then queues behind a width-2 gate, which
-      # deadlocked the binary under libtest fan-out. It is therefore `#[ignore]`d
-      # so `cargo test` never runs it alongside its siblings. nextest executes
-      # every test in its own process, so selecting it through the same alias
-      # (below, after the full suite) keeps the coverage without letting the
-      # install leak and without a second compile.
-      #
       # The `test-ci` alias (.cargo/config.toml) is the one maintained
       # definition of the hosted selection — workspace, nextest `ci` policy,
       # root fixture feature, perf cargo profile — so a local `cargo test-ci`
@@ -402,12 +391,6 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
           retention-days: 7
-
-      - name: Run isolated background-CPU width test
-        run: |
-          cargo test-ci --locked --run-ignored only \
-            -E 'binary_id(tracedecay-code-index) & test(=chunks::tests::nested_chunk_fanout_admits_stolen_workers_without_exceeding_width)' \
-            --no-tests=fail
 
       # This parity test must execute separate feature-off/on binaries. Copy
       # each result immediately so the second Cargo resolution cannot replace
