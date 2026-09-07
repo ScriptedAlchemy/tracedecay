@@ -4,6 +4,14 @@ use serde_json::{Value, json};
 
 const MIN_AST_GREP_OUTLINE_VERSION: (u64, u64, u64) = (0, 44, 0);
 
+/// Outcome of probing the external `ast-grep` CLI once per process.
+///
+/// Each flag is one independently observed probe (`--version` ran, its
+/// version meets the outline floor, `outline --help` advertises the JSON
+/// flags) and `ast_grep_diagnostics_json` reports every flag verbatim to
+/// `tracedecay doctor`, so the struct is that wire shape rather than a state
+/// machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct AstGrepDiagnostics {
     pub installed: bool,
