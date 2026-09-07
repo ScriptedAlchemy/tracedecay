@@ -1015,6 +1015,13 @@ impl DaemonConfigurationRuntimeRegistrar {
         Ok(())
     }
 
+    /// Installs this project's one semantic configuration operation.
+    ///
+    /// The registered configuration runtime this installs onto is already
+    /// keyed by the project's store authority, and registering it is itself
+    /// idempotent for a second route of the same project. So a second install
+    /// joins the incumbent operation instead of refusing: refusing degraded
+    /// every reopen of a route, which builds its own operation object.
     #[hotpath::skip]
     pub async fn install_semantic_operation(
         &self,
@@ -1024,19 +1031,14 @@ impl DaemonConfigurationRuntimeRegistrar {
         self.service
             .project_runtimes
             .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
-                registered
-                    .semantic_operation
-                    .set(operation)
-                    .map_err(|_| TraceDecayError::Config {
-                        message: "semantic configuration operation is already installed".to_owned(),
-                    })
+                let _ = registered.semantic_operation.set(operation);
             })
             .await
             .ok_or_else(|| TraceDecayError::Config {
                 message:
                     "semantic configuration operation requires a registered configuration runtime"
                         .to_owned(),
-            })?
+            })
     }
 
     #[hotpath::skip]
@@ -1179,6 +1181,13 @@ impl DaemonWorkRuntimeRegistrar {
             .register_or_reconcile(
                 project_root.clone(),
                 |registered: &mut RegisteredWorkRuntime| {
+                    // Store authority only. The evidence-retrieval adapter is
+                    // built fresh by every route that mounts it, so comparing
+                    // its object identity refused the second route of one
+                    // project — a linked worktree, or a reopen of a route
+                    // whose server was replaced — and left it permanently
+                    // degraded. Its own project scope is already proven by
+                    // `grant.scope` and the authority digest.
                     if registered.actor == actor
                         && registered.grant.digest == grant.digest
                         && registered.grant.scope == grant.scope
@@ -1188,9 +1197,6 @@ impl DaemonWorkRuntimeRegistrar {
                         && registered
                             .proposal_routing
                             .same_configuration_as(&proposal_routing)
-                        && registered
-                            .evidence_retrieval
-                            .same_retrieval_authority(evidence_retrieval.as_ref())
                     {
                         // The same authority re-registering only renews its grant.
                         if registered.grant != grant {
@@ -1313,6 +1319,17 @@ impl DaemonRetainedRuntimeRegistrar {
         }
     }
 
+    /// Registers this project's one retained runtime, or joins the incumbent.
+    ///
+    /// Identity is the registered store authority — the exact authorized scope
+    /// and the actor whose grant issued it — never the identity of the ports
+    /// object. Every route builds its own `RetainedSurfacePortsV1`, so
+    /// comparing that object (or the grant digest it folds the current
+    /// configuration into) refused the second same-identity worktree route and
+    /// every reopen of a route whose ports had been rebuilt: project open then
+    /// degraded, for the life of the daemon. A matching route aliases the
+    /// incumbent and stamps its own grant on it; a foreign scope or actor is
+    /// still refused rather than given a second retained runtime.
     #[hotpath::skip]
     pub async fn register(
         &self,
@@ -1332,11 +1349,7 @@ impl DaemonRetainedRuntimeRegistrar {
             .register_or_reconcile(
                 project_root,
                 |registered: &mut RegisteredRetainedRuntime| {
-                    if registered.scope == scope
-                        && registered.actor == actor
-                        && registered.grant.digest == grant.digest
-                        && Arc::ptr_eq(&registered.ports, &ports)
-                    {
+                    if registered.scope == scope && registered.actor == actor {
                         registered.grant = grant.clone();
                         Ok(())
                     } else {

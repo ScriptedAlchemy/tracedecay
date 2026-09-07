@@ -123,6 +123,8 @@ fn active_skill(body: &str) -> ManagedSkill {
         id: SKILL_ID.to_string(),
         title: "Atomic retry".to_string(),
         summary: "Tests materialization recovery after a failed manifest write.".to_string(),
+        routing_description: "Repeated repository workflows requiring this maintained procedure."
+            .to_owned(),
         category: "testing".to_string(),
         targets: vec![SkillInstallTarget::Claude],
         body_markdown: body.to_string(),

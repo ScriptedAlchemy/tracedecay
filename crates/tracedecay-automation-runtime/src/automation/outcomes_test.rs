@@ -335,6 +335,8 @@ async fn refresh_skill_outcomes_persists_snapshot() {
             id: "outcome-skill".to_string(),
             title: "Outcome skill".to_string(),
             summary: "Outcome tracking fixture.".to_string(),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "maintenance".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: "Use when checking outcomes.".to_string(),
@@ -374,6 +376,8 @@ async fn seed_activated_skill(profile_root: &Path) {
             id: "outcome-lock-skill".to_string(),
             title: "Outcome lock skill".to_string(),
             summary: "Outcome persistence fixture.".to_string(),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "maintenance".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: "Use when testing outcome persistence.".to_string(),
