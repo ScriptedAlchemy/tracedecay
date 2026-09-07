@@ -459,6 +459,7 @@ impl SourceAuthorizationInputV1 {
     }
 
     /// Digest of all input facts, including explicit time and content state.
+    #[hotpath::measure(label = "policy.authorization.input_digest")]
     pub fn input_digest(&self) -> ManifestDigest {
         policy_digest("tracedecay.policy.source-authorization-input.v1", self)
     }
