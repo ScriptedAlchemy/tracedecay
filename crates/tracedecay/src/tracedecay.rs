@@ -228,12 +228,7 @@ impl TraceDecay {
             .current()
             .await
             .ok()
-            .map(
-                |pinned| tracedecay_configuration::ConfigurationCurrentStateV1 {
-                    revision_id: pinned.revision_id,
-                    snapshot: pinned.snapshot,
-                },
-            )
+            .map(tracedecay_configuration::PinnedRuntimeConfiguration::into_current_state)
             .is_some_and(|current| pin.configuration().matches_current(&current))
     }
 }

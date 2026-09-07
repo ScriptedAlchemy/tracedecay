@@ -15867,7 +15867,7 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         snapshot,
     )
     .expect("materialize pinned runtime configuration");
-    assert!(!config.config.native_graph_activation);
+    assert!(!config.config().native_graph_activation);
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
@@ -15876,7 +15876,9 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
             fixture.path(),
             store.path().to_path_buf(),
             None,
-            super::CodeGraphActivationPolicyV1::from_enabled(config.config.native_graph_activation),
+            super::CodeGraphActivationPolicyV1::from_enabled(
+                config.config().native_graph_activation,
+            ),
         )
         .await
         .expect("mount scheduler under configured graph policy");

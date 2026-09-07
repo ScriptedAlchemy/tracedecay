@@ -382,12 +382,12 @@ async fn execute_dashboard_automation_run(
         .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
             detail: format!("automation configuration authority is unavailable: {error}"),
         })?;
-    let config = from_configuration_snapshot(&pinned.snapshot).map_err(automation_failed)?;
+    let config = from_configuration_snapshot(pinned.snapshot()).map_err(automation_failed)?;
     let configuration_digest =
         crate::daemon::automation_effect::pinned_automation_configuration_digest(
-            &pinned.revision_id,
-            &pinned.snapshot.effective_behavior_digest,
-            &pinned.snapshot.resolution_provenance_digest,
+            pinned.revision_id(),
+            &pinned.snapshot().effective_behavior_digest,
+            &pinned.snapshot().resolution_provenance_digest,
         )
         .map_err(automation_failed)?;
     let runtime = DashboardAutomationRequestRuntime::new(&config);
