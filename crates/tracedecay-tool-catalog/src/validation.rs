@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
 use crate::id::{BindingId, CapabilityId, ContributionId, ProfileId, RetrieverId, UseCaseId};
 use crate::manifest::{CapabilityManifestV1, EffectClass, InverseContract};
-use crate::profile::{ProfileDefinition, RoutingFixtureExpectation};
+use crate::profile::ProfileDefinition;
 use crate::retrieval::RetrievalPrimitiveManifestV1;
 use crate::snapshot::{ApplicationHandlerDescriptorV1, CatalogContributionV1};
 
@@ -145,13 +145,6 @@ pub enum CatalogValidationError {
         profile_id: ProfileId,
         capability_id: CapabilityId,
         surface: BindingSurface,
-    },
-    #[error(
-        "profile {profile_id} routing fixture references incompatible capability {capability_id}"
-    )]
-    InvalidRoutingFixtureCapability {
-        profile_id: ProfileId,
-        capability_id: CapabilityId,
     },
 }
 
@@ -559,7 +552,6 @@ fn validate_profiles(
     for profile in profiles.values() {
         validate_profile_budget(profile, capabilities, bindings)?;
         validate_paired_profile(profile, bindings)?;
-        validate_routing_fixtures(profile, capabilities)?;
     }
     Ok(())
 }
@@ -638,55 +630,6 @@ fn validate_paired_profile(
                 capability_id: capability_id.clone(),
                 surface: BindingSurface::Mcp,
             });
-        }
-    }
-    Ok(())
-}
-
-/// Check that every routing fixture names capabilities that exist and sit on
-/// the side of the profile boundary its expectation claims.
-///
-/// Fixture *completeness* is deliberately not checked. A fixture carries an
-/// utterance and an expectation tag but nothing in the catalog evaluates an
-/// utterance, so demanding one fixture per capability only forced composers to
-/// mint a placeholder per capability and made every profile that omitted a
-/// capability invalid the moment a capability was added anywhere.
-fn validate_routing_fixtures(
-    profile: &ProfileDefinition,
-    capabilities: &BTreeMap<CapabilityId, &CapabilityManifestV1>,
-) -> Result<(), CatalogValidationError> {
-    let invalid =
-        |capability_id: &CapabilityId| CatalogValidationError::InvalidRoutingFixtureCapability {
-            profile_id: profile.profile_id().clone(),
-            capability_id: capability_id.clone(),
-        };
-
-    for fixture in profile.routing_fixtures() {
-        match fixture.expectation() {
-            // A selectable or ambiguous outcome must name capabilities the
-            // profile actually exposes.
-            RoutingFixtureExpectation::Select { capability_id } => {
-                if !profile.includes_capability(capability_id) {
-                    return Err(invalid(capability_id));
-                }
-            }
-            RoutingFixtureExpectation::Ambiguous { capability_ids } => {
-                for capability_id in capability_ids {
-                    if !profile.includes_capability(capability_id) {
-                        return Err(invalid(capability_id));
-                    }
-                }
-            }
-            // An insufficient-capability outcome is only meaningful for a
-            // known capability the profile withholds.
-            RoutingFixtureExpectation::InsufficientCapability { capability_id } => {
-                if !capabilities.contains_key(capability_id)
-                    || profile.includes_capability(capability_id)
-                {
-                    return Err(invalid(capability_id));
-                }
-            }
-            RoutingFixtureExpectation::Reject => {}
         }
     }
     Ok(())
