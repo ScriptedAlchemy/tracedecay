@@ -360,11 +360,14 @@ fn remove_sealed_directory(directory: &Path) {
     }
 }
 
-/// Open options for the prospective store a build writes: a WAL-synced,
-/// write-capable engine that exists only until `copy_compact_and_close`
-/// checkpoints it into the artifact.
+/// Open options for the prospective store a build writes: a write-capable
+/// engine without a sidecar WAL that exists only until
+/// `copy_compact_and_close` checkpoints it into the artifact. Nothing ever
+/// recovers a prospective container — `build_or_open_sealed_store` wipes the
+/// staging directory before every build — so the closing checkpoint is its
+/// one durable write (see [`GraphDurability::SealedBuild`]).
 fn prospective_sealed_database_options(path: PathBuf) -> GraphDbOpenOptions {
-    sealed_database_options(path, GraphDurability::WalSync)
+    sealed_database_options(path, GraphDurability::SealedBuild)
 }
 
 /// Open options for a sealed artifact that already exists: read-only, so a
@@ -1050,106 +1053,12 @@ fn copy_compact_and_close(
     // writer queues, so one corpus-length read guard here turned every
     // concurrent write *and every reader arriving behind it* — memory-graph
     // publication, fact and journey reads — into a build-length stall.
-    let mut endpoint_cache = EndpointIdentityCache::default();
-    let mut relation_rows = Vec::new();
-    relation_rows
-        .try_reserve_exact(relation_locators.len())
-        .map_err(|_| GraphDbError::unavailable("sealed relation copy set is too large"))?;
-    // Endpoint entities living in dependency generations, keyed by the
-    // dependency projection so each copy batch stays namespace-exact.
-    let mut dependency_endpoints: BTreeMap<
-        GraphProjectionIdentity,
-        BTreeMap<GraphEntityId, GraphEntity>,
-    > = BTreeMap::new();
-    hotpath::measure_block!("graph_db.sealed_store.copy.load_relations", {
-        for chunk in relation_locators.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
-            let guard = source.read_guard()?;
-            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-            let store = database.graph_store();
-            for (_, locator) in chunk {
-                check()?;
-                let stored =
-                    load_relation_by_locator_cached(store.as_ref(), *locator, &mut endpoint_cache)?;
-                let from =
-                    recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?;
-                let to =
-                    recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?;
-                for endpoint in [&from, &to] {
-                    if endpoint.projection == identity.projection {
-                        continue;
-                    }
-                    let dependency_namespace = dependency_namespaces
-                        .get(&endpoint.projection)
-                        .ok_or_else(|| GraphDbError::Corrupt {
-                            message: "sealed copy relation escapes its dependency closure"
-                                .to_owned(),
-                        })?;
-                    let copies = dependency_endpoints
-                        .entry(endpoint.projection.clone())
-                        .or_default();
-                    if !copies.contains_key(&endpoint.identity) {
-                        let entity =
-                            load_entity(database, dependency_namespace, &endpoint.identity)?
-                                .ok_or_else(|| GraphDbError::Corrupt {
-                                    message: "sealed copy dependency endpoint disappeared"
-                                        .to_owned(),
-                                })?;
-                        copies.insert(endpoint.identity.clone(), entity.entity);
-                    }
-                }
-                let relation = GraphGenerationRelation::new(
-                    stored.relation.identity,
-                    from,
-                    to,
-                    stored.relation.kind,
-                    stored.relation.properties,
-                )?;
-                relation_rows.push(relation);
-            }
-        }
-        Ok::<(), GraphDbError>(())
-    })?;
-    drop(endpoint_cache);
     let entity_count = entity_nodes.len();
-    let relation_count = relation_rows.len();
-    let mut saw_bytes_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_bytes(&relation.properties));
-    let mut saw_vector_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_vectors(&relation.properties));
+    let relation_count = relation_locators.len();
+    let mut saw_bytes_property = false;
+    let mut saw_vector_property = false;
 
-    // 1. Dependency endpoint copies, so cross-generation edges resolve.
-    hotpath::measure_block!("graph_db.sealed_store.copy.dependency_endpoints", {
-        for (projection, copies) in dependency_endpoints {
-            let namespace = dependency_namespaces
-                .get(&projection)
-                .cloned()
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: "sealed copy dependency namespace disappeared".to_owned(),
-                })?;
-            let mut pager =
-                SealedCopyPager::new(namespace, projection.projection.clone(), identity);
-            for (_, entity) in copies {
-                check()?;
-                saw_bytes_property |= properties_carry_bytes(&entity.properties);
-                saw_vector_property |= properties_carry_vectors(&entity.properties);
-                let live_bytes = entity_copy_live_bytes(&entity);
-                pager.push(
-                    &sealed,
-                    &fresh,
-                    GraphMutation::UpsertEntity(entity),
-                    None,
-                    live_bytes,
-                    check,
-                )?;
-            }
-            pager.flush(&sealed, &fresh, check)?;
-        }
-        Ok::<(), GraphDbError>(())
-    })?;
-
-    // 2. The generation's own entities, in recovered-digest order.
+    // 1. The generation's own entities, in recovered-digest order.
     let mut pager = SealedCopyPager::new(
         physical_namespace.clone(),
         identity.projection.projection.clone(),
@@ -1190,50 +1099,149 @@ fn copy_compact_and_close(
         }
         pager.flush(&sealed, &fresh, check)
     })?;
+    drop(entity_nodes);
 
-    // 3. The generation's relations, with exact endpoint namespaces.
+    // 2. The generation's relations, streamed one guard-bounded chunk at a
+    // time so the copy never holds the whole relation set decoded in memory
+    // (2.2 M rows materialized here alongside two resident row stores was the
+    // graph-phase RSS peak). Each chunk's endpoints that live in dependency
+    // generations are copied and applied *before* the chunk's rows enter the
+    // relation pager, so every edge's endpoints exist by the time its page
+    // applies, whichever later chunk that page spans.
+    let mut endpoint_cache = EndpointIdentityCache::default();
+    let mut copied_dependency_endpoints: BTreeSet<(GraphProjectionIdentity, GraphEntityId)> =
+        BTreeSet::new();
+    let mut dependency_pagers: BTreeMap<GraphProjectionIdentity, SealedCopyPager> = BTreeMap::new();
     let mut pager = SealedCopyPager::new(
         physical_namespace.clone(),
         identity.projection.projection.clone(),
         identity,
     );
     hotpath::measure_block!("graph_db.sealed_store.copy.relations", {
-        for relation in relation_rows {
-            check()?;
-            let live_bytes = relation_copy_live_bytes(&relation);
-            let from_namespace = if relation.from.projection == identity.projection {
-                physical_namespace.clone()
-            } else {
-                dependency_namespaces
-                    .get(&relation.from.projection)
-                    .cloned()
-                    .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "sealed copy relation source escapes its closure".to_owned(),
-                    })?
-            };
-            let to_namespace = if relation.to.projection == identity.projection {
-                physical_namespace.clone()
-            } else {
-                dependency_namespaces
-                    .get(&relation.to.projection)
-                    .cloned()
-                    .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "sealed copy relation target escapes its closure".to_owned(),
-                    })?
-            };
-            let identity_key = relation.identity.clone();
-            let storage = relation.storage_relation()?;
-            pager.push(
-                &sealed,
-                &fresh,
-                GraphMutation::UpsertRelation(storage),
-                Some((identity_key, (from_namespace, to_namespace))),
-                live_bytes,
-                check,
-            )?;
+        for chunk in relation_locators.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
+            let mut loaded = Vec::with_capacity(chunk.len());
+            let mut endpoint_copies: Vec<(GraphProjectionIdentity, GraphEntity)> = Vec::new();
+            {
+                let guard = source.read_guard()?;
+                let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+                let store = database.graph_store();
+                for (_, locator) in chunk {
+                    check()?;
+                    let stored = load_relation_by_locator_cached(
+                        store.as_ref(),
+                        *locator,
+                        &mut endpoint_cache,
+                    )?;
+                    let from =
+                        recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?;
+                    let to =
+                        recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?;
+                    for endpoint in [&from, &to] {
+                        if endpoint.projection == identity.projection {
+                            continue;
+                        }
+                        let dependency_namespace = dependency_namespaces
+                            .get(&endpoint.projection)
+                            .ok_or_else(|| GraphDbError::Corrupt {
+                                message: "sealed copy relation escapes its dependency closure"
+                                    .to_owned(),
+                            })?;
+                        let key = (endpoint.projection.clone(), endpoint.identity.clone());
+                        if copied_dependency_endpoints.contains(&key) {
+                            continue;
+                        }
+                        let entity =
+                            load_entity(database, dependency_namespace, &endpoint.identity)?
+                                .ok_or_else(|| GraphDbError::Corrupt {
+                                    message: "sealed copy dependency endpoint disappeared"
+                                        .to_owned(),
+                                })?;
+                        copied_dependency_endpoints.insert(key);
+                        endpoint_copies.push((endpoint.projection.clone(), entity.entity));
+                    }
+                    loaded.push(GraphGenerationRelation::new(
+                        stored.relation.identity,
+                        from,
+                        to,
+                        stored.relation.kind,
+                        stored.relation.properties,
+                    )?);
+                }
+            }
+            hotpath::measure_block!("graph_db.sealed_store.copy.dependency_endpoints", {
+                for (projection, entity) in endpoint_copies {
+                    check()?;
+                    saw_bytes_property |= properties_carry_bytes(&entity.properties);
+                    saw_vector_property |= properties_carry_vectors(&entity.properties);
+                    let live_bytes = entity_copy_live_bytes(&entity);
+                    let dependency_pager = match dependency_pagers.entry(projection) {
+                        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            let namespace = dependency_namespaces
+                                .get(entry.key())
+                                .cloned()
+                                .ok_or_else(|| GraphDbError::Corrupt {
+                                    message: "sealed copy dependency namespace disappeared"
+                                        .to_owned(),
+                                })?;
+                            let projection = entry.key().projection.clone();
+                            entry.insert(SealedCopyPager::new(namespace, projection, identity))
+                        }
+                    };
+                    dependency_pager.push(
+                        &sealed,
+                        &fresh,
+                        GraphMutation::UpsertEntity(entity),
+                        None,
+                        live_bytes,
+                        check,
+                    )?;
+                }
+                for dependency_pager in dependency_pagers.values_mut() {
+                    dependency_pager.flush(&sealed, &fresh, check)?;
+                }
+                Ok::<(), GraphDbError>(())
+            })?;
+            for relation in loaded {
+                check()?;
+                saw_bytes_property |= properties_carry_bytes(&relation.properties);
+                saw_vector_property |= properties_carry_vectors(&relation.properties);
+                let live_bytes = relation_copy_live_bytes(&relation);
+                let from_namespace = if relation.from.projection == identity.projection {
+                    physical_namespace.clone()
+                } else {
+                    dependency_namespaces
+                        .get(&relation.from.projection)
+                        .cloned()
+                        .ok_or_else(|| GraphDbError::Corrupt {
+                            message: "sealed copy relation source escapes its closure".to_owned(),
+                        })?
+                };
+                let to_namespace = if relation.to.projection == identity.projection {
+                    physical_namespace.clone()
+                } else {
+                    dependency_namespaces
+                        .get(&relation.to.projection)
+                        .cloned()
+                        .ok_or_else(|| GraphDbError::Corrupt {
+                            message: "sealed copy relation target escapes its closure".to_owned(),
+                        })?
+                };
+                let identity_key = relation.identity.clone();
+                let storage = relation.storage_relation()?;
+                pager.push(
+                    &sealed,
+                    &fresh,
+                    GraphMutation::UpsertRelation(storage),
+                    Some((identity_key, (from_namespace, to_namespace))),
+                    live_bytes,
+                    check,
+                )?;
+            }
         }
         pager.flush(&sealed, &fresh, check)
     })?;
+    drop(endpoint_cache);
 
     // Finalization: exactly like native staging, an empty batch binds the
     // dependency-closure digest to the projection commit — the recovered
@@ -1495,6 +1503,173 @@ mod fresh_store_tests {
                 &|| Ok(()),
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        SEALED_STORE_DATABASE_FILE, build_or_open_sealed_store, sealed_generation_directory,
+        sealed_store_root,
+    };
+    use crate::{
+        GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
+        GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationId,
+        GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace,
+        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
+        GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, SourceGeneration,
+    };
+
+    fn entity_identity(index: usize) -> GraphEntityId {
+        GraphEntityId::new(format!("symbol:{index:05}")).unwrap()
+    }
+
+    /// A generation large enough that its copy spans several guard chunks
+    /// and pager pages, with a Bytes payload so it takes the production
+    /// (compact-eligible) row shape.
+    fn manifest(entities: usize, relations: usize) -> GraphGenerationManifest {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("sealed-build").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+        );
+        let entity_rows = (0..entities)
+            .map(|index| {
+                GraphEntity::new(
+                    entity_identity(index),
+                    BTreeSet::from([GraphLabel::new("function").unwrap()]),
+                    BTreeMap::from([
+                        (
+                            GraphPropertyName::new("name").unwrap(),
+                            GraphProperty::String(format!("fn_{index:05}")),
+                        ),
+                        (
+                            GraphPropertyName::new("payload").unwrap(),
+                            GraphProperty::Bytes(vec![(index % 251) as u8; 64]),
+                        ),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect();
+        let entity_ref =
+            |index: usize| GraphEntityRef::new(projection.clone(), entity_identity(index));
+        let relation_rows = (0..relations)
+            .map(|index| {
+                GraphGenerationRelation::new(
+                    GraphRelationId::new(format!("call:{index:05}")).unwrap(),
+                    entity_ref(index % entities),
+                    entity_ref((index + 1) % entities),
+                    GraphRelationKind::new("calls").unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap()
+            })
+            .collect();
+        GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("generation:build").unwrap(),
+            SourceGeneration::new("source:build").unwrap(),
+            GraphWatermark::new("watermark:build").unwrap(),
+            Vec::new(),
+            entity_rows,
+            relation_rows,
+        )
+        .unwrap()
+    }
+
+    /// The prospective container is written once, by its closing checkpoint.
+    /// While the copy streams, no sidecar WAL exists next to it (a WAL-synced
+    /// open creates that directory before the first row); a build cancelled
+    /// mid-copy leaves neither an artifact nor a staging directory behind,
+    /// and the next attempt rebuilds from the source rows and proves the
+    /// reopened artifact against the same digest.
+    #[test]
+    fn sealed_build_writes_no_wal_and_an_interrupted_build_leaves_nothing_recoverable() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let owner = GraphDbOwner::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(database_path.clone()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        let database = owner.issue_lease().unwrap();
+        let manifest = manifest(9_000, 9_000);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let sidecar_wal = {
+            let mut path = staging.join(SEALED_STORE_DATABASE_FILE).into_os_string();
+            path.push(".wal");
+            std::path::PathBuf::from(path)
+        };
+
+        // Cancel once the copy is well inside the row stream: the first
+        // checks run before any row is copied, so wait for the container to
+        // exist and then let a few thousand row checks pass.
+        let checks = AtomicUsize::new(0);
+        let saw_container_without_wal = AtomicUsize::new(0);
+        let cancel_mid_copy = || {
+            let count = checks.fetch_add(1, Ordering::Relaxed);
+            if staging.join(SEALED_STORE_DATABASE_FILE).is_file() {
+                assert!(
+                    !sidecar_wal.exists(),
+                    "a sealed build must not open a sidecar WAL next to its prospective container"
+                );
+                saw_container_without_wal.fetch_add(1, Ordering::Relaxed);
+            }
+            if count >= 12_000 {
+                return Err(GraphDbError::Cancelled);
+            }
+            Ok(())
+        };
+        let interrupted = build_or_open_sealed_store(
+            &database,
+            &identity,
+            &expected,
+            &database_path,
+            &cancel_mid_copy,
+        );
+        assert!(
+            matches!(interrupted, Err(GraphDbError::Cancelled)),
+            "mid-copy cancellation must surface typed: {interrupted:?}"
+        );
+        assert!(
+            saw_container_without_wal.load(Ordering::Relaxed) > 0,
+            "the check must have observed the prospective container mid-copy"
+        );
+        assert!(
+            !staging.exists() && !directory.exists(),
+            "an interrupted build must leave neither its staging directory nor an artifact"
+        );
+
+        let (store, staging_proof) =
+            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
+                .unwrap();
+        assert!(staging_proof.is_some(), "a fresh build carries its proof");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert_eq!((store.entity_count, store.relation_count), (9_000, 9_000));
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+        assert!(
+            !staging.exists(),
+            "a completed build renames its staging directory into place"
+        );
+        let _ = store.database().close();
     }
 }
 
