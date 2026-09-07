@@ -26,6 +26,18 @@ pub struct FileChangeToken {
 /// and the `cap_std` `Dir`/`File` capabilities whose `Metadata` only exposes
 /// the volume serial number and file index on nightly.
 pub fn information<H: AsRawHandle>(file: &H) -> io::Result<FileInformation> {
+    identity_information(raw_information(file)?)
+}
+
+/// Reads only the hard-link count from an open Windows file handle.
+///
+/// Unlike [`information`], this does not require the volume to expose a
+/// durable file identity.
+pub fn number_of_links<H: AsRawHandle>(file: &H) -> io::Result<u32> {
+    Ok(raw_information(file)?.number_of_links)
+}
+
+fn raw_information<H: AsRawHandle>(file: &H) -> io::Result<FileInformation> {
     let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: `file` owns a valid Windows file handle, and `information` points
     // to writable memory sized for the API's complete output structure.
@@ -37,12 +49,101 @@ pub fn information<H: AsRawHandle>(file: &H) -> io::Result<FileInformation> {
 
     // SAFETY: A nonzero API result initializes every field of the output structure.
     let information = unsafe { information.assume_init() };
-    Ok(FileInformation {
-        volume_serial_number: information.dwVolumeSerialNumber,
-        file_index: (u64::from(information.nFileIndexHigh) << 32)
-            | u64::from(information.nFileIndexLow),
-        number_of_links: information.nNumberOfLinks,
-    })
+    Ok(file_information(
+        information.dwVolumeSerialNumber,
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        information.nNumberOfLinks,
+    ))
+}
+
+fn file_information(
+    volume_serial_number: u32,
+    file_index: u64,
+    number_of_links: u32,
+) -> FileInformation {
+    FileInformation {
+        volume_serial_number,
+        file_index,
+        number_of_links,
+    }
+}
+
+fn identity_information(information: FileInformation) -> io::Result<FileInformation> {
+    if information.volume_serial_number == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows by-handle identity has a zero volume serial number",
+        ));
+    }
+    if information.file_index == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows by-handle identity has a zero file index",
+        ));
+    }
+    if information.file_index == u64::MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows by-handle identity returned the unsupported maximum file-index sentinel",
+        ));
+    }
+    Ok(information)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+
+    use super::{file_information, identity_information};
+
+    #[test]
+    fn by_handle_information_preserves_partial_identity_and_link_count() {
+        let information = file_information(0, 41, 2);
+
+        assert_eq!(information.volume_serial_number, 0);
+        assert_eq!(information.file_index, 41);
+        assert_eq!(information.number_of_links, 2);
+    }
+
+    #[test]
+    fn by_handle_identity_rejects_unprovable_and_sentinel_values() {
+        let zero_volume = identity_information(file_information(0, 41, 1))
+            .err()
+            .expect("a zero volume serial number proves no identity");
+        assert_eq!(zero_volume.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            zero_volume.to_string(),
+            "Windows by-handle identity has a zero volume serial number"
+        );
+
+        let zero_file_index = identity_information(file_information(17, 0, 1))
+            .err()
+            .expect("a zero file index proves no identity");
+        assert_eq!(zero_file_index.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            zero_file_index.to_string(),
+            "Windows by-handle identity has a zero file index"
+        );
+
+        let unsupported_file_index = identity_information(file_information(17, u64::MAX, 1))
+            .err()
+            .expect("the unsupported file-index sentinel must fail closed");
+        assert_eq!(unsupported_file_index.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            unsupported_file_index.to_string(),
+            "Windows by-handle identity returned the unsupported maximum file-index sentinel"
+        );
+    }
+
+    #[test]
+    fn by_handle_identity_accepts_representative_valid_values() {
+        let information = identity_information(file_information(17, 41, 2))
+            .expect("a nonzero nonsentinel identity is durable");
+
+        assert_eq!(information.volume_serial_number, 17);
+        assert_eq!(information.file_index, 41);
+        assert_eq!(information.number_of_links, 2);
+    }
 }
 
 /// Reads the native last-write and change times from one open Windows handle.
