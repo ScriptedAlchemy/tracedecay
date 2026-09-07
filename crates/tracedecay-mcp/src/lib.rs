@@ -25,7 +25,6 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::wildcard_imports)]
-#![allow(clippy::needless_pass_by_value)]
 #![allow(clippy::trivially_copy_pass_by_ref)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::items_after_statements)]

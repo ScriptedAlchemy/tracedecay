@@ -185,7 +185,7 @@ pub(crate) async fn handle_projectless_hook_runtime(
         )?,
         "hermes_receipt" => {
             let host_admission_broker =
-                host_admission_broker.map_err(map_host_admission_outcome)?;
+                host_admission_broker.map_err(|outcome| map_host_admission_outcome(&outcome))?;
             hermes_receipt(
                 &args,
                 profile_root,

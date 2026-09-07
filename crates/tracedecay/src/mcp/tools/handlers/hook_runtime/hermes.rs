@@ -326,15 +326,15 @@ pub(super) async fn hermes_receipt(
     let admitted = broker
         .admit(&hook_event.admission_source(), &payload)
         .await
-        .map_err(map_host_admission_outcome)?;
+        .map_err(|outcome| map_host_admission_outcome(&outcome))?;
     let outcome = replay_projectless_hermes_receipts(broker, profile_root, Some(admitted.seq))
         .await
-        .map_err(map_host_admission_outcome)?;
+        .map_err(|outcome| map_host_admission_outcome(&outcome))?;
     if !matches!(
         outcome.status,
         HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
     ) {
-        return Err(map_host_admission_outcome(outcome));
+        return Err(map_host_admission_outcome(&outcome));
     }
     if is_turn_ingested {
         let session_runtime_registry = session_runtime_registry.ok_or_else(|| {
