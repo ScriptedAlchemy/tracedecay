@@ -1499,7 +1499,7 @@ impl StoreAdministration {
             configuration_database,
         )
         .await?
-        .config
+        .into_config()
         .sync;
         self.execute_branch_admin_in_layout(
             schedulers,

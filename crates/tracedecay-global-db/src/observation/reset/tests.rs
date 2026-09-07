@@ -1,6 +1,7 @@
 use rusqlite::OptionalExtension;
 use tempfile::TempDir;
 
+use crate::schema_contract::invariants::test_fixture::authority_fixture;
 use crate::tests::harness::open_registered_test_database_fixture;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
@@ -185,6 +186,177 @@ fn count(conn: &rusqlite::Connection, table: &str) -> i64 {
         row.get::<_, i64>(0)
     })
     .unwrap()
+}
+
+/// Seeds one canonical-shape observation and cursor whose source names
+/// `provider`, then removes the native-source scheme marker so the store looks
+/// exactly like one written before the Cline/Roo/Kilo `ui_messages` source
+/// existed. `source_key` is the observation's source key (`None` omits it).
+fn seed_unmarked_native_source_rows(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    source_key: Option<&str>,
+) {
+    let source = match source_key {
+        Some(key) => format!(
+            r#"{{"provider":"{provider}","session_id":"session.fixture","source_key":"{key}"}}"#
+        ),
+        None => format!(r#"{{"provider":"{provider}","session_id":"session.fixture"}}"#),
+    };
+    let observation =
+        format!(r#"{{"identity":{{"source":{source},"scope":{{"kind":"profile"}}}}}}"#);
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("disable foreign keys for fixture seeding");
+    conn.execute_batch(
+        "INSERT INTO sanitization_receipts
+            (receipt_id, sanitizer_version, payload_digest, receipt_json)
+         VALUES ('receipt.fixture', 'v1', 'digest.fixture', '{}');",
+    )
+    .expect("seed a receipt");
+    conn.execute(
+        "INSERT INTO observations
+            (observation_id, payload_digest, receipt_id, observation_json,
+             committed_cursor_json)
+         VALUES ('observation.fixture', 'digest.fixture', 'receipt.fixture', ?1, '{}')",
+        [&observation],
+    )
+    .expect("seed an observation");
+    conn.execute(
+        "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+         VALUES (?1, '{\"kind\":\"profile\"}', '{}')",
+        [&source],
+    )
+    .expect("seed a cursor");
+    conn.execute(
+        "DELETE FROM global_schema_migrations WHERE migration = ?1",
+        [super::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+    )
+    .expect("make the fixture an old-scheme store");
+}
+
+async fn reopen_registered_store(path: &std::path::Path) -> tracedecay_domain::errors::Result<()> {
+    open_registered_test_database_fixture(path, TestDatabaseRuntimeScope::ProfileSessions)
+        .await
+        .map(drop)
+}
+
+/// The native-source scheme change only ever applied to Cline, Roo Code and
+/// Kilo tasks. A populated store whose observations and cursors name none of
+/// those hosts cannot double-count anything under the new scheme, so attach
+/// enrolls it instead of demanding a reset that would discard derived history
+/// for no reason. Rows are untouched. The rows are real committed Codex
+/// observations (the same fixture the authority audit uses), because attach
+/// audits every retained row after the shape check admits the store.
+#[tokio::test]
+async fn populated_store_without_cline_like_sources_enrolls_on_attach() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        let (observation, cursor) = authority_fixture(0, "enroll");
+        let receipt = observation.receipt();
+        let payload_digest = observation.payload_reference().digest().as_str().to_owned();
+        raw.execute(
+            "INSERT INTO sanitization_receipts
+                (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                receipt.receipt().receipt_id().as_str(),
+                receipt.receipt().sanitizer_version().as_str(),
+                payload_digest.as_str(),
+                serde_json::to_string(receipt).unwrap()
+            ],
+        )
+        .expect("seed a committed receipt");
+        raw.execute(
+            "INSERT INTO observations
+                (observation_id, payload_digest, receipt_id, observation_json,
+                 committed_cursor_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                observation.observation_id().as_str(),
+                payload_digest.as_str(),
+                receipt.receipt().receipt_id().as_str(),
+                serde_json::to_string(&observation).unwrap(),
+                serde_json::to_string(&cursor).unwrap()
+            ],
+        )
+        .expect("seed a committed Codex observation");
+        raw.execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                serde_json::to_string(cursor.source()).unwrap(),
+                serde_json::to_string(cursor.scope()).unwrap(),
+                serde_json::to_string(&cursor).unwrap()
+            ],
+        )
+        .expect("seed the committed cursor");
+        raw.execute(
+            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            [super::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+        )
+        .expect("make the fixture an old-scheme store");
+        assert!(!scheme_migration_recorded(&raw));
+    }
+
+    reopen_registered_store(&database_path)
+        .await
+        .expect("a Codex-only old-scheme store must attach");
+
+    let raw = rusqlite::Connection::open(&database_path).unwrap();
+    assert!(
+        scheme_migration_recorded(&raw),
+        "attach must enroll the scheme for a store the change never applied to"
+    );
+    assert_eq!(count(&raw, "observations"), 1);
+    assert_eq!(count(&raw, "source_cursors"), 1);
+    assert!(
+        super::reset_refused_observation_authority(
+            &mut rusqlite::Connection::open(&database_path).unwrap()
+        )
+        .is_err(),
+        "an enrolled store is healthy and the scoped reset must refuse it"
+    );
+}
+
+/// A store that did admit a Cline-like task under the combined `<task>` source
+/// carries no record of which scheme wrote those rows, so it must still refuse
+/// with the typed `ResetRequired` state naming the observation authority —
+/// whether the host shows up as an observation provider or only as a cursor.
+#[tokio::test]
+async fn populated_store_with_cline_like_sources_still_refuses_without_the_marker() {
+    for (provider, source_key) in [
+        ("cline", None),
+        ("roo-code", None),
+        ("kilo", Some("task.fixture:ui_messages")),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        install_registered_store(&database_path).await;
+        {
+            let raw = rusqlite::Connection::open(&database_path).unwrap();
+            seed_unmarked_native_source_rows(&raw, provider, source_key);
+        }
+
+        let error = reopen_registered_store(&database_path)
+            .await
+            .expect_err("an old-scheme Cline-like store must refuse admission");
+        let (authority, reason) = error.reset_required_context().unwrap_or_else(|| {
+            panic!("expected the typed ResetRequired state for {provider}, got: {error}")
+        });
+        assert_eq!(authority, super::OBSERVATION_AUTHORITY);
+        assert!(
+            reason.contains("ui_messages.json"),
+            "the refusal must name the scheme change for {provider}: {reason}"
+        );
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        assert!(
+            !scheme_migration_recorded(&raw),
+            "a refused {provider} store must not be enrolled behind the operator's back"
+        );
+    }
 }
 
 #[tokio::test]

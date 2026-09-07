@@ -49,6 +49,8 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> =
 
 /// Grammars served by another registration: Rust by the patched fork below,
 /// Markdown by `markdown_grammar` (the large bundle's copy is never used).
+/// Only bundle tiers have anything to filter.
+#[cfg(any(feature = "medium-grammars", feature = "large-grammars"))]
 fn is_bundle_only_grammar(name: &str) -> bool {
     !matches!(name, "rust" | "markdown")
 }

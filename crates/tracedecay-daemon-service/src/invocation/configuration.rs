@@ -378,7 +378,7 @@ pub(super) async fn execute_configuration(
                     None,
                     ConfigurationMutationOperationV1::RollbackDryRun,
                     registered.scope.scope_digest.clone(),
-                    current.revision_id.clone(),
+                    current.revision_id().clone(),
                     ConfigurationMutationSinkV1::ConfigurationStore,
                     ConfigurationMutationEffectV1::CreateProtectedChangePlan,
                     deadline.expires_at,
@@ -397,7 +397,7 @@ pub(super) async fn execute_configuration(
                     authority,
                     plan.plan_id.as_str(),
                     plan.operation_digest,
-                    &current.revision_id,
+                    current.revision_id(),
                     observed_at,
                     deadline,
                 )
@@ -480,13 +480,13 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     let current = Box::pin(registered.runtime.client().current()).await?;
     let semantic_profile = requested_semantic_profile.filter(|requested| {
         requires_coordinated_semantic_profile_transition(
-            current.config.semantic.active_profile.is_some(),
+            current.config().semantic.active_profile.is_some(),
             requested.is_some(),
         )
     });
     let coordinated_semantic_transition = semantic_profile.is_some();
     let receipt =
-        if current.revision_id != expected_revision {
+        if current.revision_id() != &expected_revision {
             Box::pin(registered.runtime.client().mutate_direct(
                 authority,
                 mutation,

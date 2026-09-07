@@ -11,7 +11,7 @@ mod audit;
 mod repair;
 mod rows;
 #[cfg(test)]
-mod test_fixture;
+pub(crate) mod test_fixture;
 mod triggers;
 
 use audit::{

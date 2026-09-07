@@ -981,7 +981,8 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
         .current()
         .await
         .expect("current production configuration")
-        .revision_id;
+        .revision_id()
+        .clone();
     let request = tracedecay_application::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project { project_id },
         key: tracedecay_domain::configuration::SettingKey::new(

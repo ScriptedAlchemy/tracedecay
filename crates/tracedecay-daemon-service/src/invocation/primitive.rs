@@ -483,10 +483,7 @@ pub(super) async fn execute_context_scout(
         );
     };
     let current = match registered.runtime.client().current().await {
-        Ok(current) => tracedecay_configuration::ConfigurationCurrentStateV1 {
-            revision_id: current.revision_id,
-            snapshot: current.snapshot,
-        },
+        Ok(current) => current.into_current_state(),
         Err(error) => {
             return application_problem(wire_request_id, configuration_problem(error));
         }
@@ -894,10 +891,7 @@ async fn reconcile_context_scout_configuration(
         .current()
         .await
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
-    let current = tracedecay_configuration::ConfigurationCurrentStateV1 {
-        revision_id: current.revision_id,
-        snapshot: current.snapshot,
-    };
+    let current = current.into_current_state();
     let refreshed =
         tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
             .ok_or(ContextScoutActivationReconciliationError::InvalidConfiguration)?;

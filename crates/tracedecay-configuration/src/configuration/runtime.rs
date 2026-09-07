@@ -58,7 +58,7 @@ impl ProjectConfigurationRuntime {
             configuration,
             registered_database,
         } = opened;
-        let target = configuration.target.clone();
+        let target = configuration.target().clone();
         let profile_id = registered_database.binding().shard_id.profile_id.clone();
         let registry = crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
             TraceDecayError::Config {
@@ -79,7 +79,7 @@ impl ProjectConfigurationRuntime {
                 clock: SystemConfigurationClock,
             });
         let client = Arc::new(ProductionConfigurationDaemonClient {
-            target: configuration.target.clone(),
+            target: configuration.target().clone(),
             store,
             control_plane: Arc::clone(&control_plane),
         });

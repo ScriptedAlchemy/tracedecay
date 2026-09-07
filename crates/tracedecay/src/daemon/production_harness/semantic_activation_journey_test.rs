@@ -668,7 +668,8 @@ async fn set_semantic_profile_response(
         .current()
         .await
         .expect("current production configuration")
-        .revision_id;
+        .revision_id()
+        .clone();
     let request = ConfigurationSetRequestV1 {
         layer: ConfigurationLayerIdV1::Project { project_id },
         key: SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
@@ -1417,11 +1418,13 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         .await
         .expect("configuration after failed transition");
     assert_eq!(
-        configuration_after_refusal.revision_id, configuration_before_refusal.revision_id,
+        configuration_after_refusal.revision_id(),
+        configuration_before_refusal.revision_id(),
         "pre-admission refusal must not advance the configuration revision"
     );
     assert_eq!(
-        configuration_after_refusal.config.semantic, configuration_before_refusal.config.semantic,
+        configuration_after_refusal.config().semantic,
+        configuration_before_refusal.config().semantic,
         "pre-admission refusal must preserve active and rollback selections"
     );
     assert_eq!(
