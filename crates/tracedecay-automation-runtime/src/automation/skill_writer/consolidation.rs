@@ -127,7 +127,10 @@ pub(super) fn skill_merge_from_proposal(
         ));
     }
 
-    if object.contains_key("routing_description") {
+    if object
+        .get("routing_description")
+        .is_some_and(|value| !value.is_null())
+    {
         super::validate_routing_examples(proposal, &target.host_skill_slug())?;
     }
     let update = ManagedSkillUpdate {
@@ -135,6 +138,7 @@ pub(super) fn skill_merge_from_proposal(
         summary: optional_proposal_string(object.get("summary"))?,
         routing_description: object
             .get("routing_description")
+            .filter(|value| !value.is_null())
             .map(|value| super::required_routing_description(Some(value)))
             .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
@@ -142,7 +146,10 @@ pub(super) fn skill_merge_from_proposal(
         body_markdown: optional_proposal_string(
             object.get("body_markdown").or_else(|| object.get("body")),
         )?,
-        support_files: if object.contains_key("support_files") {
+        support_files: if object
+            .get("support_files")
+            .is_some_and(|value| !value.is_null())
+        {
             Some(support_files_from_proposal(object.get("support_files"))?)
         } else {
             None

@@ -687,7 +687,7 @@ mod tests {
             run_id: "run-outcomes",
             task: AgentTaskKind::CombinedReview,
             task_key: "combined_review",
-            prompt_version: "combined_review:v1",
+            prompt_version: "combined_review:v2",
             policy: artifact_policy(AgentTaskKind::CombinedReview),
             request: &request,
             response: &response,

@@ -118,11 +118,11 @@ fn combined_review_contract_requires_both_arrays_with_deterministic_input_hash()
     );
 
     assert_eq!(request.contract.task_key, "combined_review");
-    assert_eq!(request.contract.prompt_version, "combined_review:v1");
+    assert_eq!(request.contract.prompt_version, "combined_review:v2");
     assert!(request.contract.strict_json);
     assert_eq!(
         request.contract.response_schema["required"],
-        json!(["facts", "skills"])
+        json!(["facts", "skills", "outcome", "decision"])
     );
     assert_eq!(
         request.contract.response_schema["properties"]["facts"]["type"],
@@ -152,6 +152,30 @@ fn combined_review_contract_requires_both_arrays_with_deterministic_input_hash()
         json!({"apply": false}),
     );
     assert_ne!(request.input_hash, different_evidence.input_hash);
+}
+
+#[test]
+fn skill_writer_contract_requires_explicit_terminal_shape() {
+    let request = AgentTaskRequest::new(
+        "run_skill_contract".to_string(),
+        AgentTaskKind::SkillWriter,
+        "skill prompt".to_string(),
+        None,
+        json!({}),
+    );
+
+    assert_eq!(
+        request.contract.response_schema["required"],
+        json!(["skills", "outcome", "decision"])
+    );
+    assert_eq!(
+        request.contract.response_schema["additionalProperties"],
+        json!(false)
+    );
+    assert_eq!(
+        request.contract.response_schema["properties"]["outcome"]["enum"],
+        json!(["skills_proposed", "no_skill_needed"])
+    );
 }
 
 #[test]
@@ -337,6 +361,7 @@ fn fake_codex_app_server_returns_summary_and_logs_protocol() {
     assert_eq!(messages[3]["method"], "turn/start");
     assert_eq!(messages[3]["params"]["threadId"], "thread-1");
     assert_eq!(messages[3]["params"]["model"], "configured-model");
+    assert!(messages[3]["params"].get("outputSchema").is_none());
     assert!(messages[3]["params"].get("maxOutputTokens").is_none());
     assert!(messages[3]["params"].get("temperature").is_none());
     assert_eq!(messages[3]["params"]["effort"], "low");
@@ -369,8 +394,11 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
 
     assert_eq!(response.run_id, "run_app_server");
     assert_eq!(response.task, AgentTaskKind::SkillWriter);
-    assert_eq!(response.output_text, r#"{"skills": []}"#);
-    assert_eq!(response.output_json.unwrap()["skills"], json!([]));
+    assert_eq!(response.output_json.as_ref().unwrap()["skills"], json!([]));
+    assert_eq!(
+        response.output_json.as_ref().unwrap()["outcome"],
+        "no_skill_needed"
+    );
     assert_eq!(response.model.as_deref(), Some("actual-model"));
     assert_eq!(response.input_tokens, None);
     assert_eq!(response.output_tokens, None);
@@ -386,11 +414,15 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
     assert_eq!(backend_request["contract"]["task_key"], "skill_writer");
     assert_eq!(
         backend_request["contract"]["prompt_version"],
-        "skill_writer:v2"
+        "skill_writer:v3"
     );
     assert_eq!(backend_request["evidence_hash"], "sha256:evidence");
     assert_eq!(backend_request["prompt"], r#"{"skills":[]}"#);
     assert_eq!(backend_request["context"], json!({"kind":"test"}));
+    assert_eq!(
+        messages[3]["params"]["outputSchema"],
+        request.contract.response_schema
+    );
 }
 
 #[test]
@@ -426,6 +458,71 @@ fn codex_app_server_backend_rejects_nested_schema_matching_json_object() {
         "unexpected error: {err}"
     );
     assert_process_gone(pid);
+}
+
+#[test]
+fn codex_app_server_backend_rejects_no_skill_decision_without_skills_array() {
+    register_runtime_ports();
+    let fake = FakeCodexAppServer::new_with_behavior("no_skill_without_array");
+    let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
+        codex_bin: fake.bin.display().to_string(),
+        model: Some("configured-model".to_string()),
+        timeout: fake_codex_response_timeout(),
+    });
+    let request = AgentTaskRequest::new(
+        "run_missing_skills".to_string(),
+        AgentTaskKind::SkillWriter,
+        "review evidence".to_string(),
+        None,
+        json!({}),
+    );
+
+    let error = backend.run_task(&request).unwrap_err();
+
+    assert_eq!(
+        error.failure_class(),
+        AgentTaskFailureClass::MalformedOutput
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("automation backend output must include a skills array"),
+        "unexpected error: {error}"
+    );
+    assert_process_gone(fake.child_pid());
+}
+
+#[test]
+fn codex_app_server_backend_preserves_failed_turn_error() {
+    register_runtime_ports();
+    let fake = FakeCodexAppServer::new_with_behavior("turn_failed");
+    let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
+        codex_bin: fake.bin.display().to_string(),
+        model: Some("configured-model".to_string()),
+        timeout: fake_codex_response_timeout(),
+    });
+    let request = AgentTaskRequest::new(
+        "run_failed_turn".to_string(),
+        AgentTaskKind::SkillWriter,
+        "review evidence".to_string(),
+        None,
+        json!({}),
+    );
+
+    let error = backend.run_task(&request).unwrap_err();
+
+    assert_eq!(error.failure_class(), AgentTaskFailureClass::Permanent);
+    assert!(
+        error
+            .to_string()
+            .contains("configured model is unsupported"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !error.to_string().contains("skills array"),
+        "transport failures must not masquerade as malformed output: {error}"
+    );
+    assert_process_gone(fake.child_pid());
 }
 
 #[test]
@@ -487,6 +584,38 @@ fn codex_app_server_backend_from_automation_config_uses_the_pinned_model() {
     assert_eq!(messages[3]["params"]["model"], "configured-model");
     assert!(messages[3]["params"].get("maxOutputTokens").is_none());
     assert!(messages[3]["params"].get("temperature").is_none());
+    assert_process_gone(fake.child_pid());
+}
+
+#[test]
+fn codex_app_server_backend_uses_environment_model_when_unpinned() {
+    register_runtime_ports();
+    let fake = FakeCodexAppServer::new_with_behavior("json");
+    let backend = {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
+        let _ambient_model = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MODEL", "ambient-model");
+        CodexAppServerBackend::from_automation_config(&AutomationConfig {
+            backend: AutomationBackend::CodexAppServer,
+            model_id: None,
+            timeout_secs: fake_codex_response_timeout_secs(),
+            ..AutomationConfig::default()
+        })
+    };
+    let request = AgentTaskRequest::new(
+        "run_env_model".to_string(),
+        AgentTaskKind::SessionReflector,
+        r#"{"facts":[]}"#.to_string(),
+        None,
+        json!({}),
+    );
+
+    let response = backend.run_task(&request).unwrap();
+
+    assert_eq!(response.model.as_deref(), Some("actual-model"));
+    let messages = fake.logged_messages();
+    assert_eq!(messages[2]["params"]["model"], "ambient-model");
+    assert_eq!(messages[3]["params"]["model"], "ambient-model");
     assert_process_gone(fake.child_pid());
 }
 
@@ -811,7 +940,11 @@ with open(log_path, "a", encoding="utf-8") as log:
             elif behavior == "json":
                 requested = msg.get("params", dict()).get("input", [dict()])[0].get("text", "")
                 if "skills" in requested:
-                    payload = json.dumps(dict(skills=[]))
+                    payload = json.dumps(dict(
+                        skills=[],
+                        outcome="no_skill_needed",
+                        decision=dict(reason="No reusable skill mutation is warranted.", remedy="no_action"),
+                    ))
                 elif "facts" in requested:
                     payload = json.dumps(dict(facts=[]))
                 else:
@@ -822,6 +955,21 @@ with open(log_path, "a", encoding="utf-8") as log:
                 payload = json.dumps(dict(run_id="echo", task="memory_curator")) + "\n" + json.dumps(dict(ops=[]))
                 print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=payload, model="actual-model"))), flush=True)
                 print(json.dumps(dict(method="turn/completed")), flush=True)
+            elif behavior == "no_skill_without_array":
+                payload = json.dumps(dict(
+                    outcome="no_skill_needed",
+                    decision=dict(reason="No reusable skill mutation is warranted.", remedy="no_action"),
+                ))
+                print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=payload, model="actual-model"))), flush=True)
+                print(json.dumps(dict(method="turn/completed")), flush=True)
+            elif behavior == "turn_failed":
+                print(json.dumps(dict(
+                    method="turn/completed",
+                    params=dict(turn=dict(
+                        status="failed",
+                        error=dict(message="configured model is unsupported"),
+                    )),
+                )), flush=True)
             elif behavior == "json_wrapped_response":
                 payload = json.dumps(dict(result=dict(ops=[])))
                 print(json.dumps(dict(method="item/agentMessage/delta", params=dict(delta=payload, model="actual-model"))), flush=True)
