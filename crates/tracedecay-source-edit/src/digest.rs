@@ -367,6 +367,47 @@ mod tests {
         );
     }
 
+    /// `load_record` reads through the private-fs bounded primitive, so a
+    /// missing journal is a typed absence while an oversized one is refused
+    /// before its bytes are deserialized.
+    #[test]
+    fn load_record_distinguishes_missing_from_oversized_journals() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("journal.json");
+
+        assert_eq!(
+            load_record::<FixtureRecord>(&path, "source edit journal").unwrap(),
+            None
+        );
+
+        fs::write(&path, vec![b'"'; MAX_DURABLE_RECORD_BYTES + 1]).unwrap();
+        let error = load_record::<FixtureRecord>(&path, "source edit journal").unwrap_err();
+        assert!(error.to_string().contains("source edit journal"), "{error}");
+    }
+
+    /// A journal path that has become a symlink hands the reader bytes from
+    /// wherever the link points; the read is bound to the opened object and
+    /// refuses the link itself instead of following it.
+    #[cfg(unix)]
+    #[test]
+    fn load_record_refuses_a_symlinked_journal() {
+        let directory = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("journal.json");
+        let record = FixtureRecord {
+            content: "outside".to_owned(),
+        };
+        persist_record(&target, "fixture", &record).unwrap();
+        let link = directory.path().join("journal.json");
+        symlink(&target, &link).unwrap();
+
+        assert!(load_record::<FixtureRecord>(&link, "source edit journal").is_err());
+        assert_eq!(
+            load_record::<FixtureRecord>(&target, "source edit journal").unwrap(),
+            Some(record)
+        );
+    }
+
     #[test]
     fn the_bounded_sink_stops_encoding_at_its_limit() {
         let mut sink = BoundedRecordBytes::new(16);
