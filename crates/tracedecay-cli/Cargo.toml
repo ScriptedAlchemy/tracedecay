@@ -22,6 +22,12 @@ include = [
 name = "tracedecay"
 path = "src/main.rs"
 
+# Built explicitly by test workflows. Keeping the fake as an example leaves
+# ordinary product `--bin` / `--bins` builds free of test executables.
+[[example]]
+name = "tracedecay-host-cli-fixture"
+path = "build-support/host_cli_fixture.rs"
+
 [[test]]
 name = "cli_boundary"
 path = "tests/cli_boundary.rs"
