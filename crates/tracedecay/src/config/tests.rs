@@ -956,7 +956,7 @@ mod runtime_configuration_cutover {
             snapshot,
         )
         .expect("default snapshot materializes");
-        install_pinned_runtime_configuration(pinned).expect("publish pinned snapshot");
+        install_pinned_runtime_configuration(pinned);
 
         let legacy_dir = root.path().join(".tracedecay");
         std::fs::create_dir_all(&legacy_dir).expect("create legacy fixture directory");
@@ -1004,39 +1004,35 @@ mod runtime_configuration_cutover {
         .snapshot;
         let revision_id = revision_id("revision.runtime-cache-retarget");
         let cache = RuntimeConfigurationCache::default();
-        cache
-            .insert(
-                PinnedRuntimeConfiguration::new(
-                    RuntimeConfigurationTarget {
-                        project_id: project_id.clone(),
-                        project_root: first_root.clone(),
-                    },
-                    revision_id.clone(),
-                    snapshot.clone(),
-                )
-                .expect("first snapshot materializes"),
+        cache.insert(
+            PinnedRuntimeConfiguration::new(
+                RuntimeConfigurationTarget {
+                    project_id: project_id.clone(),
+                    project_root: first_root.clone(),
+                },
+                revision_id.clone(),
+                snapshot.clone(),
             )
-            .expect("publish first root");
-        cache
-            .insert(
-                PinnedRuntimeConfiguration::new(
-                    RuntimeConfigurationTarget {
-                        project_id: project_id.clone(),
-                        project_root: second_root.clone(),
-                    },
-                    revision_id,
-                    snapshot,
-                )
-                .expect("second snapshot materializes"),
+            .expect("first snapshot materializes"),
+        );
+        cache.insert(
+            PinnedRuntimeConfiguration::new(
+                RuntimeConfigurationTarget {
+                    project_id: project_id.clone(),
+                    project_root: second_root.clone(),
+                },
+                revision_id,
+                snapshot,
             )
-            .expect("publish second root");
+            .expect("second snapshot materializes"),
+        );
 
         let first = cache.for_root(&first_root).expect("first root lookup");
         let second = cache.for_root(&second_root).expect("second root lookup");
-        assert_eq!(first.target.project_id, project_id);
-        assert_eq!(second.target.project_id, project_id);
-        assert_eq!(first.target.project_root, first_root);
-        assert_eq!(second.target.project_root, second_root);
+        assert_eq!(first.target().project_id, project_id);
+        assert_eq!(second.target().project_id, project_id);
+        assert_eq!(first.target().project_root, first_root);
+        assert_eq!(second.target().project_root, second_root);
         assert_ne!(first.config.root_dir, second.config.root_dir);
     }
 
@@ -1065,15 +1061,15 @@ mod runtime_configuration_cutover {
             .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .expect("bind registered project database");
         crate::config::install_usecase_runtime_configuration_authority()
-            .expect("install the root runtime configuration authority");
-        let opened =
-            tracedecay_configuration::config::open_runtime_configuration_for_registered_database(
-                root.path(),
-                &layout,
-                database,
-            )
-            .await
-            .expect("open runtime configuration through the installed authority");
+            .expect("install the root runtime configuration read ports");
+        let (_, opened) = crate::config::open_runtime_configuration_for_registered_database(
+            root.path(),
+            &layout,
+            database,
+        )
+        .await
+        .expect("open runtime configuration")
+        .into_parts();
         let (runtime, startup) =
             ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
         let mutation = DirectConfigurationMutation::Set {
@@ -1090,7 +1086,7 @@ mod runtime_configuration_cutover {
                 ActorId::new("actor.configuration-runtime-drift").unwrap(),
                 ConfigurationMutationOperationV1::DirectMutation,
                 mutation.target_scope_digest().unwrap(),
-                startup.revision_id.clone(),
+                startup.revision_id().clone(),
                 1,
                 AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
                 ConfigurationMutationSinkV1::ConfigurationStore,
@@ -1109,17 +1105,154 @@ mod runtime_configuration_cutover {
             &store,
             &authority,
             &mutation,
-            &startup.revision_id,
+            startup.revision_id(),
         )
         .await
         .unwrap();
 
         let current = runtime.client().current().await.unwrap();
-        assert_eq!(current.revision_id, receipt.result_revision_id);
-        assert_ne!(current.revision_id, startup.revision_id);
-        assert!(!startup.config.diagnostics_prewarm);
-        assert!(current.config.diagnostics_prewarm);
-        assert_eq!(runtime.configuration_target(), &current.target);
+        assert_eq!(current.revision_id(), &receipt.result_revision_id);
+        assert_ne!(current.revision_id(), startup.revision_id());
+        assert!(!startup.config().diagnostics_prewarm);
+        assert!(current.config().diagnostics_prewarm);
+        assert_eq!(runtime.configuration_target(), current.target());
+    }
+
+    /// One real journey over the production read surfaces: open (as the
+    /// lifecycle does), cached reads through the root cache, the lower cache
+    /// port, and the dashboard read port, a committed configuration change
+    /// published the way daemon settlement publishes it, and the same cached
+    /// reads afterwards. The three surfaces must hand out the same revision
+    /// and the same shared settings, while the daemon-only settings keep
+    /// their exact values.
+    #[tokio::test]
+    async fn open_cached_read_and_configuration_change_share_one_runtime_pin() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary project root");
+        let project_id = project_id("project.configuration-shared-pin-journey");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root.path(),
+            project_id.as_str(),
+        )
+        .expect("write enrollment marker");
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root.path())
+                .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let host_runtime = HostAdmissionTestRuntimeV1::project(
+            tracedecay_runtime_core::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("open retained project runtime");
+        let database = host_runtime
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+            .expect("bind registered project database");
+        crate::config::install_usecase_runtime_configuration_authority()
+            .expect("install the root runtime configuration read ports");
+
+        let (config, opened) = crate::config::open_runtime_configuration_for_registered_database(
+            root.path(),
+            &layout,
+            database,
+        )
+        .await
+        .expect("open runtime configuration")
+        .into_parts();
+        let (runtime, startup) =
+            ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
+        assert!(!config.diagnostics_prewarm);
+        assert_eq!(config.max_file_size, startup.config().max_file_size);
+        assert_eq!(config.semantic, startup.config().semantic);
+
+        let cached_reads = || {
+            let root_pin = cached_runtime_configuration(root.path()).expect("root cached read");
+            let lower_pin =
+                tracedecay_configuration::config::cached_pinned_runtime_configuration(root.path())
+                    .expect("lower cached read");
+            let dashboard_pin =
+                tracedecay_dashboard_api::config::cached_runtime_configuration(root.path())
+                    .expect("dashboard cached read");
+            (root_pin, lower_pin, dashboard_pin)
+        };
+        let (root_pin, lower_pin, dashboard_pin) = cached_reads();
+        for pin in [&lower_pin, &dashboard_pin] {
+            assert_eq!(pin.revision_id(), startup.revision_id());
+            assert_eq!(pin.snapshot().snapshot_id, startup.snapshot().snapshot_id);
+            assert_eq!(pin.config(), startup.config());
+        }
+        assert_eq!(root_pin.revision_id(), startup.revision_id());
+        assert!(!root_pin.config().diagnostics_prewarm);
+        assert_eq!(
+            root_pin.config().sync.auto_watch,
+            TraceDecayConfig::default().sync.auto_watch,
+            "daemon-only settings materialize from the same snapshot"
+        );
+
+        let mutation = DirectConfigurationMutation::Set {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
+            value: Box::new(ConfigurationValueV1::Boolean(true)),
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                ConfigurationGrantReceiptId::new("configuration.grant-receipt.shared-pin").unwrap(),
+                ConfigurationGrantId::new("configuration.grant.shared-pin").unwrap(),
+                ActorId::new("actor.configuration-shared-pin").unwrap(),
+                ConfigurationMutationOperationV1::DirectMutation,
+                mutation.target_scope_digest().unwrap(),
+                startup.revision_id().clone(),
+                1,
+                AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                Some(
+                    ConfigurationIdempotencyKey::new("configuration.idempotency.shared-pin")
+                        .unwrap(),
+                ),
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let store = runtime.configuration_store();
+        let receipt = ConfigurationControlStore::commit_direct(
+            &store,
+            &authority,
+            &mutation,
+            startup.revision_id(),
+        )
+        .await
+        .expect("commit the configuration change");
+        let current = runtime
+            .client()
+            .current()
+            .await
+            .expect("read the committed revision");
+        assert_eq!(current.revision_id(), &receipt.result_revision_id);
+        assert!(current.config().diagnostics_prewarm);
+        tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
+            .expect("publish the committed revision to the runtime cache");
+
+        let (root_pin, lower_pin, dashboard_pin) = cached_reads();
+        for pin in [&lower_pin, &dashboard_pin] {
+            assert_eq!(pin.revision_id(), &receipt.result_revision_id);
+            assert!(pin.config().diagnostics_prewarm);
+        }
+        assert_eq!(root_pin.revision_id(), &receipt.result_revision_id);
+        assert!(root_pin.config().diagnostics_prewarm);
+        assert_eq!(
+            root_pin.config().sync.auto_watch,
+            TraceDecayConfig::default().sync.auto_watch,
+            "an unrelated change must not disturb daemon-only settings"
+        );
+        assert_eq!(
+            root_pin.config().sync.retention,
+            crate::config::RetentionConfig::default()
+        );
     }
 
     #[tokio::test]
@@ -1162,11 +1295,11 @@ mod runtime_configuration_cutover {
             .await
             .expect("cold open persists and publishes a resolved revision");
         assert_eq!(
-            pinned.target.project_id.as_str(),
+            pinned.target().project_id.as_str(),
             "proj_ensure_runtime_bootstrap"
         );
         assert_eq!(
-            pinned.revision_id.as_str(),
+            pinned.revision_id().as_str(),
             "configuration.initial.canonical.v1",
             "fresh stores publish the sole canonical initial revision"
         );
@@ -1189,8 +1322,8 @@ mod runtime_configuration_cutover {
             .ensure_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("reopen loads the durable current revision");
-        assert_eq!(reopened.revision_id, pinned.revision_id);
-        assert_eq!(reopened.snapshot, pinned.snapshot);
+        assert_eq!(reopened.revision_id(), pinned.revision_id());
+        assert_eq!(reopened.snapshot(), pinned.snapshot());
         assert!(
             runtime_configuration_for_layout(root.path(), &layout).is_ok(),
             "after ensure, fail-closed lookup must see the published pin"
@@ -1229,8 +1362,8 @@ mod runtime_configuration_cutover {
             .expect("bind registered project database");
         let setting = SettingKey::new(INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY)
             .expect("native graph setting key");
-        let mut values = initial.snapshot.effective_values.clone();
-        let mut provenance = initial.snapshot.provenance.clone();
+        let mut values = initial.snapshot().effective_values.clone();
+        let mut provenance = initial.snapshot().provenance.clone();
         values.remove(&setting);
         provenance.remove(&setting);
         let pre_key_snapshot =
@@ -1252,7 +1385,7 @@ mod runtime_configuration_cutover {
         transaction
             .execute(
                 "DELETE FROM configuration_entries WHERE revision_id = ?1 AND key = ?2",
-                params![initial.revision_id.as_str(), setting.as_str()],
+                params![initial.revision_id().as_str(), setting.as_str()],
             )
             .await
             .expect("remove post-snapshot setting from fixture");
@@ -1264,7 +1397,7 @@ mod runtime_configuration_cutover {
                      resolution_provenance_digest = ?4
                  WHERE revision_id = ?1",
                 params![
-                    initial.revision_id.as_str(),
+                    initial.revision_id().as_str(),
                     pre_key_snapshot.snapshot_id.as_str(),
                     pre_key_snapshot.effective_behavior_digest.as_str(),
                     pre_key_snapshot.resolution_provenance_digest.as_str(),
@@ -1296,17 +1429,17 @@ mod runtime_configuration_cutover {
             .ensure_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("registered default must converge before runtime materialization");
-        assert_ne!(converged.revision_id, initial.revision_id);
+        assert_ne!(converged.revision_id(), initial.revision_id());
         assert!(converged.config.native_graph_activation);
         assert_eq!(
-            converged.snapshot.effective_values.get(&setting),
+            converged.snapshot().effective_values.get(&setting),
             Some(&ConfigurationValueV1::Boolean(true))
         );
         let reopened = runtime
             .ensure_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("converged revision reopens without another migration");
-        assert_eq!(reopened.revision_id, converged.revision_id);
+        assert_eq!(reopened.revision_id(), converged.revision_id());
     }
 
     #[tokio::test]
@@ -1430,11 +1563,13 @@ mod runtime_configuration_cutover {
             .expect("reopen primary configuration");
 
         assert_eq!(
-            linked_configuration.revision_id, primary_configuration.revision_id,
+            linked_configuration.revision_id(),
+            primary_configuration.revision_id(),
             "linked open must not rebind the shared repository authority"
         );
         assert_eq!(
-            reopened_primary.revision_id, primary_configuration.revision_id,
+            reopened_primary.revision_id(),
+            primary_configuration.revision_id(),
             "returning to the primary must not repair linked-worktree churn"
         );
         assert_eq!(
@@ -1493,7 +1628,8 @@ mod runtime_configuration_cutover {
             .await
             .expect("registry-verified rename must rebind the locator digest, not reset");
         assert_ne!(
-            healed.revision_id, initial.revision_id,
+            healed.revision_id(),
+            initial.revision_id(),
             "the rebind must republish a new durable revision"
         );
         let reopened = runtime
@@ -1501,7 +1637,8 @@ mod runtime_configuration_cutover {
             .await
             .expect("reopen after the rebind");
         assert_eq!(
-            reopened.revision_id, healed.revision_id,
+            reopened.revision_id(),
+            healed.revision_id(),
             "a rebound binding must be stable across reopens"
         );
     }
@@ -1636,7 +1773,10 @@ mod runtime_configuration_cutover {
             .resolve_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("daemon resolve pins a registered project on demand");
-        assert_eq!(pinned.target.project_id.as_str(), "proj_resolve_cold_cache");
+        assert_eq!(
+            pinned.target().project_id.as_str(),
+            "proj_resolve_cold_cache"
+        );
 
         // After the resolve, even the fail-closed lookup sees the published pin,
         // so a subsequent daemon operation no longer hits the cold-cache error.
@@ -1650,8 +1790,8 @@ mod runtime_configuration_cutover {
             .resolve_runtime_configuration_for_test(root.path(), &layout)
             .await
             .expect("second daemon resolve reuses the published pin");
-        assert_eq!(reresolved.revision_id, pinned.revision_id);
-        assert_eq!(reresolved.snapshot, pinned.snapshot);
+        assert_eq!(reresolved.revision_id(), pinned.revision_id());
+        assert_eq!(reresolved.snapshot(), pinned.snapshot());
     }
 
     #[tokio::test]

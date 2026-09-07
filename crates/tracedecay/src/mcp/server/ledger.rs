@@ -102,7 +102,7 @@ impl McpServer {
                     "cannot read desired upload setting: {error}"
                 ))
             })?;
-        upload_enabled_from_desired_configuration(&desired.snapshot)
+        upload_enabled_from_desired_configuration(desired.snapshot())
     }
 
     /// Estimates the raw-file token cost ("before") for the given file

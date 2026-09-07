@@ -1913,16 +1913,16 @@ async fn effective_automation_config_for_project(
             message: format!("automation configuration authority is unavailable: {error}"),
         })?;
     let settings = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-        &configuration.snapshot,
+        configuration.snapshot(),
     )?;
     let configuration_digest =
         crate::daemon::automation_effect::pinned_automation_configuration_digest(
-            &configuration.revision_id,
-            &configuration.snapshot.effective_behavior_digest,
-            &configuration.snapshot.resolution_provenance_digest,
+            configuration.revision_id(),
+            &configuration.snapshot().effective_behavior_digest,
+            &configuration.snapshot().resolution_provenance_digest,
         )?;
     Ok(PinnedAutomationConfiguration {
-        configuration_revision_id: configuration.revision_id,
+        configuration_revision_id: configuration.revision_id().clone(),
         configuration_digest,
         settings,
     })

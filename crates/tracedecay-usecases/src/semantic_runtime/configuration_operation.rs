@@ -1260,10 +1260,7 @@ async fn current_configuration_state(
         .current()
         .await
         .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-    Ok(ConfigurationCurrentStateV1 {
-        revision_id: current.revision_id,
-        snapshot: current.snapshot,
-    })
+    Ok(current.into_current_state())
 }
 
 fn map_authority_error(
@@ -1289,7 +1286,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
+    use tracedecay_domain::configuration::ConfigurationRevisionId;
     use tracedecay_domain::{
         ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
         EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
@@ -1662,19 +1659,25 @@ mod tests {
         let database = database_runtime
             .project_database_arc()
             .expect("project database");
-        let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration {
-            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
+        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
+            &tracedecay_configuration::config::registry::ConfigurationRegistry::core()
+                .expect("configuration registry"),
+            &[],
+        )
+        .expect("registry defaults resolve")
+        .snapshot;
+        let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+            tracedecay_configuration::config::RuntimeConfigurationTarget {
                 project_id,
                 project_root,
             },
-            revision_id: ConfigurationRevisionId::try_from(
+            ConfigurationRevisionId::try_from(
                 "configuration.native-qualification-operation".to_owned(),
             )
             .expect("configuration revision"),
-            snapshot: ConfigurationSnapshotV1::new(BTreeMap::new(), BTreeMap::new())
-                .expect("empty configuration snapshot"),
-            config: tracedecay_configuration::config::TraceDecayConfig::default(),
-        };
+            snapshot,
+        )
+        .expect("registry defaults materialize");
         let (configuration, _) = ProjectConfigurationRuntime::open(
             tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
                 configuration,

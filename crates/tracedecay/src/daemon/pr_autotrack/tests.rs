@@ -626,7 +626,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
         .current()
         .await
         .expect("read parent configuration");
-    let project_id = current.target.project_id.clone();
+    let project_id = current.target().project_id.clone();
     let mutation = DirectConfigurationMutation::Set {
         layer: ConfigurationLayerIdV1::Project {
             project_id: project_id.clone(),
@@ -646,7 +646,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
             mutation
                 .target_scope_digest()
                 .expect("mutation target scope"),
-            current.revision_id.clone(),
+            current.revision_id().clone(),
             1,
             AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).expect("policy digest"),
             ConfigurationMutationSinkV1::ConfigurationStore,
@@ -664,7 +664,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
         &graph.configuration_runtime().configuration_store(),
         &authority,
         &mutation,
-        &current.revision_id,
+        current.revision_id(),
     )
     .await
     .expect("persist native graph refusal");

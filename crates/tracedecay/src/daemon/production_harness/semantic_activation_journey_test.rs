@@ -658,7 +658,8 @@ pub(super) async fn set_semantic_profile(
         .current()
         .await
         .expect("current production configuration")
-        .revision_id;
+        .revision_id()
+        .clone();
     let request = ConfigurationSetRequestV1 {
         layer: ConfigurationLayerIdV1::Project { project_id },
         key: SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)

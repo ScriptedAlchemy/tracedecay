@@ -27,9 +27,10 @@
 //! [`tracedecay::apply_source_edit_plan`], and
 //! [`tracedecay::capture_planned_source_edit`]. Callers should use these
 //! rather than create a second root-owned plan.
-//! - [`tracedecay_configuration::RuntimeConfigurationAuthorityPort`], installed
-//!   via [`tracedecay_configuration::install_runtime_configuration_authority`]
-//!   before opening any configuration-backed use case. Configuration
+//! - [`tracedecay_configuration::PinnedRuntimeConfigurationCachePort`], installed
+//!   via [`tracedecay_configuration::install_pinned_runtime_configuration_cache`]
+//!   by the composition root, which owns opening durable configuration.
+//!   Configuration
 //!   value/persistence contracts live in `tracedecay-configuration` (re-exported
 //!   from `tracedecay_global_db::configuration::contracts`), not duplicated here.
 //!   [`config::retrieval`] stays in this crate because it is production-load-bearing

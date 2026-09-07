@@ -692,8 +692,8 @@ pub(super) async fn register_project_open_production_owners(
     );
     owner_phase_started = Instant::now();
     let scout_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
-        revision_id: configuration.revision_id.clone(),
-        snapshot: configuration.snapshot.clone(),
+        revision_id: configuration.revision_id().clone(),
+        snapshot: configuration.snapshot().clone(),
     };
     let _scout_registry = match hotpath::future!(
         invocation
@@ -883,7 +883,7 @@ pub(super) async fn register_project_open_production_owners(
     })?;
     let work_topology_policy =
         tracedecay_configuration::config::topology::resolved_work_topology_policy(
-            &configuration.snapshot,
+            configuration.snapshot(),
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open work topology policy is unavailable: {error}"),
@@ -891,8 +891,8 @@ pub(super) async fn register_project_open_production_owners(
         .clone();
     let work_proposal_routing = DaemonWorkProposalRoutingAuthorityV1::mount(
         scope.clone(),
-        configuration.revision_id.clone(),
-        &configuration.snapshot,
+        configuration.revision_id().clone(),
+        configuration.snapshot(),
         &access.configuration_digest,
     )
     .map_err(|error| TraceDecayError::Config {
@@ -1735,13 +1735,13 @@ pub(super) fn daemon_owned_project_source_access_at(
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "project-open source binding",
     })?;
-    if configuration.target.project_id != scope.project_id {
+    if configuration.target().project_id != scope.project_id {
         return Err(ApplicationContractError::Inconsistent {
             field: "project-open configuration project",
         });
     }
     configuration
-        .snapshot
+        .snapshot()
         .validate()
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open configuration snapshot",
@@ -1758,7 +1758,7 @@ pub(super) fn daemon_owned_project_source_access_at(
         }
     })?;
     let Some(ConfigurationValueV1::SourceBindings(bindings)) =
-        configuration.snapshot.effective_values.get(&bindings_key)
+        configuration.snapshot().effective_values.get(&bindings_key)
     else {
         return Err(ApplicationContractError::Inconsistent {
             field: "project-open source bindings",
@@ -1791,7 +1791,7 @@ pub(super) fn daemon_owned_project_source_access_at(
         }
     })?;
     let Some(ConfigurationValueV1::AccessRules(access_rules)) = configuration
-        .snapshot
+        .snapshot()
         .effective_values
         .get(&access_rules_key)
     else {
@@ -1832,10 +1832,10 @@ pub(super) fn daemon_owned_project_source_access_at(
         scope: scope.clone(),
         requester,
         binding,
-        configuration_revision: configuration.revision_id.clone(),
-        configuration_digest: configuration.snapshot.effective_behavior_digest.clone(),
+        configuration_revision: configuration.revision_id().clone(),
+        configuration_digest: configuration.snapshot().effective_behavior_digest.clone(),
         configuration_provenance_digest: configuration
-            .snapshot
+            .snapshot()
             .resolution_provenance_digest
             .clone(),
         effective_capabilities,

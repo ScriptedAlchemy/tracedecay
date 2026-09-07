@@ -993,12 +993,13 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
     ) -> Result<crate::config::PinnedRuntimeConfiguration> {
-        crate::config::load_runtime_configuration_for_registered_database_read_only(
+        crate::config::open_runtime_configuration_for_registered_database_read_only(
             project_root,
             layout,
             self.project_configuration_database_for_test()?,
         )
         .await
+        .map(|opened| opened.configuration)
     }
 
     #[cfg(test)]

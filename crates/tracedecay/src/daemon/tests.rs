@@ -621,7 +621,7 @@ async fn apply_project_setting_via_surface(
         .current()
         .await
         .expect("read pinned project configuration");
-    let (key, value) = setting(&current.snapshot);
+    let (key, value) = setting(current.snapshot());
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
@@ -674,7 +674,7 @@ async fn apply_project_setting_via_surface(
                         value: Box::new(value),
                     },
                 ],
-                expected_revision: current.revision_id,
+                expected_revision: current.revision_id().clone(),
                 idempotency_key,
             },
         ),

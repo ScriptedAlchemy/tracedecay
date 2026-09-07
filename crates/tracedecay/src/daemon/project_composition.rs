@@ -498,7 +498,7 @@ async fn production_project_server_inner(
         semantic_lifecycle: semantic_lifecycle.clone(),
         semantic_resources,
         semantic_document_composition,
-        native_graph_activation: runtime_configuration.config.native_graph_activation,
+        native_graph_activation: runtime_configuration.config().native_graph_activation,
         scope: code_search_scope.clone(),
         route_registered: Arc::clone(&route_registered),
         cancellation: route_cancellation.clone(),
@@ -577,10 +577,7 @@ async fn production_project_server_inner(
                     .ok()
                     .and_then(|pinned| {
                         tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
-                            &tracedecay_configuration::ConfigurationCurrentStateV1 {
-                                revision_id: pinned.revision_id,
-                                snapshot: pinned.snapshot,
-                            },
+                            &pinned.into_current_state(),
                         )
                         .ok()
                     });
@@ -1429,7 +1426,7 @@ fn semantic_project_runtime(
     runtime_configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     runtime: &ProductionProjectCompositionRuntime,
 ) -> Result<SemanticProjectRuntime> {
-    let semantic_config = &runtime_configuration.config.semantic;
+    let semantic_config = &runtime_configuration.config().semantic;
     let semantic_resources = &semantic_config.resources;
     // The configured ceiling still caps concurrency; this only narrows it to
     // what the serving reservation leaves room for and adds one slot so an

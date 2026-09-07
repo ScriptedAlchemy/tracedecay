@@ -462,13 +462,7 @@ async fn doctor_runtime_value_inner(
         .await
         .ok()
         .and_then(|pinned| {
-            SemanticConfigurationPinV1::from_current(
-                &tracedecay_configuration::ConfigurationCurrentStateV1 {
-                    revision_id: pinned.revision_id,
-                    snapshot: pinned.snapshot,
-                },
-            )
-            .ok()
+            SemanticConfigurationPinV1::from_current(&pinned.into_current_state()).ok()
         });
     value["semantic_runtime"] =
         doctor_semantic_runtime_status(Some(project_path), semantic_configuration);

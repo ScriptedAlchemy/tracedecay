@@ -209,8 +209,8 @@ pub(super) async fn handle_admin_project(
                     message: format!("configuration authority unavailable: {error}"),
                 })?;
             json!({
-                "git_ignore": configuration.config.git_ignore,
-                "revision_id": configuration.revision_id.as_str(),
+                "git_ignore": configuration.config().git_ignore,
+                "revision_id": configuration.revision_id().as_str(),
             })
         }
         AdminProjectAction::Bench {
