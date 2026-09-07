@@ -64,6 +64,47 @@ pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
 /// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
+/// Candidate documents one lexical request hydrates before ranking. Every
+/// candidate is decoded from its row and scored, so the union of the request's
+/// term sources — not the winner cap — decides the lane's transient allocation
+/// and wall time: unbounded, a natural-language task whose terms include
+/// common words hydrated ~74k rows of a 472k-chunk corpus per read (~0.95 GB
+/// decoded, 5.7 s) and missed the context deadline. Term sources are admitted
+/// in ascending document-frequency order until their summed frequencies would
+/// exceed this bound; the most selective source is always admitted so a
+/// single common-term query still answers. Sized as the reader cache over a
+/// conservative 16 KiB per hydrated row (measured mean ~6.6 KiB), so one
+/// request's decode churn stays near 100 MiB.
+pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize =
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1 / (16 * 1024);
+
+/// Admit `(document_frequency, source)` pairs rarest-first while the summed
+/// frequency stays within [`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`]; the rarest
+/// nonempty source is always admitted. Ties keep request order so admission
+/// is deterministic. Sources past the bound still weigh admitted candidates
+/// through scoring; a document matching only those sources is never hydrated.
+pub(crate) fn admit_candidate_sources<S>(mut sources: Vec<(usize, S)>) -> Vec<S> {
+    sources.retain(|(frequency, _)| *frequency > 0);
+    sources.sort_by_key(|(frequency, _)| *frequency);
+    let total = sources.len();
+    let mut admitted_documents = 0usize;
+    let mut admitted = Vec::with_capacity(total);
+    for (ordinal, (frequency, source)) in sources.into_iter().enumerate() {
+        let next = admitted_documents.saturating_add(frequency);
+        if ordinal > 0 && next > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 {
+            break;
+        }
+        admitted_documents = next;
+        admitted.push(source);
+    }
+    hotpath::gauge!("query.lane.lexical.candidate_sources_total").inc(total as u64);
+    hotpath::gauge!("query.lane.lexical.candidate_sources_pruned")
+        .inc((total - admitted.len()) as u64);
+    hotpath::gauge!("query.lane.lexical.candidate_documents_admitted")
+        .set(admitted_documents as u64);
+    admitted
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LexicalQueryPartsV1 {
     pub whole_terms: Vec<String>,

@@ -55,7 +55,8 @@ use super::super::{
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, field_admitted,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
+    field_admitted,
 };
 
 #[derive(Clone)]
@@ -1097,7 +1098,6 @@ const ARTIFACT_NGRAM_CANDIDATE_BYTES_PER_DOCUMENT_V1: usize = 8;
 const ARTIFACT_NGRAM_MAX_CANDIDATES_V1: u64 = (ARTIFACT_NGRAM_CANDIDATE_BITMAP_BYTES_V1
     / ARTIFACT_NGRAM_CANDIDATE_BYTES_PER_DOCUMENT_V1)
     as u64;
-
 fn ensure_sqlite_bind_capacity(
     fixed_parameters: usize,
     dynamic_parameters: usize,
@@ -1502,7 +1502,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 Ok(())
             },
         )?;
-        let documents = self.lexical_documents(request, &fuzzy, &phrase_queries)?;
+        let documents = self.lexical_documents(request, &fuzzy, &stats, &phrase_queries)?;
         // The scan holds one transient row and retains complete rows only for
         // the cap-bounded winners. That avoids a second winner hydration pass
         // while preserving the same strict materialization ceiling.
@@ -1692,69 +1692,75 @@ impl<'a> ArtifactQueryV1<'a> {
             .map_err(map_query_artifact_error)
     }
 
+    /// The candidate document set for one lexical request: every phrase
+    /// match plus the term sources `admit_candidate_sources` keeps under
+    /// `MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`.
     fn lexical_documents(
         &self,
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
+        stats: &LexicalStatsCacheV1,
         phrase_queries: &BTreeMap<String, DocumentQueryV1>,
     ) -> Result<DocumentQueryV1, RetrievalPortError> {
-        let mut sources = Vec::new();
+        let mut whole_terms = Vec::new();
+        for term in &request.whole_terms {
+            whole_terms.push(normalize_lexical(term));
+            if let Some(expansions) = fuzzy.by_query.get(term) {
+                whole_terms.extend(expansions.iter().cloned());
+            }
+        }
+        let subtokens = request
+            .subtokens
+            .iter()
+            .map(|subtoken| normalize_lexical(subtoken))
+            .collect::<Vec<_>>();
+        let mut sources = Vec::with_capacity(whole_terms.len() + subtokens.len());
         match self.layout {
             LexicalArtifactLayoutV1::V10 => {
                 let subtoken_field =
                     encode_field(LexicalFieldV1::Subtoken).map_err(map_query_artifact_error)?;
-                for term in &request.whole_terms {
-                    sources.push(DocumentQueryV1::term_except(
-                        normalize_lexical(term),
-                        subtoken_field.clone(),
+                for term in whole_terms {
+                    let frequency = stats.whole_term_documents(&term);
+                    sources.push((
+                        frequency,
+                        DocumentQueryV1::term_except(term, subtoken_field.clone()),
                     ));
-                    if let Some(expansions) = fuzzy.by_query.get(term) {
-                        for expansion in expansions {
-                            sources.push(DocumentQueryV1::term_except(
-                                expansion.clone(),
-                                subtoken_field.clone(),
-                            ));
-                        }
-                    }
                 }
-                for subtoken in &request.subtokens {
-                    sources.push(DocumentQueryV1::term(
-                        subtoken_field.clone(),
-                        normalize_lexical(subtoken),
+                for subtoken in subtokens {
+                    let frequency = stats.document_frequency(LexicalFieldV1::Subtoken, &subtoken);
+                    sources.push((
+                        frequency,
+                        DocumentQueryV1::term(subtoken_field.clone(), subtoken),
                     ));
                 }
             }
             LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
                 let subtoken_field = field_code(LexicalFieldV1::Subtoken);
-                for term in &request.whole_terms {
-                    if let Some(term_id) = lookup_term_id(self.connection, &normalize_lexical(term))
-                        .map_err(map_query_artifact_error)?
+                for term in whole_terms {
+                    if let Some(term_id) =
+                        lookup_term_id(self.connection, &term).map_err(map_query_artifact_error)?
                     {
-                        sources.push(DocumentQueryV1::term_except_id(term_id, subtoken_field));
-                    }
-                    if let Some(expansions) = fuzzy.by_query.get(term) {
-                        for expansion in expansions {
-                            if let Some(term_id) = lookup_term_id(self.connection, expansion)
-                                .map_err(map_query_artifact_error)?
-                            {
-                                sources
-                                    .push(DocumentQueryV1::term_except_id(term_id, subtoken_field));
-                            }
-                        }
+                        sources.push((
+                            stats.whole_term_documents(&term),
+                            DocumentQueryV1::term_except_id(term_id, subtoken_field),
+                        ));
                     }
                 }
-                for subtoken in &request.subtokens {
-                    if let Some(term_id) =
-                        lookup_term_id(self.connection, &normalize_lexical(subtoken))
-                            .map_err(map_query_artifact_error)?
+                for subtoken in subtokens {
+                    if let Some(term_id) = lookup_term_id(self.connection, &subtoken)
+                        .map_err(map_query_artifact_error)?
                     {
-                        sources.push(DocumentQueryV1::term_id(subtoken_field, term_id));
+                        sources.push((
+                            stats.document_frequency(LexicalFieldV1::Subtoken, &subtoken),
+                            DocumentQueryV1::term_id(subtoken_field, term_id),
+                        ));
                     }
                 }
             }
         }
-        sources.extend(phrase_queries.values().cloned());
-        union_document_queries(sources)
+        let mut admitted = phrase_queries.values().cloned().collect::<Vec<_>>();
+        admitted.extend(admit_candidate_sources(sources));
+        union_document_queries(admitted)
     }
 
     fn exact_documents(
@@ -2267,6 +2273,16 @@ impl LexicalStatsCacheV1 {
             .and_then(|frequencies| frequencies.get(term))
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Upper bound on the documents a whole-term source enumerates: the
+    /// term's frequency summed over every non-subtoken field.
+    fn whole_term_documents(&self, term: &str) -> usize {
+        self.document_frequencies
+            .iter()
+            .filter(|(field, _)| **field != LexicalFieldV1::Subtoken)
+            .map(|(_, frequencies)| frequencies.get(term).copied().unwrap_or_default())
+            .fold(0usize, usize::saturating_add)
     }
 }
 

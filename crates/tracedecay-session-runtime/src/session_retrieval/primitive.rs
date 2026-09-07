@@ -17,10 +17,10 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{
-    SessionApplicationRetrievalPortV1, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
+    APPLICATION_RETRIEVAL_MAX_BYTES, SessionApplicationRetrievalPortV1, SessionRetrievalPageView,
+    SessionRetrievalServiceOutcome, admitted_execution_limits,
 };
 
-const SESSION_LOOKUP_CONTEXT_BYTES: u64 = 64 * 1024;
 const SESSION_LOOKUP_SORT: &str = "sort.session.temporal.anchor.v1";
 
 pub struct DaemonSessionLookupPrimitiveV1 {
@@ -41,6 +41,14 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
     ) -> TemporalRetrievalFuture<'a> {
         Box::pin(hotpath::future!(
             async move {
+                let limit = usize::try_from(request.meta.page.page_size)
+                    .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
+                // The admitted binding refuses any query whose execution
+                // limits exceed `APPLICATION_RETRIEVAL_MAX_BYTES` as a
+                // non-retryable structural refusal, so the adapter must size
+                // them itself: the schema exposes no budget knob a caller
+                // could correct, and the multi-MiB `ExecutionLimits::default()`
+                // made the advertised minimum page fail admission.
                 let query = SessionTemporalQuery::new(
                     request.session_id.clone(),
                     None,
@@ -53,16 +61,16 @@ impl TemporalRetrievalPort for DaemonSessionLookupPrimitiveV1 {
                         .map(|cursor| cursor.as_str().to_owned()),
                     request.meta.temporal,
                     RetrievalGrainV1::Occurrence,
-                    usize::try_from(request.meta.page.page_size)
-                        .map_err(|_| TemporalRetrievalFailure::Unavailable)?,
+                    limit,
                     DiversityLimits::unbounded(),
                     ContextBudget {
-                        max_bytes: SESSION_LOOKUP_CONTEXT_BYTES,
-                        max_tokens: SESSION_LOOKUP_CONTEXT_BYTES / 4,
+                        max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                        max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
                         estimator_version: "words-v1".to_owned(),
                     },
                 )
-                .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
+                .map_err(|_| TemporalRetrievalFailure::Unavailable)?
+                .with_execution_limits(admitted_execution_limits(limit));
                 let outcome = self
                     .retrieval
                     .retrieve_admitted(context.request, query)

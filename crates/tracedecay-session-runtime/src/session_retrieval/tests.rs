@@ -1,15 +1,26 @@
+use std::collections::BTreeSet;
+
 use super::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracedecay_application::retrieval::{
+    MAX_APPLICATION_PAGE_SIZE, PageRequest, RetrievalPortContext, RetrievalPortOutcome,
+    SessionLookupRequest, SessionLookupResult, SessionRetrievalBudgetStageV1,
+    SessionRetrievalStructuralRefusalV1, TemporalRetrievalFailure, TemporalRetrievalPort,
+};
+use tracedecay_application::{
+    ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+    Deadline, DisclosureClass, OmissionReason, RequestId, ResultContractRef,
+};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
-    RetentionClass, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, TemporalModeV1,
-    UtcMicros, derive_exact_observation_anchor_id,
+    ManifestDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
+    ProjectionGenerationId, ProviderId, RetentionClass, RetrievalAnchorId, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, TemporalModeV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_store::{
@@ -25,6 +36,7 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::ranking::{RankedCandidate, RetrieverContribution};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
+use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
 #[derive(Clone)]
 struct RealPageFixture {
@@ -1026,4 +1038,134 @@ fn rendering_deadlines_remain_distinct_from_cancellation() {
         assert!(temporal_kernel_deadline(&error));
     }
     assert!(!temporal_kernel_deadline(&TemporalKernelError::Cancelled));
+}
+
+fn admitted_lookup_context(scope: tracedecay_application::ResolvedScope) -> RequestContext {
+    let actor = ActorId::new("actor.session-lookup").expect("actor");
+    let now = tracedecay_application::now_micros();
+    let expires_at = UtcMicros(now.0 + 60_000_000);
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.session-lookup").expect("grant id"),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "9".repeat(64))).expect("grant digest"),
+        actor.clone(),
+        now,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.session.lookup").expect("capability")]),
+        BTreeSet::from([UseCaseId::new("use-case.session.lookup").expect("use case")]),
+        DisclosureClass::Evidence,
+    )
+    .expect("grant");
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.session-lookup").expect("request id"),
+        Deadline::new(expires_at).expect("deadline"),
+        CancellationContext::active("cancellation.session-lookup").expect("cancellation"),
+    )
+    .expect("request context")
+}
+
+async fn admitted_session_lookup(
+    label: &str,
+    request: SessionLookupRequest,
+) -> Result<RetrievalPortOutcome<SessionLookupResult>, TemporalRetrievalFailure> {
+    let harness =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(label).await;
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service: Arc<dyn SessionApplicationRetrievalPortV1> = Arc::new(
+        DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
+            .expect("registered retrieval service"),
+    );
+    let context = admitted_lookup_context(scope);
+    let operation = ApplicationOperation::new(
+        CapabilityId::new("capability.session.lookup").expect("capability"),
+        UseCaseId::new("use-case.session.lookup").expect("use case"),
+        ResultContractRef::new(
+            SchemaId::new("schema.application.primitive.session-lookup.result").expect("schema"),
+            1,
+        )
+        .expect("result contract"),
+        true,
+    );
+    DaemonSessionLookupPrimitiveV1::new(service)
+        .session_lookup(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request,
+        )
+        .await
+}
+
+/// The exact minimal request the CLI help and MCP schema advertise. `meta`
+/// exposes no budget parameter, so a refusal here has nothing a caller could
+/// correct.
+fn advertised_minimum_session_lookup_request() -> SessionLookupRequest {
+    serde_json::from_value(json!({
+        "session_id": "session.lookup.minimum-page",
+        "meta": {
+            "order": "relevance",
+            "page": {"page_size": 1},
+            "projection": "summary",
+            "temporal": {"kind": "current"}
+        }
+    }))
+    .expect("advertised minimal request is schema-valid")
+}
+
+/// The adapter builds the temporal query the admitted binding then budgets
+/// against `APPLICATION_RETRIEVAL_MAX_BYTES`. Leaving the multi-MiB
+/// `ExecutionLimits::default()` on that query made the schema minimum fail
+/// admission as `RequestCandidateBytes` before any store read, so this
+/// crosses the real adapter -> admitted binding -> budget admission path and
+/// requires an honest empty-store answer instead of a structural refusal.
+#[tokio::test]
+async fn advertised_minimum_session_lookup_request_passes_budget_admission() {
+    let outcome = admitted_session_lookup(
+        "session-lookup-minimum-page",
+        advertised_minimum_session_lookup_request(),
+    )
+    .await;
+
+    let evidence = match outcome {
+        Ok(RetrievalPortOutcome::Unavailable(evidence)) => evidence,
+        Err(TemporalRetrievalFailure::StructuralRefusal(refusal)) => {
+            panic!("schema-valid minimum page must not be a structural refusal: {refusal:?}")
+        }
+        other => panic!("empty store must answer an honest unavailable: {other:?}"),
+    };
+    assert!(evidence.payload.is_none());
+    assert_eq!(evidence.coverage.returned, 0);
+    assert_eq!(
+        evidence.omissions.first().map(|omission| omission.reason),
+        Some(OmissionReason::Unavailable)
+    );
+}
+
+/// Sizing the limits for the admitted budget must not admit a page the
+/// binding's result budget genuinely refuses: the schema maximum page is
+/// still refused as an oversized request, with the stage naming the limit.
+#[tokio::test]
+async fn oversized_session_lookup_page_remains_a_typed_budget_refusal() {
+    let mut request = advertised_minimum_session_lookup_request();
+    request.meta.page = PageRequest::first(MAX_APPLICATION_PAGE_SIZE).expect("schema maximum");
+
+    let outcome = admitted_session_lookup("session-lookup-oversized-page", request).await;
+
+    assert_eq!(
+        outcome,
+        Err(TemporalRetrievalFailure::StructuralRefusal(
+            SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
+            }
+        ))
+    );
 }

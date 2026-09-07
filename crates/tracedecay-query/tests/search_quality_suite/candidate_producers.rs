@@ -59,7 +59,8 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    MAX_LEXICAL_QUERY_TERM_BYTES_V1, VerifiedCodeLexicalArtifactV1,
+    MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
+    VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{ExactTermPostingReadPort, LexicalPostingReadPort};
 use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1};
@@ -1640,6 +1641,93 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
                 Err(CodeLexicalArtifactErrorV1::Incompatible(_))
             ),
             "revision {revision} must fail closed"
+        );
+    }
+}
+
+#[test]
+fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
+    let files = 128;
+    let functions_per_file = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / files + 1;
+    let fixture = real_lexical_source_fixture_from_sources(
+        (0..files)
+            .map(|file| {
+                let source = (0..functions_per_file)
+                    .map(|function| {
+                        format!("pub fn function_{function}() {{ shared_candidate(); }}\n")
+                    })
+                    .collect::<String>();
+                (
+                    format!("file.common.{file:03}"),
+                    format!("src/common_{file:03}.rs"),
+                    source.into_bytes(),
+                )
+            })
+            .collect(),
+    );
+    let generation = CodeIndexPublishedGenerationV1::decode_sealed(&fixture.sealed)
+        .expect("restore canonical generation");
+    let allowed_files = fixture.metadata.logical_paths.keys().cloned().collect();
+    let memory = CodeLexicalProjectionAdapterV1::new_published(
+        fixture.metadata.clone(),
+        &generation,
+        &allowed_files,
+    )
+    .expect("generation-backed projection");
+    let memory = LexicalLane::new(memory);
+    let mut common = lexical_request("shared_candidate", &["shared_candidate"], &[], &[], 0, 8);
+    common.generation = fixture.metadata.generation.clone();
+    let baseline = complete(memory.retrieve_lexical(&common).expect("common term query"));
+    assert_eq!(baseline.candidates.len(), 8);
+    assert!(
+        baseline.coverage.eligible > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
+        "fixture must exercise the first-source exception above the admission bound"
+    );
+    let mut mixed = lexical_request(
+        "never_present_term shared_candidate",
+        &["never_present_term", "shared_candidate"],
+        &[],
+        &[],
+        0,
+        8,
+    );
+    mixed.generation = fixture.metadata.generation.clone();
+    let expected = complete(memory.retrieve_lexical(&mixed).expect("mixed term query"));
+    assert_eq!(expected.candidates, baseline.candidates);
+    assert_eq!(expected.coverage.eligible, baseline.coverage.eligible);
+
+    let directory = tempfile::tempdir().expect("artifact directory");
+    let control = ArtifactControl { cancelled: false };
+    for revision in [
+        CodeLexicalArtifactWriterRevisionV1::V11,
+        CodeLexicalArtifactWriterRevisionV1::V12,
+    ] {
+        let path = directory.path().join(format!("common-{revision:?}.sqlite"));
+        let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
+            &path,
+            fixture.metadata.clone(),
+            revision,
+        )
+        .expect("create versioned artifact");
+        let verified = builder
+            .rebuild_and_finalize(&mut fixture.open_source(128), &control)
+            .expect("build canonical pages");
+        drop(builder);
+        let reader = CodeLexicalArtifactReaderV1::open_with_control(
+            &path,
+            &verified,
+            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+            &control,
+        )
+        .expect("reopen artifact");
+        let actual = complete(
+            LexicalLane::new(reader)
+                .retrieve_lexical(&mixed)
+                .expect("mixed artifact query"),
+        );
+        assert_eq!(
+            actual, expected,
+            "{revision:?} must preserve canonical candidate parity"
         );
     }
 }

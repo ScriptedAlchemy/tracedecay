@@ -3470,6 +3470,66 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     );
 }
 
+#[test]
+fn portable_inventory_other_profiles_progress_while_one_writer_is_paused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let first_profile = tmp.path().join("first");
+    let second_profile = tmp.path().join("second");
+    for profile in [&first_profile, &second_profile] {
+        std::fs::create_dir_all(profile.join("projects/proj_independent")).unwrap();
+    }
+    let first_projects = first_profile.join("projects");
+    let signature =
+        super::unregistered_page::portable_directory_signature(&first_projects).unwrap();
+    let inventory = super::unregistered_page::portable_inventory_path(&first_profile, &signature);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn(move || {
+        let paused = AtomicBool::new(false);
+        let mut scanned = 0;
+        super::unregistered_page::advance_portable_inventory(
+            &first_projects,
+            &inventory,
+            &signature,
+            1,
+            &mut scanned,
+            &|| {
+                if !paused.swap(true, Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+                false
+            },
+        )
+    });
+    entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let result = super::unregistered_page::read_project_directory_page(
+            &second_profile,
+            None,
+            1,
+            &|| false,
+        );
+        finished_tx.send(result).unwrap();
+    });
+    let independent = finished_rx.recv_timeout(Duration::from_secs(1));
+    // Always release and join the stalled writer before asserting so the
+    // regression cannot strand a process-global lock on its failure path.
+    release_tx.send(()).unwrap();
+    assert_eq!(first.join().unwrap().unwrap(), Some(false));
+    second.join().unwrap();
+    let page = independent
+        .expect("another profile must progress before the paused writer is released")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        page.entries.as_slice(),
+        [super::unregistered_page::ProjectDirectoryWorkV1::Project(name)]
+            if name == "proj_independent"
+    ));
+}
+
 /// Every platform uses an append-only durable inventory. A cancelled admission
 /// keeps its partial inventory, and
 /// the next page advances that exact log instead of deleting/rebuilding it.

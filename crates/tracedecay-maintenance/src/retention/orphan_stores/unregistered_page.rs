@@ -854,13 +854,20 @@ pub(super) fn advance_portable_inventory(
         return Ok(Some(true));
     }
     let builders = PORTABLE_INVENTORY_BUILDERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut builders =
+    // The canonical sidecar lock already owns this inventory exclusively.
+    // Move its iterator out of the shared map so unrelated profile admissions
+    // never wait for this inventory's filesystem reads or durable appends.
+    let retained = hotpath::measure_block!("maintenance.orphan_inventory.builder_admission", {
         builders
             .lock()
             .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
                 message: "unregistered inventory builder lock is poisoned".to_owned(),
-            })?;
-    if !builders.contains_key(inventory) {
+            })?
+            .remove(inventory)
+    });
+    let mut builder = if let Some(builder) = retained {
+        builder
+    } else {
         let profile_root = projects_dir.parent().ok_or_else(|| {
             tracedecay_domain::errors::TraceDecayError::Config {
                 message: "unregistered projects directory has no profile parent".to_owned(),
@@ -889,127 +896,136 @@ pub(super) fn advance_portable_inventory(
                 message: format!("read unregistered inventory recovery header: {error}"),
             }
         })?;
-        builders.insert(
-            inventory.to_path_buf(),
-            PortableInventoryBuilder {
-                source,
-                known: HashSet::new(),
-                known_offset: header.len() as u64,
-                hydration: Some(hydration),
-                complete: false,
-            },
-        );
-    }
-    let Some(builder) = builders.get_mut(inventory) else {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "unregistered inventory builder was not retained".to_owned(),
-        });
+        PortableInventoryBuilder {
+            source,
+            known: HashSet::new(),
+            known_offset: header.len() as u64,
+            hydration: Some(hydration),
+            complete: false,
+        }
     };
-    // The sidecar lock serializes writes, but other processes can append
-    // between admissions. Hydrate only their new suffix before resuming this
-    // iterator, so each committed name still appears exactly once.
-    if builder.hydration.is_none() {
-        let mut file = std::fs::File::open(inventory).map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("open unregistered inventory suffix: {error}"),
-            }
-        })?;
-        let length = file
-            .metadata()
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("inspect unregistered inventory suffix: {error}"),
-            })?
-            .len();
-        if length < builder.known_offset {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "committed unregistered inventory shrank between admissions".to_owned(),
-            });
-        }
-        if length > builder.known_offset {
-            file.seek(SeekFrom::Start(builder.known_offset))
-                .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("seek unregistered inventory suffix: {error}"),
-                })?;
-            builder.hydration = Some(std::io::BufReader::new(file));
-        }
-    }
-    let raw_entry_limit = raw_entry_limit.max(1);
-    let mut budget = raw_entry_limit;
-    let mut completed = false;
-    let mut append_error = None;
-    while budget > 0 {
-        if interrupted() {
-            return Ok(None);
-        }
-        if let Some(hydration) = builder.hydration.as_mut() {
-            let mut name = String::new();
-            let bytes = hydration.read_line(&mut name).map_err(|error| {
+    let result = (|| {
+        // The sidecar lock serializes writes, but other processes can append
+        // between admissions. Hydrate only their new suffix before resuming this
+        // iterator, so each committed name still appears exactly once.
+        if builder.hydration.is_none() {
+            let mut file = std::fs::File::open(inventory).map_err(|error| {
                 tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("read unregistered inventory recovery entry: {error}"),
+                    message: format!("open unregistered inventory suffix: {error}"),
                 }
             })?;
-            if bytes == 0 {
-                builder.hydration = None;
+            let length = file
+                .metadata()
+                .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("inspect unregistered inventory suffix: {error}"),
+                })?
+                .len();
+            if length < builder.known_offset {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "committed unregistered inventory shrank between admissions"
+                        .to_owned(),
+                });
+            }
+            if length > builder.known_offset {
+                file.seek(SeekFrom::Start(builder.known_offset))
+                    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("seek unregistered inventory suffix: {error}"),
+                    })?;
+                builder.hydration = Some(std::io::BufReader::new(file));
+            }
+        }
+        let raw_entry_limit = raw_entry_limit.max(1);
+        let mut budget = raw_entry_limit;
+        let mut completed = false;
+        let mut append_error = None;
+        while budget > 0 {
+            if interrupted() {
+                return Ok(None);
+            }
+            if let Some(hydration) = builder.hydration.as_mut() {
+                let mut name = String::new();
+                let bytes = hydration.read_line(&mut name).map_err(|error| {
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("read unregistered inventory recovery entry: {error}"),
+                    }
+                })?;
+                if bytes == 0 {
+                    builder.hydration = None;
+                    continue;
+                }
+                builder.known_offset += bytes as u64;
+                *entries_scanned = entries_scanned.saturating_add(1);
+                budget = budget.saturating_sub(1);
+                let name = name.trim_end_matches(['\r', '\n']);
+                if portable_inventory_entry_is_valid(name) {
+                    builder.known.insert(name.to_owned());
+                }
                 continue;
             }
-            builder.known_offset += bytes as u64;
-            *entries_scanned = entries_scanned.saturating_add(1);
-            budget = budget.saturating_sub(1);
-            let name = name.trim_end_matches(['\r', '\n']);
-            if portable_inventory_entry_is_valid(name) {
-                builder.known.insert(name.to_owned());
-            }
-            continue;
-        }
-        if builder.complete {
-            completed = true;
-            break;
-        }
-        let Some(entry) = builder.source.next() else {
-            builder.complete = true;
-            completed = true;
-            break;
-        };
-        *entries_scanned = entries_scanned.saturating_add(1);
-        budget = budget.saturating_sub(1);
-        let entry = entry.map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("read unregistered project-directory inventory entry: {error}"),
-        })?;
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        if portable_inventory_entry_is_valid(&name) && !builder.known.contains(&name) {
-            let append = (|| {
-                // Build one complete record before its single locked write.
-                // A crash can leave only this final record torn; the bounded
-                // tail repair above removes it before the next hydration.
-                let record = format!("{name}\n");
-                let mut output = std::fs::OpenOptions::new().append(true).open(inventory)?;
-                output
-                    .write_all(record.as_bytes())
-                    .and_then(|()| output.sync_data())
-            })();
-            if let Err(error) = append {
-                append_error = Some(error);
+            if builder.complete {
+                completed = true;
                 break;
             }
-            builder.known_offset += name.len() as u64 + 1;
-            builder.known.insert(name);
-        }
-    }
-    if let Some(error) = append_error {
-        builders.remove(inventory);
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("durably append unregistered inventory entry: {error}"),
-        });
-    }
-    if completed {
-        mark_portable_inventory_complete(inventory).map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("mark unregistered inventory complete: {error}"),
+            let Some(entry) = builder.source.next() else {
+                builder.complete = true;
+                completed = true;
+                break;
+            };
+            *entries_scanned = entries_scanned.saturating_add(1);
+            budget = budget.saturating_sub(1);
+            let entry =
+                entry.map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!(
+                        "read unregistered project-directory inventory entry: {error}"
+                    ),
+                })?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if portable_inventory_entry_is_valid(&name) && !builder.known.contains(&name) {
+                let append = hotpath::measure_block!(
+                    "maintenance.orphan_inventory.durable_append",
+                    (|| {
+                        // Build one complete record before its single locked write.
+                        // A crash can leave only this final record torn; the bounded
+                        // tail repair above removes it before the next hydration.
+                        let record = format!("{name}\n");
+                        let mut output =
+                            std::fs::OpenOptions::new().append(true).open(inventory)?;
+                        output
+                            .write_all(record.as_bytes())
+                            .and_then(|()| output.sync_data())
+                    })()
+                );
+                if let Err(error) = append {
+                    append_error = Some(error);
+                    break;
+                }
+                builder.known_offset += name.len() as u64 + 1;
+                builder.known.insert(name);
             }
-        })?;
-        builders.remove(inventory);
+        }
+        if let Some(error) = append_error {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("durably append unregistered inventory entry: {error}"),
+            });
+        }
+        if completed {
+            mark_portable_inventory_complete(inventory).map_err(|error| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("mark unregistered inventory complete: {error}"),
+                }
+            })?;
+        }
+        Ok(Some(completed))
+    })();
+    if matches!(&result, Ok(None | Some(false))) {
+        builders
+            .lock()
+            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                message: "unregistered inventory builder lock is poisoned".to_owned(),
+            })?
+            .insert(inventory.to_path_buf(), builder);
     }
-    Ok(Some(completed))
+    result
 }

@@ -338,6 +338,15 @@ async fn load_registered_project_rows(
     })
     .await
     .map_err(|error| report_error("join global.db family copy", error))??;
+    // This clone has no live writer holding its copied SHM. Normalize only
+    // the owned scratch family before snapshot validation: a SQLite reader
+    // would otherwise rebuild that transient SHM and invalidate its own read.
+    tracedecay_runtime_core::sqlite_read_snapshot::materialize(
+        &snapshot_source,
+        tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
+    )
+    .await
+    .map_err(|error| report_error("materialize private global.db family", error))?;
     let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_foreign_in(
         &snapshot_source,
         scratch.path(),
@@ -845,6 +854,8 @@ fn database_family_bytes(database_path: &Path) -> u64 {
 /// caller opens only `destination`, which prevents reporting from creating
 /// sidecars under the profile it is inspecting.
 fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let generation =
+        tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(source)?;
     for suffix in ["", "-wal", "-shm"] {
         let source_member = sqlite_family_member(source, suffix);
         if !source_member.is_file() {
@@ -852,7 +863,7 @@ fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> 
         }
         std::fs::copy(&source_member, sqlite_family_member(destination, suffix))?;
     }
-    Ok(())
+    generation.validate()
 }
 
 fn validate_external_scratch(profile_root: &Path, scratch_root: &Path) -> std::io::Result<()> {
@@ -1598,20 +1609,51 @@ mod tests {
 
     #[tokio::test]
     async fn storage_report_preserves_the_exact_live_global_database_family() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let profile_root = tmp.path().join("profile");
-        std::fs::create_dir_all(&profile_root).unwrap();
-        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
-        let global_db = profile_root.join(GLOBAL_DB_FILENAME);
-        let before = sqlite_family_bytes(&global_db);
+        for checkpointed in [false, true] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let profile_root = tmp.path().join("profile");
+            std::fs::create_dir_all(&profile_root).unwrap();
+            let global_db = profile_root.join(GLOBAL_DB_FILENAME);
+            let writer = rusqlite::Connection::open(&global_db).unwrap();
+            writer
+                .execute_batch(
+                    "PRAGMA journal_mode = WAL;
+                     PRAGMA wal_autocheckpoint = 0;
+                     CREATE TABLE code_projects (
+                         project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                     );
+                     INSERT INTO code_projects VALUES ('proj_a', '/repos/a');",
+                )
+                .unwrap();
+            if checkpointed {
+                writer
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .unwrap();
+            }
+            let wal = sqlite_family_member(&global_db, "-wal");
+            assert_eq!(wal.metadata().unwrap().len() == 0, checkpointed);
+            assert!(sqlite_family_member(&global_db, "-shm").is_file());
+            seed_graph_db(&profile_root, "proj_a");
+            let before = sqlite_family_bytes(&global_db);
 
-        build_storage_report(&profile_root).await.unwrap();
+            let report = build_storage_report(&profile_root).await.unwrap();
 
-        assert_eq!(
-            sqlite_family_bytes(&global_db),
-            before,
-            "reporting must never create, change, or delete a source SQLite family member"
-        );
+            assert_eq!(report.stores.len(), 1);
+            assert_eq!(report.stores[0].project_id, "proj_a");
+            assert_eq!(report.stores[0].canonical_root, "/repos/a");
+            assert_eq!(
+                sqlite_family_bytes(&global_db),
+                before,
+                "reporting must never create, change, or delete a source SQLite family member"
+            );
+            drop(writer);
+            let closed = sqlite_family_bytes(&global_db);
+            assert!(!sqlite_family_member(&global_db, "-wal").exists());
+            assert!(!sqlite_family_member(&global_db, "-shm").exists());
+            let report = build_storage_report(&profile_root).await.unwrap();
+            assert_eq!(report.stores.len(), 1);
+            assert_eq!(sqlite_family_bytes(&global_db), closed);
+        }
     }
 
     #[test]

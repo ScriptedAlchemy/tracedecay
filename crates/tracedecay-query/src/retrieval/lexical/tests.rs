@@ -19,7 +19,8 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever, lexical_query_parts,
+    LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, admit_candidate_sources,
+    lexical_query_parts,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, LexicalPostingReadPort, RetrievalPortError,
@@ -39,6 +40,54 @@ where
     <T as TryFrom<String>>::Error: fmt::Debug,
 {
     T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid fixture digest")
+}
+
+#[test]
+fn candidate_sources_admit_rarest_first_within_the_document_budget() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    let admitted = admit_candidate_sources(vec![
+        (budget * 3, "the"),
+        (10, "pendingtoolkind"),
+        (budget - 100, "pending"),
+        (budget * 2, "tool"),
+        (200, "kind"),
+    ]);
+    assert_eq!(
+        admitted,
+        ["pendingtoolkind", "kind"],
+        "`pending` would push the admitted total past the budget, and every later \
+         (more common) source is pruned with it"
+    );
+}
+
+#[test]
+fn candidate_sources_always_admit_the_most_selective_term() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    assert_eq!(
+        admit_candidate_sources(vec![(budget * 20, "tracedecay"), (budget * 30, "the")]),
+        ["tracedecay"]
+    );
+    assert!(admit_candidate_sources(Vec::<(usize, &str)>::new()).is_empty());
+}
+
+#[test]
+fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    assert_eq!(
+        admit_candidate_sources(vec![(0, "missing"), (budget + 1, "common"), (0, "absent")]),
+        ["common"],
+        "empty sources must not consume the first nonempty source exception"
+    );
+    assert!(admit_candidate_sources(vec![(0, "missing"), (0, "absent")]).is_empty());
+}
+
+#[test]
+fn candidate_sources_keep_request_order_across_equal_frequencies() {
+    let half = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / 2;
+    assert_eq!(
+        admit_candidate_sources(vec![(half, "b"), (half, "a"), (half, "c")]),
+        ["b", "a"]
+    );
 }
 
 #[test]
