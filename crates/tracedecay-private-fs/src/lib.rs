@@ -291,8 +291,16 @@ compile_error!("TraceDecay private filesystem authority requires Unix or Windows
 /// `AccessDenied` (`ERROR_ACCESS_DENIED`, 5) are different operations — an
 /// open/ACL problem is not proof that another authority holds the lock.
 pub fn is_lock_contended(error: &io::Error) -> bool {
-    const ERROR_LOCK_VIOLATION: i32 = 33;
-    error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        return error.raw_os_error() == Some(ERROR_LOCK_VIOLATION);
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 #[cfg(test)]
@@ -306,11 +314,21 @@ mod lock_contention_tests {
         )));
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_lock_violation_is_typed_contention() {
         assert!(
             is_lock_contended(&std::io::Error::from_raw_os_error(33)),
             "ERROR_LOCK_VIOLATION (33) is the Windows non-blocking lock conflict"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_raw_error_33_is_not_lock_contention() {
+        assert!(
+            !is_lock_contended(&std::io::Error::from_raw_os_error(33)),
+            "Unix errno 33 is not Windows LockFileEx contention"
         );
     }
 
