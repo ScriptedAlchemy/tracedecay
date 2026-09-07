@@ -9,8 +9,9 @@ use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
 use super::{
-    SnapshotReadControl, backup_live_sqlite_database, backup_live_sqlite_database_with,
-    backup_staging_path, family_state, open, open_foreign_in, with_suffix,
+    SnapshotReadControl, backup_live_sqlite_database, backup_live_sqlite_database_sync,
+    backup_live_sqlite_database_with, backup_staging_path, family_state, open, open_foreign_in,
+    with_suffix,
 };
 
 fn wal_writer(path: &std::path::Path) -> Connection {
@@ -178,6 +179,53 @@ fn live_backup_cancellation_retires_partial_scratch_and_never_publishes_destinat
 }
 
 #[test]
+fn cancelled_backup_retires_staging_family_and_allows_rollback_and_reopen() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    let writer = wal_writer(&source);
+    let staging = backup_staging_path(&destination);
+    fs::write(&staging, b"stale partial database").unwrap();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        fs::write(with_suffix(&staging, suffix), b"stale partial sidecar").unwrap();
+    }
+
+    let error = backup_live_sqlite_database_with(&source, &destination, || {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "cancel before opening the source",
+        ))
+    })
+    .expect_err("cancelled backup must fail");
+
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert!(
+        std::iter::once(staging.clone())
+            .chain(
+                ["-wal", "-shm", "-journal"]
+                    .into_iter()
+                    .map(|suffix| with_suffix(&staging, suffix)),
+            )
+            .all(|member| !member.exists()),
+        "cancellation must retire the complete private staging family"
+    );
+    assert!(!destination.exists());
+
+    writer
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO durable(id, value) VALUES (2, 'rolled-back');
+             ROLLBACK;",
+        )
+        .unwrap();
+    drop(writer);
+
+    backup_live_sqlite_database_sync(&source, &destination).unwrap();
+    assert_eq!(integrity_ok(&destination), "ok");
+    assert_eq!(snapshot_ids(&destination), [0, 1]);
+}
+
+#[test]
 fn live_backup_deadline_interrupts_busy_locked_retries() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");
@@ -185,7 +233,10 @@ fn live_backup_deadline_interrupts_busy_locked_retries() {
     let writer = Connection::open(&source).unwrap();
     writer
         .execute_batch(
-            "PRAGMA journal_mode=WAL;
+            // WAL-mode EXCLUSIVE transactions still admit readers. DELETE
+            // mode makes this a real source read-lock conflict so the test
+            // deterministically exercises the Busy/Locked retry loop.
+            "PRAGMA journal_mode=DELETE;
              CREATE TABLE durable(value TEXT NOT NULL);
              INSERT INTO durable(value) VALUES ('held');
              BEGIN EXCLUSIVE;",

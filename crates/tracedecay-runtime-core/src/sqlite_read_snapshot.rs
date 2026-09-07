@@ -59,18 +59,13 @@ fn backup_live_sqlite_database_with(
     checkpoint: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
     let staging = backup_staging_path(destination);
-    match fs::remove_file(&staging) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
+    remove_sqlite_family(&staging)?;
     match run_online_backup(source, &staging, checkpoint) {
         Ok(()) => publish_complete_backup(&staging, destination),
-        Err(error) => {
-            let _ = fs::remove_file(&staging);
-            let _ = fs::remove_file(destination);
-            Err(error)
-        }
+        Err(error) => Err(retire_failed_backup(
+            error,
+            &[staging.as_path(), destination],
+        )),
     }
 }
 
@@ -128,7 +123,7 @@ fn run_online_backup(
         )));
     }
     drop(staging);
-    for suffix in ["-wal", "-shm"] {
+    for suffix in ["-wal", "-shm", "-journal"] {
         match fs::remove_file(with_suffix(staging_path, suffix)) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -139,22 +134,44 @@ fn run_online_backup(
 }
 
 fn publish_complete_backup(staging: &Path, destination: &Path) -> io::Result<()> {
-    match fs::remove_file(destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            let _ = fs::remove_file(staging);
-            return Err(error);
-        }
+    if let Err(error) = remove_sqlite_family(destination) {
+        return Err(retire_failed_backup(error, &[staging]));
     }
     match fs::rename(staging, destination) {
         Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(staging);
-            let _ = fs::remove_file(destination);
-            Err(error)
+        Err(error) => Err(retire_failed_backup(error, &[staging, destination])),
+    }
+}
+
+fn remove_sqlite_family(path: &Path) -> io::Result<()> {
+    for member in [
+        with_suffix(path, "-wal"),
+        with_suffix(path, "-shm"),
+        with_suffix(path, "-journal"),
+        path.to_path_buf(),
+    ] {
+        match fs::remove_file(member) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
+    Ok(())
+}
+
+fn retire_failed_backup(error: io::Error, paths: &[&Path]) -> io::Error {
+    for path in paths {
+        if let Err(cleanup) = remove_sqlite_family(path) {
+            return io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; failed to retire incomplete SQLite backup family '{}': {cleanup}",
+                    path.display()
+                ),
+            );
+        }
+    }
+    error
 }
 
 pub struct SnapshotDatabase {
