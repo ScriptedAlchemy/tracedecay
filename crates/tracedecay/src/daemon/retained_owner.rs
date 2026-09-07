@@ -164,10 +164,23 @@ where
 pub(in crate::daemon) fn session_retrieval_unavailable_detail(
     unavailable: &tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable,
 ) -> String {
-    format!(
-        "the session retrieval service is unavailable: {:?}",
-        unavailable.reason
-    )
+    // A refusal that names the refresh worker also names where the worker
+    // stands, so a converging store reads as converging, not as missing data.
+    match &unavailable.worker {
+        Some(worker) => format!(
+            "the session retrieval service is unavailable: {:?} (refresh worker backlog={}, \
+             blocker={:?}, retry_class={:?}, last_progress_at_unix_micros={:?})",
+            unavailable.reason,
+            worker.backlog,
+            worker.blocker,
+            worker.retry_class,
+            worker.last_progress_at_unix_micros
+        ),
+        None => format!(
+            "the session retrieval service is unavailable: {:?}",
+            unavailable.reason
+        ),
+    }
 }
 
 pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionErrorV1 {

@@ -611,6 +611,219 @@ async fn populated_temporal_generation_is_invalidated_and_replay_rediscovered() 
     );
 }
 
+/// Seeds the anchor state one admitted observation leaves behind: its
+/// exact-observation anchor bound through `observation_retrieval_anchors` and
+/// `observation_projection_provenance`, the native-record alias resolving to
+/// it, and a repository-capture anchor bound through
+/// `observation_repository_provenance`.
+fn seed_observation_bound_anchors(conn: &rusqlite::Connection) {
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("disable foreign keys for fixture seeding");
+    conn.execute_batch(
+        "INSERT INTO retrieval_anchors
+            (anchor_id, anchor_json, owner_json, projection_generation)
+         VALUES ('anchor.observation', '{}', '{\"kind\":\"profile\"}', 'generation.fixture'),
+                ('anchor.capture', '{}', '{\"kind\":\"profile\"}', 'generation.fixture');
+         INSERT INTO retrieval_anchor_aliases
+            (owner_json, alias_kind, locator_digest, anchor_id)
+         VALUES ('{\"kind\":\"profile\"}', '\"provider_record\"', '\"sha256:record\"',
+                 'anchor.observation');
+         INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
+         VALUES ('observation.legacy', 'anchor.observation');
+         INSERT INTO observation_repository_provenance
+            (observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json)
+         VALUES ('observation.legacy', '{}', '{}', 'anchor.capture', '{\"kind\":\"profile\"}');
+         INSERT INTO observation_projection_provenance
+            (projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+             receipt_id, output_provider, output_message_id, output_digest, message_created)
+         VALUES ('projector.v1', 'observation.legacy', 0, 'anchor.observation',
+                 'receipt.legacy', 'claude', 'message.fixture', 'digest.output', 1);",
+    )
+    .expect("seed the anchors one admitted observation binds");
+}
+
+/// The anchors an admitted observation binds, and the native-record aliases
+/// resolving to them, are re-derived by the next admission of the same
+/// records — and verified field-for-field against whatever row already holds
+/// the anchor id. A retained anchor whose transcript file was since replaced
+/// (a new source generation) fails that verification as a storage collision
+/// on every retry; a retained alias whose record was revised refuses it
+/// deterministically. Either leaves the rebuild the reset promises undone, so
+/// they go with the observation stream, while anchors preserved rows own
+/// (here a summary anchor) stay, the immutability guards return, and the
+/// committed store is referentially coherent.
+#[tokio::test]
+async fn observation_bound_anchors_and_aliases_reset_with_the_stream() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        seed_preserved_transcript_rows(&raw);
+        install_legacy_observation_shape(&raw);
+        seed_active_temporal_generation(&raw);
+        seed_observation_bound_anchors(&raw);
+        raw.execute_batch(
+            "INSERT INTO session_summary_nodes
+                (summary_id, session_id, summary_anchor_id, summary_text,
+                 index_text, source_horizon_json, created_at)
+             VALUES ('summary.fixture', 'session.fixture', 'anchor.fixture',
+                     'summary', 'index', '{}', 1);",
+        )
+        .expect("seed a preserved summary naming its own anchor");
+        assert_eq!(count(&raw, "retrieval_anchors"), 3);
+        assert_eq!(count(&raw, "retrieval_anchor_aliases"), 1);
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report =
+        reset_refused_observation_authority(&mut raw).expect("scoped reset of an anchored store");
+    assert_eq!(
+        report.cleared_retrieval_anchor_rows, 3,
+        "two observation-bound anchors and one alias must be accounted for: {report:?}"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT group_concat(anchor_id, ',') FROM retrieval_anchors",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "anchor.fixture",
+        "only the anchor a preserved summary names may survive"
+    );
+    assert_eq!(
+        count(&raw, "retrieval_anchor_aliases"),
+        0,
+        "no alias may keep resolving a native record to an anchor that is gone"
+    );
+    for trigger in [
+        "retrieval_anchors_immutable_delete",
+        "retrieval_anchor_aliases_immutable_delete",
+        "retrieval_anchors_immutable_update",
+    ] {
+        assert!(
+            trigger_exists(&raw, trigger),
+            "{trigger} must be reinstalled before the reset commits"
+        );
+    }
+    assert!(
+        raw.execute("DELETE FROM retrieval_anchors", []).is_err(),
+        "runtime immutability must be back in force"
+    );
+    assert!(
+        foreign_key_violations(&raw).is_empty(),
+        "the committed reset must be referentially coherent"
+    );
+    assert_eq!(count(&raw, "session_summary_nodes"), 1);
+
+    // Re-admitting the same native record under a moved source generation
+    // must now be able to write its anchor and alias afresh.
+    raw.execute_batch(
+        "INSERT INTO retrieval_anchors
+            (anchor_id, anchor_json, owner_json, projection_generation)
+         VALUES ('anchor.observation', '{\"generation\":2}', '{\"kind\":\"profile\"}',
+                 'generation.fixture');
+         INSERT INTO retrieval_anchor_aliases
+            (owner_json, alias_kind, locator_digest, anchor_id)
+         VALUES ('{\"kind\":\"profile\"}', '\"provider_record\"', '\"sha256:record\"',
+                 'anchor.observation');",
+    )
+    .expect("the rebuilt authority must own the anchor identity again");
+}
+
+/// The rebuilt authority re-reads every native transcript only if nothing
+/// tells it the corpus was already swept. The Codex history frontier and
+/// corpus epoch, per-provider coverage verdicts, host discovery frontiers, and
+/// queued discovery paths all live in `parse_offsets`; a surviving `complete`
+/// verdict would leave the reset store empty forever while every read reports
+/// a healthy, current, empty projection. The hook-analytics import cursor
+/// shares the table but feeds `analytics_events`, so it stays.
+#[tokio::test]
+async fn native_source_scheduling_cursors_reset_with_the_stream() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        install_legacy_observation_shape(&raw);
+        raw.execute_batch(
+            "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id) VALUES
+                ('host-coverage://codex/v1', 0, 2, 1),
+                ('tracedecay-internal:codex-history-frontier:v2', 0, 0, 3),
+                ('tracedecay-internal:codex-history-epoch:v2', -5565623358034642743,
+                 -2743919526740859943, 1),
+                ('tracedecay-internal:project-ingest-provider-frontier:v1', 11, 0, 1),
+                ('host-frontier://kimi/discovery/v1', 0, 4, 0),
+                ('host-discovery-queue://codex/v1/L2hvbWUvcm9sbG91dA', 1, 0, 1),
+                ('hook_analytics:/project/.tracedecay/hook_analytics.jsonl', 4096, 7, 1);",
+        )
+        .expect("seed every parse-offset tenant");
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report = reset_refused_observation_authority(&mut raw)
+        .expect("scoped reset of a store with scheduling cursors");
+    assert_eq!(
+        report.cleared_native_source_cursor_rows, 6,
+        "every native-source scheduling cursor must be accounted for: {report:?}"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT group_concat(file_path, ',') FROM parse_offsets",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "hook_analytics:/project/.tracedecay/hook_analytics.jsonl",
+        "only the analytics import cursor may survive the reset"
+    );
+}
+
+/// A disposition (for example a redaction) recorded against an observation
+/// anchor is preserved evidence the reset cannot rebind, so a store carrying
+/// one refuses atomically instead of orphaning it.
+#[tokio::test]
+async fn anchor_dispositions_on_observation_anchors_refuse_atomically() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        seed_preserved_transcript_rows(&raw);
+        install_legacy_observation_shape(&raw);
+        seed_observation_bound_anchors(&raw);
+        raw.execute_batch(
+            "INSERT INTO retrieval_anchor_dispositions
+                (disposition_id, anchor_id, owner_json, state, superseded_by,
+                 reason_class, effective_at, record_json)
+             VALUES ('disposition.redacted', 'anchor.observation', '{\"kind\":\"profile\"}',
+                     'redacted', NULL, 'redaction', 1, '{}');",
+        )
+        .expect("seed a redaction against the observation anchor");
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let error = reset_refused_observation_authority(&mut raw)
+        .expect_err("an anchor disposition the reset cannot rebind must refuse");
+    assert!(
+        matches!(
+            &error,
+            TraceDecayError::Config { message }
+                if message.contains("retrieval_anchor_dispositions")
+                    && message.contains("nothing was reset")
+        ),
+        "unexpected error for a preserved anchor disposition: {error}"
+    );
+    assert_eq!(count(&raw, "retrieval_anchors"), 2);
+    assert_eq!(count(&raw, "retrieval_anchor_aliases"), 1);
+    assert_eq!(count(&raw, "retrieval_anchor_dispositions"), 1);
+    assert!(
+        trigger_exists(&raw, "retrieval_anchors_immutable_delete"),
+        "a rolled-back reset must leave the anchor guards in place"
+    );
+}
+
 /// A scoped reset must never orphan preserved evidence. External payload
 /// manifests are durable LCM publication metadata whose receipt lives in the
 /// `sanitization_receipts` table the reset recreates empty, and they are not
