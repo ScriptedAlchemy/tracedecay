@@ -409,42 +409,6 @@ fn add_and_remove_preserve_an_operator_owned_peer_server() {
 }
 
 #[cfg(unix)]
-struct AmbientPathGuard {
-    previous: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(unix)]
-impl AmbientPathGuard {
-    fn set(path: &Path) -> Self {
-        let lock = crate::config::lock_user_data_dir_test_env();
-        let previous = std::env::var_os("PATH");
-        // SAFETY: the shared profile-discovery lock is held for this guard's
-        // lifetime, so sibling tests do not observe the temporary PATH.
-        unsafe {
-            std::env::set_var("PATH", path);
-        }
-        Self {
-            previous,
-            _lock: lock,
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for AmbientPathGuard {
-    fn drop(&mut self) {
-        // SAFETY: see `AmbientPathGuard::set`.
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var("PATH", previous),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
 fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1 {
     crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
         crate::agents::host_bundle_v2::HostKindV1::Kiro,
@@ -489,7 +453,7 @@ fn failed_kiro_cli_effect_rolls_back_the_peer_containing_registry() {
     let kiro_cli = bin_dir.path().join("kiro-cli");
     let log = bin_dir.path().join("invocations.log");
     fake_kiro_cli(&kiro_cli, &log, FAKE_FAIL_AFTER_WRITE_BODY);
-    let _path = AmbientPathGuard::set(bin_dir.path());
+    let _path = crate::config::AmbientPathGuard::set(bin_dir.path());
 
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
@@ -547,7 +511,7 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
     let kiro_cli = bin_dir.path().join("kiro-cli");
     let log = bin_dir.path().join("invocations.log");
     fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-    let _path = AmbientPathGuard::set(bin_dir.path());
+    let _path = crate::config::AmbientPathGuard::set(bin_dir.path());
 
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();

@@ -191,7 +191,13 @@ fn stored_dir_marker_names_project(stored_common_dir: &Path, expected_project_id
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub fn pin_fixture_repository_identity(project_root: &Path, project_id: &str) -> Result<()> {
     if crate::worktree::git_common_dir(project_root).is_none() {
-        let status = std::process::Command::new("git")
+        let git = crate::git::try_git_program().map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "cannot git init fixture '{}': {error}",
+                project_root.display()
+            ),
+        })?;
+        let status = std::process::Command::new(git)
             .args(["init", "--quiet"])
             .current_dir(project_root)
             .status()

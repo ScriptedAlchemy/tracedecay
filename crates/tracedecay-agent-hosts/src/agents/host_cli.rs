@@ -716,37 +716,6 @@ printf '%s' "$HOME" > "$HOME/home"
     fn env_shebang_interpreter_is_resolved_before_ambient_path_is_cleared() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct PathGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl PathGuard {
-            fn set(path: &std::ffi::OsStr) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("PATH");
-                // SAFETY: the shared profile-discovery lock serializes this
-                // process-global test environment mutation.
-                unsafe { std::env::set_var("PATH", path) };
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `PathGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("PATH", previous),
-                        None => std::env::remove_var("PATH"),
-                    }
-                }
-            }
-        }
-
         let home = tempfile::tempdir().unwrap();
         let node_dir = tempfile::tempdir().unwrap();
         let attacker_dir = tempfile::tempdir().unwrap();
@@ -781,7 +750,7 @@ exit 0
         std::fs::set_permissions(&launcher, launcher_permissions).unwrap();
 
         let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
-        let _path = PathGuard::set(&path);
+        let _path = crate::config::AmbientPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["mcp", "add"], home.path())
             .expect("env-shebang launchers must run after interpreter admission");
 
@@ -818,37 +787,6 @@ exit 0
     fn env_shebang_interpreter_preserves_multicall_symlink_name() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
-        struct PathGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl PathGuard {
-            fn set(path: &std::ffi::OsStr) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("PATH");
-                // SAFETY: the shared profile-discovery lock serializes this
-                // process-global test environment mutation.
-                unsafe { std::env::set_var("PATH", path) };
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `PathGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("PATH", previous),
-                        None => std::env::remove_var("PATH"),
-                    }
-                }
-            }
-        }
-
         let home = tempfile::tempdir().unwrap();
         let bin_dir = tempfile::tempdir().unwrap();
         let shim = bin_dir.path().join("volta-shim");
@@ -875,7 +813,7 @@ printf '%s' "$*" > "$HOME/node-args"
         std::fs::set_permissions(&launcher, permissions).unwrap();
 
         let path = std::env::join_paths([bin_dir.path()]).unwrap();
-        let _path = PathGuard::set(&path);
+        let _path = crate::config::AmbientPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["plugin", "add"], home.path())
             .expect("the admitted multicall interpreter must launch");
 

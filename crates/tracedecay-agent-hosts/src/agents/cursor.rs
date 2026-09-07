@@ -1466,6 +1466,10 @@ mod tests {
 
     #[test]
     fn cursor_component_transaction_updates_doctor_and_preserves_denied_state() {
+        // Resolves the product binary from ambient PATH twice (here and inside
+        // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
+        // PATH between the two reads.
+        let _env = crate::config::lock_user_data_dir_test_env();
         use crate::agents::host_bundle_registry::{
             HostBundleRegistryError, verified_embedded_default_host_component_set,
         };
@@ -1650,6 +1654,10 @@ mod tests {
     /// "recorded by no receipt" ownership conflict that no command can clear.
     #[test]
     fn cursor_component_transaction_takes_over_a_pre_receipt_bundle() {
+        // Resolves the product binary from ambient PATH twice (here and inside
+        // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
+        // PATH between the two reads.
+        let _env = crate::config::lock_user_data_dir_test_env();
         for operation in [
             HostBundleLifecycleOpV1::Install,
             HostBundleLifecycleOpV1::Update,
@@ -1752,6 +1760,10 @@ mod tests {
     /// over, backing the previous bytes up first.
     #[test]
     fn cursor_transaction_refuses_unrecognized_receiptless_bytes_without_adoption() {
+        // Resolves the product binary from ambient PATH twice (here and inside
+        // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
+        // PATH between the two reads.
+        let _env = crate::config::lock_user_data_dir_test_env();
         for operation in [
             HostBundleLifecycleOpV1::Install,
             HostBundleLifecycleOpV1::Update,
