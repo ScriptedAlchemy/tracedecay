@@ -225,6 +225,33 @@ pub struct LcmDoctorHealthV1 {
     pub reason: Option<String>,
 }
 
+/// Whether the refresh worker that serves this store's temporal projection
+/// is current, still converging history, or not serving at all.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LcmDoctorProjectionStateV1 {
+    Current,
+    Stale,
+    Unavailable,
+}
+
+/// The temporal projection's serving state at diagnosis time. A store whose
+/// schema is healthy can still have nothing to serve while history is being
+/// re-derived (for example after a scoped observation reset); this is where
+/// that state is named instead of being read as absent data.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LcmDoctorProjectionV1 {
+    pub state: LcmDoctorProjectionStateV1,
+    /// Machine reason for a non-current state: `historical_convergence`,
+    /// `historical_retry:<code>`, `historical_blocked:<code>`, or the worker
+    /// unavailability (`worker_missing`, `worker_recovering`, `worker_stalled`,
+    /// `worker_stopped`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub worker: super::RetrievalWorkerStatusV1,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LcmDoctorResultV1 {
@@ -232,6 +259,9 @@ pub struct LcmDoctorResultV1 {
     pub authority_outcome: LcmAuthorityOutcomeV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<LcmDoctorHealthV1>,
+    /// Absent when the diagnosed store has no refresh worker (profile mounts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<LcmDoctorProjectionV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

@@ -414,6 +414,72 @@ fn same_line_column_shifts_reextract_following_top_level_syntax() {
     );
 }
 
+/// Two same-line methods share kind, name, and line. Re-extracting only the
+/// second one's `impl` must not hand it the first one's identity: the merged
+/// rows must equal a cold extraction of the edited source.
+#[test]
+fn same_line_method_edit_keeps_both_methods_distinct_after_merge() {
+    let before = "fn alpha() {} fn beta() {} fn gamma() {} impl A { fn run() { alpha(); } } impl B { fn run() { beta(); } }\n";
+    let after = "fn alpha() {} fn beta() {} fn gamma() {} impl A { fn run() { alpha(); } } impl B { fn run() { gamma(); } }\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "rust",
+        before,
+        ParseLimits::default(),
+    )
+    .expect("initial parse");
+    let initial = document
+        .extract_canonical(&RustExtractor, &opened, None)
+        .expect("initial canonical extraction");
+
+    let report = document
+        .reparse(
+            identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            after,
+        )
+        .expect("same-line incremental parse");
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let incremental = document
+        .extract_canonical(&RustExtractor, &report, Some(&initial.result))
+        .expect("same-line canonical extraction");
+    assert_eq!(
+        incremental.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+    assert_eq!(incremental.metrics.visited_top_level_nodes, 1);
+
+    let mut cold = RustExtractor.extract("src/lib.rs", after);
+    let mut merged = incremental.result;
+    for result in [&mut cold, &mut merged] {
+        result.duration_ms = 0;
+        for node in &mut result.nodes {
+            node.updated_at = 0;
+        }
+    }
+    assert_eq!(
+        serde_json::to_string(&merged).expect("merged rows"),
+        serde_json::to_string(&cold).expect("cold rows"),
+        "the merged same-line rows must equal a cold extraction of the edited source"
+    );
+    let callee_by_owner = merged
+        .unresolved_refs
+        .iter()
+        .map(|reference| {
+            let owner = merged
+                .nodes
+                .iter()
+                .find(|node| node.id == reference.from_node_id)
+                .expect("reference owner");
+            (
+                owner.qualified_name.clone(),
+                reference.reference_name.clone(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(callee_by_owner.contains(&("src/lib.rs::A::run".to_owned(), "alpha".to_owned())));
+    assert!(callee_by_owner.contains(&("src/lib.rs::B::run".to_owned(), "gamma".to_owned())));
+}
+
 #[test]
 fn incremental_edit_after_same_line_import_matches_fresh_parser_artifact() {
     let before = "import type { Foo } from \"./foo\"; export const tail = 1;\n";

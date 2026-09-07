@@ -270,8 +270,8 @@ pub fn prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator:v1",
         AgentTaskKind::SessionReflector => "session_reflector:v2",
-        AgentTaskKind::SkillWriter => "skill_writer:v2",
-        AgentTaskKind::CombinedReview => "combined_review:v1",
+        AgentTaskKind::SkillWriter => "skill_writer:v3",
+        AgentTaskKind::CombinedReview => "combined_review:v2",
         AgentTaskKind::UserJob => "user_job:v1",
     }
 }
@@ -280,13 +280,283 @@ fn response_schema(task: AgentTaskKind) -> Value {
     match task {
         AgentTaskKind::MemoryCurator => json_schema_for_array_properties(&["ops"]),
         AgentTaskKind::SessionReflector => json_schema_for_array_properties(&["facts"]),
-        AgentTaskKind::SkillWriter => json_schema_for_array_properties(&["skills"]),
-        AgentTaskKind::CombinedReview => json_schema_for_array_properties(&["facts", "skills"]),
+        AgentTaskKind::SkillWriter => skill_writer_response_schema(),
+        AgentTaskKind::CombinedReview => {
+            let mut schema = response_schema(AgentTaskKind::SkillWriter);
+            schema["required"] = serde_json::json!(["facts", "skills", "outcome", "decision"]);
+            schema["properties"]["facts"] = serde_json::json!({
+                "type": "array",
+                "items": session_fact_schema()
+            });
+            schema
+        }
         AgentTaskKind::UserJob => serde_json::json!({
             "type": "object",
             "additionalProperties": true
         }),
     }
+}
+
+fn session_fact_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["content", "category", "tags", "entities", "trust", "source_span", "reason"],
+        "properties": {
+            "content": { "type": "string" },
+            "category": {
+                "type": "string",
+                "enum": ["general", "user_pref", "project", "tool", "decision", "code_area"]
+            },
+            "tags": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "entities": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "trust": { "type": "number" },
+            "source_span": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "required": ["session_id", "message_id"],
+                        "properties": {
+                            "session_id": { "type": "string" },
+                            "message_id": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "required": ["store_id"],
+                        "properties": {
+                            "store_id": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "required": ["node_id"],
+                        "properties": {
+                            "node_id": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                    }
+                ]
+            },
+            "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn skill_writer_response_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["skills", "outcome", "decision"],
+        "properties": {
+            "skills": {
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        skill_create_schema(),
+                        skill_update_schema(),
+                        skill_merge_schema(),
+                        skill_archive_schema()
+                    ]
+                }
+            },
+            "outcome": {
+                "type": "string",
+                "enum": ["skills_proposed", "no_skill_needed"]
+            },
+            "decision": {
+                "type": ["object", "null"],
+                "required": ["reason", "remedy"],
+                "properties": {
+                    "reason": { "type": "string" },
+                    "remedy": {
+                        "type": "string",
+                        "enum": [
+                            "improve_tool_description",
+                            "improve_hint_routing",
+                            "insufficient_repeated_evidence",
+                            "generic_reasoning",
+                            "one_off_task",
+                            "no_action"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn skill_create_schema() -> Value {
+    let routing_validation = routing_validation_schema();
+    serde_json::json!({
+        "type": "object",
+        "required": [
+            "action", "id", "title", "summary", "routing_description", "category",
+            "targets", "body_markdown", "support_files", "routing_validation", "reason"
+        ],
+        "properties": {
+            "action": { "type": "string", "enum": ["create"] },
+            "id": { "type": "string" },
+            "title": { "type": "string" },
+            "summary": { "type": "string" },
+            "routing_description": { "type": "string" },
+            "category": { "type": "string" },
+            "targets": skill_targets_schema(false),
+            "body_markdown": { "type": "string" },
+            "support_files": support_files_schema(false),
+            "routing_validation": routing_validation,
+            "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn skill_update_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": [
+            "action", "id", "base_checksum", "title", "summary", "routing_description",
+            "category", "targets", "body_markdown", "support_files", "pinned",
+            "routing_validation", "reason"
+        ],
+        "properties": {
+            "action": { "type": "string", "enum": ["update", "patch"] },
+            "id": { "type": "string" },
+            "base_checksum": { "type": "string" },
+            "title": nullable_string_schema(),
+            "summary": nullable_string_schema(),
+            "routing_description": nullable_string_schema(),
+            "category": nullable_string_schema(),
+            "targets": skill_targets_schema(true),
+            "body_markdown": nullable_string_schema(),
+            "support_files": support_files_schema(true),
+            "pinned": { "type": ["boolean", "null"] },
+            "routing_validation": nullable_routing_validation_schema(),
+            "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn skill_merge_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": [
+            "action", "id", "base_checksum", "source_skill_id", "source_base_checksum",
+            "title", "summary", "routing_description", "category", "targets",
+            "body_markdown", "support_files", "routing_validation", "reason"
+        ],
+        "properties": {
+            "action": { "type": "string", "enum": ["merge"] },
+            "id": { "type": "string" },
+            "base_checksum": { "type": "string" },
+            "source_skill_id": { "type": "string" },
+            "source_base_checksum": { "type": "string" },
+            "title": nullable_string_schema(),
+            "summary": nullable_string_schema(),
+            "routing_description": nullable_string_schema(),
+            "category": nullable_string_schema(),
+            "targets": skill_targets_schema(true),
+            "body_markdown": nullable_string_schema(),
+            "support_files": support_files_schema(true),
+            "routing_validation": nullable_routing_validation_schema(),
+            "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn skill_archive_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["action", "id", "base_checksum", "reason"],
+        "properties": {
+            "action": { "type": "string", "enum": ["archive"] },
+            "id": { "type": "string" },
+            "base_checksum": { "type": "string" },
+            "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn nullable_string_schema() -> Value {
+    serde_json::json!({ "type": ["string", "null"] })
+}
+
+fn skill_targets_schema(nullable: bool) -> Value {
+    serde_json::json!({
+        "type": if nullable { serde_json::json!(["array", "null"]) } else { serde_json::json!("array") },
+        "items": {
+            "type": "string",
+            "enum": ["cursor", "codex", "claude", "agents", "opencode", "kimi", "kiro", "hermes"]
+        }
+    })
+}
+
+fn support_files_schema(nullable: bool) -> Value {
+    serde_json::json!({
+        "type": if nullable { serde_json::json!(["array", "null"]) } else { serde_json::json!("array") },
+        "items": {
+            "type": "object",
+            "required": ["path", "text"],
+            "properties": {
+                "path": { "type": "string" },
+                "text": { "type": "string" }
+            },
+            "additionalProperties": false
+        }
+    })
+}
+
+fn routing_validation_schema() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "required": [
+                "id", "category", "hosts", "fixture", "status", "prompt",
+                "ground_truth", "max_tool_calls", "expected_skill", "allowed_skills"
+            ],
+            "properties": {
+                "id": { "type": "string" },
+                "category": { "type": "string" },
+                "hosts": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["claude", "codex"] }
+                },
+                "fixture": { "type": "string" },
+                "status": { "type": "string" },
+                "prompt": { "type": "string" },
+                "ground_truth": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "max_tool_calls": { "type": "integer" },
+                "expected_skill": { "type": ["string", "null"] },
+                "allowed_skills": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            },
+            "additionalProperties": false
+        }
+    })
+}
+
+fn nullable_routing_validation_schema() -> Value {
+    let mut schema = routing_validation_schema();
+    schema["type"] = serde_json::json!(["array", "null"]);
+    schema
 }
 
 fn json_schema_for_array_properties(properties: &[&str]) -> Value {

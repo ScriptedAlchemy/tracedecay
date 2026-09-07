@@ -1,8 +1,6 @@
 //! Git index transaction application boundary.
 
 mod catalog;
-#[cfg(feature = "native-git")]
-mod historical_blob;
 mod native_integration;
 mod native_integration_surface;
 mod public_wire;
@@ -13,8 +11,6 @@ mod transactions;
 mod worktree;
 
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
-#[cfg(feature = "native-git")]
-pub use historical_blob::NativeHistoricalBlobReaderV1;
 pub use native_integration::{
     NativeIntegrationApplyRequestV1, NativeIntegrationCancelDispositionV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationContractError,

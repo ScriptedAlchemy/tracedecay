@@ -49,10 +49,7 @@ pub use mcp::{
     McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 pub use operation::ApplicationSurfaceOperation;
-pub use profile::{
-    ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,
-    RoutingFixtureExpectation, RoutingFixtureV1,
-};
+pub use profile::{ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind};
 pub use retrieval::{
     ContributionContractRef, CoverageContractRef, OmissionContractRef, RetrievalFamily,
     RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, ScoringContractRef,

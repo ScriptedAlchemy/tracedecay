@@ -29,117 +29,60 @@ mod wgsl_grammar {
     pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_wgsl) };
 }
 
-fn has_large_grammar_tier() -> bool {
-    cfg!(any(
-        feature = "lang-pascal",
-        feature = "lang-protobuf",
-        feature = "lang-powershell",
-        feature = "lang-nix",
-        feature = "lang-vbnet",
-        feature = "lang-zig",
-        feature = "lang-objc",
-        feature = "lang-perl",
-        feature = "lang-batch",
-        feature = "lang-fortran",
-        feature = "lang-cobol",
-        feature = "lang-msbasic2",
-        feature = "lang-gwbasic",
-        feature = "lang-qbasic",
-        feature = "lang-dockerfile",
-        feature = "lang-glsl",
-        feature = "lang-metal",
-        feature = "lang-markdown",
-        feature = "lang-r",
-        feature = "lang-sql",
-        feature = "lang-julia",
-        feature = "lang-haskell",
-        feature = "lang-ocaml",
-        feature = "lang-clojure",
-        feature = "lang-erlang",
-        feature = "lang-elixir",
-        feature = "lang-fsharp",
-        feature = "lang-quint",
-        feature = "lang-toml",
-        feature = "lang-lean"
-    ))
+/// Markdown block and inline grammars. `tree-sitter-md` carries the same
+/// generated parser/scanner sources the large bundle vendors, so every tier
+/// parses Markdown identically without `lite` linking that bundle.
+#[cfg(feature = "lang-markdown")]
+pub(crate) mod markdown_grammar {
+    pub use tree_sitter_md::{INLINE_LANGUAGE, LANGUAGE};
 }
 
-fn has_medium_grammar_tier() -> bool {
-    cfg!(any(
-        feature = "lite",
-        feature = "lang-dart",
-        feature = "lang-php",
-        feature = "lang-ruby",
-        feature = "lang-bash",
-        feature = "lang-lua"
-    ))
+/// Whether any grammar bundle is linked; the patched Rust grammar is
+/// registered alongside the bundles, never on its own.
+fn has_grammar_bundle() -> bool {
+    cfg!(any(feature = "medium-grammars", feature = "large-grammars"))
 }
 
 /// Cached map of language key -> `Language` built once from the enabled grammar tiers.
 static LANGUAGES: LazyLock<HashMap<&'static str, Language>> =
     LazyLock::new(|| crate::hotpath_observe::measure_grammar_table_init(build_language_table));
 
+/// Grammars served by another registration: Rust by the patched fork below,
+/// Markdown by `markdown_grammar` (the large bundle's copy is never used).
+/// Only bundle tiers have anything to filter.
+#[cfg(any(feature = "medium-grammars", feature = "large-grammars"))]
+fn is_bundle_only_grammar(name: &str) -> bool {
+    !matches!(name, "rust" | "markdown")
+}
+
 fn build_language_table() -> HashMap<&'static str, Language> {
     let languages = std::iter::empty::<(&'static str, Language)>();
 
-    #[cfg(any(
-        feature = "lite",
-        feature = "lang-dart",
-        feature = "lang-php",
-        feature = "lang-ruby",
-        feature = "lang-bash",
-        feature = "lang-lua"
-    ))]
+    #[cfg(feature = "medium-grammars")]
     let languages = languages.chain(
         tracedecay_medium_treesitters::all_languages()
             .into_iter()
-            .filter(|(name, _)| *name != "rust")
+            .filter(|(name, _)| is_bundle_only_grammar(name))
             .map(|(name, lang_fn)| (name, lang_fn.into())),
     );
 
-    #[cfg(any(
-        feature = "lang-pascal",
-        feature = "lang-protobuf",
-        feature = "lang-powershell",
-        feature = "lang-nix",
-        feature = "lang-vbnet",
-        feature = "lang-zig",
-        feature = "lang-objc",
-        feature = "lang-perl",
-        feature = "lang-batch",
-        feature = "lang-fortran",
-        feature = "lang-cobol",
-        feature = "lang-msbasic2",
-        feature = "lang-gwbasic",
-        feature = "lang-qbasic",
-        feature = "lang-dockerfile",
-        feature = "lang-glsl",
-        feature = "lang-metal",
-        feature = "lang-markdown",
-        feature = "lang-r",
-        feature = "lang-sql",
-        feature = "lang-julia",
-        feature = "lang-haskell",
-        feature = "lang-ocaml",
-        feature = "lang-clojure",
-        feature = "lang-erlang",
-        feature = "lang-elixir",
-        feature = "lang-fsharp",
-        feature = "lang-quint",
-        feature = "lang-toml",
-        feature = "lang-lean"
-    ))]
+    #[cfg(feature = "large-grammars")]
     let languages = languages.chain(
         tracedecay_large_treesitters::all_languages()
             .into_iter()
-            .filter(|(name, _)| *name != "rust")
+            .filter(|(name, _)| is_bundle_only_grammar(name))
             .map(|(name, lang_fn)| (name, lang_fn.into())),
     );
 
     let languages = languages.chain(
-        std::iter::once(("rust", rust_grammar::LANGUAGE.into()))
-            .filter(|_| has_medium_grammar_tier() || has_large_grammar_tier()),
+        std::iter::once(("rust", rust_grammar::LANGUAGE.into())).filter(|_| has_grammar_bundle()),
     );
+
+    #[cfg(feature = "lang-markdown")]
+    let languages = languages.chain(std::iter::once((
+        "markdown",
+        markdown_grammar::LANGUAGE.into(),
+    )));
 
     #[cfg(feature = "lang-wgsl")]
     let languages = languages.chain(std::iter::once(("wgsl", wgsl_grammar::LANGUAGE.into())));
@@ -233,7 +176,7 @@ mod tests {
     fn expected_bundled_keys() -> Vec<&'static str> {
         let mut keys = Vec::new();
 
-        if super::has_medium_grammar_tier() || super::has_large_grammar_tier() {
+        if super::has_grammar_bundle() {
             keys.extend([
                 "bash",
                 "c",
@@ -256,7 +199,11 @@ mod tests {
             ]);
         }
 
-        if super::has_large_grammar_tier() {
+        if cfg!(feature = "lang-markdown") {
+            keys.push("markdown");
+        }
+
+        if cfg!(feature = "large-grammars") {
             keys.extend([
                 "batch",
                 "clojure",
@@ -271,7 +218,6 @@ mod tests {
                 "haskell",
                 "julia",
                 "lean",
-                "markdown",
                 "msbasic2",
                 "nix",
                 "objc",
@@ -353,17 +299,29 @@ mod tests {
         );
     }
 
+    /// A build without the large bundle registers none of its grammars, so a
+    /// `lite` build that only wants Markdown cannot reach them.
     #[test]
-    #[cfg(not(feature = "lang-powershell"))]
-    fn disabled_optional_language_keys_are_not_registered() -> Result<(), String> {
-        for key in ["powershell", "markdown"] {
+    #[cfg(not(feature = "large-grammars"))]
+    fn large_bundle_keys_are_not_registered_without_the_bundle() -> Result<(), String> {
+        for key in ["powershell", "cobol", "protobuf", "zig"] {
             let Err(err) = super::language(key) else {
                 return Err(format!(
-                    "grammar key '{key}' should not be registered when its feature is disabled"
+                    "grammar key '{key}' should not be registered when its bundle is disabled"
                 ));
             };
             assert!(err.contains("unknown language key"));
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(not(feature = "lang-markdown"))]
+    fn markdown_is_not_registered_without_its_feature() -> Result<(), String> {
+        let Err(err) = super::language("markdown") else {
+            return Err("markdown should not be registered when lang-markdown is disabled".into());
+        };
+        assert!(err.contains("unknown language key"));
         Ok(())
     }
 }

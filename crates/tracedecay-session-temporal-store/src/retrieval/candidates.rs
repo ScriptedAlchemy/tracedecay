@@ -391,6 +391,11 @@ pub(super) async fn query_candidate_clause(
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
+    let occurrence_fts_query = if clause.channel == CandidateChannel::Lexical {
+        fts_any_terms(&clause.value)
+    } else {
+        fts_phrase(&clause.value)
+    };
     let (sql, params) = match (scope, clause.channel) {
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
             return Err(read_message(
@@ -412,6 +417,11 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Integer(limit),
             ],
         ),
+        // The exact literal is admitted through the maintained FTS index before
+        // `instr` verifies it. A literal without an indexable token (`!!!`,
+        // `🚨 :: --`) is an empty FTS phrase, which FTS5 resolves to EOF: zero
+        // rows through the index and no retained-row text scan. That is a
+        // measured empty channel, not a budget refusal.
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
             ROOT_EXACT_CANDIDATE_QUERY,
             vec![
@@ -420,6 +430,7 @@ pub(super) async fn query_candidate_clause(
                 })?,
                 provider,
                 SqlValue::Text(clause.value.clone()),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -442,7 +453,7 @@ pub(super) async fn query_candidate_clause(
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Text(occurrence_fts_query.clone()),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -597,7 +608,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Text(occurrence_fts_query),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(source_stable_cap),
@@ -781,6 +792,14 @@ pub(super) fn fts_phrase(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+fn fts_any_terms(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(fts_phrase)
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortError> {
     let start_seconds = parse_rfc3339_timestamp(&format!("{value}T00:00:00Z"))
         .ok_or_else(|| read_message(CANDIDATE_OPERATION, "invalid ISO date candidate"))?;
@@ -837,4 +856,17 @@ pub(super) fn require_candidate_scope(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexical_terms_share_one_or_query() {
+        assert_eq!(
+            fts_any_terms("workflow correction repeated"),
+            "\"workflow\" OR \"correction\" OR \"repeated\""
+        );
+    }
 }

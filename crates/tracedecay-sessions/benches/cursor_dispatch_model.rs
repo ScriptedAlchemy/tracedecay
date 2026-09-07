@@ -114,6 +114,14 @@ fn run_harness() -> Value {
         unchanged.model.is_none(),
         "agent {AGENT_ID} must stay unresolved before the late dispatch"
     );
+    assert_eq!(unchanged.bytes_parsed, fixture.parent_bytes);
+    assert_eq!(unchanged.prefix_digest_bytes, 0);
+    assert_eq!(unchanged.rescanned_from_zero, 1);
+    let distinct_agents = measure_distinct_agent_lookups(&fixture.child_path, LOOKUPS);
+    assert!(distinct_agents.model.is_none());
+    assert_eq!(distinct_agents.bytes_parsed, 0);
+    assert_eq!(distinct_agents.prefix_digest_bytes, 0);
+    assert_eq!(distinct_agents.rescanned_from_zero, 0);
 
     append_late_dispatch(&fixture.parent_path);
     let after_append = lookup_once(&fixture.child_path);
@@ -122,6 +130,8 @@ fn run_harness() -> Value {
         Some(LATE_MODEL),
         "late-arriving dispatch must become visible on the next lookup"
     );
+    assert_eq!(after_append.prefix_digest_bytes, fixture.parent_bytes);
+    assert_eq!(after_append.rescanned_from_zero, 0);
 
     let truncate = measure_truncate_rewrite();
     let inode = measure_inode_replacement();
@@ -137,6 +147,7 @@ fn run_harness() -> Value {
             "parent_session_id": PARENT_SESSION_ID,
         },
         "unchanged_misses": unchanged,
+        "unchanged_distinct_agent_misses": distinct_agents,
         "late_dispatch": after_append,
         "truncate_rewrite": truncate,
         "inode_replacement": inode,
@@ -151,6 +162,7 @@ struct LookupBatch {
     lookups: usize,
     wall_ms: u128,
     bytes_parsed: u64,
+    prefix_digest_bytes: u64,
     records_parsed: u64,
     rescanned_from_zero: u64,
 }
@@ -160,22 +172,37 @@ fn lookup_once(child_path: &Path) -> LookupBatch {
 }
 
 fn measure_repeated_lookups(child_path: &Path, lookups: usize) -> LookupBatch {
+    measure_lookups(child_path, (0..lookups).map(|_| AGENT_ID.to_string()))
+}
+
+fn measure_distinct_agent_lookups(child_path: &Path, lookups: usize) -> LookupBatch {
+    measure_lookups(
+        child_path,
+        (0..lookups).map(|index| format!("missing-agent-{index}")),
+    )
+}
+
+fn measure_lookups(child_path: &Path, agent_ids: impl IntoIterator<Item = String>) -> LookupBatch {
     let started = Instant::now();
     let mut model = None;
+    let mut lookups = 0;
     let mut bytes_parsed = 0_u64;
+    let mut prefix_digest_bytes = 0_u64;
     let mut records_parsed = 0_u64;
     let mut rescanned_from_zero = 0_u64;
-    for _ in 0..lookups {
+    for agent_id in agent_ids {
         let (found, receipt) = hotpath::measure_block!(
             "sessions.hosts.cursor.dispatch_model_blocking",
             parent_dispatch_model_for_subagent_with_receipt(
                 child_path,
                 PARENT_SESSION_ID,
-                AGENT_ID,
+                &agent_id,
             )
         );
+        lookups += 1;
         model = found;
         bytes_parsed = bytes_parsed.saturating_add(receipt.bytes_parsed);
+        prefix_digest_bytes = prefix_digest_bytes.saturating_add(receipt.prefix_digest_bytes);
         records_parsed = records_parsed.saturating_add(receipt.records_parsed);
         if receipt.rescanned_from_zero {
             rescanned_from_zero = rescanned_from_zero.saturating_add(1);
@@ -186,6 +213,7 @@ fn measure_repeated_lookups(child_path: &Path, lookups: usize) -> LookupBatch {
         lookups,
         wall_ms: started.elapsed().as_millis(),
         bytes_parsed,
+        prefix_digest_bytes,
         records_parsed,
         rescanned_from_zero,
     }

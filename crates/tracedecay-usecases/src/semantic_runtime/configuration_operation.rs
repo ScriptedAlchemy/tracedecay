@@ -1260,10 +1260,7 @@ async fn current_configuration_state(
         .current()
         .await
         .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-    Ok(ConfigurationCurrentStateV1 {
-        revision_id: current.revision_id,
-        snapshot: current.snapshot,
-    })
+    Ok(current.into_current_state())
 }
 
 fn map_authority_error(
@@ -1289,7 +1286,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
+    use tracedecay_domain::configuration::ConfigurationRevisionId;
     use tracedecay_domain::{
         ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
         EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
@@ -1471,6 +1468,14 @@ mod tests {
     fn semantic_compatibility(
         resources: SemanticResourceRequirementV1,
     ) -> SemanticCompatibilityPinsV1 {
+        semantic_compatibility_with_privacy(resources, typed("privacy.qualification-test.v1"), 1)
+    }
+
+    fn semantic_compatibility_with_privacy(
+        resources: SemanticResourceRequirementV1,
+        privacy_domain: PrivacyDomainId,
+        privacy_key_epoch: u64,
+    ) -> SemanticCompatibilityPinsV1 {
         let artifact = digest('a');
         let projection = EmbeddingProjectionKeyV1 {
             model_artifact_digest: artifact.clone(),
@@ -1493,8 +1498,8 @@ mod tests {
             precision: EmbeddingPrecisionV1::Fp32,
             chunk_schema_revision: "code-search-chunk.v1".to_owned(),
             chunker_revision: typed::<ChunkerRevision>("chunker.qualification-test.v1"),
-            privacy_domain: typed::<PrivacyDomainId>("privacy.qualification-test.v1"),
-            privacy_key_epoch: 1,
+            privacy_domain,
+            privacy_key_epoch,
         }
         .admit()
         .expect("admitted projection");
@@ -1579,6 +1584,25 @@ mod tests {
     }
 
     #[test]
+    fn publication_snapshot_identity_invalidates_source_drift() {
+        let candidate = query_candidate();
+        let before = query_snapshot(&candidate);
+        let mut changed_source = before.clone();
+        changed_source.code_source_manifest_digest = digest('5');
+        assert_ne!(
+            changed_source, before,
+            "a changed sealed source commitment must invalidate qualification"
+        );
+
+        let mut changed_capability = before.clone();
+        changed_capability.code_capability_manifest_digest = digest('6');
+        assert_ne!(
+            changed_capability, before,
+            "a changed sealed capability commitment must invalidate qualification"
+        );
+    }
+
+    #[test]
     fn measured_report_resources_replace_semantic_pins_but_retain_configured_ceiling() {
         let measured = semantic_resources(10);
         let configured_ceiling = semantic_resources(20);
@@ -1608,6 +1632,34 @@ mod tests {
 
         assert_eq!(runtime.semantic, Some(accepted_semantic));
         assert_eq!(runtime.semantic_ceiling, Some(configured_ceiling));
+    }
+
+    #[test]
+    fn live_runtime_pins_invalidate_privacy_and_calibration_drift() {
+        let observed = semantic_compatibility(semantic_resources(10));
+        let changed_privacy = semantic_compatibility_with_privacy(
+            semantic_resources(10),
+            typed("privacy.qualification-test.changed"),
+            2,
+        );
+        let privacy_mismatch = semantic_pin_mismatch(&observed, &changed_privacy)
+            .expect("changed privacy identity must mismatch");
+        assert!(
+            privacy_mismatch.starts_with("projection observed "),
+            "privacy drift must be attributed to the admitted projection: {privacy_mismatch}"
+        );
+
+        let mut changed_calibration = observed.clone();
+        changed_calibration.calibration.maximum_distance_micros = changed_calibration
+            .calibration
+            .maximum_distance_micros
+            .saturating_add(1);
+        let calibration_mismatch = semantic_pin_mismatch(&observed, &changed_calibration)
+            .expect("changed calibration must mismatch");
+        assert!(
+            calibration_mismatch.starts_with("calibration observed "),
+            "calibration drift must be attributed to the live calibration: {calibration_mismatch}"
+        );
     }
 
     #[test]
@@ -1662,19 +1714,25 @@ mod tests {
         let database = database_runtime
             .project_database_arc()
             .expect("project database");
-        let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration {
-            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
+        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
+            &tracedecay_configuration::config::registry::ConfigurationRegistry::core()
+                .expect("configuration registry"),
+            &[],
+        )
+        .expect("registry defaults resolve")
+        .snapshot;
+        let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+            tracedecay_configuration::config::RuntimeConfigurationTarget {
                 project_id,
                 project_root,
             },
-            revision_id: ConfigurationRevisionId::try_from(
+            ConfigurationRevisionId::try_from(
                 "configuration.native-qualification-operation".to_owned(),
             )
             .expect("configuration revision"),
-            snapshot: ConfigurationSnapshotV1::new(BTreeMap::new(), BTreeMap::new())
-                .expect("empty configuration snapshot"),
-            config: tracedecay_configuration::config::TraceDecayConfig::default(),
-        };
+            snapshot,
+        )
+        .expect("registry defaults materialize");
         let (configuration, _) = ProjectConfigurationRuntime::open(
             tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
                 configuration,
@@ -1851,6 +1909,20 @@ mod tests {
         assert!(
             mismatch.starts_with("profile.minimum_calibrated_feature_micros candidate "),
             "unhelpful acceptance-cut mismatch: {mismatch}"
+        );
+        candidate
+            .profile
+            .minimum_calibrated_feature_micros
+            .remove(&RetrieverKind::Lexical);
+        candidate.profile.calibrations.insert(
+            RetrieverKind::Temporal,
+            typed("calibration.profile-drift-test.v1"),
+        );
+        let mismatch = candidate_matches_evaluated_material(&candidate, &material)
+            .expect_err("a drifted profile calibration must be reported");
+        assert!(
+            mismatch.starts_with("profile.calibrations candidate "),
+            "unhelpful profile-calibration mismatch: {mismatch}"
         );
         let serialized = serde_json::to_string(&candidate).expect("serialize candidate");
         assert!(!serialized.contains("evaluation_result_anchor"));

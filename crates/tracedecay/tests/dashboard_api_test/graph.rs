@@ -38,7 +38,7 @@ use tracedecay_domain::code_intelligence::{Edge, EdgeKind, Node, NodeKind, Visib
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
-    ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId,
+    ComplexityAnalysisV1, ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId,
     LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
     RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
     SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
@@ -175,6 +175,7 @@ fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: 
         loops: 0,
         returns: 1,
         max_nesting: 1,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         unsafe_blocks: 0,
         unchecked_calls: 0,
         assertions: 0,
@@ -453,6 +454,7 @@ fn compose_graph_authority(
                     branches: node.branches,
                     loops: node.loops,
                     max_nesting: node.max_nesting,
+                    complexity_analysis: node.complexity_analysis,
                     line_span: node
                         .end_line
                         .saturating_sub(node.start_line)

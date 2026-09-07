@@ -2802,6 +2802,22 @@
       ],
       "type": "string"
     },
+    "ComplexityAnalysisV1": {
+      "description": "Whether the bounded complexity walk over a symbol's body ran to the end.\n\nThe extractor stops walking a body once its traversal budget is spent. The\ncounters accumulated by then are lower bounds over the visited prefix, not\nfacts about the whole body, so every surface that prints, ranks, or\naggregates complexity must render this state instead of treating those\ncounters as exact.",
+      "oneOf": [
+        {
+          "enum": [
+            "complete"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "traversal_budget_exhausted",
+          "description": "The walk stopped when the traversal budget ran out.",
+          "type": "string"
+        }
+      ]
+    },
     "ComponentVersion": {
       "description": "Strongly typed canonical identity: `ComponentVersion`.",
       "type": "string"
@@ -10903,11 +10919,23 @@
           ]
         },
         "branches": {
+          "description": "Exact counters; `None` when `complexity_analysis` reports that the\nbounded walk did not cover the body.",
           "format": "int64",
           "type": [
             "integer",
             "null"
           ]
+        },
+        "complexity_analysis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComplexityAnalysisV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`None` only where this surface carries no extraction metadata at all."
         },
         "degree": {
           "format": "int64",
@@ -11087,6 +11115,7 @@
         "unsafe_blocks",
         "unchecked_calls",
         "assertions",
+        "complexity_analysis",
         "updated_at",
         "parent_id",
         "degree",

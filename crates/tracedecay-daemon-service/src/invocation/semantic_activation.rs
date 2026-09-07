@@ -11,7 +11,6 @@
 
 use super::*;
 
-use tracedecay_configuration::ConfigurationCurrentStateV1;
 use tracedecay_domain::configuration::{ConfigurationValueV1, SettingKey};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
@@ -132,7 +131,7 @@ impl DaemonInvocationService {
             Err(error) => return application_problem(request_id, configuration_problem(error)),
         };
         let composed = compose_activated_semantic_config(
-            &current.config.semantic,
+            &current.config().semantic,
             &evaluated_profile_id,
             &profile_digest,
             &material,
@@ -156,7 +155,7 @@ impl DaemonInvocationService {
                 );
             }
         };
-        let expected_revision = current.revision_id.clone();
+        let expected_revision = current.revision_id().clone();
         let idempotency_key = match ConfigurationIdempotencyKey::new(format!(
             "configuration.idempotency.semantic-activation.{expected_revision}"
         )) {
@@ -214,11 +213,7 @@ impl DaemonInvocationService {
             .await
             .ok()
             .and_then(|post| {
-                SemanticConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {
-                    revision_id: post.revision_id,
-                    snapshot: post.snapshot,
-                })
-                .ok()
+                SemanticConfigurationPinV1::from_current(&post.into_current_state()).ok()
             });
         let runtime_state =
             tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(

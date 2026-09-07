@@ -11,7 +11,7 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 
 use super::fence::{capture_store_content_fence_controlled, open_store_directory_nofollow};
 use super::quarantine::{
-    QuarantineRecoveryOutcome, quarantined_project_id, recover_named_store_quarantine,
+    QuarantineRecoveryOutcome, quarantine_recovery_entry, recover_named_store_quarantine,
 };
 use super::{
     CollectionCompletionV1, CollectionControl, CollectionFailure, CollectionFailureKind,
@@ -309,34 +309,56 @@ async fn census_unregistered_project_dirs_page(
             continue;
         };
         if recover_interrupted_quarantines {
+            if recovered_project_ids.contains(&project_id) {
+                continue;
+            }
             let data_root = projects_dir.join(&project_id);
             let record_recovery = match recover_named_store_quarantine(
                 profile_root,
                 &data_root,
                 std::ffi::OsStr::new(&quarantine_name),
                 &projects_dir,
+                CollectionControl::new(cancellation, deadline),
             ) {
+                Ok(Some(QuarantineRecoveryOutcome::Removed {
+                    journal_failure, ..
+                })) => {
+                    recovered_project_ids.insert(project_id.clone());
+                    if let Some(failure) = journal_failure {
+                        recovery_outcome.errors.push(CollectionFailure {
+                            store_id: project_id.clone(),
+                            kind: CollectionFailureKind::RemoveFailed(failure),
+                        });
+                    }
+                    None
+                }
                 Ok(Some(QuarantineRecoveryOutcome::Restored {
                     restored_path,
-                    journal_pending,
+                    failure,
                 })) => {
                     recovered_project_ids.insert(project_id.clone());
                     Some((
                         projects_dir.join(&quarantine_name),
                         restored_path,
-                        if journal_pending {
+                        if failure.is_some() {
                             CollectionRecoveryAction::RetainedForRecovery
                         } else {
                             CollectionRecoveryAction::Restored
                         },
+                        failure,
                     ))
                 }
-                Ok(Some(QuarantineRecoveryOutcome::Retained { quarantine_path })) => {
+                Ok(Some(QuarantineRecoveryOutcome::Retained {
+                    quarantine_path,
+                    actual_path,
+                    failure,
+                })) => {
                     recovered_project_ids.insert(project_id.clone());
                     Some((
                         quarantine_path.clone(),
-                        quarantine_path,
+                        actual_path,
                         CollectionRecoveryAction::RetainedForRecovery,
+                        failure,
                     ))
                 }
                 Ok(None) => None,
@@ -348,7 +370,7 @@ async fn census_unregistered_project_dirs_page(
                     None
                 }
             };
-            if let Some((quarantine_path, actual_path, action)) = record_recovery {
+            if let Some((quarantine_path, actual_path, action, failure)) = record_recovery {
                 recovery_outcome
                     .recovery_receipts
                     .push(CollectionRecoveryReceipt {
@@ -358,6 +380,12 @@ async fn census_unregistered_project_dirs_page(
                         quarantine_path,
                         action,
                     });
+                if let Some(failure) = failure {
+                    recovery_outcome.errors.push(CollectionFailure {
+                        store_id: project_id.clone(),
+                        kind: CollectionFailureKind::RemoveFailed(failure),
+                    });
+                }
                 recovery_outcome.errors.push(CollectionFailure {
                     store_id: project_id,
                     kind: CollectionFailureKind::PayloadChanged,
@@ -365,6 +393,10 @@ async fn census_unregistered_project_dirs_page(
             }
         }
     }
+    // Directory inventories preserve discovery order. A live leaf can precede
+    // its quarantine; recovery invalidates that earlier census just as it
+    // prevents a later one, so neither may reach collection in this admission.
+    findings.retain(|finding| !recovered_project_ids.contains(&finding.project_dir_name));
     Ok(Some((findings, next_cursor)))
 }
 
@@ -542,10 +574,10 @@ pub(in crate::retention) fn read_project_directory_page(
         })?;
         scanned = scanned.saturating_add(1);
         entries_scanned = entries_scanned.saturating_add(1);
-        if let Some(project_id) = quarantined_project_id(&name) {
+        if let Some((project_id, quarantine_name)) = quarantine_recovery_entry(&name) {
             work.push(ProjectDirectoryWorkV1::Quarantine {
                 project_id,
-                quarantine_name: name,
+                quarantine_name,
             });
         } else if tracedecay_runtime_core::storage::validate_project_id(&name).is_ok() {
             work.push(ProjectDirectoryWorkV1::Project(name));
@@ -629,7 +661,7 @@ fn portable_inventory_matches(path: &Path, signature: &str) -> bool {
 }
 
 pub(super) fn portable_inventory_entry_is_valid(name: &str) -> bool {
-    quarantined_project_id(name).is_some()
+    quarantine_recovery_entry(name).is_some()
         || tracedecay_runtime_core::storage::validate_project_id(name).is_ok()
 }
 

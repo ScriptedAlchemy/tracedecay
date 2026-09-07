@@ -1704,8 +1704,8 @@ mod cancellable_queue_tests {
             .with_direct_databases(
                 mounted_active.global_db.clone(),
                 mounted_active.registry_db.clone(),
-                mounted_active.session_db.clone(),
-                mounted_active.user_session_db.clone(),
+                mounted_active.project_session_db.clone(),
+                mounted_active.profile_session_db.clone(),
             )
             .with_retained_project_server_resolver(resolver);
             let caller = super::super::McpServer::new_with_context(context).await;
@@ -2384,8 +2384,8 @@ mod cancellable_queue_tests {
         .with_direct_databases(
             mounted_active.global_db.clone(),
             mounted_active.registry_db.clone(),
-            mounted_active.session_db.clone(),
-            mounted_active.user_session_db.clone(),
+            mounted_active.project_session_db.clone(),
+            mounted_active.profile_session_db.clone(),
         )
         .with_retained_project_server_resolver(resolver);
         let caller = super::super::McpServer::new_with_context(context).await;

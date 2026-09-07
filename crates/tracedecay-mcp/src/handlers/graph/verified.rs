@@ -181,20 +181,6 @@ pub fn canonical_relation_kind(kind: EdgeKind) -> Result<RelationEdgeKindV1> {
     }
 }
 
-pub fn canonical_relation_kind_name(kind: RelationEdgeKindV1) -> &'static str {
-    match kind {
-        RelationEdgeKindV1::Calls => "calls",
-        RelationEdgeKindV1::Uses => "uses",
-        RelationEdgeKindV1::TypeOf => "type_of",
-        RelationEdgeKindV1::Contains => "contains",
-        RelationEdgeKindV1::Implements => "implements",
-        RelationEdgeKindV1::Extends => "extends",
-        RelationEdgeKindV1::Annotates => "annotates",
-        RelationEdgeKindV1::Returns => "returns",
-        RelationEdgeKindV1::Receives => "receives",
-    }
-}
-
 pub fn single_graph_adjacency_batch<T>(mut batches: Vec<Vec<T>>) -> Result<Vec<T>> {
     if batches.len() != 1 {
         return Err(graph_symbol_corrupt(format!(
@@ -264,7 +250,7 @@ pub fn verified_neighbor_value(result: &VerifiedNeighbor) -> Result<Value> {
         "kind": metadata.kind,
         "file": required_graph_file_path(&result.symbol)?,
         "line": metadata.start_line.saturating_add(1),
-        "edge_kind": canonical_relation_kind_name(result.edge_kind),
+        "edge_kind": result.edge_kind.as_str(),
         "depth": result.depth,
     }))
 }

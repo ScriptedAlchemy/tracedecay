@@ -61,14 +61,46 @@ pub(crate) struct ExistingBatchState {
     pub(crate) relations: BTreeMap<String, StoredRelation>,
 }
 
+/// Which of a batch's own rows may already exist in the target store.
+#[derive(Clone, Copy)]
+pub(crate) enum ExistingRowsV1<'a> {
+    /// Any row may exist: probe the unique-key indexes for every row.
+    Probe,
+    /// The target is a sealed copy that held no records when the copy began
+    /// and has no other writer, so the batch's entity and relation records
+    /// are absent by construction; only relation endpoints resolve.
+    FreshSealedCopy(&'a crate::sealed_store::FreshSealedStoreV1),
+}
+
 impl ExistingBatchState {
-    pub(crate) fn load(database: &GrafeoDB, batch: &GraphWriteBatch) -> Result<Self, GraphDbError> {
+    pub(crate) fn load(
+        database: &GrafeoDB,
+        batch: &GraphWriteBatch,
+        existing_rows: ExistingRowsV1<'_>,
+    ) -> Result<Self, GraphDbError> {
         if batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
+        let probe_records = match existing_rows {
+            ExistingRowsV1::Probe => true,
+            ExistingRowsV1::FreshSealedCopy(fresh) => {
+                if !fresh.covers(&batch.namespace) {
+                    return Err(GraphDbError::Corrupt {
+                        message: format!(
+                            "sealed copy batch for namespace `{}` is outside the claimed store",
+                            batch.namespace
+                        ),
+                    });
+                }
+                false
+            }
+        };
         let encoded_namespace = encoded_namespace_key(&batch.namespace);
+        // Endpoints resolve through the locator path (node handle only) for
+        // generation namespaces, and whenever the records themselves are not
+        // probed: a fresh copy still has to find every endpoint it wires.
         let physical_generation =
-            crate::generation::is_physical_generation_namespace(&batch.namespace);
+            !probe_records || crate::generation::is_physical_generation_namespace(&batch.namespace);
         let (entity_count, relation_count, relation_endpoint_count) =
             batch
                 .mutations
@@ -140,18 +172,26 @@ impl ExistingBatchState {
             }
         }
         entity_locator_keys.retain(|key, _| !entity_keys.contains_key(key));
-        let entities = hotpath::measure_block!(
-            "graph_db.mutation.existing_state.entity_records",
-            load_requested_entities(database, &batch.namespace, entity_keys, batch)
-        )?;
+        let entities = if probe_records {
+            hotpath::measure_block!(
+                "graph_db.mutation.existing_state.entity_records",
+                load_requested_entities(database, &batch.namespace, entity_keys, batch)
+            )?
+        } else {
+            BTreeMap::new()
+        };
         let entity_locators = hotpath::measure_block!(
             "graph_db.mutation.existing_state.endpoint_locators",
             load_requested_entity_locators(database, &batch.namespace, entity_locator_keys, batch,)
         )?;
-        let relations = hotpath::measure_block!(
-            "graph_db.mutation.existing_state.relation_records",
-            load_requested_relations(database, &batch.namespace, relation_keys, batch)
-        )?;
+        let relations = if probe_records {
+            hotpath::measure_block!(
+                "graph_db.mutation.existing_state.relation_records",
+                load_requested_relations(database, &batch.namespace, relation_keys, batch)
+            )?
+        } else {
+            BTreeMap::new()
+        };
         Ok(Self {
             entities,
             entity_locators,
@@ -898,6 +938,33 @@ pub(crate) fn projection_relation_deletion_page_checked(
     .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Records read by retirement page scans on this thread; the retirement
+    /// tests pin that a whole generation is read once across all its pages.
+    static RETIREMENT_PAGE_RECORD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_retirement_page_record_reads() {
+    RETIREMENT_PAGE_RECORD_READS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn retirement_page_record_reads() -> usize {
+    RETIREMENT_PAGE_RECORD_READS.with(std::cell::Cell::get)
+}
+
+/// One bounded page of identities to retire from a projection.
+///
+/// Retirement deletes a generation page by page, so this scan must cost one
+/// page, not the projection: it reads owner-label candidates in index order
+/// and stops as soon as the page is full. Filtering every candidate first
+/// (the `labeled_projection_nodes_checked` shape) re-read the whole
+/// projection per page — measured at ~9.5 s per 4,096-row page against a
+/// 3.4M-row staging release, an O(rows² / page) sweep that kept the
+/// publishing thread, and the serving seat behind it, busy for hours.
+#[hotpath::measure(label = "graph_db.projection.deletion_page")]
 fn projection_identity_deletion_page_checked(
     database: &GrafeoDB,
     owner_label: &str,
@@ -907,21 +974,32 @@ fn projection_identity_deletion_page_checked(
     description: &str,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<String>, GraphDbError> {
-    let nodes = labeled_projection_nodes_checked(
-        database,
-        owner_label,
-        record_label,
-        maximum_records,
-        check,
-    )?;
+    check()?;
     let store = database.graph_store();
+    require_generation_capacity(
+        if record_label == ENTITY_LABEL {
+            "entities"
+        } else {
+            "relations"
+        },
+        nodes_with_label_count(store.as_ref(), owner_label),
+        0,
+        maximum_records,
+    )?;
     let mut identities = BTreeSet::new();
     let mut live_bytes = 0usize;
-    for node in nodes {
+    for node in nodes_with_label(store.as_ref(), owner_label) {
         check()?;
-        let record = store.get_node(node).ok_or_else(|| GraphDbError::Corrupt {
-            message: format!("native graph {description} disappeared during retirement"),
-        })?;
+        #[cfg(test)]
+        RETIREMENT_PAGE_RECORD_READS.with(|count| count.set(count.get() + 1));
+        // A candidate carrying only the owner label is a reference node, not
+        // a record of this kind; the labeled scan skips those the same way.
+        let Some(record) = store
+            .get_node(node)
+            .filter(|record| has_native_label(record, record_label))
+        else {
+            continue;
+        };
         let identity = required_arc_string(
             record.get_property(identity_property),
             &format!("native graph {description} identity"),
@@ -1323,7 +1401,10 @@ mod tests {
     use grafeo_common::types::Value;
     use grafeo_engine::GrafeoDB;
 
-    use super::{ExistingBatchState, projection_entities_checked, projection_relations_checked};
+    use super::{
+        ExistingBatchState, ExistingRowsV1, projection_entities_checked,
+        projection_relations_checked,
+    };
     use crate::schema::{
         ENTITY_KEY_PROPERTY, ENTITY_LABEL, RELATION_LABEL, entity_labels, entity_projection_label,
         entity_properties, relation_projection_label,
@@ -1386,7 +1467,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = ExistingBatchState::load(&database, &batch).unwrap();
+        let loaded = ExistingBatchState::load(&database, &batch, ExistingRowsV1::Probe).unwrap();
 
         assert!(loaded.entities.is_empty());
 
@@ -1425,7 +1506,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            ExistingBatchState::load(&database, &ordinary_batch),
+            ExistingBatchState::load(&database, &ordinary_batch, ExistingRowsV1::Probe),
             Err(GraphDbError::Corrupt { .. })
         ));
     }

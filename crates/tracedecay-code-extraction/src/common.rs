@@ -8,13 +8,46 @@
 
 use tree_sitter::Node as TsNode;
 
-use crate::types::{EdgeKind, UnresolvedRef};
+use crate::types::{EdgeKind, NodeKind, UnresolvedRef, generate_node_id, generate_node_id_at};
 
 /// Gets the text of a tree-sitter node from the source.
 fn node_text(source: &[u8], node: TsNode<'_>) -> String {
     node.utf8_text(source)
         .unwrap_or("<invalid utf8>")
         .to_string()
+}
+
+/// Mints the extraction-local ID for the construct rooted at `node`.
+///
+/// Every edge and unresolved reference an extractor emits while visiting the
+/// construct is keyed by this ID, so two constructs must never share one. A
+/// construct that begins its line (only blanks precede it) keeps the line-keyed
+/// [`generate_node_id`], leaving indentation and one-construct lines
+/// identity-neutral; a construct preceded by other source on its line also
+/// carries its start column, which distinguishes `impl A { fn run() {} } impl
+/// B { fn run() {} }` before relation endpoints are bound.
+pub(crate) fn local_node_id(
+    file_path: &str,
+    source: &[u8],
+    kind: &NodeKind,
+    name: &str,
+    node: TsNode<'_>,
+) -> String {
+    let start = node.start_position();
+    let line = start.row as u32;
+    let start_byte = node.start_byte().min(source.len());
+    let line_start = source[..start_byte]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let begins_line = source[line_start..start_byte]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'));
+    if begins_line {
+        generate_node_id(file_path, kind, name, line)
+    } else {
+        generate_node_id_at(file_path, kind, name, line, start.column as u32)
+    }
 }
 
 /// Strip comment markers from a single C-style comment text

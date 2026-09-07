@@ -22,6 +22,16 @@ name: hotpath-coverage
 
 on:
   pull_request:
+    # Only Rust inputs can change what these slice tests compile or measure;
+    # dashboard, plugin, docs and script-only pull requests do not queue it.
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - ".github/workflows/hotpath-coverage.yml"
   workflow_dispatch:
 
 concurrency:

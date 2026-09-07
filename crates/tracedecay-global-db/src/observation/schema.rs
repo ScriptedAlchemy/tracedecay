@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use tracedecay_domain::integration::NativeHostIdentityV1;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::super::global_db_operation_error;
@@ -27,9 +28,17 @@ pub(super) const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical
 /// their usage facts, so admission refuses it with
 /// [`ResetRequired`](tracedecay_domain::errors::TraceDecayError::ResetRequired)
 /// instead. The marker is recorded for any authority that holds no rows yet,
-/// so only stores carrying old-scheme rows refuse.
+/// and for one whose retained rows and cursors name no Cline/Roo/Kilo source at
+/// all — the scheme change touched only those hosts, so such a store cannot
+/// double-count anything (see [`cline_like_sources_present`]). Only stores
+/// carrying old-scheme rows from those hosts refuse.
 pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
     "observations-native-source-scheme-v2-cline-ui-messages";
+
+/// Source-key suffix of the native `ui_messages.json` source a Cline-like task
+/// gained under [`OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION`] (the sessions
+/// crate's `ui_messages_source_key`).
+const CLINE_LIKE_UI_MESSAGES_SOURCE_SUFFIX: &str = ":ui_messages";
 
 /// Canonical `observations` column set. Shared by the admission refusal below
 /// and the scoped operator reset in [`super::reset`] so the two can never
@@ -85,6 +94,47 @@ async fn observation_authority_populated(
             "SELECT 1 WHERE EXISTS(SELECT 1 FROM observations)
                         OR EXISTS(SELECT 1 FROM source_cursors)",
             (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
+/// Whether any retained observation or admission cursor names a Cline, Roo
+/// Code, or Kilo source — the only hosts whose admission scheme changed under
+/// [`OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION`]. A populated authority
+/// without such rows was written by a scheme that never applied to it, so
+/// enrolling it is exact rather than a migration of ambiguous data; one with
+/// such rows carries no record of which scheme wrote them and must reset.
+async fn cline_like_sources_present(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<bool> {
+    let providers = [
+        NativeHostIdentityV1::Cline.hook_key(),
+        NativeHostIdentityV1::RooCode.hook_key(),
+        NativeHostIdentityV1::Kilo.hook_key(),
+    ];
+    let ui_messages_pattern = format!("%{CLINE_LIKE_UI_MESSAGES_SOURCE_SUFFIX}");
+    let mut rows = conn
+        .query(
+            "SELECT 1 WHERE EXISTS(
+                 SELECT 1 FROM observations
+                 WHERE json_extract(observation_json, '$.identity.source.provider') IN (?1, ?2, ?3)
+                    OR json_extract(observation_json, '$.identity.source.source_key') LIKE ?4
+             ) OR EXISTS(
+                 SELECT 1 FROM source_cursors
+                 WHERE json_extract(source_json, '$.provider') IN (?1, ?2, ?3)
+                    OR json_extract(source_json, '$.source_key') LIKE ?4
+             )",
+            params![
+                providers[0],
+                providers[1],
+                providers[2],
+                ui_messages_pattern
+            ],
         )
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
@@ -330,7 +380,11 @@ pub async fn ensure_observation_schema(
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     }
-    if !observation_authority_populated(conn).await? {
+    // Enroll the native-source scheme wherever it cannot double-count: an
+    // authority with no rows, or one whose rows and cursors never came from a
+    // Cline-like host. Only a populated authority that does carry such rows is
+    // left unmarked, and `require_admitted_observation_shape` refuses it.
+    if !observation_authority_populated(conn).await? || !cline_like_sources_present(conn).await? {
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
             params![OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],

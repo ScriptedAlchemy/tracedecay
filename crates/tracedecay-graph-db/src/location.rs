@@ -46,6 +46,23 @@ pub enum GraphDurability {
     /// Grafeo does not surface every WAL append failure from session commit, so
     /// this is a configuration request rather than a proof of durable commit.
     WalSync,
+    /// Opens an existing sealed generation artifact through Grafeo's read-only
+    /// access mode: shared file lock, no sidecar WAL, and a close that never
+    /// checkpoints. The artifact is immutable after its build, and a
+    /// write-capable open re-serialized the whole compacted container on
+    /// every close because Grafeo's close-time checkpoint elision excludes
+    /// layered stores: one reopen of a 3.2 GB sealed artifact grew it to
+    /// 6.4 GB (the new generation appended past the live one) and moved the
+    /// mtime its verify-once marker was bound to.
+    SealedReadOnly,
+    /// Creates the prospective container a sealed build writes: write-capable,
+    /// no sidecar WAL, so the closing checkpoint is the container's one and
+    /// only durable write. A build that does not reach `close` leaves nothing
+    /// recoverable, by design: the artifact directory is receipted only after
+    /// close and any interrupted build is discarded and rebuilt from the
+    /// source rows on the next attempt, so a WAL here logged every copied row
+    /// a second time for a recovery that never reads it.
+    SealedBuild,
 }
 
 #[derive(Clone)]
@@ -125,17 +142,35 @@ impl GraphDbOpenOptions {
                         ))
                     })?,
                 };
-                let durability = match self.durability {
-                    GraphDurability::WalSync => DurabilityMode::Sync,
+                let config = match self.durability {
+                    GraphDurability::WalSync => Config::persistent(&path)
+                        .with_storage_format(StorageFormat::SingleFile)
+                        .with_wal_durability(DurabilityMode::Sync),
+                    GraphDurability::SealedReadOnly => {
+                        if !preexisting_store {
+                            return Err(GraphDbError::invalid(
+                                "read-only graph opens require an existing sealed artifact",
+                            ));
+                        }
+                        Config::read_only(&path).with_storage_format(StorageFormat::SingleFile)
+                    }
+                    GraphDurability::SealedBuild => {
+                        if preexisting_store {
+                            return Err(GraphDbError::invalid(
+                                "sealed builds require a prospective container path",
+                            ));
+                        }
+                        let mut config = Config::persistent(&path)
+                            .with_storage_format(StorageFormat::SingleFile);
+                        config.wal_enabled = false;
+                        config
+                    }
                     GraphDurability::Memory => {
                         return Err(GraphDbError::invalid(
                             "persistent graph databases require durable storage",
                         ));
                     }
                 };
-                let config = Config::persistent(&path)
-                    .with_storage_format(StorageFormat::SingleFile)
-                    .with_wal_durability(durability);
                 let config = apply_tiered_storage(config, &path);
                 Ok(ValidatedOpen {
                     config,

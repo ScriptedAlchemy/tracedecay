@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { decodeJsonBody, UNDECODABLE } from './responseBody.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { readOnlyScopeRefusal, type ReadOnlyScopeRefusal } from '../scope/store.ts';
 
@@ -51,19 +52,6 @@ export type PayloadWriteResult<T> =
   | PayloadResult<T>
   | { outcome: 'read_only_scope'; refusal: ReadOnlyScopeRefusal };
 
-/** Sentinel for a body that was not JSON at all, kept distinct from a body
- * that decoded to `null` — the second is a legal body that must still fail the
- * payload schema rather than being mistaken for a decode failure. */
-const undecodable = Symbol('undecodable');
-
-async function decodedBody(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return undecodable;
-  }
-}
-
 /** Reads the canonical failure discriminant out of an admitted 404/503 body.
  *
  * Gated on a non-`ok` string `status`, which is the marker the generated
@@ -114,7 +102,7 @@ async function readPayloadResponse<T>(
   // identity is fine) nor a generic error (the remedy is specific and the
   // daemon states it), and unlike both it is fixed by changing scope.
   if (response.status === 405) {
-    const refusal = readOnlyScopeRefusal(await decodedBody(response));
+    const refusal = readOnlyScopeRefusal(await decodeJsonBody(response, init?.signal));
     if (refusal) return { outcome: 'read_only_scope', refusal };
     // A 405 this dashboard cannot account for. The request was refused and
     // that is all that is known, so it stays a plain error rather than
@@ -125,8 +113,8 @@ async function readPayloadResponse<T>(
   // than a fault: 503 for a registry that is missing or cannot be opened, 404
   // for an id it does not hold. Both carry the generated payload.
   if (response.status === 404 || response.status === 503) {
-    const body = await decodedBody(response);
-    const canonical = body === undecodable ? null : canonicalFailure(body);
+    const body = await decodeJsonBody(response, init?.signal);
+    const canonical = body === UNDECODABLE ? null : canonicalFailure(body);
     if (canonical !== null) {
       const parsed = schema.safeParse(body);
       // A body that names its condition but that this build cannot otherwise
@@ -148,8 +136,8 @@ async function readPayloadResponse<T>(
   if (!response.ok) {
     return { outcome: 'error', detail: `HTTP ${response.status}` };
   }
-  const body = await decodedBody(response);
-  if (body === undecodable) return { outcome: 'unsupported_schema' };
+  const body = await decodeJsonBody(response, init?.signal);
+  if (body === UNDECODABLE) return { outcome: 'unsupported_schema' };
   const parsed = schema.safeParse(body);
   if (!parsed.success) return { outcome: 'unsupported_schema' };
   return { outcome: 'ok', data: parsed.data };

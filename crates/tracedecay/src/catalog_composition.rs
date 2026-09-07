@@ -3,8 +3,6 @@
 //! Composition validates metadata against the closed application handler
 //! descriptors and binds them to one caller-supplied canonical dispatcher.
 
-use std::collections::BTreeSet;
-
 use thiserror::Error;
 use tracedecay_application::handlers::BoundApplicationHandler;
 use tracedecay_application::{
@@ -14,10 +12,9 @@ use tracedecay_application::{
     application_handler_descriptors,
 };
 use tracedecay_tool_catalog::{
-    BindingSurface, CapabilityId, CatalogContributionV1, CatalogSnapshotBuilderV1,
-    CatalogSnapshotV1, CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
-    ProfileDefinitionInputV1, ProfileId, ProfileKind, RoutingFixtureExpectation, RoutingFixtureV1,
-    UseCaseId,
+    BindingSurface, CatalogContributionV1, CatalogSnapshotBuilderV1, CatalogSnapshotV1,
+    CatalogValidationError, IdentifierError, ProfileBudget, ProfileDefinition,
+    ProfileDefinitionInputV1, ProfileId, ProfileKind, UseCaseId,
 };
 
 // The default profile currently composes 403 shipped bindings. This reviewed
@@ -201,94 +198,15 @@ fn application_profile(
     requires_cli_mcp_pairing: bool,
 ) -> Result<ProfileDefinition, CatalogCompositionError> {
     let profile_id = ProfileId::new(profile_id)?;
-    let capabilities: Vec<_> = contributions
+    let capability_ids = contributions
         .iter()
-        .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
+        .flat_map(CatalogContributionV1::capabilities)
         .filter(|capability| {
             capability.availability().is_callable()
                 && capability.profile_eligibility().contains(&profile_id)
         })
-        .collect();
-    let capability_ids = capabilities
-        .iter()
         .map(|capability| capability.capability_id().clone())
         .collect::<Vec<_>>();
-    let mut used_fixture_utterances = BTreeSet::from([
-        "Preview and apply these index changes".to_owned(),
-        "Explain the weather".to_owned(),
-        "Stage these selected hunks".to_owned(),
-    ]);
-    let mut routing_fixtures = capabilities
-        .iter()
-        .map(|capability| -> Result<_, CatalogCompositionError> {
-            let query = unique_routing_fixture_utterance(capability, &mut used_fixture_utterances)?;
-            Ok(RoutingFixtureV1::new(
-                query,
-                RoutingFixtureExpectation::Select {
-                    capability_id: capability.capability_id().clone(),
-                },
-            )?)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !capability_ids.is_empty() {
-        let git_preview = CapabilityId::new("capability.application.git.preview")?;
-        let git_apply = CapabilityId::new("capability.application.git.apply")?;
-        if capability_ids.len() > 1 {
-            let (query, ambiguous_capability_ids) =
-                if capability_ids.contains(&git_preview) && capability_ids.contains(&git_apply) {
-                    (
-                        "Preview and apply these index changes".to_owned(),
-                        vec![git_preview, git_apply],
-                    )
-                } else {
-                    let first = capabilities[0];
-                    let second = capabilities[1];
-                    (
-                        format!("{} or {}", first.routing().name(), second.routing().name()),
-                        vec![
-                            first.capability_id().clone(),
-                            second.capability_id().clone(),
-                        ],
-                    )
-                };
-            routing_fixtures.push(RoutingFixtureV1::new(
-                query,
-                RoutingFixtureExpectation::ambiguous(ambiguous_capability_ids)?,
-            )?);
-        }
-        routing_fixtures.push(RoutingFixtureV1::new(
-            "Explain the weather",
-            RoutingFixtureExpectation::Reject,
-        )?);
-        let stage_hunks = CapabilityId::new("capability.git.stage-hunks")?;
-        let insufficient_capability = contributions
-            .iter()
-            .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
-            .find(|capability| {
-                capability.capability_id() == &stage_hunks
-                    && !capability_ids.contains(capability.capability_id())
-            })
-            .or_else(|| {
-                contributions
-                    .iter()
-                    .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
-                    .find(|capability| !capability_ids.contains(capability.capability_id()))
-            });
-        if let Some(capability) = insufficient_capability {
-            let query = capability
-                .routing()
-                .examples()
-                .first()
-                .cloned()
-                .unwrap_or_else(|| capability.routing().name().to_owned());
-            routing_fixtures.push(RoutingFixtureV1::new(
-                query,
-                RoutingFixtureExpectation::InsufficientCapability {
-                    capability_id: capability.capability_id().clone(),
-                },
-            )?);
-        }
-    }
     let enabled_surfaces = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -300,7 +218,7 @@ fn application_profile(
     .filter(|surface| {
         contributions
             .iter()
-            .flat_map(tracedecay_tool_catalog::CatalogContributionV1::bindings)
+            .flat_map(CatalogContributionV1::bindings)
             .any(|binding| {
                 binding.surface() == *surface && capability_ids.contains(binding.capability_id())
             })
@@ -313,42 +231,13 @@ fn application_profile(
         enabled_surfaces,
         requires_cli_mcp_pairing,
         budget,
-        routing_fixtures,
     })?)
-}
-
-fn unique_routing_fixture_utterance(
-    capability: &tracedecay_tool_catalog::CapabilityManifestV1,
-    used: &mut BTreeSet<String>,
-) -> Result<String, CatalogCompositionError> {
-    for candidate in capability
-        .routing()
-        .examples()
-        .iter()
-        .cloned()
-        .chain(std::iter::once(capability.routing().name().to_owned()))
-    {
-        if used.insert(candidate.clone()) {
-            return Ok(candidate);
-        }
-    }
-
-    let fallback = format!(
-        "{} [{}]",
-        capability.routing().name(),
-        capability.capability_id().as_str()
-    );
-    if !used.insert(fallback.clone()) {
-        return Err(CatalogValidationError::DuplicateValue {
-            field: "profile routing fixture utterances",
-        }
-        .into());
-    }
-    Ok(fallback)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::mcp::tools::{
         default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
@@ -358,7 +247,7 @@ mod tests {
         ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_mcp::{ToolRegistryMode, project_catalog_discovery_scope};
-    use tracedecay_tool_catalog::SurfaceOperationName;
+    use tracedecay_tool_catalog::{CapabilityId, SurfaceOperationName};
 
     // Growth tripwire only, not an MCP client or protocol limit. The complete
     // final-V2 profile measures 573,502 bytes after the typed Work and workflow
@@ -498,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_default_budget_routes_every_capability_for_an_eager_client() {
+    fn reviewed_default_budget_admits_the_full_eager_profile() {
         let snapshot = build_application_catalog_snapshot().expect("application catalog");
         let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
         let profile = snapshot.profile(&profile_id).expect("default profile");
@@ -521,48 +410,6 @@ mod tests {
             "acceptance must exercise the reviewed budget with the full eager profile loaded"
         );
 
-        for capability in &eager_visible_capabilities {
-            let fixture = profile
-                .routing_fixtures()
-                .iter()
-                .find(|fixture| {
-                    matches!(
-                        fixture.expectation(),
-                        RoutingFixtureExpectation::Select { capability_id }
-                            if capability_id == capability.capability_id()
-                    )
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} must retain an eager routing fixture",
-                        capability.capability_id()
-                    )
-                });
-            let routed = eager_visible_capabilities
-                .iter()
-                .filter(|candidate| {
-                    candidate.routing().name() == fixture.utterance()
-                        || candidate
-                            .routing()
-                            .examples()
-                            .iter()
-                            .any(|example| example == fixture.utterance())
-                        || format!(
-                            "{} [{}]",
-                            candidate.routing().name(),
-                            candidate.capability_id().as_str()
-                        ) == fixture.utterance()
-                })
-                .map(|candidate| candidate.capability_id())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                routed,
-                vec![capability.capability_id()],
-                "{} must route unambiguously with every eager capability loaded",
-                capability.capability_id()
-            );
-        }
-
         for operation in DASHBOARD_OPERATIONS {
             let operation_name =
                 SurfaceOperationName::new(operation).expect("surface operation name");
@@ -575,38 +422,11 @@ mod tests {
                     &BTreeSet::new(),
                 )
                 .unwrap_or_else(|| panic!("{operation} must resolve from the eager profile"));
-            let fixture = profile
-                .routing_fixtures()
-                .iter()
-                .find(|fixture| {
-                    matches!(
-                        fixture.expectation(),
-                        RoutingFixtureExpectation::Select { capability_id }
-                            if capability_id == capability.capability_id()
-                    )
-                })
-                .unwrap_or_else(|| panic!("{operation} must retain a routing fixture"));
-            let routed = eager_visible_capabilities
-                .iter()
-                .filter(|candidate| {
-                    candidate.routing().name() == fixture.utterance()
-                        || candidate
-                            .routing()
-                            .examples()
-                            .iter()
-                            .any(|example| example == fixture.utterance())
-                        || format!(
-                            "{} [{}]",
-                            candidate.routing().name(),
-                            candidate.capability_id().as_str()
-                        ) == fixture.utterance()
-                })
-                .map(|candidate| candidate.capability_id())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                routed,
-                vec![capability.capability_id()],
-                "{operation} must route unambiguously with every eager capability loaded"
+            assert!(
+                eager_visible_capabilities
+                    .iter()
+                    .any(|candidate| candidate.capability_id() == capability.capability_id()),
+                "{operation} must resolve to an eager-visible capability"
             );
         }
     }
@@ -672,23 +492,5 @@ mod tests {
              the {DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES}-byte regression ceiling; \
              largest serialized tool definitions: {largest_contributors}"
         );
-    }
-
-    #[test]
-    fn application_profiles_disambiguate_duplicate_routing_examples() {
-        let snapshot = build_application_catalog_snapshot().expect("application catalog");
-        for profile in snapshot.profiles() {
-            let utterances = profile
-                .routing_fixtures()
-                .iter()
-                .map(RoutingFixtureV1::utterance)
-                .collect::<BTreeSet<_>>();
-            assert_eq!(
-                utterances.len(),
-                profile.routing_fixtures().len(),
-                "{} contains duplicate routing fixtures",
-                profile.profile_id().as_str()
-            );
-        }
     }
 }

@@ -489,6 +489,10 @@ pub struct DashboardState {
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub token_counts: Arc<token_count::TokenCountCache>,
+    /// Derived snapshots (PCA projection, similarity pairs, dependency strata)
+    /// computed from this state's own stores. Owned here, shared by clones,
+    /// and released with the state instead of accumulating process-wide.
+    pub(crate) derived_snapshots: Arc<snapshot_cache::DerivedSnapshotCaches>,
     /// Admitted daemon/application diagnostics authority. `None` keeps all
     /// diagnostics controls typed unavailable; the dashboard never constructs
     /// a broker or analyzer runtime.
@@ -857,6 +861,7 @@ async fn build_state_inner(
         user_settings: cg.user_settings_client(),
         profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
+        derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
         code_diagnostics_authority: None,
         automation_authority,
         automation_observation,
@@ -2403,6 +2408,7 @@ mod authority_tests {
                 ),
                 profile_code_index_worker_settings: None,
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
+                derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
                 code_diagnostics_authority: None,
                 automation_authority: None,
                 automation_observation: None,
@@ -2591,6 +2597,45 @@ mod authority_tests {
         assert_eq!(projection_warm["scan"]["vector_rows_read"], 0);
         assert_eq!(similarity_warm["scan"]["cache_state"], "hit");
         assert_eq!(similarity_warm["scan"]["vector_rows_read"], 0);
+    }
+
+    #[tokio::test]
+    async fn retiring_the_dashboard_state_releases_its_derived_snapshots() {
+        let fixture = DashboardStateFixture::open("project.dashboard-derived-retirement").await;
+        let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
+        fixture.add_vector_facts(3).await;
+
+        let projection =
+            memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
+        let similarity =
+            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
+        assert_eq!(projection["scan"]["cache_state"], "miss");
+        assert_eq!(projection["points"].as_array().unwrap().len(), 3);
+        assert_eq!(similarity["scan"]["cache_state"], "miss");
+        assert_eq!(similarity["count"], 3);
+
+        // The populated caches are owned by the state (and its clones), not by
+        // the process: once the last handle to this store's dashboard state is
+        // gone, the derived snapshots are gone with it.
+        let DashboardStateFixture {
+            state,
+            layout: _,
+            _database_authority,
+            _temporary,
+        } = fixture;
+        let retained = Arc::downgrade(&state.derived_snapshots);
+        let clone = state.clone();
+        drop(state);
+        assert!(
+            retained.upgrade().is_some(),
+            "a live clone of the state still owns the derived snapshots"
+        );
+        drop(clone);
+        assert!(
+            retained.upgrade().is_none(),
+            "retiring the last dashboard state must release its derived snapshots"
+        );
+        drop((_database_authority, _temporary));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

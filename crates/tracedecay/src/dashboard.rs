@@ -81,14 +81,14 @@ pub async fn dashboard_automation_authority_for_test(
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("dashboard automation fixture configuration is unavailable: {error}"),
     })?;
-    let configured_project_root = configuration.target.project_root.canonicalize()?;
+    let configured_project_root = configuration.target().project_root.canonicalize()?;
     if configured_project_root != project_root {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: "dashboard automation fixture configuration resolved a different project root"
                 .to_owned(),
         });
     }
-    let project_id = configuration.target.project_id.clone();
+    let project_id = configuration.target().project_id.clone();
     let scope =
         tracedecay_code_index_runtime::resolved_scope_for_project(&project_root, &project_id)
             .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
@@ -103,8 +103,8 @@ pub async fn dashboard_automation_authority_for_test(
     let configuration_policy_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.daemon.configuration-policy.v1",
         &scope.scope_digest,
-        &configuration.snapshot.effective_behavior_digest,
-        &configuration.snapshot.resolution_provenance_digest,
+        &configuration.snapshot().effective_behavior_digest,
+        &configuration.snapshot().resolution_provenance_digest,
     ))
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
         message: format!("dashboard automation fixture policy digest failed: {error}"),
@@ -126,7 +126,7 @@ pub async fn dashboard_automation_authority_for_test(
             project_root.clone(),
             project_database,
             project_id.clone(),
-            configuration.snapshot.effective_behavior_digest,
+            configuration.snapshot().effective_behavior_digest.clone(),
             configuration_policy_digest,
         ),
         label = "dashboard.automation.mount"

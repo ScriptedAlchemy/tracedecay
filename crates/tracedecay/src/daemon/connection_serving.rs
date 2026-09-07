@@ -7,7 +7,7 @@
 use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
-use tracedecay_daemon_service::{DaemonInvocationService, Lease, cancel, register};
+use tracedecay_daemon_service::{DaemonInvocationService, Lease};
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.
 ///
@@ -921,7 +921,11 @@ fn serve_broker_socket_client_inner(
             )
         {
             hotpath::measure_block!("daemon.engine.transport.cancel", {
-cancel(cancellation.target_request_id());
+                engine
+                    .invocation
+                    .service
+                    .request_cancellations()
+                    .cancel(cancellation.target_request_id());
             });
             drop(setup_activity);
             return Ok(None);
@@ -1137,9 +1141,13 @@ cancel(cancellation.target_request_id());
                             );
                             return Ok(());
                         };
-                        let delivery_cancellation = request_id
-                            .as_deref()
-                            .and_then(register);
+                        let delivery_cancellation = request_id.as_deref().and_then(|request_id| {
+                            engine
+                                .invocation
+                                .service
+                                .request_cancellations()
+                                .register(request_id)
+                        });
                         let cancellation = delivery_cancellation
                             .as_ref()
                             .map(Lease::token);
@@ -1615,7 +1623,10 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         )
     {
         hotpath::measure_block!("daemon.engine.transport.cancel", {
-            cancel(cancellation.target_request_id());
+            invocation
+                .service
+                .request_cancellations()
+                .cancel(cancellation.target_request_id());
         });
         drop(setup_activity);
         return Ok(());
@@ -1820,9 +1831,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                         );
                         return Ok(());
                     };
-                    let delivery_cancellation = request_id
-                        .as_deref()
-                        .and_then(register);
+                    let delivery_cancellation = request_id.as_deref().and_then(|request_id| {
+                        invocation
+                            .service
+                            .request_cancellations()
+                            .register(request_id)
+                    });
                     let cancellation = delivery_cancellation
                         .as_ref()
                         .map(Lease::token);

@@ -174,7 +174,9 @@ pub(super) async fn run_semantic_vector_generation_retention(
         // maintenance interval.
         return match graph.configuration_runtime().client().current().await {
             Ok(runtime_configuration)
-                if semantic_retrieval_profiles_disabled(&runtime_configuration.config.semantic) =>
+                if semantic_retrieval_profiles_disabled(
+                    &runtime_configuration.config().semantic,
+                ) =>
             {
                 // Default off: no committed active or rollback retrieval
                 // profile, so no census will ever complete. Pin the typed

@@ -8,6 +8,44 @@ use tracedecay_policy::authorization::{
 const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
     include_str!("fixtures/source_authorization/core.json");
 
+/// Byte-exact `(input_digest, decision_digest)` per truth-table row. These
+/// are the digests the evaluator produced before decision construction was
+/// reworked to hash the decision material once; replay, proof issuance, and
+/// sink recheck all bind to these bytes, so a change here is a contract break,
+/// not a refactor.
+const PINNED_DECISION_DIGESTS: &[(&str, &str, &str)] = &[
+    (
+        "project_authorized_live",
+        "sha256:ebd80c5f30861d41091cac8136112220a51b11c65d24fa9d39cf5b15a543a6fe",
+        "sha256:cc0659b2bf7f5064a771c0bc98c455308a8669cb58f5807edd732b112083849d",
+    ),
+    (
+        "project_owner_mismatch",
+        "sha256:2a31d316680e54279e4e233317c5262c7d424a23626a8cd0d768a7ca122882b2",
+        "sha256:0ced4c613a4cf96bce197747246c9a7b50a93d2e90cfa9a8d1f6fc8b928b7223",
+    ),
+    (
+        "mandatory_local_privacy_blocks_host_egress",
+        "sha256:96302fa59d141d0a383843c09c76ac0ac36b4d151502795d0deb8690e34aed33",
+        "sha256:59d50e411a22c56bab7dc5acfd3cfbb7e6ad6116b984d14b2e45db500451a6cc",
+    ),
+    (
+        "expired_requester_grant",
+        "sha256:a72cf235938cd39fbf950eb8a7892435ab13bb0e9e98280b0dcf9fccf3fff555",
+        "sha256:00bf07d143ed55b229fd9adf327d31e69ff1dc788540e5037bdc7569aa6763af",
+    ),
+    (
+        "temporarily_unavailable_is_not_deletion",
+        "sha256:5201a04cbcd8e18a7f62ef87807b8909d3b2cf3c22f80545f5dd0bd5f035acc6",
+        "sha256:ddaa027062de71c36d8c18ef5044f183851609fb90c59a6730c1c7716b2fa047",
+    ),
+    (
+        "policy_excluded_is_not_unauthorized",
+        "sha256:633d4a84397a2d1ccd202b6f6189af5aa83b65f55cf6b70c93b6ecc92b74603c",
+        "sha256:f460d6e5b9647aecb9d848e03584549fcf3c4223c8addbc1e29849cc0938ae90",
+    ),
+];
+
 fn truth_tables() -> Vec<SourceAuthorizationTruthTableV1> {
     serde_json::from_str(SOURCE_AUTHORIZATION_TRUTH_TABLES)
         .expect("checked-in source authorization truth tables deserialize")
@@ -19,6 +57,22 @@ fn canonical_source_authorization_truth_tables_hold() {
 
     for row in truth_tables() {
         let decision = evaluator.evaluate(&row.input);
+        let (_, input_digest, decision_digest) = PINNED_DECISION_DIGESTS
+            .iter()
+            .find(|(name, _, _)| *name == row.name)
+            .unwrap_or_else(|| panic!("truth-table row {} has no pinned digests", row.name));
+        assert_eq!(
+            decision.input_digest.as_str(),
+            *input_digest,
+            "input digest drifted for {}",
+            row.name
+        );
+        assert_eq!(
+            decision.decision_digest.as_str(),
+            *decision_digest,
+            "decision digest drifted for {}",
+            row.name
+        );
 
         assert_eq!(
             decision.access, row.expected.access,

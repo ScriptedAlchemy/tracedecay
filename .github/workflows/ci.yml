@@ -9,9 +9,16 @@ on:
 permissions:
   contents: read
 
+# One run per pull request (or per pushed ref). A newer push to a
+# feature-branch pull request supersedes the run in flight: its verdict is for
+# a head nobody can merge any more, and letting it finish only holds runners
+# the current head is waiting for. Pull requests into `master` (the integration
+# delivery and release PRs) keep every run to completion: their heads move
+# often as child work lands, and a verdict for a slightly older tip is still
+# the evidence those merges are judged by. `push` runs are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref != 'master' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -95,9 +102,60 @@ jobs:
           TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
           TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
 
+  # One dev-profile `tracedecay` binary for every job that only exercises the
+  # built CLI against a host (Hermes, Claude Code, OpenCode). Each of those
+  # jobs used to compile the whole workspace itself behind its own cache key,
+  # so a cold cache cost the run three 25-minute builds instead of one and
+  # tripped their timeouts. `pr-dogfood` keeps its own build on purpose: it
+  # tests the checked-out PR head, not the merge ref the other jobs check out.
+  debug-cli:
+    name: Build debug CLI
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-debug-cli-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: kache compiler cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+      - name: Build tracedecay binary
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+
+      - name: Publish the binary for the host integration jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-tracedecay-cli
+          path: target/debug/tracedecay
+          if-no-files-found: error
+          retention-days: 1
+
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
@@ -147,6 +205,7 @@ jobs:
     name: Release Version Drift
     if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -189,6 +248,7 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -289,19 +349,27 @@ jobs:
       # `--workspace --features tracedecay/test-helpers` resolution turns the
       # tiers back on, and it makes these artifacts a cache hit for the run
       # that follows rather than a second, differently-featured build.
+      #
+      # Every build in this lane uses the `perf` cargo profile that
+      # `cargo test-ci` (the test step below) compiles the suites with; see
+      # [profile.perf] in Cargo.toml. A default-profile build here would be a
+      # second, unshared dependency graph.
       - name: Build workspace binaries for the test lane
-        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
+
+      - name: Build host-CLI test fixture
+        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
 
       # This parity test must execute separate feature-off/on binaries. Copy
       # each result immediately so the second Cargo resolution cannot replace
-      # the first executable in target/debug/examples.
+      # the first executable in target/perf/examples.
       - name: Build controlled-workload hotpath parity executables
         shell: bash
-        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile test
+        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile perf
 
       - name: Verify controlled-workload hotpath parity
         run: |
-          cargo nextest run -p tracedecay-search-eval --locked \
+          cargo nextest run -p tracedecay-search-eval --locked --cargo-profile perf \
             --run-ignored only \
             -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
             --no-tests=fail
@@ -317,12 +385,16 @@ jobs:
       # every sibling.
       - name: Run isolated background-CPU width test
         run: |
-          cargo test -p tracedecay-code-index --locked --lib \
+          cargo test -p tracedecay-code-index --locked --profile perf --lib \
             nested_chunk_fanout_admits_stolen_workers_without_exceeding_width \
             -- --ignored --test-threads=1
 
+      # The `test-ci` alias (.cargo/config.toml) is the one maintained
+      # definition of the hosted selection — workspace, nextest `ci` policy,
+      # root fixture feature, perf cargo profile — so a local `cargo test-ci`
+      # reproduces exactly this run.
       - name: Run tests
-        run: cargo nextest run --workspace --profile ci --locked --features tracedecay/test-helpers
+        run: cargo test-ci --locked
 
       # Compile-only gate for the features this lane does not enable. Both are
       # otherwise built for the first time at release (`--all-features`), so
@@ -423,27 +495,34 @@ jobs:
           echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
 
       # Compile this portable historical-artifact journey before the large
-      # root test binaries monopolize the hosted runner. The workspace and
-      # feature selection match the archive, so Cargo reuses the result below.
+      # root test binaries monopolize the hosted runner. The workspace,
+      # feature and cargo-profile selection match the archive, so Cargo
+      # reuses the result below.
       - name: Compile Windows search-quality portability target
         shell: pwsh
-        run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
+        run: cargo test --no-run --workspace --locked --profile perf --features tracedecay/test-helpers --test search_quality_suite
 
       # Acceptance tests execute the ordinary evaluator binaries. Match the
-      # archive's feature resolution so this reuses its dependency artifacts;
+      # archive's features and perf profile to reuse dependency artifacts;
       # nextest's archive.include carries the executables to every shard.
       - name: Build workspace binaries for the Windows test lane
         shell: pwsh
-        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
+
+      - name: Build Windows host-CLI test fixture
+        shell: pwsh
+        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified on the Linux test lane only. Building them here would put a
       # second, feature-on resolution of the search-eval dependency graph
       # inside this job's bound (18 of its 62 minutes before it was cancelled),
       # and the parity property does not depend on the platform.
+      # Same selection as `cargo test-ci` (.cargo/config.toml); nextest has no
+      # archive alias, so the arguments are spelled out here once.
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload Windows archive build timings
         if: always()
@@ -508,31 +587,6 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
 
-      # `tracedecay-cli::source_provenance_test` drives a nested `cargo
-      # generate-lockfile --offline` / `cargo build --offline` on a fixture
-      # crate whose build-dependency mirrors this crate's own (`serde_json =
-      # "1"`, see `CargoFixture::new`). The Linux/macOS lanes resolve that
-      # from the registry cache their own build just filled; a shard runner
-      # only receives the archive and starts with an empty Cargo home, so the
-      # offline resolution finds no index at all. Fetch that one dependency
-      # graph here so the fixture stays offline and hermetic.
-      - name: Seed the Cargo registry for the source-provenance fixture
-        shell: pwsh
-        run: |
-          $seed = Join-Path $env:RUNNER_TEMP "source-provenance-seed"
-          New-Item -ItemType Directory -Force -Path (Join-Path $seed "src") | Out-Null
-          Set-Content -Path (Join-Path $seed "Cargo.toml") -Value @'
-          [package]
-          name = "source-provenance-seed"
-          version = "0.1.0"
-          edition = "2024"
-
-          [build-dependencies]
-          serde_json = "1"
-          '@
-          Set-Content -Path (Join-Path $seed "src/main.rs") -Value "fn main() {}"
-          cargo fetch --manifest-path (Join-Path $seed "Cargo.toml")
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -543,8 +597,6 @@ jobs:
           path: ${{ runner.temp }}
 
       - name: Run Windows tests
-        env:
-          TRACEDECAY_SQLITE_UNSAFE_FAST: "1"
         shell: pwsh
         # --extract-to must be the workspace so target/ lands at the same
         # absolute path as on the build job: integration tests bake
@@ -601,6 +653,7 @@ jobs:
     if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
     needs: [windows-test-shard, scope-gate]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check Windows shards
         run: |
@@ -615,6 +668,7 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -729,6 +783,7 @@ jobs:
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
@@ -823,7 +878,7 @@ jobs:
 
   hermes-integration:
     name: Hermes integration (stock)
-    needs: scope-gate
+    needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -836,39 +891,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
       - name: Install ast-grep
         uses: ./.github/actions/install-ast-grep
         with:
           version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+      - name: Fetch the debug CLI built once for this run
+        uses: actions/download-artifact@v4
         with:
-          shared-key: ci-hermes-integration-full-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build tracedecay binary
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+          name: debug-tracedecay-cli
+          path: target/debug
+      - name: Restore the executable bit the artifact store drops
+        run: chmod +x target/debug/tracedecay
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py
@@ -899,7 +932,7 @@ jobs:
 
   host-stock-integration:
     name: Claude Code + OpenCode integration (stock)
-    needs: scope-gate
+    needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -913,34 +946,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
+      - name: Fetch the debug CLI built once for this run
+        uses: actions/download-artifact@v4
         with:
-          shared-key: ci-host-stock-integration-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-      - name: Build tracedecay binary
-        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+          name: debug-tracedecay-cli
+          path: target/debug
+      - name: Restore the executable bit the artifact store drops
+        run: chmod +x target/debug/tracedecay
 
       - name: Install stock Claude Code and OpenCode at pinned versions
         run: |

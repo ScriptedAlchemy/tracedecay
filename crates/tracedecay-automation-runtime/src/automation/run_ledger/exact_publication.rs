@@ -261,7 +261,7 @@ fn bind_staged_run_record_exact_with_publisher<T>(
         let result = (|| {
             ensure_no_exact_append_intent(dashboard_root).map_err(TraceDecayError::from)?;
             let durable_identity =
-                match super::exact_lookup::open_stabilized_run_ledger(&ledger_path, false)? {
+                match super::exact_lookup::open_committed_run_ledger(&ledger_path, false)? {
                     Some(ledger) => super::exact_lookup::read_exact_run_identity_from_file(
                         &ledger,
                         &ledger_path,
@@ -608,7 +608,7 @@ where
         let ledger_lock = acquire_run_ledger_lock(&ledger_path).map_err(TraceDecayError::from)?;
         let result = (|| {
             ensure_no_exact_append_intent(dashboard_root).map_err(TraceDecayError::from)?;
-            let ledger = super::exact_lookup::open_stabilized_run_ledger(&ledger_path, false)?
+            let ledger = super::exact_lookup::open_committed_run_ledger(&ledger_path, false)?
                 .ok_or_else(|| {
                     config_error(
                         "automation run spool cleanup has no durable exact ledger authority",
@@ -656,7 +656,7 @@ fn publish_under_ledger_lock(
     publication: &ExactRunPublication,
     publish_file: &AtomicFilePublisher<'_>,
 ) -> Result<ExactRunPublishOutcome> {
-    let mut ledger = super::exact_lookup::open_stabilized_run_ledger(ledger_path, true)?
+    let mut ledger = super::exact_lookup::open_committed_run_ledger(ledger_path, true)?
         .ok_or_else(|| config_error("automation run ledger disappeared during durable open"))?;
     let recovered_intent = recover_matching_append_intent(
         dashboard_root,
@@ -731,6 +731,7 @@ fn publish_under_ledger_lock(
     sync_run_ledger_file_and_parent(ledger_path, &ledger)?;
     verify_published_range(&mut ledger, &mut spool, &intent)?;
     clear_append_intent(dashboard_root)?;
+    super::lifecycle_index::record_durable_run_ledger_append(&ledger, ledger_path, pre_append_eof);
     Ok(ExactRunPublishOutcome::Published)
 }
 
@@ -790,12 +791,19 @@ fn recover_matching_append_intent(
         verify_published_range(ledger, &mut spool, &intent)?;
         sync_run_ledger_file_and_parent(ledger_path, ledger)?;
         clear_append_intent(dashboard_root)?;
+        super::lifecycle_index::record_durable_run_ledger_append(
+            ledger,
+            ledger_path,
+            intent.pre_append_eof,
+        );
         return Ok(None);
     }
     ledger
         .set_len(intent.pre_append_eof)
         .map_err(TraceDecayError::from)?;
     sync_run_ledger_file_and_parent(ledger_path, ledger)?;
+    // Recovery rewrote the tail: the next read revalidates the whole history.
+    super::lifecycle_index::discard_run_ledger_index(ledger_path);
     // The republished intent stays durable and owns the upcoming append; the
     // caller resumes under it instead of clearing and rewriting the same
     // bytes with a second atomic publication.
@@ -1394,6 +1402,8 @@ fn repair_corrupt_append_intent(
     }
     ledger.set_len(clean_eof).map_err(TraceDecayError::from)?;
     sync_run_ledger_file_and_parent(ledger_path, ledger)?;
+    // Recovery rewrote the tail: the next read revalidates the whole history.
+    super::lifecycle_index::discard_run_ledger_index(ledger_path);
     clear_corrupt_append_intent_if_unchanged(dashboard_root, corrupt_bytes)
 }
 
@@ -1765,6 +1775,86 @@ mod tests {
         let mut conflicting = record;
         conflicting.backend = "claude_cli".to_owned();
         assert!(stage_run_record_exact(temp.path(), &conflicting).is_err());
+    }
+
+    #[test]
+    fn terminal_publication_decodes_rows_proportional_to_its_run() {
+        use super::super::exact_lookup::scan_receipt;
+        use super::super::find_run_record_exact_bounded_blocking;
+
+        const UNRELATED_RUNS: u64 = 4_000;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = run_ledger_path(temp.path());
+        let mut history = String::new();
+        for index in 0..UNRELATED_RUNS {
+            let mut unrelated = record(&format!("unrelated-{index}"));
+            unrelated.status = AutomationRunStatus::Running;
+            history.push_str(&serde_json::to_string(&unrelated).expect("unrelated row"));
+            history.push('\n');
+        }
+        std::fs::create_dir_all(temp.path()).expect("dashboard root");
+        std::fs::write(&ledger, history).expect("seed history");
+
+        let cold = scan_receipt::snapshot();
+        assert!(
+            find_run_record_exact_bounded_blocking(temp.path(), "proportional-terminal")
+                .expect("cold lookup")
+                .is_none()
+        );
+        let cold = scan_receipt::snapshot().since(cold);
+        assert!(
+            cold.rows_decoded >= UNRELATED_RUNS,
+            "index recovery decodes the complete history once: {cold:?}"
+        );
+
+        let terminal = record("proportional-terminal");
+        let bound = scan_receipt::snapshot();
+        let (publication, ()) =
+            bind_staged_run_record_exact(temp.path(), &terminal, |_| Ok(())).expect("bind");
+        let bound = scan_receipt::snapshot().since(bound);
+        assert_eq!(
+            bound.rows_decoded, 0,
+            "binding a new run decodes no ledger rows"
+        );
+        assert_eq!(
+            bound.syncs, 0,
+            "an unchanged ledger is not resynced while binding"
+        );
+
+        let published = scan_receipt::snapshot();
+        assert_eq!(
+            publish_staged_run_record_exact_blocking(temp.path(), &terminal.run_id, &publication)
+                .expect("publish"),
+            ExactRunPublishOutcome::Published
+        );
+        let published = scan_receipt::snapshot().since(published);
+        assert_eq!(
+            published.rows_decoded, 2,
+            "publication decodes only the spool row and the appended row: {published:?}"
+        );
+        assert_eq!(published.syncs, 1, "the append commit is the only sync");
+
+        let replayed = scan_receipt::snapshot();
+        assert_eq!(
+            publish_staged_run_record_exact_blocking(temp.path(), &terminal.run_id, &publication)
+                .expect("replay"),
+            ExactRunPublishOutcome::Published
+        );
+        let replayed = scan_receipt::snapshot().since(replayed);
+        assert_eq!(
+            replayed.rows_decoded, 0,
+            "an exact replay check decodes no rows"
+        );
+        assert_eq!(replayed.syncs, 0);
+
+        let looked_up = scan_receipt::snapshot();
+        let found = find_run_record_exact_bounded_blocking(temp.path(), &terminal.run_id)
+            .expect("lookup")
+            .expect("published run");
+        assert_eq!(found, terminal);
+        let looked_up = scan_receipt::snapshot().since(looked_up);
+        assert_eq!(looked_up.rows_decoded, 1);
+        assert_eq!(looked_up.syncs, 0);
     }
 
     #[test]

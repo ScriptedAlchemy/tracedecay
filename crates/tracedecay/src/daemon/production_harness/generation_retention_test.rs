@@ -106,7 +106,7 @@ async fn set_project_model_selection(
         .current()
         .await
         .expect("current production configuration");
-    let mut semantic = configuration.config.semantic.clone();
+    let mut semantic = configuration.config().semantic.clone();
     semantic.selected_model = selected_model.map(str::to_owned);
     semantic.auto_download = false;
     assert!(semantic.active_profile.is_none());
@@ -129,11 +129,11 @@ async fn set_project_model_selection(
         idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
             format!(
                 "configuration.idempotency.retention-no-model.{}",
-                configuration.revision_id
+                configuration.revision_id()
             ),
         )
         .expect("configuration idempotency key"),
-        expected_revision: configuration.revision_id,
+        expected_revision: configuration.revision_id().clone(),
     };
     let response = harness
         .call_tool(
@@ -158,12 +158,12 @@ async fn set_project_model_selection(
         .await
         .expect("committed model selection");
     assert_eq!(
-        observed.config.semantic.selected_model.as_deref(),
+        observed.config().semantic.selected_model.as_deref(),
         selected_model
     );
-    let root_view = crate::config::runtime_config_from_snapshot(project, &observed.snapshot)
-        .expect("root runtime decodes the same committed snapshot");
-    assert_eq!(root_view.semantic, observed.config.semantic);
+    let root_view = crate::config::PinnedRuntimeConfiguration::from_runtime(observed.clone())
+        .expect("root runtime layers policy over the same committed pin");
+    assert_eq!(root_view.config().semantic, observed.config().semantic);
     drop(graph);
 }
 
@@ -1130,7 +1130,8 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
         .current()
         .await
         .expect("current production configuration")
-        .revision_id;
+        .revision_id()
+        .clone();
     let request = tracedecay_application::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project { project_id },
         key: tracedecay_domain::configuration::SettingKey::new(
@@ -1635,9 +1636,9 @@ async fn mounted_default_off_retention_requires_an_empty_vector_census() {
         .current()
         .await
         .unwrap();
-    assert!(configuration.config.semantic.selected_model.is_none());
-    assert!(configuration.config.semantic.active_profile.is_none());
-    assert!(configuration.config.semantic.rollback_profile.is_none());
+    assert!(configuration.config().semantic.selected_model.is_none());
+    assert!(configuration.config().semantic.active_profile.is_none());
+    assert!(configuration.config().semantic.rollback_profile.is_none());
     assert!(
         schedulers
             .semantic_vector_graph_provider(&root)
@@ -1875,7 +1876,7 @@ async fn semantic_shutdown_drains_project_startup_selection_before_returning() {
             .current()
             .await
             .expect("current config")
-            .config
+            .config()
             .semantic
             .selected_model
             .is_some(),

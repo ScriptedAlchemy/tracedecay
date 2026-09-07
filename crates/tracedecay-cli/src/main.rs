@@ -124,12 +124,7 @@ impl Spinner {
                 if !text.is_empty() {
                     let frame = frames[idx % frames.len()];
                     idx += 1;
-                    // Truncate to avoid line wrapping on typical terminals.
-                    let display: std::borrow::Cow<str> = if text.len() > 50 {
-                        format!("…{}", &text[text.len() - 49..]).into()
-                    } else {
-                        text.as_str().into()
-                    };
+                    let display = spinner_tail(&text, SPINNER_MESSAGE_MAX_CHARS);
                     let mut stderr = std::io::stderr();
                     let _ = write!(stderr, "\r\x1b[2K{} {}", frame, display);
                     let _ = stderr.flush();
@@ -159,9 +154,82 @@ impl Spinner {
 
     fn stop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        if let Some(h) = self.handle.take()
+            && h.join().is_err()
+        {
+            let mut stderr = std::io::stderr();
+            let _ = writeln!(stderr, "\r\x1b[2Kprogress renderer thread panicked");
+            let _ = stderr.flush();
         }
+    }
+}
+
+/// Character bound for one rendered spinner message, so a long path or
+/// progress line does not wrap on a typical terminal. Counted in Unicode
+/// scalar values, not display columns: wide CJK glyphs still take two
+/// columns each.
+const SPINNER_MESSAGE_MAX_CHARS: usize = 50;
+
+/// The last `max_chars` characters of `text`, with a leading `…` standing in
+/// for the dropped prefix when the message is longer than that. Always slices
+/// on a character boundary, so multibyte messages cannot panic the renderer.
+fn spinner_tail(text: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    let excess = text.chars().count().saturating_sub(max_chars);
+    if excess == 0 {
+        return text.into();
+    }
+    // Drop one extra character so the ellipsis fits inside the bound.
+    let start = text
+        .char_indices()
+        .nth(excess + 1)
+        .map_or(text.len(), |(index, _)| index);
+    format!("…{}", &text[start..]).into()
+}
+
+#[cfg(test)]
+mod spinner_tail_tests {
+    use super::{SPINNER_MESSAGE_MAX_CHARS, spinner_tail};
+
+    #[test]
+    fn ascii_within_the_bound_is_unchanged() {
+        let text = "a".repeat(SPINNER_MESSAGE_MAX_CHARS);
+        assert_eq!(spinner_tail(&text, SPINNER_MESSAGE_MAX_CHARS), text);
+    }
+
+    /// Matches the previous byte-based output for ASCII: an ellipsis plus the
+    /// last 49 characters.
+    #[test]
+    fn ascii_over_the_bound_keeps_the_tail_behind_an_ellipsis() {
+        let text = format!("{}{}", "x".repeat(20), "y".repeat(40));
+        let tail = spinner_tail(&text, SPINNER_MESSAGE_MAX_CHARS);
+        assert_eq!(tail, format!("…{}{}", "x".repeat(9), "y".repeat(40)));
+        assert_eq!(tail.chars().count(), SPINNER_MESSAGE_MAX_CHARS);
+    }
+
+    #[test]
+    fn multibyte_latin_cjk_and_boundary_spanning_text_never_split_a_character() {
+        for text in [
+            "é".repeat(60),
+            "字".repeat(60),
+            format!("{}{}", "a".repeat(49), "日本語"),
+            format!("{}🦀{}", "p".repeat(48), "q".repeat(10)),
+            "/tmp/répertoire/très/long/chemin/vers/le/projet/源/lib.rs".repeat(2),
+        ] {
+            let tail = spinner_tail(&text, SPINNER_MESSAGE_MAX_CHARS);
+            assert_eq!(tail.chars().count(), SPINNER_MESSAGE_MAX_CHARS, "{text}");
+            let kept = tail.strip_prefix('…').unwrap_or_else(|| panic!("{text}"));
+            assert!(text.ends_with(kept), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_message_one_character_over_drops_two_and_adds_the_ellipsis() {
+        let text = "é".repeat(SPINNER_MESSAGE_MAX_CHARS + 1);
+        let tail = spinner_tail(&text, SPINNER_MESSAGE_MAX_CHARS);
+        assert_eq!(
+            tail,
+            format!("…{}", "é".repeat(SPINNER_MESSAGE_MAX_CHARS - 1))
+        );
     }
 }
 

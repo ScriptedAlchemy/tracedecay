@@ -8,6 +8,7 @@ use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
 };
+use tracedecay_daemon_service::RequestCancellationRegistryV1;
 
 fn authoritative_response(request_id: &str) -> DaemonInvocationResponse {
     DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::ResetRequired)
@@ -25,8 +26,10 @@ fn assert_authoritative_settlement(response: DaemonInvocationResponse) {
 #[tokio::test]
 async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settlement() {
     const REQUEST_ID: &str = "request.in-process-effect-cancel";
-    let lease =
-        tracedecay_daemon_service::register(REQUEST_ID).expect("register invocation cancellation");
+    let request_cancellations = RequestCancellationRegistryV1::default();
+    let lease = request_cancellations
+        .register(REQUEST_ID)
+        .expect("register invocation cancellation");
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
     let completed_by_invocation = Arc::clone(&completed);
@@ -46,6 +49,7 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
     let response = tokio::time::timeout(
         Duration::from_secs(1),
         settle_in_process_invocation(
+            &request_cancellations,
             REQUEST_ID,
             invocation,
             Duration::from_secs(1),
@@ -66,8 +70,10 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
 #[tokio::test]
 async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement() {
     const REQUEST_ID: &str = "request.in-process-effect-deadline";
-    let lease =
-        tracedecay_daemon_service::register(REQUEST_ID).expect("register invocation cancellation");
+    let request_cancellations = RequestCancellationRegistryV1::default();
+    let lease = request_cancellations
+        .register(REQUEST_ID)
+        .expect("register invocation cancellation");
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
     let completed_by_invocation = Arc::clone(&completed);
@@ -80,6 +86,7 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
     let response = tokio::time::timeout(
         Duration::from_secs(1),
         settle_in_process_invocation(
+            &request_cancellations,
             REQUEST_ID,
             invocation,
             Duration::from_millis(10),
@@ -100,19 +107,26 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
 #[tokio::test(start_paused = true)]
 async fn in_process_effect_without_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.in-process-effect-no-settlement";
-    let lease =
-        tracedecay_daemon_service::register(REQUEST_ID).expect("register invocation cancellation");
+    let request_cancellations = RequestCancellationRegistryV1::default();
+    let lease = request_cancellations
+        .register(REQUEST_ID)
+        .expect("register invocation cancellation");
     let invocation = tokio::spawn(std::future::pending::<DaemonInvocationResponse>());
 
-    let settlement = tokio::spawn(settle_in_process_invocation(
-        REQUEST_ID,
-        invocation,
-        Duration::from_millis(10),
-        CancellationSignal::active("cancel.in-process-effect-no-settlement")
-            .expect("cancellation signal"),
-        None,
-        InvocationCancellationPolicy::AuthoritativeEffect,
-    ));
+    let settlement_cancellations = request_cancellations.clone();
+    let settlement = tokio::spawn(async move {
+        settle_in_process_invocation(
+            &settlement_cancellations,
+            REQUEST_ID,
+            invocation,
+            Duration::from_millis(10),
+            CancellationSignal::active("cancel.in-process-effect-no-settlement")
+                .expect("cancellation signal"),
+            None,
+            InvocationCancellationPolicy::AuthoritativeEffect,
+        )
+        .await
+    });
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(10)).await;
     tokio::task::yield_now().await;
@@ -146,8 +160,10 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
     let admission = registry
         .admit_request(&project, None)
         .expect("admit outer project request");
-    let lease =
-        tracedecay_daemon_service::register(REQUEST_ID).expect("register invocation cancellation");
+    let request_cancellations = RequestCancellationRegistryV1::default();
+    let lease = request_cancellations
+        .register(REQUEST_ID)
+        .expect("register invocation cancellation");
     let admitted_cancellation = lease.token();
     let (started, started_rx) = tokio::sync::oneshot::channel::<()>();
     let invocation = tokio::spawn(async move {
@@ -179,6 +195,7 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
     let response = tokio::time::timeout(
         Duration::from_secs(2),
         settle_in_process_invocation(
+            &request_cancellations,
             REQUEST_ID,
             invocation,
             Duration::from_secs(10),

@@ -927,7 +927,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         let direct_layers = mounted_configuration_layers(
             &runtime.configuration_target().project_id,
             &profile_id,
-            &current.snapshot,
+            current.snapshot(),
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("configuration layer authority invalid: {error:?}"),
@@ -948,7 +948,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             }
         })?;
         runtime
-            .record_runtime_activation(Some(current.revision_id), None, current_micros())
+            .record_runtime_activation(Some(current.revision_id().clone()), None, current_micros())
             .await
             .map_err(|error| TraceDecayError::Config {
                 message: format!("configuration runtime activation could not be recorded: {error}"),

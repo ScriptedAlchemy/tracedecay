@@ -8,12 +8,12 @@ pub use navigation::{
     handle_impact, handle_implementations, handle_impls, handle_node, handle_signature,
 };
 pub use verified::{
-    GRAPH_RELATION_READ_LIMIT, VerifiedNeighbor, canonical_relation_kind,
-    canonical_relation_kind_name, cost_to_expand_verified, graph_name_matches, graph_occurrence_id,
-    graph_symbol_corrupt, graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths,
-    graph_symbols_in_scope, line_for_byte_offset, nodes_addressed_by_args,
-    required_graph_file_path, required_graph_metadata, single_graph_adjacency_batch,
-    traverse_verified_neighbors, verified_neighbor_value, verified_trait_dispatch_targets,
+    GRAPH_RELATION_READ_LIMIT, VerifiedNeighbor, canonical_relation_kind, cost_to_expand_verified,
+    graph_name_matches, graph_occurrence_id, graph_symbol_corrupt, graph_symbol_end_line,
+    graph_symbol_location_value, graph_symbol_paths, graph_symbols_in_scope, line_for_byte_offset,
+    nodes_addressed_by_args, required_graph_file_path, required_graph_metadata,
+    single_graph_adjacency_batch, traverse_verified_neighbors, verified_neighbor_value,
+    verified_trait_dispatch_targets,
 };
 
 use tracedecay_application::retrieval::PrimitiveNotFoundV1;

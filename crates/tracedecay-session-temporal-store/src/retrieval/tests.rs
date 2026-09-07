@@ -1381,6 +1381,65 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         "root retrieval must execute one live FTS store query: {root_fts_plan:?}"
     );
 
+    let root_exact_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text("needle candidate".to_string()),
+        SqlValue::Text(fts_phrase("needle candidate")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap")),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone(), 0)
+            .await,
+        ["occurrence-plan-inside"],
+        "root exact retrieval must exclude the populated out-of-root session"
+    );
+    let root_exact_plan = read
+        .explain_query_plan(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone())
+        .await;
+    assert!(
+        root_exact_plan.iter().any(|detail| {
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "root exact retrieval must prefilter through the live FTS operator: {root_exact_plan:?}"
+    );
+
+    // Every retained snippet contains a space, so `instr` alone would admit all
+    // three in-root rows. The literal has no FTS token, so the maintained index
+    // admits nothing: the exact channel is a measured empty set that never
+    // scans retained text and never refuses.
+    let mut root_exact_tokenless_params = root_exact_params;
+    root_exact_tokenless_params[2] = SqlValue::Text(" ".to_string());
+    root_exact_tokenless_params[3] = SqlValue::Text(fts_phrase(" "));
+    assert_eq!(
+        read.text_column(
+            ROOT_EXACT_CANDIDATE_QUERY,
+            root_exact_tokenless_params.clone(),
+            0
+        )
+        .await,
+        Vec::<String>::new(),
+        "a literal without an indexable token must be an empty exact channel"
+    );
+    let root_exact_tokenless_plan = read
+        .explain_query_plan(ROOT_EXACT_CANDIDATE_QUERY, root_exact_tokenless_params)
+        .await;
+    assert!(
+        root_exact_tokenless_plan.iter().any(|detail| {
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "a token-free exact literal must still be admitted through the FTS operator: {root_exact_tokenless_plan:?}"
+    );
+
     let root_time_params = vec![
         SqlValue::Text("user".to_string()),
         SqlValue::Null,
@@ -1817,6 +1876,11 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
              snippet_text TEXT NOT NULL,
              PRIMARY KEY(session_id, generation, occurrence_id)
          );
+         CREATE VIRTUAL TABLE session_occurrences_fts USING fts5(
+             snippet_text,
+             content = 'session_occurrences',
+             content_rowid = 'rowid'
+         );
          INSERT INTO sessions VALUES ('claude', 'session-large', 'user');
          INSERT INTO retrieval_anchors VALUES (
              'anchor-large',
@@ -1830,7 +1894,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     .expect("large exact fixture schema");
     let literal = "exact-tail-🚨";
     let prefix_bytes = 768 * 1024;
-    let snippet = format!("{}{literal}", "x".repeat(prefix_bytes));
+    let snippet = format!("{} {literal}", "x".repeat(prefix_bytes));
     assert!(snippet.len() < MAX_OBSERVATION_RECORD_BYTES);
     conn.execute(
         "INSERT INTO session_occurrences VALUES (
@@ -1854,6 +1918,11 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     )
     .await
     .expect("oversized hostile occurrence");
+    conn.execute_batch(
+        "INSERT INTO session_occurrences_fts(session_occurrences_fts) VALUES('rebuild');",
+    )
+    .await
+    .expect("rebuild exact candidate FTS fixture");
 
     let candidate_item_bytes = 256 * 1024;
     let source_bytes = i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap");
@@ -1895,6 +1964,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
                 SqlValue::Text("user".to_string()),
                 SqlValue::Null,
                 SqlValue::Text(literal.to_string()),
+                SqlValue::Text(fts_phrase(literal)),
                 SqlValue::Integer(i64::MAX),
                 SqlValue::Text(String::new()),
                 SqlValue::Text(String::new()),

@@ -30,7 +30,7 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
     for schema in [
         crate::db::retrieval_anchor_schema::ALIASES_SCHEMA,
         crate::db::retrieval_anchor_schema::AUTHORITY_SCHEMA,
-        crate::db::retrieval_anchor_schema::IMMUTABILITY_TRIGGERS,
+        crate::db::retrieval_anchor_schema::RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL,
     ] {
         connection.execute_batch(schema).map_err(|error| {
             format!("failed to install canonical retrieval-anchor support: {error}")

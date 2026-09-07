@@ -20,9 +20,9 @@ use tracedecay_code_extraction::ExtractionArtifactV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CodeSearchChunkV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind, ExactTechnicalTermKindV1,
-    ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest, FileOccurrenceId,
-    LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
+    CodeSearchChunkV1, ComplexityAnalysisV1, ContentDigest, Edge, EdgeAuthorityV1, EdgeKind,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, FileIdentityDigest,
+    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, Node, NodeKind, PolicyRevisionId,
     RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
     SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UnresolvedRef, ValidatedCodeFileV1,
     canonical_sha256, classify_technical_token, split_subtokens, technical_tokens,
@@ -723,6 +723,7 @@ struct SymbolRow {
     branches: u32,
     loops: u32,
     max_nesting: u32,
+    complexity_analysis: ComplexityAnalysisV1,
     line_span: u32,
     start_line: u32,
     signature: Option<String>,
@@ -1257,6 +1258,7 @@ impl DeterministicCodeChunker {
             branches: u32,
             loops: u32,
             max_nesting: u32,
+            complexity_analysis: ComplexityAnalysisV1,
             line_span: u32,
             start_line: u32,
             signature: Option<String>,
@@ -1282,6 +1284,7 @@ impl DeterministicCodeChunker {
                     branches: node.branches,
                     loops: node.loops,
                     max_nesting: node.max_nesting,
+                    complexity_analysis: node.complexity_analysis,
                     line_span: node
                         .end_line
                         .saturating_sub(node.start_line)
@@ -1360,6 +1363,7 @@ impl DeterministicCodeChunker {
                 branches: node.branches,
                 loops: node.loops,
                 max_nesting: node.max_nesting,
+                complexity_analysis: node.complexity_analysis,
                 line_span: node.line_span,
                 start_line: node.start_line,
                 signature: node.signature.clone(),
@@ -1405,6 +1409,7 @@ impl DeterministicCodeChunker {
                 branches: row.branches,
                 loops: row.loops,
                 max_nesting: row.max_nesting,
+                complexity_analysis: row.complexity_analysis,
                 line_span: row.line_span,
                 start_line: row.start_line,
                 signature: row.signature.clone(),
@@ -2282,6 +2287,7 @@ mod tests {
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: source[start..end].lines().count() as u32,
             start_line: source[..start].matches('\n').count() as u32,
             signature: None,
@@ -3341,6 +3347,168 @@ pub fn real_symbol() {}
             &unsupported_kind.reason,
             CodeIndexEdgeAbstentionReasonV1::UnsupportedRelationKind
         ));
+    }
+
+    /// Two same-line methods share kind, name, and start line; the parser must
+    /// still hand this path distinct endpoints so each `Contains`/`Calls`
+    /// relation binds to its own symbol instead of abstaining or cross-binding.
+    #[test]
+    fn same_line_symbols_bind_relations_to_their_own_occurrence() {
+        let compact = "struct A; struct B; fn alpha() {} fn beta() {} impl A { fn run() { alpha(); } } impl B { fn run() { beta(); } }\n";
+        let formatted = "struct A;\nstruct B;\nfn alpha() {}\nfn beta() {}\nimpl A {\n    fn run() {\n        alpha();\n    }\n}\nimpl B {\n    fn run() {\n        beta();\n    }\n}\n";
+
+        let index = |source: &str| {
+            let file = validated_file("src/lib.rs", source.as_bytes());
+            let batch = batch_for(&file, ParseOutcomeV1::Complete);
+            chunker()
+                .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+                .expect("indexing succeeds")
+        };
+        let relations = |artifacts: &CodeFileIndexArtifactsV1| {
+            let name_of = |occurrence: &SymbolOccurrenceId| {
+                artifacts
+                    .symbols
+                    .iter()
+                    .find(|symbol| &symbol.occurrence == occurrence)
+                    .map(|symbol| symbol.qualified_name.clone())
+                    .expect("edge endpoint names an indexed symbol")
+            };
+            artifacts
+                .edges
+                .iter()
+                .map(|edge| {
+                    (
+                        edge.kind,
+                        name_of(&edge.from_occurrence),
+                        name_of(&edge.to_occurrence),
+                    )
+                })
+                .collect::<BTreeSet<_>>()
+        };
+
+        let artifacts = index(compact);
+        let runs = artifacts
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == "method")
+            .map(|symbol| symbol.qualified_name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            runs,
+            BTreeSet::from(["src/lib.rs::A::run", "src/lib.rs::B::run"])
+        );
+        let expected = BTreeSet::from([
+            (
+                RelationEdgeKindV1::Contains,
+                "src/lib.rs::A".to_owned(),
+                "src/lib.rs::A::run".to_owned(),
+            ),
+            (
+                RelationEdgeKindV1::Contains,
+                "src/lib.rs::B".to_owned(),
+                "src/lib.rs::B::run".to_owned(),
+            ),
+            (
+                RelationEdgeKindV1::Calls,
+                "src/lib.rs::A::run".to_owned(),
+                "src/lib.rs::alpha".to_owned(),
+            ),
+            (
+                RelationEdgeKindV1::Calls,
+                "src/lib.rs::B::run".to_owned(),
+                "src/lib.rs::beta".to_owned(),
+            ),
+        ]);
+        let actual = relations(&artifacts);
+        assert!(
+            actual.is_superset(&expected),
+            "missing relations: {:?}",
+            expected.difference(&actual).collect::<Vec<_>>()
+        );
+        assert!(
+            !actual.contains(&(
+                RelationEdgeKindV1::Calls,
+                "src/lib.rs::A::run".to_owned(),
+                "src/lib.rs::beta".to_owned(),
+            )),
+            "A::run must not be cross-bound to beta"
+        );
+        // The file node is not a symbol row, so its `Contains` edges always
+        // abstain; every symbol-to-symbol edge must bind.
+        let symbol_abstentions = artifacts
+            .edge_abstentions
+            .iter()
+            .filter(|abstention| !abstention.source_node_id.starts_with("file:"))
+            .collect::<Vec<_>>();
+        assert!(
+            symbol_abstentions.is_empty(),
+            "same-line naming must not produce missing-endpoint abstentions: {symbol_abstentions:?}"
+        );
+
+        // Reformatting onto separate lines changes extraction-local ids but
+        // neither the relations nor the declared logical symbol identities.
+        let reformatted = index(formatted);
+        assert_eq!(relations(&reformatted), actual);
+        let identities = |artifacts: &CodeFileIndexArtifactsV1| {
+            artifacts
+                .symbols
+                .iter()
+                .map(|symbol| (symbol.qualified_name.clone(), symbol.identity.clone()))
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(identities(&reformatted), identities(&artifacts));
+    }
+
+    /// A body larger than the extractor's traversal budget reaches this path
+    /// as an incomplete analysis: the lineage record carries the state and
+    /// offers no exact counters, while ordinary bodies stay exact.
+    #[test]
+    fn incomplete_complexity_walk_reaches_lineage_records_as_unavailable_counters() {
+        let mut source = String::from("pub fn huge(mut x: u64) -> u64 {\n");
+        for _ in 0..tracedecay_code_extraction::complexity::TRAVERSAL_BUDGET / 4 {
+            source.push_str("    x += 1;\n");
+        }
+        source.push_str("    if x > 3 { return x; }\n    x\n}\n\npub fn small(x: u64) -> u64 {\n    if x > 3 { return x; }\n    x\n}\n");
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("indexing succeeds");
+        let record = |name: &str| {
+            artifacts
+                .symbols
+                .iter()
+                .find(|symbol| symbol.qualified_name == format!("src/lib.rs::{name}"))
+                .unwrap_or_else(|| panic!("{name} lineage record"))
+        };
+
+        let huge = record("huge");
+        assert_eq!(
+            huge.complexity_analysis,
+            ComplexityAnalysisV1::TraversalBudgetExhausted
+        );
+        assert_eq!(
+            huge.exact_complexity(),
+            None,
+            "an incomplete walk must not surface counters as exact"
+        );
+        let wire = serde_json::to_value(huge).expect("lineage record");
+        assert_eq!(
+            wire["complexity_analysis"],
+            serde_json::json!("traversal_budget_exhausted")
+        );
+
+        let small = record("small");
+        assert_eq!(small.complexity_analysis, ComplexityAnalysisV1::Complete);
+        let exact = small.exact_complexity().expect("complete walk is exact");
+        assert_eq!((exact.branches, exact.max_nesting), (1, 2));
+        assert!(
+            serde_json::to_value(small)
+                .expect("lineage record")
+                .get("complexity_analysis")
+                .is_none(),
+            "complete records keep their pinned wire shape"
+        );
     }
 
     #[test]

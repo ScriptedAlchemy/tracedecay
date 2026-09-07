@@ -11,6 +11,11 @@ use std::path::Path;
 use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay_domain::SessionId;
+#[cfg(feature = "test-transport")]
+use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
+#[cfg(feature = "test-transport")]
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 #[cfg(feature = "test-transport")]
 fn write_production_codex_rollout(home: &Path, project: &Path) {
@@ -268,6 +273,140 @@ async fn message_search_rejects_foreign_project_selectors() {
     assert!(
         err.contains("project_selector"),
         "malformed selectors must fail decode naming the argument: {err}"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
+    const SESSION_COUNT: usize = 4;
+    const MESSAGES_PER_SESSION: usize = 4;
+
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+    let runtime = open_active_project_session_db(&cg).await;
+    for session_index in 0..SESSION_COUNT {
+        let session_id = format!("bounded-search-session-{session_index}");
+        for message_index in 0..MESSAGES_PER_SESSION {
+            let message_id = format!("bounded-search-message-{session_index}-{message_index}");
+            let unique_target = if session_index == 0 && message_index == 0 {
+                " bounded retained target"
+            } else {
+                ""
+            };
+            seed_temporal_lcm_session_message(
+                &cg,
+                &session_id,
+                &message_id,
+                format!(
+                    "workflow correction repeated skill tool pattern from {session_id} in {message_id}{unique_target}"
+                ),
+                i64::try_from(session_index * MESSAGES_PER_SESSION + message_index + 1)
+                    .expect("fixture ordinal"),
+            )
+            .await;
+        }
+        GlobalDbSessionTemporalStore::new(
+            runtime
+                .registered_database(HostAdmissionScope::Project)
+                .expect("registered project session database"),
+        )
+        .materialize_pending_session_refresh_for_test(
+            &SessionId::new(session_id).expect("fixture session id"),
+        )
+        .await
+        .expect("materialize canonical temporal session");
+    }
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "bounded retained target",
+            "limit": 1,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("a limit-one retained search must fit the admitted budget");
+    let envelope: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("retained evidence envelope");
+    let payload = envelope
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&envelope);
+    let hits = payload["results"].as_array().expect("message-search hits");
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert_eq!(
+        hit["message"]["session_id"], hit["session"]["session_id"],
+        "the hydrated message must come from its owning session"
+    );
+    let session_id = hit["session"]["session_id"]
+        .as_str()
+        .expect("owning session id");
+    let message_id = hit["message"]["message_id"]
+        .as_str()
+        .expect("owning message id");
+    let text = hit["message"]["text"]
+        .as_str()
+        .expect("canonical message text");
+    assert!(text.contains(session_id), "{text}");
+    assert!(text.contains(message_id), "{text}");
+
+    let broad = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "workflow correction repeated skill tool pattern",
+            "limit": 1,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("the bounded record read must resolve duplicate candidate lanes once");
+    let broad_envelope: Value =
+        serde_json::from_str(extract_text(&broad.value)).expect("broad retained evidence envelope");
+    let broad_payload = broad_envelope
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&broad_envelope);
+    assert_eq!(
+        broad_payload["results"]
+            .as_array()
+            .expect("broad message-search hits")
+            .len(),
+        1
+    );
+
+    // A literal without a maintained-index token cannot be admitted through
+    // the FTS prefilter, so the exact channel is a measured empty set: the
+    // search stays bounded and answers zero results, never a budget refusal.
+    let tokenless = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "🚨 :: --",
+            "limit": 1,
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("an exact query without a maintained-index token is a valid empty search");
+    let tokenless_envelope: Value = serde_json::from_str(extract_text(&tokenless.value))
+        .expect("token-free retained evidence envelope");
+    let tokenless_payload = tokenless_envelope
+        .pointer("/outcome/value/payload")
+        .unwrap_or(&tokenless_envelope);
+    assert_eq!(
+        tokenless_payload["outcome"], "complete_zero",
+        "{tokenless_payload}"
+    );
+    assert_eq!(
+        tokenless_payload["results"],
+        Value::Array(Vec::new()),
+        "{tokenless_payload}"
     );
 }
 

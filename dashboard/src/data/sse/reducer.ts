@@ -93,7 +93,6 @@ export function createSseReducer<TPayload = unknown>(
   let latestEventRevision: number | null = null;
   let observedCount = 0;
   const observed = new Set<string>();
-  const retainedReceipts = new Map<string, SseEventEnvelope<TPayload>>();
 
   let queue: Array<SseEventEnvelope<TPayload>> = [];
   let queuedBytes = 0;
@@ -126,10 +125,6 @@ export function createSseReducer<TPayload = unknown>(
     refetchRequested = true;
     refetchReason = reason;
     canonicalEpoch += 1;
-  }
-
-  function retainReceipt(key: string, event: SseEventEnvelope<TPayload>): void {
-    if (event.is_receipt) retainedReceipts.set(key, event);
   }
 
   /**
@@ -172,35 +167,23 @@ export function createSseReducer<TPayload = unknown>(
 
     // Once stale (overflow), a single invalidation has already been emitted and
     // the consumer will refresh and commit the reseed; further events are moot.
-    // Receipts are still retained so a reload/restart never loses them.
-    if (stale) {
-      if (observed.has(key)) return false;
-      retainReceipt(key, event);
-      return false;
-    }
+    if (stale) return false;
 
-    if (observed.has(key)) {
-      retainReceipt(key, event);
-      return false;
-    }
+    if (observed.has(key)) return false;
 
     const rev = event.revision.event_revision;
     const lastRev = mark ? mark.lastEventRevision : null;
 
     // Out-of-order / superseded within this stream: an unseen event whose
-    // revision is not newer than the stream watermark. Drop it (retain if a
-    // receipt) — the monotone sequence has moved past it.
-    if (lastRev !== null && rev <= lastRev) {
-      retainReceipt(key, event);
-      return false;
-    }
+    // revision is not newer than the stream watermark. Drop it — the monotone
+    // sequence has moved past it.
+    if (lastRev !== null && rev <= lastRev) return false;
 
     const size = sizeOf(event);
     const wouldOverflow = queue.length + 1 > maxEvents || queuedBytes + size > maxBytes;
     if (wouldOverflow) {
       stale = true;
       requestCanonicalRefresh("overflow");
-      retainReceipt(key, event);
       return false;
     }
 
@@ -220,7 +203,6 @@ export function createSseReducer<TPayload = unknown>(
     latestEventRevision = latestEventRevision === null ? rev : Math.max(latestEventRevision, rev);
     queue.push(event);
     queuedBytes += size;
-    retainReceipt(key, event);
     return true;
   }
 
@@ -331,10 +313,6 @@ export function createSseReducer<TPayload = unknown>(
     return applyOutcome(settleReseed(token, reason));
   }
 
-  function getRetainedReceipts(): Array<SseEventEnvelope<TPayload>> {
-    return [...retainedReceipts.values()];
-  }
-
   function stats(): SseReducerStats {
     return {
       observedEvents: observedCount,
@@ -361,7 +339,6 @@ export function createSseReducer<TPayload = unknown>(
     beginReseed,
     commitReseed,
     abortReseed,
-    getRetainedReceipts,
     stats,
   };
 }

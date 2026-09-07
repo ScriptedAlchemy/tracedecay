@@ -103,7 +103,7 @@ pub fn preview_project_settings(
     current: &PinnedRuntimeConfiguration,
     patch: ProjectSettingsPatchV1,
 ) -> Result<ProjectSettingsPreviewV1, ProjectSettingsPreviewErrorV1> {
-    if &current.target.project_id != project_id {
+    if &current.target().project_id != project_id {
         return Err(ProjectSettingsPreviewErrorV1::InvalidAuthority);
     }
     let expected_revision = ConfigurationRevisionId::new(patch.expected_revision_id.clone())
@@ -133,39 +133,39 @@ pub fn preview_project_settings(
     let layer = ConfigurationLayerIdV1::Project {
         project_id: project_id.clone(),
     };
-    let current_context_scout = effective_context_scout_settings(&current.snapshot);
-    let expected_is_current = expected_revision == current.revision_id;
+    let current_context_scout = effective_context_scout_settings(current.snapshot());
+    let expected_is_current = &expected_revision == current.revision_id();
     let supplied_values_are_current = patch
         .include
         .as_ref()
-        .is_none_or(|value| value == &current.config.include)
+        .is_none_or(|value| value == &current.config().include)
         && patch
             .exclude
             .as_ref()
-            .is_none_or(|value| value == &current.config.exclude)
+            .is_none_or(|value| value == &current.config().exclude)
         && patch
             .max_file_size
-            .is_none_or(|value| value == current.config.max_file_size)
+            .is_none_or(|value| value == current.config().max_file_size)
         && patch
             .extract_docstrings
-            .is_none_or(|value| value == current.config.extract_docstrings)
+            .is_none_or(|value| value == current.config().extract_docstrings)
         && patch
             .track_call_sites
-            .is_none_or(|value| value == current.config.track_call_sites)
+            .is_none_or(|value| value == current.config().track_call_sites)
         && patch
             .git_ignore
-            .is_none_or(|value| value == current.config.git_ignore)
+            .is_none_or(|value| value == current.config().git_ignore)
         && patch.telemetry.as_ref().is_none_or(|telemetry| {
             telemetry
                 .timings
-                .is_none_or(|value| value == current.config.telemetry.timings)
+                .is_none_or(|value| value == current.config().telemetry.timings)
         })
         && patch.sync.as_ref().is_none_or(|sync| {
             sync.auto_track_pr_branches
-                .is_none_or(|value| value == current.config.sync.auto_track_pr_branches)
+                .is_none_or(|value| value == current.config().sync.auto_track_pr_branches)
                 && sync
                     .auto_track_pr_poll_secs
-                    .is_none_or(|value| value == current.config.sync.auto_track_pr_poll_secs)
+                    .is_none_or(|value| value == current.config().sync.auto_track_pr_poll_secs)
         })
         && patch.context_scout.is_none_or(|value| {
             value == context_scout_settings_are_enabled(&current_context_scout)
@@ -250,7 +250,7 @@ pub fn preview_project_settings(
     if mutations.is_empty() && !expected_is_current {
         return Err(ProjectSettingsPreviewErrorV1::RevisionConflict {
             expected: expected_revision.as_str().to_owned(),
-            actual: current.revision_id.as_str().to_owned(),
+            actual: current.revision_id().as_str().to_owned(),
         });
     }
     let changed = !expected_is_current || !supplied_values_are_current;
@@ -302,31 +302,38 @@ fn issue(field: &str, message: &str) -> SettingsValidationIssueV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use super::*;
-    use tracedecay_domain::configuration::{ConfigurationCandidateV1, ConfigurationSnapshotV1};
+    use tracedecay_configuration::config::registry::ConfigurationRegistry;
+    use tracedecay_configuration::config::resolver::resolve_configuration;
+
+    /// A pin over the registry defaults: the only way to hold a
+    /// `PinnedRuntimeConfiguration` is through its validating constructor.
+    fn pinned_defaults(
+        project_id: &ProjectId,
+        revision: &ConfigurationRevisionId,
+    ) -> PinnedRuntimeConfiguration {
+        let snapshot = resolve_configuration(&ConfigurationRegistry::core().unwrap(), &[])
+            .unwrap()
+            .snapshot;
+        PinnedRuntimeConfiguration::new(
+            tracedecay_configuration::config::RuntimeConfigurationTarget {
+                project_id: project_id.clone(),
+                project_root: PathBuf::from("/project"),
+            },
+            revision.clone(),
+            snapshot,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn preview_builds_one_typed_atomic_batch_without_mutating_runtime() {
         let project_id = ProjectId::new("project.settings").unwrap();
         let revision = ConfigurationRevisionId::new("configuration.revision.settings").unwrap();
-        let snapshot = ConfigurationSnapshotV1::new(
-            BTreeMap::new(),
-            BTreeMap::<SettingKey, Vec<ConfigurationCandidateV1>>::new(),
-        )
-        .unwrap();
-        let current = PinnedRuntimeConfiguration {
-            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
-                project_id: project_id.clone(),
-                project_root: PathBuf::from("/project"),
-            },
-            revision_id: revision.clone(),
-            snapshot,
-            config: tracedecay_configuration::config::TraceDecayConfig::default(),
-        };
-        let changed_timings = !current.config.telemetry.timings;
+        let current = pinned_defaults(&project_id, &revision);
+        let changed_timings = !current.config().telemetry.timings;
         let preview = preview_project_settings(
             &project_id,
             &current,
@@ -344,29 +351,16 @@ mod tests {
             panic!("project settings must be atomic")
         };
         assert_eq!(mutations.len(), 2);
-        assert_eq!(current.config.max_file_size, 1_048_576);
+        assert_eq!(current.config().max_file_size, 1_048_576);
     }
 
     #[test]
     fn context_scout_flag_toggles_only_the_state_of_the_effective_value() {
         let project_id = ProjectId::new("project.settings.scout").unwrap();
         let revision = ConfigurationRevisionId::new("configuration.revision.scout").unwrap();
-        let snapshot = ConfigurationSnapshotV1::new(
-            BTreeMap::new(),
-            BTreeMap::<SettingKey, Vec<ConfigurationCandidateV1>>::new(),
-        )
-        .unwrap();
-        let current = PinnedRuntimeConfiguration {
-            target: tracedecay_configuration::config::RuntimeConfigurationTarget {
-                project_id: project_id.clone(),
-                project_root: PathBuf::from("/project"),
-            },
-            revision_id: revision.clone(),
-            snapshot,
-            config: tracedecay_configuration::config::TraceDecayConfig::default(),
-        };
-        // A snapshot without the key renders the canonical stock state: off.
-        let current_settings = effective_context_scout_settings(&current.snapshot);
+        let current = pinned_defaults(&project_id, &revision);
+        // The registry default renders the canonical stock state: off.
+        let current_settings = effective_context_scout_settings(current.snapshot());
         assert_eq!(current_settings, ContextScoutSettingsV1::disabled());
         assert!(!context_scout_settings_are_enabled(&current_settings));
 

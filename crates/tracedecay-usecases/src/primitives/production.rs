@@ -584,20 +584,6 @@ fn files_for_occurrences(
         .collect()
 }
 
-fn relation_kind_name(kind: tracedecay_domain::RelationEdgeKindV1) -> &'static str {
-    match kind {
-        tracedecay_domain::RelationEdgeKindV1::Calls => "calls",
-        tracedecay_domain::RelationEdgeKindV1::Uses => "uses",
-        tracedecay_domain::RelationEdgeKindV1::TypeOf => "type_of",
-        tracedecay_domain::RelationEdgeKindV1::Contains => "contains",
-        tracedecay_domain::RelationEdgeKindV1::Implements => "implements",
-        tracedecay_domain::RelationEdgeKindV1::Extends => "extends",
-        tracedecay_domain::RelationEdgeKindV1::Annotates => "annotates",
-        tracedecay_domain::RelationEdgeKindV1::Returns => "returns",
-        tracedecay_domain::RelationEdgeKindV1::Receives => "receives",
-    }
-}
-
 pub struct TraceDecayLexicalGrepAuthorityV1 {
     source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
@@ -1586,7 +1572,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 );
                 let edge_kinds = edges
                     .into_iter()
-                    .map(|edge| relation_kind_name(edge.kind).to_owned())
+                    .map(|edge| edge.kind.as_str().to_owned())
                     .collect();
                 completed(
                     CallChainPrimitiveResult {

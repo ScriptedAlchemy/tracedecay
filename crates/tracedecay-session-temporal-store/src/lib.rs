@@ -13,6 +13,8 @@ mod schema_constants;
 mod support;
 #[cfg(test)]
 mod test_registered_impls;
+#[cfg(test)]
+mod test_support;
 pub use handle::{
     SessionTemporalAccess, SessionTemporalExec, SessionTemporalQuery, SessionTemporalRegisteredDb,
     SessionTemporalWriteTxn,
@@ -47,10 +49,9 @@ pub mod store;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
-use tracedecay_graph_db::GraphNamespace;
+use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
 
 use self::execution::{
     AuthorizedTaskSessionExecutionRequestV1, AuthorizedTemporalExecutionRequest,
@@ -72,8 +73,8 @@ use tracedecay_query::retrieval::evidence_lanes::{
 };
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_sessions::runtime::git_correlation::{
-    GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
-    recover_git_evidence_projection,
+    GitCorrelationError, GitEvidenceGraphHead, GitScopeFilter, git_evidence_projection_identity,
+    open_git_evidence_graph_view,
 };
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
@@ -126,14 +127,23 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // Absence is not an authoritative empty projection. Until Git
         // evidence has been published, callers cannot prove that no durable
         // session holds a matching worktree.
-        let Some(projection) =
-            recover_git_evidence_projection(runtime, &identity, Arc::new(AtomicBool::new(false)))?
-        else {
-            return Err(GitCorrelationError::Unavailable(
-                "verified Git-evidence projection has not been published".to_owned(),
-            ));
+        let view = match open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))?
+        {
+            GitEvidenceGraphHead::Indexed(view) => view,
+            GitEvidenceGraphHead::Unpublished => {
+                return Err(GitCorrelationError::Unavailable(
+                    "verified Git-evidence projection has not been published".to_owned(),
+                ));
+            }
+            // A pre-index head cannot be scoped through the graph either; its
+            // next publication re-projects it.
+            GitEvidenceGraphHead::Legacy { generation } => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "verified Git-evidence generation `{generation}` predates the indexed projector"
+                )));
+            }
         };
-        let session_ids = projection.session_ids_for_scope(filter).ok_or_else(|| {
+        let session_ids = view.session_ids_for_scope(filter)?.ok_or_else(|| {
             GitCorrelationError::Contract(
                 "Git scope resolution requires a non-empty filter".to_owned(),
             )
@@ -162,21 +172,46 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(key)
     }
 
+    /// Loads the cursor key provider, provisioning the first active key only
+    /// when none exists.
+    ///
+    /// A provisioned store is served from one admitted read snapshot and takes
+    /// no writer transaction. Only `ActiveKeyMissing` enters the provisioning
+    /// transaction, which rechecks under the writer so concurrent first-use
+    /// callers mint exactly one key; the provider is then built from a fresh
+    /// read view that includes it. Every other read-side refusal — multiple
+    /// active keys, invalid id/version/material, retention — is returned as is
+    /// and never becomes a reason to mint a replacement.
     #[hotpath::skip]
     pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+        let read = self.cursor_key_read_snapshot().await?;
+        match GlobalDbCursorKeyProvider::from_registered_active(&read).await {
+            Err(cursor_keys::GlobalDbCursorKeyProviderError::ActiveKeyMissing) => {}
+            loaded => return loaded,
+        }
+        drop(read);
         let key = self
             .ensure_active_session_cursor_key_result()
             .await
             .map_err(|source| cursor_keys::GlobalDbCursorKeyProviderError::Provision { source })?;
-        let read = self.read_snapshot().await.map_err(|source| {
+        let read = self.cursor_key_read_snapshot().await?;
+        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
+    }
+
+    async fn cursor_key_read_snapshot(
+        &self,
+    ) -> Result<
+        tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+        cursor_keys::GlobalDbCursorKeyProviderError,
+    > {
+        self.read_snapshot().await.map_err(|source| {
             cursor_keys::GlobalDbCursorKeyProviderError::Storage {
                 operation: "load registered session cursor authentication key",
                 source: EngineError::invalid_operation(source.to_string()),
             }
-        })?;
-        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
+        })
     }
 
     #[hotpath::skip]

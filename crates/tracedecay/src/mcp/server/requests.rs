@@ -546,11 +546,12 @@ impl McpServer {
         // this project, so publish it at the observation point carrying this
         // project's own registered id. The application lane retains it even
         // without a connected dashboard; the SSE adapter coalesces the burst.
-        let activity_project_id =
-            tracedecay_session_memory::event_lane::enabled(dispatch_server.session_db.as_deref())
-                .then(|| cg.store_layout().identity.project_id.clone())
-                .flatten();
-        if let Some(activity_db) = dispatch_server.session_db.as_deref() {
+        let activity_project_id = tracedecay_session_memory::event_lane::enabled(
+            dispatch_server.project_session_db.as_deref(),
+        )
+        .then(|| cg.store_layout().identity.project_id.clone())
+        .flatten();
+        if let Some(activity_db) = dispatch_server.project_session_db.as_deref() {
             tracedecay_session_memory::event_lane::publish(
                 activity_db,
                 tracedecay_session_memory::event_lane::ActivityFamilyV1::Hook,
@@ -573,7 +574,7 @@ impl McpServer {
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone()).await
-                && let Some(activity_db) = dispatch_server.session_db.as_deref()
+                && let Some(activity_db) = dispatch_server.project_session_db.as_deref()
             {
                 tracedecay_session_memory::event_lane::publish(
                     activity_db,
@@ -1351,7 +1352,7 @@ impl McpServer {
     }
 
     fn publish_tool_call_activity(&self, tool_name: &str, cg: &TraceDecay) {
-        if !tracedecay_session_memory::event_lane::enabled(self.session_db.as_deref()) {
+        if !tracedecay_session_memory::event_lane::enabled(self.project_session_db.as_deref()) {
             return;
         }
         if self
@@ -1361,7 +1362,7 @@ impl McpServer {
         {
             return;
         }
-        let Some(activity_db) = self.session_db.clone() else {
+        let Some(activity_db) = self.project_session_db.clone() else {
             self.tool_activity_publish_running
                 .store(false, Ordering::Release);
             return;
@@ -1950,7 +1951,7 @@ mod activity_dispatch_tests {
             .expect("registered test server");
         let (graph, live_branch) = server.reopen_if_branch_drifted_memoized().await;
         let activity_db = server
-            .session_db
+            .project_session_db
             .as_deref()
             .expect("registered project-session activity authority");
         let project_id = activity_db
