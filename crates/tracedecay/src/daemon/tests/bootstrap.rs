@@ -3288,8 +3288,9 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     // writer gate is not: the open path takes no writer at all any more (only
     // owner rekey and background refresh do), so blocking `WriterScope::Daemon`
     // let the open publish inside the bound and the request returned a result
-    // instead of the warming refusal. `production_project_server_inner` blocks
-    // on the project-open capacity gate before it counts an open attempt, so
+    // instead of the warming refusal. Route admission in
+    // `production_project_server` blocks on the project-open capacity gate
+    // before the open counts an attempt, so
     // holding that gate keeps every route cold for exactly as long as the test
     // holds it, then releases the background warm-up this test goes on to await.
     let capacity_gate = {
