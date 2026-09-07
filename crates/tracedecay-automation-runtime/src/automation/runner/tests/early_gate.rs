@@ -162,6 +162,7 @@ async fn scheduled_disabled_skill_writer_reads_no_evidence_and_runs_no_backend()
 
     let run = run_skill_writer_for_store(
         SkillWriterStoreRuntime {
+            host_io: crate::automation::host_io::plain_file_host_io(),
             dashboard_root: directory.path().join("automation"),
             sessions_db: sessions.profile_database_arc(),
             analytics_project_root: None,
