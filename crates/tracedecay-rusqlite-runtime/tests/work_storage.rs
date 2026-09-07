@@ -1,13 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_application::{
-    AcceptProposalCommand, CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand,
-    Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, ReviewProposalCommand,
-    WorkProjectionPortError, WorkProjectionReadPort, WorkService,
+    AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
+    CreateWorkCommand, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
+    ReviewProposalCommand, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
-    WorkCommandId, WorkProjectionResumeCursorV1, WorkVersion, WorktreeId,
+    WorkCommandId, WorkEvent, WorkEventKind, WorkProjection, WorkProjectionDeltaV1,
+    WorkProjectionResumeCursorV1, WorkVersion, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -84,6 +85,225 @@ fn create(service: &WorkService<WorkSqliteStorage>, context: &RequestContext, ta
             },
         )
         .unwrap();
+}
+
+fn accept(
+    service: &WorkService<WorkSqliteStorage>,
+    context: &RequestContext,
+    task_id: &str,
+    occurred_at: i64,
+) -> WorkProjection {
+    service
+        .accept_proposal(
+            context,
+            AcceptProposalCommand {
+                review: ReviewProposalCommand {
+                    task_id: id(task_id),
+                    proposal_id: id(&format!("proposal.{task_id}")),
+                    proposal_digest: digest('b'),
+                    expected_version: WorkVersion::initial(),
+                    command_id: id(&format!("command.accept-proposal.{task_id}")),
+                    occurred_at: UtcMicros(occurred_at),
+                },
+            },
+        )
+        .unwrap()
+}
+
+fn admit(
+    service: &WorkService<WorkSqliteStorage>,
+    context: &RequestContext,
+    task_id: &str,
+    occurred_at: i64,
+) -> WorkProjection {
+    service
+        .admit_execution(
+            context,
+            AdmitExecutionCommand {
+                task_id: id(task_id),
+                expected_version: WorkVersion::new(2).unwrap(),
+                command_id: id(&format!("command.admit-execution.{task_id}")),
+                occurred_at: UtcMicros(occurred_at),
+            },
+        )
+        .unwrap()
+}
+
+fn by_task(projections: &[WorkProjection]) -> BTreeMap<TaskId, WorkProjection> {
+    projections
+        .iter()
+        .map(|projection| (projection.task_id().clone(), projection.clone()))
+        .collect()
+}
+
+/// Folds one delta page into a follower's task map and records what it
+/// delivered as `(task, version)` pairs.
+fn apply_delta(
+    state: &mut BTreeMap<TaskId, WorkProjection>,
+    delivered: &mut Vec<(TaskId, u64)>,
+    delta: &WorkProjectionDeltaV1,
+) {
+    for projection in delta.changed() {
+        delivered.push((projection.task_id().clone(), projection.version().get()));
+        state.insert(projection.task_id().clone(), projection.clone());
+    }
+}
+
+/// The projection delta cursor must follow the order events were appended,
+/// not the `task_id, version` order the journal happens to sort by. With a
+/// task-sorted offset, appending to a task that sorts before the saved
+/// position shifts later rows past the cursor: the resumed walk skips the
+/// new event and replays an unchanged one. This interleaves appends to two
+/// tasks across a one-task page boundary, a restart, and an append between
+/// pages, and asserts the pages together deliver every appended event exactly
+/// once and converge on the same state a fresh snapshot reports.
+#[test]
+fn delta_resumes_by_append_order_across_interleaved_task_appends() {
+    let mut store = RegisteredWorkStore::start("append-order");
+    let owner = context("project.work.append-order", "actor.work.owner");
+    let owner_authority = authority(&owner);
+    let task_a = id::<TaskId>("task.work.append-order.a");
+    let task_b = id::<TaskId>("task.work.append-order.b");
+    let page_size = 1;
+
+    let service = WorkService::new(store.storage().clone());
+    create(&service, &owner, task_a.as_str());
+    create(&service, &owner, task_b.as_str());
+    let snapshot = WorkProjectionReadPort::snapshot(store.storage(), &owner_authority, 10).unwrap();
+    assert!(snapshot.coverage().resume_cursor().is_none());
+    let mut state = by_task(snapshot.projections());
+    let mut delivered = Vec::new();
+
+    // Both tasks advance after the snapshot, `a` first. `a` sorts before the
+    // saved position, which is exactly the append a task-sorted offset loses.
+    accept(&service, &owner, task_a.as_str(), 20);
+    accept(&service, &owner, task_b.as_str(), 21);
+
+    let resume = WorkSqliteStorage::resume_cursor(&snapshot).unwrap();
+    let first =
+        WorkProjectionReadPort::delta(store.storage(), &owner_authority, &resume, page_size)
+            .unwrap();
+    first.validate_after(&snapshot).unwrap();
+    assert_eq!(
+        first.coverage().total(),
+        2,
+        "both tasks changed after the snapshot"
+    );
+    assert_eq!(
+        first
+            .changed()
+            .iter()
+            .map(|projection| (projection.task_id().clone(), projection.version().get()))
+            .collect::<Vec<_>>(),
+        vec![(task_a.clone(), 2)],
+        "the first page must carry the first appended change, not the lexically last task"
+    );
+    apply_delta(&mut state, &mut delivered, &first);
+    let mut cursor = first.coverage().resume_cursor().cloned();
+
+    // The cursor is a durable append position, so a restart cannot lose it,
+    // and an append between pages lands in a later page.
+    drop(service);
+    store = store.restart("append-order");
+    let service = WorkService::new(store.storage().clone());
+    admit(&service, &owner, task_a.as_str(), 30);
+
+    let mut pages = 0;
+    while let Some(resume) = cursor {
+        pages += 1;
+        assert!(pages <= 4, "the walk must terminate");
+        let delta =
+            WorkProjectionReadPort::delta(store.storage(), &owner_authority, &resume, page_size)
+                .unwrap();
+        apply_delta(&mut state, &mut delivered, &delta);
+        cursor = delta.coverage().resume_cursor().cloned();
+    }
+
+    let fresh = WorkProjectionReadPort::snapshot(store.storage(), &owner_authority, 10).unwrap();
+    assert_eq!(
+        state,
+        by_task(fresh.projections()),
+        "following every delta page must converge on the fresh snapshot"
+    );
+    assert_eq!(
+        delivered,
+        vec![
+            (task_a.clone(), 2),
+            (task_b.clone(), 2),
+            (task_a.clone(), 3)
+        ],
+        "each appended event must be delivered exactly once, in append order"
+    );
+
+    // An exact command replay commits nothing, so the frontier does not move
+    // and the head cursor stays at the head.
+    accept(&service, &owner, task_b.as_str(), 21);
+    assert_eq!(
+        store
+            .inspect(|connection| WorkSqliteStorage::owner_cursor(connection, &owner_authority))
+            .unwrap(),
+        5
+    );
+    let head = WorkSqliteStorage::resume_cursor(&fresh).unwrap();
+    assert_eq!(
+        WorkProjectionReadPort::delta(store.storage(), &owner_authority, &head, page_size)
+            .unwrap_err(),
+        WorkProjectionPortError::StaleCursor
+    );
+
+    // A cursor minted for another authority, an unparseable token, and a
+    // position past the frontier all refuse rather than guess.
+    let foreign = context("project.work.append-order.other", "actor.work.owner");
+    let foreign_snapshot =
+        WorkProjectionReadPort::snapshot(store.storage(), &authority(&foreign), 10).unwrap();
+    for cursor in [
+        WorkSqliteStorage::resume_cursor(&foreign_snapshot).unwrap(),
+        WorkProjectionResumeCursorV1::new(
+            fresh.generation_id().clone(),
+            "work-projection-sequence.v1:1",
+        )
+        .unwrap(),
+        WorkProjectionResumeCursorV1::new(fresh.generation_id().clone(), "not-a-cursor").unwrap(),
+        WorkProjectionResumeCursorV1::new(
+            fresh.generation_id().clone(),
+            "work-projection-append-sequence.v1:99",
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(
+            WorkProjectionReadPort::delta(store.storage(), &owner_authority, &cursor, page_size)
+                .unwrap_err(),
+            WorkProjectionPortError::StaleCursor
+        );
+    }
+}
+
+/// A task created after the snapshot that sorts before every existing task
+/// is the other shape of the same defect: under a task-sorted offset its
+/// creation lands before the saved position and the delta reports the wrong
+/// task.
+#[test]
+fn delta_reports_a_lexically_earlier_task_created_after_the_snapshot() {
+    let store = RegisteredWorkStore::start("earlier-task");
+    let storage = store.storage().clone();
+    let service = WorkService::new(storage.clone());
+    let owner = context("project.work.earlier-task", "actor.work.owner");
+    let owner_authority = authority(&owner);
+    create(&service, &owner, "task.work.earlier-task.z");
+    let snapshot = WorkProjectionReadPort::snapshot(&storage, &owner_authority, 10).unwrap();
+    create(&service, &owner, "task.work.earlier-task.a");
+
+    let resume = WorkSqliteStorage::resume_cursor(&snapshot).unwrap();
+    let delta = WorkProjectionReadPort::delta(&storage, &owner_authority, &resume, 10).unwrap();
+    assert_eq!(
+        delta
+            .changed()
+            .iter()
+            .map(|projection| projection.task_id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["task.work.earlier-task.a".to_owned()]
+    );
+    assert!(delta.coverage().resume_cursor().is_none());
 }
 
 #[test]
@@ -351,7 +571,7 @@ fn capped_work_projection_snapshot_pages_every_task_through_delta() {
     // A cursor already at the journal head has nothing to hand back.
     let head = WorkProjectionResumeCursorV1::new(
         snapshot.generation_id().clone(),
-        format!("work-projection-sequence.v1:{}", task_ids.len()),
+        format!("work-projection-append-sequence.v1:{}", task_ids.len()),
     )
     .unwrap();
     assert_eq!(
@@ -367,6 +587,189 @@ fn capped_work_projection_snapshot_pages_every_task_through_delta() {
         u32::try_from(task_ids.len()).unwrap()
     );
     assert!(whole.coverage().resume_cursor().is_none());
+}
+
+/// The `work_events_v1` and `work_owner_cursors_v1` shapes `v0.1.0-beta.37`
+/// installed, before events carried their append position.
+const SHIPPED_WORK_JOURNAL_SCHEMA: &str = "
+CREATE TABLE work_owner_cursors_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    PRIMARY KEY (project_id, repository_id, worktree_id, actor_id, policy_digest)
+) STRICT;
+CREATE TABLE work_events_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version > 0),
+    command_id TEXT NOT NULL,
+    input_digest TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL,
+    event_payload TEXT NOT NULL,
+    PRIMARY KEY (
+        project_id, repository_id, worktree_id, actor_id, policy_digest, task_id, version
+    ),
+    UNIQUE (
+        project_id, repository_id, worktree_id, actor_id, policy_digest, task_id, command_id
+    )
+) STRICT;
+";
+
+/// A journal written before `owner_sequence` existed opens under the current
+/// schema with its rows numbered in the order they were inserted, keeps
+/// accepting appends at the next position, and refuses the cursor tokens the
+/// earlier task-sorted contract minted.
+#[test]
+fn shipped_journal_without_append_positions_gains_them_in_insertion_order() {
+    let owner = context("project.work.shipped", "actor.work.owner");
+    let owner_authority = authority(&owner);
+    let task_a = id::<TaskId>("task.work.shipped.a");
+    let task_b = id::<TaskId>("task.work.shipped.b");
+    let created = |task_id: &TaskId, occurred_at: i64| {
+        WorkEvent::new(
+            task_id.clone(),
+            WorkVersion::initial(),
+            owner_authority.clone(),
+            UtcMicros(occurred_at),
+            id(&format!("command.create.{task_id}")),
+            digest('c'),
+            WorkEventKind::Created {
+                title: format!("Persist {task_id}"),
+                dependencies: BTreeSet::new(),
+            },
+        )
+        .unwrap()
+    };
+    let accepted = WorkEvent::new(
+        task_a.clone(),
+        WorkVersion::new(2).unwrap(),
+        owner_authority.clone(),
+        UtcMicros(12),
+        id(&format!("command.accept-proposal.{task_a}")),
+        digest('c'),
+        WorkEventKind::ProposalAccepted {
+            proposal_id: id(&format!("proposal.{task_a}")),
+            proposal_digest: digest('b'),
+        },
+    )
+    .unwrap();
+    // Inserted a1, b1, a2: `a` gains its second version after `b` exists, so
+    // insertion order and `task_id, version` order disagree.
+    let shipped = [created(&task_a, 10), created(&task_b, 11), accepted];
+
+    let store = RegisteredWorkStore::start_seeded("shipped", |connection| {
+        connection
+            .execute_batch(SHIPPED_WORK_JOURNAL_SCHEMA)
+            .unwrap();
+        for event in &shipped {
+            connection
+                .execute(
+                    "INSERT INTO work_events_v1 (
+                        project_id, repository_id, worktree_id, actor_id, policy_digest,
+                        task_id, version, command_id, input_digest, occurred_at, event_payload
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    rusqlite::params![
+                        owner_authority.project_id().as_str(),
+                        owner_authority.repository_id().as_str(),
+                        owner_authority.worktree_id().as_str(),
+                        owner_authority.actor_id().as_str(),
+                        owner_authority.policy_digest().as_str(),
+                        event.task_id().as_str(),
+                        i64::try_from(event.version().get()).unwrap(),
+                        event.command_id().as_str(),
+                        event.input_digest().as_str(),
+                        event.occurred_at().0,
+                        serde_json::to_string(event).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO work_owner_cursors_v1 (
+                    project_id, repository_id, worktree_id, actor_id, policy_digest, sequence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    owner_authority.project_id().as_str(),
+                    owner_authority.repository_id().as_str(),
+                    owner_authority.worktree_id().as_str(),
+                    owner_authority.actor_id().as_str(),
+                    owner_authority.policy_digest().as_str(),
+                    i64::try_from(shipped.len()).unwrap(),
+                ],
+            )
+            .unwrap();
+    });
+
+    let positions = store.inspect(|connection| {
+        let mut statement = connection
+            .prepare(
+                "SELECT task_id, version, owner_sequence FROM work_events_v1
+                 ORDER BY owner_sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    });
+    assert_eq!(
+        positions,
+        vec![
+            (task_a.as_str().to_owned(), 1, 1),
+            (task_b.as_str().to_owned(), 1, 2),
+            (task_a.as_str().to_owned(), 2, 3),
+        ]
+    );
+
+    let storage = store.storage().clone();
+    let snapshot = WorkProjectionReadPort::snapshot(&storage, &owner_authority, 10).unwrap();
+    assert_eq!(snapshot.sequence().get(), 3);
+    assert_eq!(
+        by_task(snapshot.projections())
+            .values()
+            .map(|projection| projection.version().get())
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+
+    let service = WorkService::new(storage.clone());
+    accept(&service, &owner, task_b.as_str(), 20);
+    let resume = WorkSqliteStorage::resume_cursor(&snapshot).unwrap();
+    let delta = WorkProjectionReadPort::delta(&storage, &owner_authority, &resume, 10).unwrap();
+    assert_eq!(delta.to_sequence().get(), 4);
+    assert_eq!(
+        delta
+            .changed()
+            .iter()
+            .map(|projection| (projection.task_id().clone(), projection.version().get()))
+            .collect::<Vec<_>>(),
+        vec![(task_b, 2)]
+    );
+
+    let shipped_cursor = WorkProjectionResumeCursorV1::new(
+        snapshot.generation_id().clone(),
+        "work-projection-sequence.v1:2",
+    )
+    .unwrap();
+    assert_eq!(
+        WorkProjectionReadPort::delta(&storage, &owner_authority, &shipped_cursor, 10).unwrap_err(),
+        WorkProjectionPortError::StaleCursor
+    );
 }
 
 #[test]

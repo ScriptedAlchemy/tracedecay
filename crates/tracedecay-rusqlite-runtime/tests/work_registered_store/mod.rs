@@ -68,12 +68,22 @@ impl RegisteredWorkStore {
     /// Starts a registered store, running `setup` against the file after the
     /// Work schema is installed and before the writer takes ownership.
     pub fn start_with_setup(name: &str, setup: impl FnOnce(&Connection)) -> Self {
+        Self::start_seeded(name, |connection| {
+            install_work_schema(connection).expect("install work schema");
+            setup(connection);
+        })
+    }
+
+    /// Starts a registered store over a file `seed` shaped before the current
+    /// Work schema is installed — the way a daemon opens a journal an earlier
+    /// release wrote. Installation is idempotent, so a seed may install too.
+    pub fn start_seeded(name: &str, seed: impl FnOnce(&Connection)) -> Self {
         let directory = TempDir::new().expect("work store directory");
         let path = directory.path().join(format!("{name}.sqlite3"));
         {
             let connection = Connection::open(&path).expect("open work store");
+            seed(&connection);
             install_work_schema(&connection).expect("install work schema");
-            setup(&connection);
         }
         let path = path.canonicalize().expect("canonicalize work store");
         Self::open(name, path, directory)

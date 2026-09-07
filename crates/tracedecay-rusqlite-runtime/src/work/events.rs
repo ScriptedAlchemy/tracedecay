@@ -153,8 +153,8 @@ pub(crate) fn append_registered(
         return Err(WorkStorageError::VersionConflict);
     }
 
-    advance_registered_owner_cursor(&transaction, authority)?;
-    registered_insert_event(&transaction, &request.event)?;
+    let owner_sequence = advance_registered_owner_cursor(&transaction, authority)?;
+    registered_insert_event(&transaction, &request.event, owner_sequence)?;
     let next_history = load_registered_history_in_transaction(&transaction, authority, task_id)?;
     let next = WorkProjection::rebuild(&next_history).map_err(|_| WorkStorageError::Unavailable)?;
     transaction
@@ -196,9 +196,13 @@ pub(crate) fn advance_registered_owner_cursor(
         .ok_or(WorkStorageError::Unavailable)
 }
 
+/// Inserts one event bound to the owner sequence the same transaction just
+/// advanced to, so the row's append position is exactly the cursor value that
+/// committed with it.
 pub(crate) fn registered_insert_event(
     transaction: &ExactSqlTransaction,
     event: &WorkEvent,
+    owner_sequence: u64,
 ) -> Result<(), WorkStorageError> {
     let payload = serde_json::to_string(event).map_err(|_| WorkStorageError::Unavailable)?;
     transaction
@@ -206,8 +210,9 @@ pub(crate) fn registered_insert_event(
             exact_sql_statement(
                 "INSERT INTO work_events_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, version, command_id, input_digest, occurred_at, event_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    task_id, version, command_id, input_digest, occurred_at, event_payload,
+                    owner_sequence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 authority_params_owned(event.authority())
                     .into_iter()
                     .chain([
@@ -220,6 +225,7 @@ pub(crate) fn registered_insert_event(
                         ExactSqlValue::Text(event.input_digest().as_str().to_owned()),
                         ExactSqlValue::Integer(event.occurred_at().0),
                         ExactSqlValue::Text(payload),
+                        sequence_param(owner_sequence)?,
                     ])
                     .collect(),
             )
@@ -227,4 +233,67 @@ pub(crate) fn registered_insert_event(
         )
         .map_err(|_| WorkStorageError::Unavailable)?;
     Ok(())
+}
+
+/// The authority's durable append frontier: the owner cursor, or 0 before the
+/// first append. Every committed event carries an `owner_sequence` at or below
+/// it, and any event committed after this read carries a greater one, so a
+/// read bounded by this value sees one coherent journal prefix.
+pub(crate) fn load_registered_owner_frontier(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+) -> Result<u64, WorkStorageError> {
+    let rows = registered_work_query(
+        source,
+        "SELECT sequence FROM work_owner_cursors_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5",
+        authority_params_owned(authority),
+    )
+    .map_err(|_| WorkStorageError::Unavailable)?;
+    rows.rows.first().map_or(Ok(0), |row| {
+        exact_sql_integer(&row.values, 0)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(WorkStorageError::Unavailable)
+    })
+}
+
+/// Loads the authority's events with append positions in `(after, through]`,
+/// in append order.
+pub(crate) fn load_registered_events_in_append_order(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+    after: u64,
+    through: u64,
+) -> Result<Vec<(u64, WorkEvent)>, WorkStorageError> {
+    let rows = registered_work_query(
+        source,
+        "SELECT owner_sequence, event_payload FROM work_events_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5
+           AND owner_sequence > ?6 AND owner_sequence <= ?7
+         ORDER BY owner_sequence",
+        authority_params_owned(authority)
+            .into_iter()
+            .chain([sequence_param(after)?, sequence_param(through)?])
+            .collect(),
+    )
+    .map_err(|_| WorkStorageError::Unavailable)?;
+    rows.rows
+        .into_iter()
+        .map(|row| {
+            let sequence = exact_sql_integer(&row.values, 0)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(WorkStorageError::Unavailable)?;
+            let payload = exact_sql_text(&row.values, 1).ok_or(WorkStorageError::Unavailable)?;
+            let event = serde_json::from_str(payload).map_err(|_| WorkStorageError::Unavailable)?;
+            Ok((sequence, event))
+        })
+        .collect()
+}
+
+fn sequence_param(sequence: u64) -> Result<ExactSqlValue, WorkStorageError> {
+    i64::try_from(sequence)
+        .map(ExactSqlValue::Integer)
+        .map_err(|_| WorkStorageError::Unavailable)
 }
