@@ -194,6 +194,8 @@ impl HostAdmissionReplay<'_> {
 }
 
 pub(crate) use schedule::{FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler};
+#[cfg(test)]
+pub(crate) use spool::take_cloned_payload_bytes;
 pub(crate) use spool::{HostAdmissionSpool, SpoolError, SpoolIntegrity};
 pub use spool::{SpoolBounds, SpoolOpenReport, SpoolRecord, TerminalReason};
 
