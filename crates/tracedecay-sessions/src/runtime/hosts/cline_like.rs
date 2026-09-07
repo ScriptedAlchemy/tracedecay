@@ -152,9 +152,7 @@ impl ClineLikeSource {
     pub fn cline_with_home(home: &Path) -> Self {
         Self {
             provider: "cline",
-            storage_roots: vec![
-                vscode_global_storage_tasks(home, "saoudrizwan.claude-dev"),
-            ],
+            storage_roots: vec![vscode_global_storage_tasks(home, "saoudrizwan.claude-dev")],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
             task_metadata: TaskMetadataCache::default(),
@@ -164,9 +162,10 @@ impl ClineLikeSource {
     pub fn roo_code_with_home(home: &Path) -> Self {
         Self {
             provider: "roo-code",
-            storage_roots: vec![
-                vscode_global_storage_tasks(home, "rooveterinaryinc.roo-cline"),
-            ],
+            storage_roots: vec![vscode_global_storage_tasks(
+                home,
+                "rooveterinaryinc.roo-cline",
+            )],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
             task_metadata: TaskMetadataCache::default(),
@@ -442,7 +441,10 @@ fn snapshot_generation(contents: &str) -> TranscriptIngestResult<ObservationSour
     )?)
 }
 
-fn ui_messages_source_key(task_id: &str) -> String {
+/// The native source key of a task's `ui_messages.json` stream, which is
+/// ordered independently of the task's API conversation history.
+#[must_use]
+pub fn ui_messages_source_key(task_id: &str) -> String {
     format!("{task_id}{UI_MESSAGES_SOURCE_SUFFIX}")
 }
 
