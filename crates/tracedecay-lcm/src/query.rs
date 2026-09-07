@@ -1034,11 +1034,6 @@ fn sort_hits(hits: &mut [LcmGrepHit], sort: LcmGrepSort) {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
-    use std::path::Path;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     use std::time::Duration;
 
     use tracedecay_runtime_core::db::engine::{
@@ -1047,6 +1042,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::test_support::sqlite_vm_steps;
 
     struct CountingQuery<'a> {
         inner: &'a TestConnection,
@@ -1143,52 +1139,6 @@ mod tests {
             .find(|(sql, _)| sql.contains("SELECT r.store_id"))
             .cloned()
             .expect("unsafe LIKE grep must admit indexed raw candidates first")
-    }
-
-    fn sqlite_value(value: &Value) -> rusqlite::types::Value {
-        match value {
-            Value::Null => rusqlite::types::Value::Null,
-            Value::Integer(value) => rusqlite::types::Value::Integer(*value),
-            Value::Real(value) => rusqlite::types::Value::Real(*value),
-            Value::Text(value) => rusqlite::types::Value::Text(value.clone()),
-            Value::Blob(value) => rusqlite::types::Value::Blob(value.clone()),
-        }
-    }
-
-    /// Counts actual SQLite virtual-machine steps for the exact candidate SQL,
-    /// rather than the rows materialized by the engine test adapter.
-    fn candidate_vm_steps(database_path: &Path, sql: &str, values: &[Value]) -> usize {
-        let connection = rusqlite::Connection::open(database_path)
-            .expect("open native SQLite connection for candidate measurement");
-        let steps = Arc::new(AtomicUsize::new(0));
-        let counted_steps = Arc::clone(&steps);
-        connection
-            .progress_handler(
-                1,
-                Some(move || {
-                    counted_steps.fetch_add(1, Ordering::Relaxed);
-                    false
-                }),
-            )
-            .expect("install SQLite VM progress handler");
-        {
-            let mut statement = connection
-                .prepare(sql)
-                .expect("prepare candidate measurement statement");
-            let native_values = values.iter().map(sqlite_value).collect::<Vec<_>>();
-            let mut rows = statement
-                .query(rusqlite::params_from_iter(native_values))
-                .expect("execute candidate measurement statement");
-            while rows
-                .next()
-                .expect("advance candidate measurement statement")
-                .is_some()
-            {}
-        }
-        connection
-            .progress_handler(1, None::<fn() -> bool>)
-            .expect("clear SQLite VM progress handler");
-        steps.load(Ordering::Relaxed)
     }
 
     async fn insert_query_test_raw(
@@ -1736,7 +1686,7 @@ mod tests {
                 .any(|line| line.contains("idx_lcm_raw_direct_user_candidate")),
             "direct-user candidate must seek the maintained user-role index: {direct_candidate_plan:?}"
         );
-        let direct_candidate_steps = candidate_vm_steps(
+        let direct_candidate_steps = sqlite_vm_steps(
             &temp.path().join("sessions.db"),
             &direct_candidate_sql,
             &direct_candidate_values,
@@ -1796,7 +1746,7 @@ mod tests {
                 .any(|line| line.contains("idx_lcm_raw_session_order")),
             "single-session candidate must seek the maintained session index: {session_candidate_plan:?}"
         );
-        let session_candidate_steps = candidate_vm_steps(
+        let session_candidate_steps = sqlite_vm_steps(
             &temp.path().join("sessions.db"),
             &session_candidate_sql,
             &session_candidate_values,
