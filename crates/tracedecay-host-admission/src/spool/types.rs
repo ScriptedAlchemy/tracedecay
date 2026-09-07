@@ -1,3 +1,6 @@
+#[cfg(test)]
+use std::cell::Cell;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -114,13 +117,40 @@ impl SpoolError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
+thread_local! {
+    static CLONED_PAYLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Payload bytes copied by [`SpoolRecord::clone`] on this thread since the
+/// previous call. Tests separate queue bookkeeping, which must copy nothing,
+/// from lease materialization, which hands the worker an owned payload.
+#[cfg(test)]
+pub(crate) fn take_cloned_payload_bytes() -> usize {
+    CLONED_PAYLOAD_BYTES.replace(0)
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct SpoolRecord {
     pub seq: u64,
     pub source: String,
     pub payload: Vec<u8>,
     pub(crate) file_offset: u64,
     pub(crate) framed_len: usize,
+}
+
+impl Clone for SpoolRecord {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        CLONED_PAYLOAD_BYTES.with(|bytes| bytes.set(bytes.get() + self.payload.len()));
+        Self {
+            seq: self.seq,
+            source: self.source.clone(),
+            payload: self.payload.clone(),
+            file_offset: self.file_offset,
+            framed_len: self.framed_len,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

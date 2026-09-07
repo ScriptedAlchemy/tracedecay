@@ -49,6 +49,8 @@ use recovery::recover_pending;
 
 pub use bounds::SpoolBounds;
 pub(crate) use bounds::SpoolOverflowDisposition;
+#[cfg(test)]
+pub(crate) use types::take_cloned_payload_bytes;
 pub(crate) use types::{SpoolError, SpoolIntegrity};
 pub use types::{SpoolOpenReport, SpoolRecord, TerminalReason};
 
@@ -372,8 +374,10 @@ impl HostAdmissionSpool {
             }
             return Err(SpoolError::AckUnknown { seq });
         };
-        let record = self.pending[index].clone();
-        let active_frame = encode_frame(record.seq, record.source.as_bytes(), &record.payload)?;
+        let active_frame = {
+            let record = &self.pending[index];
+            encode_frame(record.seq, record.source.as_bytes(), &record.payload)?
+        };
         match self.quarantine.preserve(seq, reason, &active_frame) {
             Ok(_) => {}
             Err(SpoolError::Io) => {
@@ -396,7 +400,7 @@ impl HostAdmissionSpool {
             return Err(SpoolError::QuarantineRecoveryRequired);
         }
 
-        self.pending.remove(index);
+        let record = self.pending.remove(index);
         self.pending_bytes = self.pending_bytes.saturating_sub(record.framed_len);
         self.source_usage_release(&record.source, record.framed_len);
         let compacted = self.publish_logical_deletion_cleanup(true)?;
