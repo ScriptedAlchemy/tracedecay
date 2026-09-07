@@ -98,7 +98,8 @@ fn reference_rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkContra
     Ok(projection)
 }
 
-/// Folds one event at a time, the way storage does on each append.
+/// Applies one event at a time onto a carried state, serializing and reloading
+/// the state between events so the persisted frontier shape is exercised too.
 fn incremental(history: &[WorkEvent]) -> Result<WorkProjection, WorkContractError> {
     let (first, rest) = history
         .split_first()
@@ -114,23 +115,49 @@ fn incremental(history: &[WorkEvent]) -> Result<WorkProjection, WorkContractErro
     Ok(state.into_projection())
 }
 
-/// Asserts the incremental fold and the full rebuild agree on value, on
-/// serialized bytes, and on rejection.
+/// Moves an owned state through every event, the way storage admits an
+/// appended event onto the state it just validated.
+fn folded_in_place(history: &[WorkEvent]) -> Result<WorkProjection, WorkContractError> {
+    let (first, rest) = history
+        .split_first()
+        .ok_or(WorkContractError::EmptyHistory)?;
+    rest.iter()
+        .try_fold(
+            WorkProjectionStateV1::rebuild(std::slice::from_ref(first))?,
+            WorkProjectionStateV1::fold,
+        )
+        .map(WorkProjectionStateV1::into_projection)
+}
+
+/// Asserts the incremental apply, the in-place fold, and the full rebuild all
+/// agree with the reference on value, on serialized bytes, and on rejection.
 fn assert_equivalent(history: &[WorkEvent]) {
     let reference = reference_rebuild(history);
-    let folded = incremental(history);
+    let applied = incremental(history);
+    let folded = folded_in_place(history);
     let shipped = WorkProjection::rebuild(history);
-    assert_eq!(folded, reference, "incremental fold diverged from rebuild");
+    assert_eq!(
+        applied, reference,
+        "incremental apply diverged from rebuild"
+    );
+    assert_eq!(folded, reference, "in-place fold diverged from rebuild");
     assert_eq!(
         shipped, reference,
         "shipped rebuild diverged from reference"
     );
-    if let (Ok(reference), Ok(folded)) = (&reference, &folded) {
-        assert_eq!(
-            serde_json::to_vec(reference).unwrap(),
-            serde_json::to_vec(folded).unwrap(),
-            "incremental fold produced different bytes"
-        );
+    if let Ok(reference) = &reference {
+        let expected = serde_json::to_vec(reference).unwrap();
+        for (label, projection) in [
+            ("apply", &applied),
+            ("fold", &folded),
+            ("rebuild", &shipped),
+        ] {
+            assert_eq!(
+                serde_json::to_vec(projection.as_ref().unwrap()).unwrap(),
+                expected,
+                "{label} produced different bytes"
+            );
+        }
     }
 }
 
@@ -282,6 +309,50 @@ fn every_prefix_of_a_history_folds_to_its_own_rebuild() {
         assert_eq!(state.projection().history_len(), length);
         assert_eq!(state.occurred_at(), UtcMicros(length as i64));
     }
+}
+
+/// A caller that keeps the prior state across a refused `apply` must find it
+/// untouched — in value and in bytes — and the consuming `fold` must refuse
+/// the same event for the same reason.
+#[test]
+fn a_refused_transition_leaves_the_retained_state_unchanged() {
+    let state = WorkProjectionStateV1::rebuild(&[
+        event(1, created()),
+        event(2, accepted("proposal.work.fold.first")),
+    ])
+    .unwrap();
+    let before = serde_json::to_vec(&state).unwrap();
+    let refused = [
+        (
+            event(
+                3,
+                WorkEventKind::Created {
+                    title: "created again".to_owned(),
+                    dependencies: BTreeSet::new(),
+                },
+            ),
+            WorkContractError::InvalidTransition,
+        ),
+        (
+            event(4, WorkEventKind::TaskAccepted),
+            WorkContractError::NonContiguousVersion,
+        ),
+        (
+            event_at(3, 1, "command.work.fold.early", WorkEventKind::TaskAccepted),
+            WorkContractError::NonMonotonicTime,
+        ),
+        (
+            event_at(3, 3, "command.work.fold.2", WorkEventKind::TaskAccepted),
+            WorkContractError::DuplicateCommand,
+        ),
+    ];
+    for (event, expected) in refused {
+        assert_eq!(state.apply(&event), Err(expected.clone()));
+        assert_eq!(state.clone().fold(&event), Err(expected));
+        assert_eq!(serde_json::to_vec(&state).unwrap(), before);
+    }
+    assert_eq!(state.command_ids().len(), 2);
+    assert_eq!(state.version().get(), 2);
 }
 
 #[test]
