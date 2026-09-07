@@ -31,8 +31,8 @@ use tracedecay_domain::canonical_text::{
 use tracedecay_graph_db::GraphConflictContextV1;
 
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
-    ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
+    ChunkerRevision, CodeGenerationId, CodeGenerationSourceCommitmentsV1, ComponentRevision,
+    ContentDigest, ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
     ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
     RetrievalBudget, RetrieverBatch, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
@@ -1598,8 +1598,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "partitioned generation manifest digest does not verify",
             ));
         }
-        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes)
-            .map_err(|error| Self::corruption(error.to_string()))
+        match CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes) {
+            Ok(metadata) => Ok(metadata),
+            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => Ok(None),
+            Err(error) => Err(Self::corruption(error.to_string())),
+        }
     }
 
     #[hotpath::measure(label = "code_index.generation.decode.bundle")]
@@ -1630,6 +1633,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 );
                 return Ok(None);
             }
+            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => return Ok(None),
             Err(error) => return Err(error),
         };
         if monolithic.is_some() {
@@ -1653,30 +1657,36 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let mut lifetime_lock = Some(lifetime_lock);
         let mut pinned_evidence = None;
-        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |request, buffer| {
-            match request {
-                SealedGenerationSegmentReadV1::Whole { .. } => {
-                    self.read_partitioned_segment(request, buffer)
-                }
-                SealedGenerationSegmentReadV1::Range { .. } => {
-                    if pinned_evidence.is_none() {
-                        pinned_evidence = Some(self.open_pinned_partitioned_segment(request)?);
-                        // The store lock proves the pack pathname is live through
-                        // this open. The handle then owns all remaining page reads.
-                        drop(lifetime_lock.take());
+        match CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            &manifest,
+            |request, buffer| {
+                match request {
+                    SealedGenerationSegmentReadV1::Whole { .. } => {
+                        self.read_partitioned_segment(request, buffer)
                     }
-                    Self::read_pinned_partitioned_segment(
-                        pinned_evidence.as_mut().ok_or_else(|| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "sealed generation evidence handle was not pinned".to_owned(),
-                            )
-                        })?,
-                        request,
-                        buffer,
-                    )
+                    SealedGenerationSegmentReadV1::Range { .. } => {
+                        if pinned_evidence.is_none() {
+                            pinned_evidence = Some(self.open_pinned_partitioned_segment(request)?);
+                            // The store lock proves the pack pathname is live through
+                            // this open. The handle then owns all remaining page reads.
+                            drop(lifetime_lock.take());
+                        }
+                        Self::read_pinned_partitioned_segment(
+                            pinned_evidence.as_mut().ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed generation evidence handle was not pinned".to_owned(),
+                                )
+                            })?,
+                            request,
+                            buffer,
+                        )
+                    }
                 }
-            }
-        })
+            },
+        ) {
+            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => Ok(None),
+            result => result,
+        }
     }
 
     /// Serve one sealed generation by identity, decoding it at most once.
@@ -4010,6 +4020,12 @@ impl LatestCompleteCodeIndexV1 {
 impl LatestCodeTextGenerationV1 {
     pub fn metadata(&self) -> &VerifiedSealedTextGenerationMetadataV1 {
         &self.metadata
+    }
+
+    pub fn source_commitments(
+        &self,
+    ) -> Result<&CodeGenerationSourceCommitmentsV1, CodeIndexProductionErrorV1> {
+        self.metadata.source_commitments()
     }
 
     pub fn uses_partitioned_manifest(&self) -> bool {

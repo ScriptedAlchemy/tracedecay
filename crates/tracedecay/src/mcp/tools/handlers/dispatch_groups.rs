@@ -681,6 +681,7 @@ fn dispatch_info_tools_inner<'a>(
                     active_project_session_db.map(RegisteredGlobalDbLeaseV1::as_ref),
                     options.code_index_freshness_reader.as_ref(),
                     options.generation_census_reader.as_ref(),
+                    options.daemon_invocation_service,
                 )
                 .await
             }
