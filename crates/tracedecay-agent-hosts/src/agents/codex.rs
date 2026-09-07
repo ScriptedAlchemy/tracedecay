@@ -186,6 +186,7 @@ impl AgentIntegration for CodexIntegration {
         let mut errors = Vec::new();
         for dir in plugin_dirs {
             match tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
                 &dir,
@@ -216,6 +217,7 @@ impl AgentIntegration for CodexIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
                 &repo_dir,
@@ -357,12 +359,10 @@ impl AgentIntegration for CodexIntegration {
         // transaction that retires stale exports can still roll them back.
         if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
             // `agent_targets` lives in automation-runtime and reads agent
-            // bytes through the host-io port this crate owns. Bind it before
-            // inventory so preview/backup see the same surface activate mutates
-            // (composition-root and in-crate tests that skip `main` both rely
-            // on this ensure — registration is idempotent).
-            crate::register_automation_host_io();
+            // bytes through the host I/O bundle this crate owns, so preview,
+            // backup, and activate all inventory the same surface.
             if let Ok(managed) = tracedecay_automation_runtime::automation::agent_targets::managed_agent_transaction_paths(
+                &crate::host_io(),
                 home,
             ) {
                 paths.extend(managed);
@@ -379,8 +379,8 @@ impl AgentIntegration for CodexIntegration {
         // current exports and retire previous-bundle stale ones — otherwise
         // Core install through the receipt-backed lifecycle never writes them
         // and never retires them (byte-for-byte rollback then fails).
-        crate::register_automation_host_io();
         tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
+            &crate::host_io(),
             &ctx.home,
         )?;
         if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
@@ -419,8 +419,8 @@ impl AgentIntegration for CodexIntegration {
         // Managed agent exports are Core registration surface (not artifacts).
         // Clear them here so uninstall verification can reach Missing and so
         // a rolled-back deactivate restores the pre-op exports byte-for-byte.
-        crate::register_automation_host_io();
         tracedecay_automation_runtime::automation::agent_targets::remove_managed_agents(
+            &crate::host_io(),
             &ctx.home.join(".codex/agents"),
         )?;
         // TraceDecay stages the personal marketplace entry; Codex's
@@ -848,6 +848,7 @@ fn install_codex_managed_skill_overlay(
         );
     super::retired_memory_digest::remove_state(&profile_root)?;
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+        &crate::host_io(),
         &profile_root,
         tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Codex,
         install_dir,

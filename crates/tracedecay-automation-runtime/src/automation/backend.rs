@@ -63,7 +63,7 @@ fn executable_resolution(bin: &str) -> Result<bool> {
         return Ok(path.is_file());
     }
     Ok(
-        crate::agents::host_cli::resolve_on_path(bin, std::env::var_os("PATH").as_deref())?
+        super::executable_lookup::resolve_on_path(bin, std::env::var_os("PATH").as_deref())?
             .is_some(),
     )
 }

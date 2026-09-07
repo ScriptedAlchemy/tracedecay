@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tracedecay_policy::CurationApplyDecisionV1;
 
 use super::artifacts::sha256_bytes;
+use super::host_io::{HostIo, ManagedSkillExportReport, home_dir};
 use super::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
     ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_update,
@@ -60,7 +61,7 @@ pub struct ManagedSkillMaterializationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManagedSkillDeploymentReceipt {
     pub status: ManagedSkillDeploymentStatus,
-    pub exports: Vec<crate::agents::ManagedSkillExportReport>,
+    pub exports: Vec<ManagedSkillExportReport>,
     pub materialization_scopes: Vec<ManagedSkillMaterializationReceipt>,
     pub errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,6 +113,7 @@ pub(crate) async fn validate_skill_proposals(
 }
 
 pub(crate) async fn validate_and_apply_skill_proposals(
+    host_io: &HostIo,
     profile_root: &Path,
     project_root: Option<&Path>,
     run_id: &str,
@@ -251,7 +253,7 @@ pub(crate) async fn validate_and_apply_skill_proposals(
         }
     }
     let mutated = !created.is_empty() || !updated.is_empty() || !consolidations.is_empty();
-    let deployment = mutated.then(|| deploy_managed_skills(profile_root, project_root));
+    let deployment = mutated.then(|| deploy_managed_skills(host_io, profile_root, project_root));
     Ok(SkillProposalOutcome {
         created,
         updated,
@@ -322,18 +324,20 @@ fn ensure_skill_not_referenced_by_scheduled_job(
 }
 
 pub fn deploy_managed_skills_to_project(
+    host_io: &HostIo,
     profile_root: &Path,
     project_root: &Path,
 ) -> ManagedSkillDeploymentReceipt {
-    deploy_managed_skills(profile_root, Some(project_root))
+    deploy_managed_skills(host_io, profile_root, Some(project_root))
 }
 
 #[hotpath::measure(label = "hosts.automation.managed_skill.deploy")]
 fn deploy_managed_skills(
+    host_io: &HostIo,
     profile_root: &Path,
     project_root: Option<&Path>,
 ) -> ManagedSkillDeploymentReceipt {
-    let Some(home) = crate::agents::home_dir() else {
+    let Some(home) = home_dir() else {
         return ManagedSkillDeploymentReceipt {
             status: ManagedSkillDeploymentStatus::Unavailable,
             exports: Vec::new(),
@@ -343,27 +347,19 @@ fn deploy_managed_skills(
             retry_required: true,
         };
     };
-    let exports = match project_root.map_or_else(
-        || crate::agents::export_managed_skills_to_agents(&home, profile_root),
+    let exports = project_root.map_or_else(
+        || host_io.export_managed_skills_to_agents(&home, profile_root),
         |project_root| {
-            crate::agents::export_managed_skills_to_agent_hosts(&home, project_root, profile_root)
+            host_io.export_managed_skills_to_agent_hosts(&home, project_root, profile_root)
         },
-    ) {
-        Ok(exports) => exports,
-        Err(error) => {
-            return ManagedSkillDeploymentReceipt {
-                status: ManagedSkillDeploymentStatus::Unavailable,
-                exports: Vec::new(),
-                materialization_scopes: Vec::new(),
-                errors: vec![error.to_string()],
-                reason: Some("host_io_unregistered".to_string()),
-                retry_required: true,
-            };
-        }
-    };
+    );
     let project_root = project_root.unwrap_or(home.as_path());
-    let (scopes, errors) =
-        super::skill_materialization::reconcile_detected_scopes(profile_root, &home, project_root);
+    let (scopes, errors) = super::skill_materialization::reconcile_detected_scopes(
+        host_io,
+        profile_root,
+        &home,
+        project_root,
+    );
     let materialization_scopes = scopes
         .into_iter()
         .map(|result| ManagedSkillMaterializationReceipt {
@@ -948,11 +944,11 @@ mod tests {
     #[test]
     fn managed_skill_exports_only_refresh_for_the_user_profile() {
         let home = Path::new("/home/test-user");
-        assert!(crate::agents::uses_default_user_profile(
+        assert!(crate::automation::host_io::uses_default_user_profile(
             home,
             Path::new("/home/test-user/.tracedecay"),
         ));
-        assert!(!crate::agents::uses_default_user_profile(
+        assert!(!crate::automation::host_io::uses_default_user_profile(
             home,
             Path::new("/tmp/tracedecay-test-profile"),
         ));

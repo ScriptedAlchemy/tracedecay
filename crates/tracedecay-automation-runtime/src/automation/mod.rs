@@ -11,6 +11,7 @@ pub mod backend;
 pub mod backend_identity;
 pub mod config;
 pub mod effect_runtime;
+pub mod executable_lookup;
 pub mod hermes_skill_bridge;
 pub mod host_io;
 pub mod host_receipts;

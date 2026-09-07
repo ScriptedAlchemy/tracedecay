@@ -501,6 +501,7 @@ impl AgentIntegration for KiroIntegration {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
+            &crate::host_io(),
             profile_root,
             SkillInstallTarget::Kiro,
             &managed_skill_index_path(home),
@@ -518,6 +519,7 @@ impl AgentIntegration for KiroIntegration {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
+            &crate::host_io(),
             profile_root,
             SkillInstallTarget::Kiro,
             &skill_index_path,
@@ -688,7 +690,12 @@ fn install_kiro_managed_skill_index<'a>(
     let profile_root = profile_root_for_agent_home(home);
     super::retired_memory_digest::remove_state(&profile_root)?;
     super::retired_memory_digest::remove_prompt_block(index_path)?;
-    let summary = install_managed_skills(&profile_root, SkillInstallTarget::Kiro, index_path)?;
+    let summary = install_managed_skills(
+        &crate::host_io(),
+        &profile_root,
+        SkillInstallTarget::Kiro,
+        index_path,
+    )?;
     Ok((summary.exported_count > 0).then_some(index_path))
 }
 

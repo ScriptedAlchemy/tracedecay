@@ -147,7 +147,7 @@ fn locate_backend_executable(spec: &str) -> Result<Option<PathBuf>> {
     if spec_path.is_absolute() || spec.contains(std::path::MAIN_SEPARATOR) {
         return Ok(spec_path.is_file().then(|| spec_path.to_path_buf()));
     }
-    crate::agents::host_cli::resolve_on_path(spec, std::env::var_os("PATH").as_deref())
+    super::executable_lookup::resolve_on_path(spec, std::env::var_os("PATH").as_deref())
 }
 
 fn unreadable_executable_identity(spec: &str, path: Option<&Path>) -> Value {

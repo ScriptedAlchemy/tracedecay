@@ -18,6 +18,8 @@ use tracedecay_automation::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
+use tracedecay_automation_runtime::automation::agent_targets::managed_agent_label;
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_global_db::{
     AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, RegisteredGlobalDb,
 };
@@ -232,7 +234,7 @@ pub async fn overview(
             let (durable_events, observatory, agents, underused) = tokio::join!(
                 durable_analytics_rows_for_state(&state),
                 observatory_model(&state),
-                agent_usage_summary(state.lcm_db.as_deref()),
+                agent_usage_summary(&state.host_io, state.lcm_db.as_deref()),
                 underused_tool_families(state.lcm_db.as_deref()),
             );
             let observatory = Some(observatory);
@@ -392,6 +394,7 @@ async fn observatory_model(state: &DashboardState) -> ObservatoryReadModelV1 {
 }
 
 async fn agent_usage_summary(
+    host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
 ) -> Result<AnalyticsAgentsPayloadV1, String> {
     let Some(db) = db else {
@@ -420,7 +423,7 @@ async fn agent_usage_summary(
     for row in rows {
         let agent_id = str_field(&row, "agent_id");
         let Some(label) =
-            managed_agent_label_for_session(agent_id, str_field(&row, "metadata_json"))
+            managed_agent_label_for_session(host_io, agent_id, str_field(&row, "metadata_json"))
         else {
             continue;
         };
@@ -437,21 +440,19 @@ async fn agent_usage_summary(
     })
 }
 
-fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
-    if let Ok(Some(label)) =
-        tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(agent_id)
-    {
+fn managed_agent_label_for_session(
+    host_io: &HostIo,
+    agent_id: &str,
+    metadata_json: &str,
+) -> Option<&'static str> {
+    if let Some(label) = managed_agent_label(host_io, agent_id) {
         return Some(label);
     }
     let metadata: Value = serde_json::from_str(metadata_json).ok()?;
     ["agent_nickname", "agent_role"]
         .into_iter()
         .filter_map(|key| metadata.get(key).and_then(Value::as_str))
-        .find_map(|id| {
-            tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(id)
-                .ok()
-                .flatten()
-        })
+        .find_map(|id| managed_agent_label(host_io, id))
 }
 
 /// `GET /api/plugins/analytics/agents` — sessions per managed subagent,
@@ -463,7 +464,7 @@ pub async fn agents(
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>> {
     hotpath::future!(
         async move {
-            match agent_usage_summary(state.lcm_db.as_deref()).await {
+            match agent_usage_summary(&state.host_io, state.lcm_db.as_deref()).await {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),
@@ -649,6 +650,7 @@ fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNo
 }
 
 async fn subagent_tree_reading(
+    host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
     project_key: &str,
 ) -> Result<AnalyticsSubagentTreePayloadV1, String> {
@@ -700,9 +702,10 @@ async fn subagent_tree_reading(
         .iter()
         .map(|row| {
             let agent_id = str_field(row, "agent_id");
-            let agent = managed_agent_label_for_session(agent_id, str_field(row, "metadata_json"))
-                .map(str::to_owned)
-                .or_else(|| optional_text(row, "agent_id"));
+            let agent =
+                managed_agent_label_for_session(host_io, agent_id, str_field(row, "metadata_json"))
+                    .map(str::to_owned)
+                    .or_else(|| optional_text(row, "agent_id"));
             SubagentSessionRow {
                 provider: str_field(row, "provider").to_owned(),
                 session_id: str_field(row, "session_id").to_owned(),
@@ -749,7 +752,8 @@ pub async fn subagent_tree(
     hotpath::future!(
         async move {
             let project_key = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-            match subagent_tree_reading(state.lcm_db.as_deref(), &project_key).await {
+            match subagent_tree_reading(&state.host_io, state.lcm_db.as_deref(), &project_key).await
+            {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),

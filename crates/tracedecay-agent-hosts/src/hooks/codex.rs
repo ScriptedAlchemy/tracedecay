@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::Value;
 #[cfg(test)]
@@ -180,42 +179,6 @@ async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option
     context
 }
 
-/// Codex `SubagentStart` hook handler.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.subagent_start")]
-pub async fn hook_codex_subagent_start(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(runtime, &parsed).await;
-    let _hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Codex,
-        "SubagentStart",
-        &event,
-        &parsed,
-    );
-    let count = record_codex_subagent_start(runtime, &event).await;
-    let output = evaluate_codex_subagent_start(&event);
-    eprintln!(
-        "{}",
-        codex_subagent_start_log_line(&event, count, output.is_some())
-    );
-    if let Some(output) = output
-        && !super::write_hook_output(
-            runtime,
-            root.as_deref(),
-            tracedecay_hooks::HookHostV1::Codex,
-            &event,
-            &output,
-            Some(&_hook_telemetry),
-        )
-        .await
-    {
-        return 1;
-    }
-    0
-}
-
 /// Codex `PostToolUse` hook handler.
 ///
 /// The native event enters the canonical V2 admission/replay journey. Only
@@ -298,117 +261,6 @@ pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
         return 1;
     }
     0
-}
-
-/// Bounds the wait for the daemon's terminal-receipt acknowledgement. The
-/// follow-up work (transcript ingest, user review) is daemon-owned and is not
-/// covered by this budget.
-const CODEX_STOP_RETENTION_BUDGET: Duration = Duration::from_secs(3);
-
-/// Codex `Stop` hook handler.
-///
-/// Codex emits this after the assistant finishes a turn. Projectless sessions
-/// need this terminal receipt because the prompt hook runs before the final
-/// assistant message has been appended to the rollout.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.stop")]
-pub async fn hook_codex_stop(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Codex,
-        "Stop",
-        &event,
-        &parsed,
-    );
-    let session_id = event_session_id(&parsed);
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::dispatch::dispatch(
-            runtime,
-            tracedecay_hooks::HookHostV1::Codex,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-    {
-        // A daemon-admitted project Stop still hands the provider's historical
-        // session to the daemon; the capture kernel correlates it back to
-        // registered projects.
-        retain_codex_stop_in_daemon(runtime, session_id.as_deref(), Some(&hook_telemetry)).await;
-        let output = if let Some(guidance) = guidance {
-            additional_context_json("Stop", &guidance)
-        } else {
-            serde_json::json!({}).to_string()
-        };
-        if !super::write_hook_output(
-            runtime,
-            Some(root),
-            tracedecay_hooks::HookHostV1::Codex,
-            &event,
-            &output,
-            Some(&hook_telemetry),
-        )
-        .await
-        {
-            return 1;
-        }
-        return 0;
-    }
-    if root.is_none() {
-        retain_codex_stop_in_daemon(runtime, session_id.as_deref(), Some(&hook_telemetry)).await;
-    }
-    if !super::write_hook_output(
-        runtime,
-        root.as_deref(),
-        tracedecay_hooks::HookHostV1::Codex,
-        &event,
-        &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
-    )
-    .await
-    {
-        return 1;
-    }
-    0
-}
-
-/// Hands the terminal receipt to the daemon, which retains transcript ingest
-/// and user review as cancellable daemon-owned work keyed to this exact
-/// session. The hook only waits (bounded) for the acknowledgement; an
-/// unavailable daemon fails open.
-#[hotpath::measure(future = true, label = "hosts.hooks.codex.retain_stop")]
-async fn retain_codex_stop_in_daemon(
-    runtime: &HookRuntimeV1,
-    session_id: Option<&str>,
-    telemetry: Option<&super::analytics::HookTimingSpan>,
-) -> bool {
-    let Some(session_id) = session_id else {
-        return false;
-    };
-    let retain = async {
-        match super::daemon_hook_action(
-            runtime,
-            None,
-            serde_json::json!({
-                "action": "codex_stop",
-                "session_id": session_id,
-            }),
-            telemetry,
-        )
-        .await
-        {
-            Ok(result) => result.get("status").and_then(Value::as_str) == Some("accepted"),
-            Err(error) => {
-                tracing::warn!(%error, "Codex Stop daemon retention failed");
-                false
-            }
-        }
-    };
-    super::await_within_stop_budget(retain, CODEX_STOP_RETENTION_BUDGET, telemetry, || false).await
 }
 
 /// Pure decision logic for Codex `SubagentStart` events.
@@ -755,51 +607,6 @@ mod tests {
         // The consolidated skill ladder and grep routing stay intact.
         assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_grep"));
         assert!(CODEX_SUBAGENT_START_CONTEXT.contains("exploring-code"));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn codex_stop_hands_terminal_receipt_to_daemon() {
-        let _lock = crate::hooks::lock_test_env();
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-            "action": "codex_stop",
-            "status": "accepted",
-            "session_id": "final-turn",
-        })]);
-
-        let runtime = crate::ports::hook_runtime::crate_test_runtime();
-        assert!(
-            !retain_codex_stop_in_daemon(&runtime, None, None).await,
-            "a receipt without a session id has nothing to retain"
-        );
-        assert!(retain_codex_stop_in_daemon(&runtime, Some("final-turn"), None).await);
-
-        let calls = daemon.calls();
-        assert_eq!(
-            calls.len(),
-            1,
-            "a session-less receipt must not reach the daemon"
-        );
-        let (project_root, arguments) = &calls[0];
-        assert_eq!(*project_root, None, "terminal retention is projectless");
-        assert_eq!(arguments["action"], "codex_stop");
-        assert_eq!(arguments["session_id"], "final-turn");
-        assert_eq!(arguments["format"], "json");
-    }
-
-    #[tokio::test]
-    async fn codex_stop_retention_timeout_is_fail_open() {
-        assert_eq!(CODEX_STOP_RETENTION_BUDGET, Duration::from_secs(3));
-        assert!(
-            !super::super::await_within_stop_budget(
-                std::future::pending(),
-                Duration::ZERO,
-                None,
-                || false,
-            )
-            .await,
-            "bounded daemon retention must not prevent Stop guidance from returning"
-        );
     }
 
     #[test]
