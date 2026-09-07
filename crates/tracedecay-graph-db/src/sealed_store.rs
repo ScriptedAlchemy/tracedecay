@@ -115,7 +115,7 @@ pub(crate) fn open_direct_sealed_generation(
     // lease. The identity read below reopens it immediately; the release
     // happens when the last operation lease goes away.
     let database = GraphDb::open_lazy_with_store_state(
-        sealed_database_options(sealed_path),
+        sealed_artifact_database_options(sealed_path),
         PersistentGraphStoreState::Existing,
     )
     .map_err(|error| match error {
@@ -360,11 +360,25 @@ fn remove_sealed_directory(directory: &Path) {
     }
 }
 
-fn sealed_database_options(path: PathBuf) -> GraphDbOpenOptions {
+/// Open options for the prospective store a build writes: a WAL-synced,
+/// write-capable engine that exists only until `copy_compact_and_close`
+/// checkpoints it into the artifact.
+fn prospective_sealed_database_options(path: PathBuf) -> GraphDbOpenOptions {
+    sealed_database_options(path, GraphDurability::WalSync)
+}
+
+/// Open options for a sealed artifact that already exists: read-only, so a
+/// reopen for proof, adoption, or serving never re-serializes the immutable
+/// container on close and never moves the identity its marker binds.
+fn sealed_artifact_database_options(path: PathBuf) -> GraphDbOpenOptions {
+    sealed_database_options(path, GraphDurability::SealedReadOnly)
+}
+
+fn sealed_database_options(path: PathBuf, durability: GraphDurability) -> GraphDbOpenOptions {
     GraphDbOpenOptions {
         location: GraphDbLocation::Persistent(path),
         expected_format: GraphFormatVersion::current(),
-        durability: GraphDurability::WalSync,
+        durability,
         cancellation: Arc::new(NeverCancelled),
     }
 }
@@ -878,7 +892,7 @@ impl GraphDb {
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn open_sealed_artifact_for_bench(directory: &Path) -> Result<Arc<GraphDb>, GraphDbError> {
         GraphDb::open_with_store_state(
-            sealed_database_options(directory.join(SEALED_STORE_DATABASE_FILE)),
+            sealed_artifact_database_options(directory.join(SEALED_STORE_DATABASE_FILE)),
             Some(PersistentGraphStoreState::Existing),
         )
     }
@@ -979,7 +993,7 @@ fn copy_compact_and_close(
 ) -> Result<(usize, usize, &'static str), GraphDbError> {
     let physical_namespace = identity.physical_namespace()?;
     let sealed = GraphDb::open_with_store_state(
-        sealed_database_options(staging.join(SEALED_STORE_DATABASE_FILE)),
+        prospective_sealed_database_options(staging.join(SEALED_STORE_DATABASE_FILE)),
         Some(PersistentGraphStoreState::Prospective),
     )
     .map_err(|error| sealed_store_failure("open for build failed", error))?;
@@ -1308,7 +1322,7 @@ fn open_sealed_store(
     // materializes nothing at all; anything that does read it reopens the
     // same container through `ensure_opened` on first use.
     let database = GraphDb::open_lazy_with_store_state(
-        sealed_database_options(database_path),
+        sealed_artifact_database_options(database_path),
         PersistentGraphStoreState::Existing,
     )
     .map_err(|error| sealed_store_failure("reopen failed", error))?;
