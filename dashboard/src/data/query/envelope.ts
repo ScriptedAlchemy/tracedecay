@@ -1,4 +1,5 @@
 import { DashboardEnvelopeV1Schema, type DashboardDomainStateV1, type DashboardEnvelopeV1 } from '../../contracts/generated.ts';
+import { decodeJsonBody } from './responseBody.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { readOnlyScopeRefusal } from '../scope/store.ts';
 
@@ -39,7 +40,7 @@ export async function fetchEnvelope<T>(
   // reported in that vocabulary — `locked` is the taxonomy's word for a
   // surface that will not accept a change — and carries the daemon's sentence.
   if (response.status === 405) {
-    const refusal = readOnlyScopeRefusal(await response.json().catch(() => null));
+    const refusal = readOnlyScopeRefusal(await decodeJsonBody(response, init?.signal));
     if (refusal) {
       return { outcome: 'transport', state: 'locked', detail: refusal.detail };
     }
@@ -52,30 +53,19 @@ export async function fetchEnvelope<T>(
     // reason included — so it must not be flattened into a raw `HTTP 503`.
     // Only a non-2xx without a decodable envelope stays a bare transport
     // error.
-    const decoded = decodeEnvelopeBody<T>(payloadSchema, await bodyJson(response));
+    const decoded = decodeEnvelopeBody<T>(payloadSchema, await decodeJsonBody(response, init?.signal));
     return decoded ?? { outcome: 'transport', state: 'error', detail: `HTTP ${response.status}` };
   }
-  const body = await bodyJson(response);
-  if (body === undefined) {
-    return { outcome: 'transport', state: 'unsupported_schema' };
-  }
   return (
-    decodeEnvelopeBody<T>(payloadSchema, body) ?? {
+    decodeEnvelopeBody<T>(payloadSchema, await decodeJsonBody(response, init?.signal)) ?? {
       outcome: 'transport',
       state: 'unsupported_schema',
     }
   );
 }
 
-async function bodyJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return undefined;
-  }
-}
-
-/** Decodes one envelope body, or `null` when it is not an envelope.
+/** Decodes one envelope body, or `null` when it is not an envelope — which
+ * includes the {@link decodeJsonBody} sentinel for a body that was not JSON.
  *
  * Envelope routes use a `null` payload only when the domain state says no safe
  * payload exists (for example, a graph read that failed before it could
@@ -86,7 +76,6 @@ function decodeEnvelopeBody<T>(
   payloadSchema: WireSchema<T>,
   body: unknown,
 ): EnvelopeResult<T> | null {
-  if (body === undefined) return null;
   const parsed = DashboardEnvelopeV1Schema(payloadSchema.nullable()).safeParse(body);
   if (!parsed.success) {
     return null;

@@ -3,8 +3,8 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from 'react';
 import type { ReactNode } from 'react';
@@ -74,22 +74,38 @@ function createRenderClock(connection: SseConnection): RenderClock {
 const EventsContext = createContext<SseConnection | null>(null);
 const RenderClockContext = createContext<RenderClock | null>(null);
 
+/** The connection and its clock, created and torn down together. */
+interface LiveStream {
+  readonly connection: SseConnection;
+  readonly clock: RenderClock;
+}
+
 /** One app-wide event-stream connection; workspaces never open EventSources. */
 export function EventsProvider({ children, url }: { children: ReactNode; url?: string }) {
-  const connection = useMemo(() => connectEvents(url), [url]);
-  const clock = useMemo(() => createRenderClock(connection), [connection]);
+  // Opening the EventSource and subscribing the clock are external effects, so
+  // they live in a committed effect with a matching teardown, not in render: a
+  // render discarded before commit has no cleanup for a connection it opened,
+  // and setup → cleanup → setup (StrictMode, a URL change) must reconnect rather
+  // than keep handing out a closed memoized object. State, not a ref, so
+  // consumers re-render once the stream exists; the first commit publishes
+  // `null`, which every hook below already reads as "no stream".
+  const [stream, setStream] = useState<LiveStream | null>(null);
+  useEffect(() => {
+    const connection = connectEvents(url);
+    const clock = createRenderClock(connection);
+    setStream({ connection, clock });
+    return () => {
+      clock.stop();
+      connection.close();
+    };
+  }, [url]);
   const queryClient = useQueryClient();
   const registry = useProjectRegistry();
   const listing = projectRegistryPayload(registry.data);
   const activeProjectId = listing?.status === 'ok' ? listing.active_project_id : null;
-  useEffect(
-    () => () => {
-      clock.stop();
-      connection.close();
-    },
-    [clock, connection],
-  );
   useEffect(() => {
+    if (stream === null) return;
+    const { connection, clock } = stream;
     // A gap or overflow is one canonical invalidation/refetch, and settling it
     // waits on every active query, which can easily outlast several ticks.
     // Re-issuing per tick would fan one overflow into a refetch storm at the
@@ -161,10 +177,10 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
       stopped = true;
       unsubscribe();
     };
-  }, [activeProjectId, clock, connection, queryClient]);
+  }, [activeProjectId, stream, queryClient]);
   return (
-    <EventsContext.Provider value={connection}>
-      <RenderClockContext.Provider value={clock}>{children}</RenderClockContext.Provider>
+    <EventsContext.Provider value={stream?.connection ?? null}>
+      <RenderClockContext.Provider value={stream?.clock ?? null}>{children}</RenderClockContext.Provider>
     </EventsContext.Provider>
   );
 }

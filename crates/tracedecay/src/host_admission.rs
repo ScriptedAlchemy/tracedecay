@@ -884,25 +884,6 @@ impl HostAdmissionTestRuntimeV1 {
             self.project_registered.as_ref(),
             Some(&self.profile_registered),
         )
-        .with_registered_databases(
-            self.project_registered.as_ref(),
-            Some(&self.profile_registered),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn unregistered_mcp_session_authorities_for_test(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> crate::mcp::tools::SessionAuthorities<'_> {
-        match scope {
-            HostAdmissionScope::Project => {
-                crate::mcp::tools::SessionAuthorities::new(self.project_registered.as_ref(), None)
-            }
-            HostAdmissionScope::Profile => {
-                crate::mcp::tools::SessionAuthorities::new(None, Some(&self.profile_registered))
-            }
-        }
     }
 
     #[cfg(test)]

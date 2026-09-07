@@ -124,7 +124,7 @@ fn store_response_handle_locked(
     };
     let payload = serde_json::to_vec_pretty(&stored)?;
 
-    let rollback_payload = match retrieve_from_root_locked(root, &handle, now) {
+    let rollback_payload = match lookup_record(root, &handle, now) {
         Ok(ResponseHandleLookup::Found(existing)) if existing.content == stored.content => {
             Some(serde_json::to_vec_pretty(&StoredResponseHandleRecord {
                 created_at: existing.created_at,
@@ -138,7 +138,15 @@ fn store_response_handle_locked(
                 "digest collision with different stored content",
             ));
         }
-        Ok(ResponseHandleLookup::Missing | ResponseHandleLookup::Expired { .. }) => None,
+        Ok(ResponseHandleLookup::Expired { .. }) => {
+            // Publication owns reclamation: retire the expired record under the
+            // writer lock before replacing it, so a fresh publish that fails
+            // before its rename leaves no record behind rather than a stale one.
+            PrivateStoreIo::remove_file_durable(&path)
+                .map_err(|error| file_error(&path, "durably delete expired record", error))?;
+            None
+        }
+        Ok(ResponseHandleLookup::Missing) => None,
         Err(error) if is_corrupt_record_error(&error) => None,
         Err(error) => return Err(error),
     };
@@ -182,24 +190,32 @@ pub fn retrieve_response_handle(
     retrieve_from_root(&root, handle, now)
 }
 
+/// Non-mutating lookup that never takes the root lock.
+///
+/// A record file is published by atomically renaming a fully synced staging
+/// file over its handle path and is never modified in place, so one `read`
+/// observes either a complete prior record, a complete replacement, or no
+/// file — never mixed bytes. Identity is revalidated from the bytes read
+/// (`validate_record` recomputes the digest), so a concurrent replacement
+/// cannot be mistaken for the record this lookup started with. Expired files
+/// are not reclaimed here; cleanup and the renewing publication remove them
+/// under the exclusive writer lock.
 fn retrieve_from_root(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
     validate_handle(handle)?;
     validate_response_handle_path(root)?;
     if !path_exists(root)? {
         return Ok(ResponseHandleLookup::Missing);
     }
-    with_exclusive_lock(root, || retrieve_from_root_locked(root, handle, now))
+    lookup_record(root, handle, now)
 }
 
-fn retrieve_from_root_locked(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
+fn lookup_record(root: &Path, handle: &str, now: i64) -> Result<ResponseHandleLookup> {
     let path = response_handle_path(root, handle)?;
     let Some(stored) = read_record(&path)? else {
         return Ok(ResponseHandleLookup::Missing);
     };
     validate_record(handle, &stored, &path)?;
     if stored.expires_at <= now {
-        PrivateStoreIo::remove_file_durable(&path)
-            .map_err(|error| file_error(&path, "durably delete expired record", error))?;
         return Ok(ResponseHandleLookup::Expired {
             created_at: stored.created_at,
             expires_at: stored.expires_at,
@@ -720,6 +736,143 @@ mod tests {
             retrieve_from_root(root.path(), &record.handle, 20).unwrap(),
             ResponseHandleLookup::Missing
         ));
+    }
+
+    #[test]
+    fn expired_lookup_is_non_mutating_until_cleanup_or_renewal() {
+        let root = tempfile::tempdir().unwrap();
+        let record = store_response_handle_in_root(root.path(), "stale", 10).unwrap();
+        let expired_at = 10 + RESPONSE_HANDLE_TTL_SECS;
+
+        for _ in 0..2 {
+            assert!(matches!(
+                retrieve_from_root(root.path(), &record.handle, expired_at).unwrap(),
+                ResponseHandleLookup::Expired {
+                    created_at: 10,
+                    expires_at
+                } if expires_at == expired_at
+            ));
+        }
+        assert_eq!(
+            inventory_response_handles_in_root(root.path())
+                .unwrap()
+                .file_count,
+            1,
+            "a lookup must not reclaim the expired record"
+        );
+
+        let renewed = store_response_handle_in_root(root.path(), "stale", expired_at).unwrap();
+        assert_eq!(renewed.handle, record.handle);
+        assert_eq!(renewed.created_at, expired_at);
+        assert_eq!(
+            inventory_response_handles_in_root(root.path())
+                .unwrap()
+                .file_count,
+            1
+        );
+        let ResponseHandleLookup::Found(persisted) =
+            retrieve_from_root(root.path(), &record.handle, expired_at).unwrap()
+        else {
+            panic!("renewed expired handle was not retrievable");
+        };
+        assert_eq!(persisted.created_at, expired_at);
+    }
+
+    #[test]
+    fn failed_renewal_of_an_expired_record_leaves_no_record() {
+        let root = tempfile::tempdir().unwrap();
+        let record = store_response_handle_in_root(root.path(), "retire me", 10).unwrap();
+        let expired_at = 10 + RESPONSE_HANDLE_TTL_SECS;
+
+        assert!(
+            with_durable_atomic_write_fault_for_test(
+                DurableAtomicWriteFaultForTest::AfterTempSync,
+                || store_response_handle_in_root(root.path(), "retire me", expired_at),
+            )
+            .is_err()
+        );
+
+        assert!(matches!(
+            retrieve_from_root(root.path(), &record.handle, expired_at).unwrap(),
+            ResponseHandleLookup::Missing
+        ));
+        assert_eq!(
+            inventory_response_handles_in_root(root.path())
+                .unwrap()
+                .file_count,
+            0,
+            "publication must retire the expired record before a fresh publish"
+        );
+    }
+
+    #[test]
+    fn lookups_do_not_take_the_writer_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let record = store_response_handle_in_root(root.path(), "read me", 10).unwrap();
+        let leaf = root.path().file_name().unwrap().to_str().unwrap();
+        let lock_path = root
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!(".{leaf}{LOCK_SUFFIX}"));
+        let held = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        held.lock_exclusive().unwrap();
+
+        let lookup = retrieve_from_root(root.path(), &record.handle, 10);
+        let missing = retrieve_from_root(root.path(), "rh_000000000000000000000000", 10);
+        FileExt::unlock(&held).unwrap();
+
+        assert!(matches!(
+            lookup.unwrap(),
+            ResponseHandleLookup::Found(found) if found.content == "read me"
+        ));
+        assert!(matches!(missing.unwrap(), ResponseHandleLookup::Missing));
+    }
+
+    #[test]
+    fn concurrent_lookups_overlap_without_failing_closed() {
+        const READERS: usize = 8;
+        const LOOKUPS_PER_READER: usize = 50;
+        let root = tempfile::tempdir().unwrap();
+        let record = store_response_handle_in_root(root.path(), "shared read", 10).unwrap();
+        let root = Arc::new(root.path().to_path_buf());
+        let handle = Arc::new(record.handle);
+        let barrier = Arc::new(Barrier::new(READERS));
+        let workers = (0..READERS)
+            .map(|_| {
+                let root = Arc::clone(&root);
+                let handle = Arc::clone(&handle);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..LOOKUPS_PER_READER)
+                        .filter(|_| {
+                            !matches!(
+                                retrieve_from_root(&root, &handle, 10),
+                                Ok(ResponseHandleLookup::Found(_))
+                            )
+                        })
+                        .count()
+                })
+            })
+            .collect::<Vec<_>>();
+        let failures = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum::<usize>();
+
+        assert_eq!(
+            failures,
+            0,
+            "{failures} of {} overlapping lookups did not return the record",
+            READERS * LOOKUPS_PER_READER
+        );
     }
 
     #[test]

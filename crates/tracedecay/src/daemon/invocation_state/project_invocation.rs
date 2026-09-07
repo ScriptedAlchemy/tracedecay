@@ -2,7 +2,7 @@
 
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
-    DaemonInvocationProblem, Lease, register,
+    DaemonInvocationProblem, Lease,
 };
 
 use super::*;
@@ -26,7 +26,11 @@ impl DaemonInvocationState {
                 | DaemonInvocationPayload::MultiRootExecute { .. }
         ) && request_cancellation.is_none()
         {
-            let Some(lease) = register(&request.request_id) else {
+            let Some(lease) = self
+                .service
+                .request_cancellations()
+                .register(&request.request_id)
+            else {
                 return DaemonInvocationResponse::problem(
                     request.request_id,
                     DaemonInvocationProblem::InvalidRequest,
