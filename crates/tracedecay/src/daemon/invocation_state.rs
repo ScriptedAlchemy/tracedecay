@@ -22,8 +22,9 @@ use tracedecay_daemon_service::{
     DaemonContextScoutRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar, DaemonInvocationOutcome,
     DaemonInvocationProblem, DaemonInvocationService, DaemonLspOwnerRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonRetainedRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrar, DaemonWorkRuntimeRegistrar, ProjectRuntimeRequestLeaseV1,
-    ProjectRuntimeRootQuiescenceV1, WorkApplicationInvocationV1,
+    DaemonSemanticOwnerRuntimeRegistrar, DaemonSemanticRuntimeRegistrar,
+    DaemonWorkRuntimeRegistrar, ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
+    WorkApplicationInvocationV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -331,6 +332,10 @@ impl DaemonInvocationState {
         DaemonSemanticRuntimeRegistrar::new(&self.service)
     }
 
+    pub(super) fn semantic_owner_runtime_registrar(&self) -> DaemonSemanticOwnerRuntimeRegistrar {
+        DaemonSemanticOwnerRuntimeRegistrar::new(&self.service)
+    }
+
     pub(super) fn lsp_owner_registrar(&self) -> DaemonLspOwnerRegistrar {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
@@ -488,6 +493,7 @@ impl DaemonInvocationState {
                 self.code_index_schedulers.clone(),
                 graph_runtime.code_graph_seat_port(),
                 Arc::clone(&graph_publication_database),
+                graph_runtime.semantic_vector_operation_task_owner(),
             ),
         );
         let semantic_schedule = semantic_runtime

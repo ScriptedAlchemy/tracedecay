@@ -11,11 +11,12 @@ use thiserror::Error;
 use tracedecay_code_extraction::incremental::ParseError;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
-    CodeIndexCapabilityManifestV1, ComponentVersion, CoverageSummaryV1, FileOccurrenceId,
-    GenerationTestAttributionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-    ProviderEvaluationStateV1, RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
+    CoverageSummaryV1, FileOccurrenceId, GenerationTestAttributionV1, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
+    RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
     TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
@@ -23,7 +24,10 @@ use tracedecay_graph_db::{
 };
 
 use super::{
-    capabilities::{BaseCapabilityEmitter, CapabilityEmissionErrorV1, CodeIndexCapabilityEmitter},
+    capabilities::{
+        BaseCapabilityEmitter, CapabilityEmissionErrorV1, CodeIndexCapabilityEmitter,
+        expected_seal_digest,
+    },
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionV1,
         CodeIndexImportEvidenceV1, DeterministicCodeChunker, ExactExtractionAuthorityV1,
@@ -1137,6 +1141,36 @@ impl CodeIndexPublishedGenerationV1 {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let commitments = self
+            .manifest
+            .source_commitments
+            .as_ref()
+            .ok_or(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)?;
+        let expected_seal = expected_seal_digest(&self.manifest)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if expected_seal != self.manifest.seal.expected_digest {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "code generation manifest seal does not authenticate its source commitments"
+                    .to_owned(),
+            ));
+        }
+        if commitments.incremental_manifest_digest
+            != self.projection.request().changes.manifest_digest
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "code generation incremental source commitment does not match its projection"
+                    .to_owned(),
+            ));
+        }
+        let full_source = self
+            .chunks
+            .chunks()
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+            .collect::<Vec<_>>();
+        commitments
+            .validate_for_source(&full_source)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         self.ignored_source_roster
             .validate(&self.snapshot, &self.repository_parse_identity)?;
         if self.chunks.generation_id() != &self.manifest.generation_id
@@ -1331,6 +1365,8 @@ pub enum CodeIndexProductionErrorV1 {
         "sealed generation format revision {0} predates this build; the generation will be rebuilt from source"
     )]
     SupersededSealedGenerationRevision(u32),
+    #[error("sealed code generation predates authenticated source commitments and must be rebuilt")]
+    SourceCommitmentsUnavailable,
     #[error("code-index contract failed: {0}")]
     Contract(String),
     #[error("code-index parallel worker runtime failed: {0}")]
@@ -1520,7 +1556,7 @@ where
             self.config.privacy_domain.clone(),
             self.config.privacy_key_epoch,
         );
-        let (manifest, increment) = match active.as_ref() {
+        let (mut manifest, increment) = match active.as_ref() {
             Some(active) => {
                 let plan = planner
                     .plan_increment_with_invalidation(
@@ -1619,6 +1655,21 @@ where
 
         let candidate = hotpath::measure_block!("code_index.build.assemble", {
             let coverage = coverage_summary(&validated.snapshot, &staged.files);
+            let changes =
+                plan_chunk_increment(active.as_ref().map(|active| &active.chunks), &staged.chunks)
+                    .map_err(CodeIndexProductionErrorV1::Increment)?;
+            let full_source = staged
+                .chunks
+                .chunks()
+                .iter()
+                .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+                .collect::<Vec<_>>();
+            manifest.source_commitments = Some(
+                CodeGenerationSourceCommitmentsV1::from_changed_chunks(&changes, &full_source)
+                    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
+            );
+            manifest.seal.expected_digest = expected_seal_digest(&manifest)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
             let capability = BaseCapabilityEmitter::new(
                 registry_for_snapshot(&validated.snapshot)?,
                 coverage,
@@ -1626,9 +1677,6 @@ where
             )
             .emit(&manifest)
             .map_err(CodeIndexProductionErrorV1::Capability)?;
-            let changes =
-                plan_chunk_increment(active.as_ref().map(|active| &active.chunks), &staged.chunks)
-                    .map_err(CodeIndexProductionErrorV1::Increment)?;
             let projection_request = projection_request(
                 active.as_deref(),
                 increment.as_ref(),

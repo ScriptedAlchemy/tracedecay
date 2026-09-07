@@ -113,6 +113,20 @@ pub struct ClineLikeSource {
     task_metadata: TaskMetadataCache,
 }
 
+/// `<VS Code data dir>/User/globalStorage/<extension>/tasks`, joined per
+/// component. Discovered task paths descend from this root and their text is
+/// the durable transcript cursor key and `transcript_path`, so the root must
+/// carry the host's native spelling: a `/`-joined literal leaves a mixed
+/// `\...\User/globalStorage/...` spelling on Windows that names the same
+/// file under a different key than any natively built path.
+fn vscode_global_storage_tasks(home: &Path, extension_id: &str) -> PathBuf {
+    crate::host_ports::vscode_data_dir(home)
+        .join("User")
+        .join("globalStorage")
+        .join(extension_id)
+        .join("tasks")
+}
+
 impl ClineLikeSource {
     /// Cline VS Code extension storage:
     /// `Code/User/globalStorage/saoudrizwan.claude-dev/tasks`.
@@ -138,10 +152,7 @@ impl ClineLikeSource {
     pub fn cline_with_home(home: &Path) -> Self {
         Self {
             provider: "cline",
-            storage_roots: vec![
-                crate::host_ports::vscode_data_dir(home)
-                    .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
-            ],
+            storage_roots: vec![vscode_global_storage_tasks(home, "saoudrizwan.claude-dev")],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
             task_metadata: TaskMetadataCache::default(),
@@ -151,10 +162,10 @@ impl ClineLikeSource {
     pub fn roo_code_with_home(home: &Path) -> Self {
         Self {
             provider: "roo-code",
-            storage_roots: vec![
-                crate::host_ports::vscode_data_dir(home)
-                    .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
-            ],
+            storage_roots: vec![vscode_global_storage_tasks(
+                home,
+                "rooveterinaryinc.roo-cline",
+            )],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
             task_metadata: TaskMetadataCache::default(),
@@ -165,9 +176,11 @@ impl ClineLikeSource {
         Self {
             provider: "kilo",
             storage_roots: vec![
-                crate::host_ports::vscode_data_dir(home)
-                    .join("User/globalStorage/kilocode.kilo-code/tasks"),
-                home.join(".kilocode/cli/global/tasks"),
+                vscode_global_storage_tasks(home, "kilocode.kilo-code"),
+                home.join(".kilocode")
+                    .join("cli")
+                    .join("global")
+                    .join("tasks"),
             ],
             user_registered_roots: None,
             project_matchers: ProjectRootMatcherCache::default(),
@@ -428,7 +441,10 @@ fn snapshot_generation(contents: &str) -> TranscriptIngestResult<ObservationSour
     )?)
 }
 
-fn ui_messages_source_key(task_id: &str) -> String {
+/// The native source key of a task's `ui_messages.json` stream, which is
+/// ordered independently of the task's API conversation history.
+#[must_use]
+pub fn ui_messages_source_key(task_id: &str) -> String {
     format!("{task_id}{UI_MESSAGES_SOURCE_SUFFIX}")
 }
 

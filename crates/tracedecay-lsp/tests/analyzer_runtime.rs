@@ -170,6 +170,22 @@ fn loaded_runner_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
     )
 }
 
+// A phase-gated refresh must outlive the spawn its barrier waits on. The
+// default budget derived from a 500ms quiet window gives initialize 3s, and a
+// starved macOS runner can take longer than that to start /usr/bin/python3;
+// a refresh that gave up there killed the fake before it could reach its
+// phase, so the barrier then waited out its own deadline (#896). The quiet
+// window itself stays short.
+fn phase_gated_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
+    let quiet = std::time::Duration::from_millis(500);
+    lsp::client::LspRefreshTimeouts::new(
+        quiet + FAKE_LSP_START_TIMEOUT,
+        FAKE_LSP_START_TIMEOUT,
+        FAKE_LSP_START_TIMEOUT,
+        quiet,
+    )
+}
+
 #[test]
 fn analyzer_lifecycle_is_project_scoped_and_preserves_failure_evidence() {
     let root = AdmittedRoot::new("file:///project");
@@ -208,10 +224,21 @@ fn polyglot_semantics_route_unique_extensions_and_fall_back_on_ambiguity() {
     let routed: Arc<dyn SemanticProviderPort + Send + Sync> = Arc::new(PendingSemanticProvider);
     let fallback: Arc<dyn SemanticProviderPort + Send + Sync> =
         Arc::new(UnavailableSemanticProvider);
-    let root = AdmittedRoot::new("file:///project");
+    let fixture = tempfile::tempdir().expect("polyglot semantic fixture");
+    let document_path = fixture.path().join("src/app.TS");
+    std::fs::create_dir_all(document_path.parent().expect("document parent"))
+        .expect("polyglot source directory");
+    std::fs::write(&document_path, b"").expect("polyglot source file");
+    let root = AdmittedRoot::new(
+        url::Url::from_directory_path(fixture.path())
+            .expect("fixture root must convert to a file URL")
+            .to_string(),
+    );
     let request_id = LspRequestId::Number(1);
     let request = SemanticRequest::DocumentSymbols {
-        document_uri: "file:///project/src/app.TS".to_string(),
+        document_uri: url::Url::from_file_path(&document_path)
+            .expect("fixture document must convert to a file URL")
+            .to_string(),
     };
 
     let unique = lsp::PolyglotSemanticProvider::new(
@@ -266,14 +293,22 @@ fn broker_exposes_project_scoped_readiness_without_lsp_transport() {
         .semantic_authority_if_available(
             FAKE_LANGUAGE,
             project.path().to_path_buf(),
-            root_uri.clone(),
+            root_uri,
             bounded_fake_lsp_timeouts(),
         )
         .unwrap()
         .expect("fake analyzer is executable");
     let readiness = authority.analyzer_readiness();
 
-    assert_eq!(readiness.root().uri(), root_uri);
+    // The slot is keyed by the canonical project root, so its supervisor names
+    // that root; compare by path, as the gateway admits roots.
+    assert_eq!(
+        url::Url::parse(readiness.root().uri())
+            .unwrap()
+            .to_file_path()
+            .unwrap(),
+        project.path().canonicalize().unwrap()
+    );
     assert_eq!(readiness.state(), AnalyzerState::AwaitingStart);
     assert_eq!(readiness.failure_evidence(), None);
 }
