@@ -386,6 +386,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), "previewed\n");
     }
 
+    /// A live authority holds the candidate's parent directory open. On Unix
+    /// that handle keeps naming the moved directory, so a swap of `src`
+    /// succeeds and publication must notice the rebinding and refuse. On
+    /// Windows the OS enforces the confinement one step earlier: a directory
+    /// with an open handle cannot be renamed at all, so the swap itself is
+    /// denied and publication lands in the still-bound parent.
+    #[cfg(not(windows))]
     #[test]
     fn atomic_publication_rejects_parent_directory_rebinding() {
         let directory = tempdir().unwrap();
@@ -418,6 +425,43 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(source.join("lib.rs")).unwrap(),
             "replacement\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_publication_parent_cannot_be_rebound_while_authority_is_live() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("src");
+        let moved = directory.path().join("moved");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("lib.rs"), "previewed\n").unwrap();
+        let file =
+            SourceEditFileAuthority::open(directory.path(), Path::new("src/lib.rs")).unwrap();
+        let (_, identity) = file.read_to_string("src/lib.rs").unwrap();
+
+        let mut swap = None;
+        file.publish(
+            "src/lib.rs",
+            Some("previewed\n"),
+            Some(&identity),
+            "intended\n",
+            || swap = Some(std::fs::rename(&source, &moved)),
+        )
+        .expect("publication into the still-bound parent succeeds");
+        let swap = swap.expect("the swap hook ran before the compare");
+        assert!(
+            swap.is_err(),
+            "Windows must refuse to rename a directory the authority holds open"
+        );
+        assert!(
+            !moved.exists(),
+            "a denied swap must not leave a moved directory behind"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("lib.rs")).unwrap(),
+            "intended\n",
+            "publication is confined to the parent the authority opened"
         );
     }
 
