@@ -10,12 +10,13 @@ use std::path::{Component, Path, PathBuf};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{CollectionControl, CollectionFailureKind};
 
 /// Stable identity of an opened directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreRootIdentity {
     pub device: u64,
     pub inode: u64,
@@ -303,7 +304,7 @@ fn capture_file_identity(
     })
 }
 
-fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdentity> {
+pub(crate) fn store_root_identity(directory: &Dir) -> io::Result<StoreRootIdentity> {
     let metadata = directory.metadata(".")?;
     capability_identity(directory, &metadata)
 }

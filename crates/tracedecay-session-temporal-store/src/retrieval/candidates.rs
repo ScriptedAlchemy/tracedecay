@@ -391,6 +391,11 @@ pub(super) async fn query_candidate_clause(
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
+    let occurrence_fts_query = if clause.channel == CandidateChannel::Lexical {
+        fts_any_terms(&clause.value)
+    } else {
+        fts_phrase(&clause.value)
+    };
     let (sql, params) = match (scope, clause.channel) {
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
             return Err(read_message(
@@ -420,6 +425,7 @@ pub(super) async fn query_candidate_clause(
                 })?,
                 provider,
                 SqlValue::Text(clause.value.clone()),
+                SqlValue::Text(exact_fts_phrase(&clause.value)?),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -442,7 +448,7 @@ pub(super) async fn query_candidate_clause(
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Text(occurrence_fts_query.clone()),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -597,7 +603,7 @@ pub(super) async fn query_candidate_clause(
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value)),
+                SqlValue::Text(occurrence_fts_query),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(source_stable_cap),
@@ -781,6 +787,24 @@ pub(super) fn fts_phrase(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+fn fts_any_terms(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(fts_phrase)
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn exact_fts_phrase(value: &str) -> Result<String, TemporalPortError> {
+    value
+        .chars()
+        .any(char::is_alphanumeric)
+        .then(|| fts_phrase(value))
+        .ok_or(TemporalPortError::BudgetExceeded {
+            resource: "exact candidate lexical prefilter",
+        })
+}
+
 pub(super) fn iso_day_bounds(value: &str) -> Result<(i64, i64), TemporalPortError> {
     let start_seconds = parse_rfc3339_timestamp(&format!("{value}T00:00:00Z"))
         .ok_or_else(|| read_message(CANDIDATE_OPERATION, "invalid ISO date candidate"))?;
@@ -837,4 +861,27 @@ pub(super) fn require_candidate_scope(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_queries_without_a_searchable_fts_token_refuse_typed() {
+        assert_eq!(
+            exact_fts_phrase("🚨 :: --"),
+            Err(TemporalPortError::BudgetExceeded {
+                resource: "exact candidate lexical prefilter",
+            })
+        );
+    }
+
+    #[test]
+    fn lexical_terms_share_one_or_query() {
+        assert_eq!(
+            fts_any_terms("workflow correction repeated"),
+            "\"workflow\" OR \"correction\" OR \"repeated\""
+        );
+    }
 }
