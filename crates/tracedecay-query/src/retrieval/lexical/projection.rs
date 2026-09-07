@@ -17,6 +17,7 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
+    admit_candidate_sources,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
@@ -805,21 +806,25 @@ impl LexicalGenerationPostingsV1 {
         fuzzy: &FuzzyExpansionsV1,
         phrase_candidates: &BTreeMap<String, RoaringBitmap>,
     ) -> RoaringBitmap {
-        let mut documents = RoaringBitmap::new();
+        let mut sources = Vec::new();
         for term in &request.whole_terms {
-            self.union_whole_term(&normalize_lexical(term), &mut documents);
+            sources.push(self.whole_term_documents(&normalize_lexical(term)));
             if let Some(expansions) = fuzzy.by_query.get(term) {
                 for expansion in expansions {
-                    self.union_whole_term(expansion, &mut documents);
+                    sources.push(self.whole_term_documents(expansion));
                 }
             }
         }
         if let Some(postings) = self.term_documents.get(&LexicalFieldV1::Subtoken) {
             for subtoken in &request.subtokens {
                 if let Some(posting) = postings.get(&normalize_lexical(subtoken)) {
-                    documents |= &posting.documents;
+                    sources.push((posting.documents.len() as usize, posting.documents.clone()));
                 }
             }
+        }
+        let mut documents = RoaringBitmap::new();
+        for source in admit_candidate_sources(sources) {
+            documents |= source;
         }
         // Reuse the per-phrase n-gram candidate sets computed once by the
         // caller. Union is idempotent, so unioning the deduplicated normalized
@@ -875,15 +880,22 @@ impl LexicalGenerationPostingsV1 {
             .count()
     }
 
-    fn union_whole_term(&self, term: &str, documents: &mut RoaringBitmap) {
+    /// A whole-term candidate source: the term's documents across every
+    /// non-subtoken field, keyed by the summed per-field document frequency
+    /// the artifact reader also admits by.
+    fn whole_term_documents(&self, term: &str) -> (usize, RoaringBitmap) {
+        let mut documents = RoaringBitmap::new();
+        let mut frequency = 0usize;
         for (field, postings) in &self.term_documents {
             if *field == LexicalFieldV1::Subtoken {
                 continue;
             }
             if let Some(posting) = postings.get(term) {
-                *documents |= &posting.documents;
+                frequency = frequency.saturating_add(posting.documents.len() as usize);
+                documents |= &posting.documents;
             }
         }
+        (frequency, documents)
     }
 }
 
