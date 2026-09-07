@@ -46,8 +46,8 @@ use tracedecay_store::{
 mod support;
 
 use support::{
-    RegisteredGraph, TestCancellation, UnsetSqliteUnsafeFast, capture_unclean_crash_image,
-    crash_child_root, graph_path, mark_durable_phase, registration, sidecar_wal_path,
+    RegisteredGraph, TestCancellation, capture_unclean_crash_image, crash_child_root, graph_path,
+    mark_durable_phase, registration, sidecar_wal_path,
 };
 
 /// Mirrors the runtime request probe the other graph-db contract suites use;
@@ -728,15 +728,15 @@ fn torn_durable_store_is_quarantined_and_rebuilt_from_the_replay_journal() {
     assert_eq!(marker_of(&served, &identity), "g1");
 }
 
-/// The operator-profile fault shape: a SIGKILL mid-WAL-write leaves a
-/// current-version container whose serialized block no longer matches its
-/// CRC, plus a live WAL sidecar. The corrupted-but-current store reports the
-/// CRC fault deterministically; quarantine must adopt the container *and*
+/// Subprocess unclean-exit proof, not machine power-loss: a child reaches
+/// the durable WAL phase and exits without closing the store. The abandoned
+/// image is a current-version container plus a live WAL sidecar. After the
+/// parent copies that image, this test corrupts a serialized block so the
+/// CRC fault is deterministic; quarantine must adopt the container *and*
 /// the WAL sidecar so the forensic pair stays together, and the fresh store
 /// must rebuild from the replay journal.
 #[test]
 fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
-    let _unsafe_fast = UnsetSqliteUnsafeFast::new();
     if let Some(root) = crash_child_root() {
         let registered = write_published_g1_leaving_wal(&root, "crash", "crc");
         mark_durable_phase(&root);
@@ -752,9 +752,10 @@ fn crc_faulted_store_is_quarantined_with_its_wal_sidecar_and_rebuilt() {
     let identity = projection("crash", "crc");
     let projection_key = g1_record.publication.key.projection.clone();
 
-    // A child publishes g1, reaches the durable WAL phase, and exits without
-    // a clean close. Only then is the abandoned image copied — never while a
-    // live Windows handle still owns the store (issue #933).
+    // Child publishes g1, reaches the durable WAL phase, and exits without
+    // a clean close. That is unclean process exit, not host power-loss. The
+    // abandoned image is copied only after the child is reaped — never while
+    // a live Windows handle still owns the store (issue #933).
     let crash = TempDir::new().unwrap();
     capture_unclean_crash_image(crash.path());
     let crashed_container = graph_path(crash.path());
@@ -1149,7 +1150,6 @@ fn newest_wal_segment(sidecar: &std::path::Path) -> Option<u64> {
 /// (and the next open's replay cost) on every restart.
 #[test]
 fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
-    let _unsafe_fast = UnsetSqliteUnsafeFast::new();
     if let Some(root) = crash_child_root() {
         let registered = write_published_g1_leaving_wal(&root, "crash", "reopen-collapse");
         apply_unverified_wal_debt(&registered, &root);
@@ -1169,7 +1169,7 @@ fn reopen_collapses_replayed_wal_history_from_an_unclean_shutdown() {
     let debt_entity = GraphEntityId::new("entity:wal-debt").unwrap();
 
     // Child publishes g1, stages unverified WAL debt, and exits without a
-    // clean close. The copy runs only after that process is gone.
+    // clean close. Subprocess unclean-exit only; the copy runs after reap.
     let crash_root = TempDir::new().unwrap();
     capture_unclean_crash_image(crash_root.path());
     let crash_path = graph_path(crash_root.path());
