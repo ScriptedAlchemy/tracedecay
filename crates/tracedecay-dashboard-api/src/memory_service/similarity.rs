@@ -1,7 +1,7 @@
 //! Cached similarity computation and the similarity pairs payload.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 use tracedecay_store::FactReadControl;
@@ -13,9 +13,8 @@ use super::super::memory_analysis::{
     empty_score_distribution, score_similar_pairs,
 };
 use super::projection::vector_rows;
-use crate::snapshot_cache::{DerivedSnapshotCache, DerivedSnapshotCacheState};
+use crate::snapshot_cache::DerivedSnapshotCacheState;
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_store::ProjectMemoryStoreRevisionV1;
 
 pub fn coerce_similarity_score(value: Option<f64>, default: f64) -> f64 {
     value
@@ -23,10 +22,6 @@ pub fn coerce_similarity_score(value: Option<f64>, default: f64) -> f64 {
         .unwrap_or(default)
         .clamp(SIMILARITY_SCORE_MIN, SIMILARITY_SCORE_MAX)
 }
-
-static SIMILARITY_CACHE: OnceLock<
-    DerivedSnapshotCache<String, ProjectMemoryStoreRevisionV1, SimilarityComputation>,
-> = OnceLock::new();
 
 async fn similarity_computation(
     state: &DashboardState,
@@ -42,12 +37,13 @@ async fn similarity_computation(
         .dashboard_store_revision(read_control)
         .await
         .map_err(|error| error.to_string())?;
-    let cache = SIMILARITY_CACHE.get_or_init(DerivedSnapshotCache::new);
     // The loader is the only writer, so this is the exact row count read for
     // this response. A hit never polls the closure and therefore reports zero.
     let vector_rows_read = AtomicUsize::new(0);
-    let (computation, cache_state) = cache
-        .get_or_compute(state.mem_db_path.clone(), store_revision, || async {
+    let (computation, cache_state) = state
+        .derived_snapshots
+        .similarity
+        .get_or_compute(store_revision, || async {
             let snapshot = application
                 .dashboard_vector_snapshot(None, vector_cap, read_control)
                 .await
