@@ -7,46 +7,20 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_hooks::DaemonHookEvent;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::claude::is_code_research_prompt;
-use super::post_tool_use::{EmptyPathPolicy, notify_edited_paths};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_cwd_from_parsed, event_project_root, event_project_root_or_process_cwd, event_session_id,
-    read_hook_event, record_hook_invoked_parsed, rel_under_root, research_block_reason,
+    event_cwd_from_parsed, event_project_root_or_process_cwd, event_session_id, read_hook_event,
+    record_hook_invoked_parsed, rel_under_root, research_block_reason,
 };
 
 /// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
 const KIRO_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
 /// Wall-clock budget for the Kiro prompt-submit catch-up ingest.
 const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_millis(1_500);
-
-/// Kiro `preToolUse` hook handler.
-///
-/// Blocks with exit code 2 and stderr, per Kiro's hook contract.
-#[hotpath::measure(label = "agent_hosts.hooks.kiro.pre_tool_use")]
-pub fn hook_kiro_pre_tool_use(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root(&parsed);
-    let _hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Kiro,
-        "preToolUse",
-        &event,
-        &parsed,
-    );
-    if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
-        eprintln!("{reason}");
-        2
-    } else {
-        0
-    }
-}
 
 /// Pure decision logic for Kiro `preToolUse` hook events.
 ///
@@ -204,55 +178,6 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         return 1;
     }
     0
-}
-
-/// Kiro `postToolUse` hook handler used to keep the graph fresh after writes.
-///
-/// Notifies the daemon after Kiro writes. Missing daemon/index state is
-/// fail-open.
-#[hotpath::measure(future = true, label = "agent_hosts.hooks.kiro.post_tool_use")]
-pub async fn hook_kiro_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    // One parse for the root, the analytics row, and the notification.
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root(&parsed);
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Kiro,
-        "postToolUse",
-        &event,
-        &parsed,
-    );
-    notify_kiro_post_tool_use(runtime, &parsed, root.as_deref(), &hook_telemetry).await;
-    0
-}
-
-async fn notify_kiro_post_tool_use(
-    runtime: &HookRuntimeV1,
-    parsed: &Value,
-    project_root: Option<&Path>,
-    telemetry: &super::analytics::HookTimingSpan,
-) {
-    let Some(project_root) = project_root
-        .map(Path::to_path_buf)
-        .or_else(|| event_project_root_or_process_cwd(parsed))
-    else {
-        return;
-    };
-    let cwd = event_cwd_from_parsed(parsed);
-    // Kiro's event reports the session `cwd` alongside the paths, so it is sent
-    // even when no edited path landed inside the project.
-    notify_edited_paths(
-        runtime,
-        &project_root,
-        parsed,
-        || kiro_post_tool_use_rel_paths_from_parsed(parsed, &project_root),
-        |rel_paths| DaemonHookEvent::kiro_post_tool_use(rel_paths, cwd),
-        EmptyPathPolicy::Send,
-        Some(telemetry),
-    )
-    .await;
 }
 
 pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Vec<String> {

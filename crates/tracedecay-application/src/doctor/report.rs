@@ -22,10 +22,11 @@ use super::sources::{
     DoctorStorageFamilyReadV1, DoctorStorageIncompleteReasonV1, HostIntegrationDoctorPort,
     HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1, ObservabilityDoctorPort,
     ObservabilityReadV1, OperationalAuditDoctorPort, ProfileAuthorityReadV1,
-    RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
-    advisory_feedback_findings, code_index_finding, configuration_finding,
-    host_integration_finding, ingest_refusal_finding, language_server_finding,
-    observability_finding, operational_audit_findings, runtime_health_finding,
+    RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, SemanticOwnerDoctorPort,
+    SemanticOwnerReadV1, StorageDoctorPort, advisory_feedback_findings, code_index_finding,
+    configuration_finding, host_integration_finding, ingest_refusal_finding,
+    language_server_finding, observability_finding, operational_audit_findings,
+    runtime_health_finding, semantic_owner_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -415,6 +416,7 @@ pub struct DoctorReportComposerV1<'a> {
     advisory_feedback: Option<&'a dyn AdvisoryFeedbackDoctorPort>,
     language_server: Option<&'a dyn LanguageServerDoctorPort>,
     code_index: Option<&'a dyn CodeIndexMountDoctorPort>,
+    semantic_owner: Option<&'a dyn SemanticOwnerDoctorPort>,
     observability: Option<&'a dyn ObservabilityDoctorPort>,
     storage: Option<&'a dyn StorageDoctorPort>,
 }
@@ -469,10 +471,17 @@ impl<'a> DoctorReportComposerV1<'a> {
         self
     }
 
-    /// Wire the code/semantic index mount source (SemanticIndex family).
+    /// Wire the code-index mount source (SemanticIndex family).
     #[must_use]
     pub fn with_code_index(mut self, port: &'a dyn CodeIndexMountDoctorPort) -> Self {
         self.code_index = Some(port);
+        self
+    }
+
+    /// Wire the independent semantic activation owner (`SemanticIndex` family).
+    #[must_use]
+    pub fn with_semantic_owner(mut self, port: &'a dyn SemanticOwnerDoctorPort) -> Self {
+        self.semantic_owner = Some(port);
         self
     }
 
@@ -508,7 +517,9 @@ impl<'a> DoctorReportComposerV1<'a> {
                 DoctorFindingFamilyV1::LanguageServer => {
                     self.compose_language_server(context).await?
                 }
-                DoctorFindingFamilyV1::SemanticIndex => self.compose_code_index(context).await?,
+                DoctorFindingFamilyV1::SemanticIndex => {
+                    self.compose_semantic_index(context).await?
+                }
                 DoctorFindingFamilyV1::Observability => self.compose_observability(context).await?,
             };
             entries.extend(family_entries);
@@ -699,6 +710,43 @@ impl<'a> DoctorReportComposerV1<'a> {
         };
         let finding = code_index_finding(&read)?;
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
+    }
+
+    #[hotpath::skip]
+    async fn compose_semantic_index(
+        &self,
+        context: &RequestContext,
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
+        if self.code_index.is_none() && self.semantic_owner.is_none() {
+            return unwired_family(DoctorFindingFamilyV1::SemanticIndex);
+        }
+        let mut entries = Vec::new();
+        let mut consultations = Vec::new();
+        if self.code_index.is_some() {
+            let (code_index_entries, consultation) = self.compose_code_index(context).await?;
+            entries.extend(code_index_entries);
+            consultations.push(consultation);
+        }
+        if let Some(port) = self.semantic_owner {
+            let read = port.semantic_owner(context).await;
+            consultations.push(match &read {
+                SemanticOwnerReadV1::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+                SemanticOwnerReadV1::Unsupported => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+                }
+                SemanticOwnerReadV1::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+                SemanticOwnerReadV1::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+                SemanticOwnerReadV1::Unknown => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
+                }
+            });
+            entries.push(DoctorReportEntryV1::new(
+                semantic_owner_finding(&read)?,
+                None,
+            )?);
+        }
+        Ok((entries, strongest_consultation(consultations)?))
     }
 
     #[hotpath::skip]

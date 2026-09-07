@@ -30,6 +30,10 @@
 #   CLAUDE_MODELS        space-separated Claude matrix (default: opus sonnet)
 #   CODEX_MODELS         space-separated Codex matrix (default: gpt-5.5 gpt-5.6-terra)
 #   SCENARIO_TIMEOUT     per scenario wall-clock seconds (default: 240)
+#   REPS                 repetitions per scenario x host x model x condition cell
+#                        (default: 1; >1 suffixes transcripts with __r<N>)
+#   PARALLEL             concurrent live agent runs (default: 1); runs are
+#                        read-only against shared fixtures, so this is safe
 #   TRACEDECAY_BIN       tracedecay binary (default: resolve from PATH)
 #   EVAL_OUT            directory to also copy scoreboard.json + report.md into
 set -euo pipefail
@@ -44,6 +48,11 @@ HOSTS="${HOSTS:-claude}"
 CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"
 CODEX_MODELS="${CODEX_MODELS:-gpt-5.5 gpt-5.6-terra}"
 SCENARIO_TIMEOUT="${SCENARIO_TIMEOUT:-240}"
+REPS="${REPS:-1}"
+PARALLEL="${PARALLEL:-1}"
+for knob in REPS PARALLEL; do
+  [[ "${!knob}" =~ ^[1-9][0-9]*$ ]] || { echo "error: $knob must be a positive integer" >&2; exit 2; }
+done
 
 # Ablation matrix. Default is "full" only (all discovery channels on) to keep
 # cost bounded — each extra condition multiplies the number of live agent runs.
@@ -58,8 +67,8 @@ for c in $CHANNELS; do
 done
 
 # Fixed steering string used for the hermetic ablation conditions. It replaces
-# the user's ambient ~/.claude/CLAUDE.md (deliberately excluded in ablations via
-# --setting-sources) so steering is held constant across no-hints/no-skills
+# the user's ambient ~/.claude/CLAUDE.md (unreachable from the throwaway HOME)
+# so steering is held constant across no-hints/no-skills
 # instead of varying with whatever global memory the operator happens to run.
 STEER_TEXT="This repository has indexed code-relationship evidence available. Choose tools according to the evidence the task requires."
 
@@ -194,10 +203,16 @@ copy_auth_readonly() {
   chmod 400 "$dest"
 }
 
+# Endpoint-profile auth lives in settings.json `env`; see carry_claude_profile.py.
+copy_claude_endpoint_profile() {
+  python3 "$here/carry_claude_profile.py" "$1" "$2"
+}
+
 scrub_auth_copies() {
   rm -f "$CODEX_EVAL_CONFIG/auth.json" \
     "$CLAUDE_EVAL_CONFIG/.credentials.json" \
-    "$CLAUDE_EVAL_CONFIG/credentials.json"
+    "$CLAUDE_EVAL_CONFIG/credentials.json" \
+    "$CLAUDE_EVAL_CONFIG/settings.json"
 }
 trap scrub_auth_copies EXIT
 trap 'exit 130' INT TERM HUP
@@ -218,6 +233,8 @@ prepare_host_profiles() {
       "$CLAUDE_EVAL_CONFIG/.credentials.json"
     copy_auth_readonly "$REAL_CLAUDE_CONFIG/credentials.json" \
       "$CLAUDE_EVAL_CONFIG/credentials.json"
+    copy_claude_endpoint_profile "$REAL_CLAUDE_CONFIG/settings.json" \
+      "$CLAUDE_EVAL_CONFIG/settings.json"
   fi
 }
 
@@ -315,9 +332,8 @@ JSON
 # ---- ablation provisioning ------------------------------------------------- #
 # Channel isolation is hard because a globally-installed plugin bundles hooks
 # (hints) + skills + MCP together. To ablate ONE channel we build a hermetic,
-# componentized copy of the plugin per condition and load ONLY it, dropping the
-# ambient user config via --setting-sources so global hooks/skills/CLAUDE.md do
-# not leak in. Descriptions (MCP) are held constant across every condition via a
+# componentized copy of the plugin per condition and load ONLY it inside a
+# throwaway HOME, so global hooks/skills/CLAUDE.md cannot leak in. Descriptions (MCP) are held constant across every condition via a
 # fixed --mcp-config + --strict-mcp-config.
 #
 # Condition -> channels:
@@ -348,10 +364,13 @@ provision_variant() {
   if [[ -f "$d/hooks/hooks-claude.json" ]]; then
     sed -i "s#__TRACEDECAY_BIN__#$TD#g" "$d/hooks/hooks-claude.json"
   fi
+  # Plugin `commands/` are exposed to Claude as `tracedecay:*` skills too (the
+  # Skill tool launches them and their bodies name tracedecay tools), so a
+  # skill-free condition must strip them alongside `skills/`.
   case "$cond" in
     no-hints) rm -f "$d"/hooks/*.json ;;   # skills + mcp, no hooks
-    no-skills) rm -rf "$d/skills" ;;       # hooks + mcp, no skills
-    bare) rm -f "$d"/hooks/*.json; rm -rf "$d/skills" ;;
+    no-skills) rm -rf "$d/skills" "$d/commands" ;;       # hooks + mcp, no skills
+    bare) rm -f "$d"/hooks/*.json; rm -rf "$d/skills" "$d/commands" ;;
     cli-only) rm -f "$d"/.mcp.json "$d"/mcp.json "$d"/hooks/*.json ;;
   esac
 }
@@ -368,8 +387,10 @@ claude_extra_for() {
   provision_variant "$cond"
   local selected_mcp="$mcp_cfg"
   [[ "$cond" == "cli-only" ]] && selected_mcp="$empty_mcp_cfg"
-  # Drop ambient user config (global plugin + user CLAUDE.md); pin MCP explicitly.
-  CLAUDE_EXTRA=(--setting-sources project,local
+  # The user source is the throwaway profile, which holds only the carried
+  # endpoint/auth env and model (see copy_claude_endpoint_profile); ambient
+  # plugins, hooks, and CLAUDE.md cannot reach it. Pin MCP explicitly.
+  CLAUDE_EXTRA=(--setting-sources user,project,local
                 --strict-mcp-config --mcp-config "$selected_mcp"
                 --add-dir "$fdir"
                 --plugin-dir "$work/plugins/$cond")
@@ -426,7 +447,33 @@ out_base_for() {
   fi
 }
 
+# One live scenario x host x model x condition x repetition. Runs in a
+# background subshell when PARALLEL > 1, so it must not mutate shared state.
+run_one() {
+  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7"
+  local fdir out err start end rc=0 timed_out=false
+  fdir="$(fixture_dir_for "$fixture")"
+  out="$run_dir/${base}.stdout.jsonl"
+  err="$run_dir/${base}.stderr.log"
+  echo "RUN  $sid [$host/$model/$cond] ..."
+  start=$(date +%s)
+  if [[ "$host" == "claude" ]]; then
+    claude_extra_for "$cond" "$fdir"
+    run_claude "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+  else
+    run_codex "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+  fi
+  end=$(date +%s)
+  [[ $rc -eq 124 ]] && timed_out=true
+  cat > "$run_dir/${base}.meta.json" <<JSON
+{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
+JSON
+  echo "     $sid [$host/$model/$cond] rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
+}
+
 for cond in $CHANNELS; do
+# Provision each condition once, before any concurrent run could race on it.
+[[ "$have_plugin" == "1" ]] && provision_variant "$cond"
 while IFS=$'\t' read -r sid host fixture prompt; do
   [[ -z "$sid" ]] && continue
   case " $HOSTS " in *" $host "*) : ;; *) continue ;; esac
@@ -443,34 +490,27 @@ while IFS=$'\t' read -r sid host fixture prompt; do
     models="$CODEX_MODELS"
   fi
   for model in $models; do
+  for ((rep = 1; rep <= REPS; rep++)); do
   base="$(out_base_for "$cond" "$sid" "$host" "$model")"
-  out="$run_dir/${base}.stdout.jsonl"
-  err="$run_dir/${base}.stderr.log"
+  [[ "$REPS" -gt 1 ]] && base="${base}__r${rep}"
   if [[ "$live" != "1" ]]; then
     echo "DRY  $sid [$host/$model/$cond] fixture=$fixture"
     if [[ "$host" == "claude" ]]; then claude_extra_for "$cond" "$fdir"; fi
-    echo "     cwd=$fdir model=$model extra=[${CLAUDE_EXTRA[*]:-}] prompt=\"$prompt\"" >"$err"
-    : >"$out"
+    echo "     cwd=$fdir model=$model extra=[${CLAUDE_EXTRA[*]:-}] prompt=\"$prompt\"" >"$run_dir/${base}.stderr.log"
+    : >"$run_dir/${base}.stdout.jsonl"
     continue
   fi
-  echo "RUN  $sid [$host/$model/$cond] ..."
-  start=$(date +%s)
-  rc=0
-  if [[ "$host" == "claude" ]]; then
-    claude_extra_for "$cond" "$fdir"
-    run_claude "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+  if [[ "$PARALLEL" -gt 1 ]]; then
+    while (( $(jobs -rp | wc -l) >= PARALLEL )); do wait -n || true; done
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" &
   else
-    run_codex "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base"
   fi
-  end=$(date +%s)
-  timed_out=false; [[ $rc -eq 124 ]] && timed_out=true
-  cat > "$run_dir/${base}.meta.json" <<JSON
-{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
-JSON
-  echo "     rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
+  done
   done
 done < "$work/selected.tsv"
 done
+wait
 
 # ---- grade ----------------------------------------------------------------- #
 if [[ "$live" == "1" ]]; then

@@ -33,9 +33,36 @@ impl QueryExecutor for CountingQuery<'_> {
     }
 }
 
+/// The registered root every fixture project lives under, spelled the way
+/// `upsert_code_project` stores it on this host: a bare `/fixture` literal is
+/// not absolute on Windows, and the registry keys its rows by the canonical
+/// (`\\?\`-prefixed) spelling there.
+fn large_registry_root() -> PathBuf {
+    let posix = "/fixture";
+    let host = if cfg!(windows) {
+        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+    } else {
+        PathBuf::from(posix)
+    };
+    super::canonical_project_path(&host)
+}
+
 async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection) {
     let directory = tempfile::tempdir().expect("project registry fixture");
     let connection = TestConnection::open(&directory.path().join("global.db"));
+    // Text columns take the project root spelled as text; the primary-root
+    // evidence column takes it in the host's native encoding (UTF-8 bytes on
+    // Unix, UTF-16LE on Windows). The constant prefix is encoded once by the
+    // production encoder and the five ASCII digits are widened in SQL (`||`
+    // yields text even for blob operands, hence the outer cast), so the seed
+    // stays one set-based statement on every host.
+    let root_prefix = format!(
+        "{}{}project-",
+        large_registry_root().display(),
+        std::path::MAIN_SEPARATOR
+    );
+    let native_prefix = super::encode_native_project_path(Path::new(&root_prefix));
+    let native_pad: &[u8] = if cfg!(windows) { &[0] } else { &[] };
     connection
         .execute_batch(
             "CREATE TABLE code_projects (
@@ -84,10 +111,15 @@ async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection) {
                  default_branch, created_at, last_seen_at
              )
              SELECT printf('project-%05d', value),
-                    printf('/fixture/project-%05d', value),
-                    printf('/fixture/project-%05d', value),
+                    ?2 || printf('%05d', value),
+                    ?2 || printf('%05d', value),
                     ?1,
-                    CAST(printf('/fixture/project-%05d', value) AS BLOB),
+                    CAST(?3 || CAST(substr(printf('%05d', value), 1, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 2, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 3, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 4, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 5, 1) AS BLOB) || ?4
+                         AS BLOB),
                     10001 - value,
                     NULL,
                     NULL,
@@ -95,7 +127,12 @@ async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection) {
                     value,
                     10001 - value
              FROM sequence",
-            params![super::native_project_path_platform()],
+            params![
+                super::native_project_path_platform(),
+                root_prefix,
+                native_prefix,
+                native_pad
+            ],
         )
         .await
         .expect("seed 10k code projects");
@@ -410,11 +447,9 @@ async fn listing_ten_thousand_projects_uses_one_set_based_statement() {
         .expect("list project paths");
 
     assert_eq!(paths.len(), 10_000);
-    assert_eq!(
-        paths.first(),
-        Some(&PathBuf::from("/fixture/project-00001"))
-    );
-    assert_eq!(paths.last(), Some(&PathBuf::from("/fixture/project-10000")));
+    let root = large_registry_root();
+    assert_eq!(paths.first(), Some(&root.join("project-00001")));
+    assert_eq!(paths.last(), Some(&root.join("project-10000")));
     assert_eq!(
         query.statements.get(),
         1,
