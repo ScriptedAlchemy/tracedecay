@@ -21,7 +21,9 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
     scoped_code_index_store_root,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
-use tracedecay_graph_query::{CodeGraphReadFreshnessV1, CodeGraphReadRequest};
+use tracedecay_graph_query::{
+    CodeGraphReadFreshnessV1, CodeGraphReadRequest, request_graph_cancellation,
+};
 use tracedecay_session_memory::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
@@ -759,37 +761,40 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             sealed_decode_count, 0,
             "clean restart must seat the verified graph head without replaying partition segments"
         );
-        let mut serving_changes = registry
-            .subscribe_serving_generation_changes(fixture.path())
-            .await
-            .expect("subscribe to the restored serving owner");
-        let complete = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(complete) = registry.latest_complete_ready_for_scope(&scope).await {
-                    break complete;
-                }
-                serving_changes
-                    .changed()
-                    .await
-                    .expect("restored complete owner must signal installation");
-            }
-        })
-        .await
-        .expect("explicit complete-generation demand must seat the restored generation");
         assert_eq!(
-            complete.generation().manifest().generation_id,
-            seeded_generation_id,
-            "complete-generation demand must preserve the restored publication identity"
+            settled_read.generation(),
+            &seeded_generation_id,
+            "graph requests must preserve the restored publication identity"
         );
         assert!(
             Arc::ptr_eq(
-                &complete
-                    .text_generation_handle()
-                    .interactive_graph_store()
-                    .expect("complete serving graph"),
+                settled_read.store(),
                 &settled.interactive_graph_store().expect("restored graph"),
             ),
-            "complete-generation seating must reuse the recovered graph authority"
+            "graph requests must reuse the recovered graph authority"
+        );
+        let reader = settled_read
+            .reader(&settled_context, now_micros())
+            .expect("admitted reader for the recovered graph");
+        let page = reader
+            .symbols_page(None, 16, request_graph_cancellation(&settled_context))
+            .expect("bounded symbol query on the recovered graph");
+        assert!(!page.has_more, "the single-function fixture fits one page");
+        assert!(
+            page.symbols.iter().any(|symbol| symbol
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.simple_name == "alpha")),
+            "the recovered graph must return the fixture function: {:?}",
+            page.symbols
+        );
+        assert_eq!(
+            scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sealed_decode_count(),
+            0,
+            "a graph query after clean restart must not replay partition segments"
         );
     }
     let (held_tx, held_rx) = std::sync::mpsc::channel();

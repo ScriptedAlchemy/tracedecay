@@ -175,8 +175,8 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     );
 
     std::fs::write(project_root.join("file.txt"), "accepted\n").unwrap();
-    let accepted = transaction_preview(&owner, "accepted", operation);
     let index_tree_before = git(&project_root, &["write-tree"]);
+    let accepted = transaction_preview(&owner, "accepted", operation);
     let accepted_result = owner.service.apply(&accepted).unwrap();
     assert_eq!(
         accepted_result.receipt.outcome,
