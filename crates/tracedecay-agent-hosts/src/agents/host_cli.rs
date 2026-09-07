@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 
 use crate::errors::{Result, TraceDecayError};
 
+pub(crate) use tracedecay_automation_runtime::automation::executable_lookup::resolve_on_path;
+
 /// Wall-clock bound for one host CLI invocation.
 ///
 /// Generous enough for a marketplace fetch on a slow link, short enough that a
@@ -119,65 +121,6 @@ fn require_host_cli_from(
         program: program.to_string(),
         lifecycle: lifecycle.to_string(),
     })
-}
-
-/// First executable match for `program` across `path_var`.
-pub(crate) fn resolve_on_path(
-    program: &str,
-    path_var: Option<&std::ffi::OsStr>,
-) -> Result<Option<PathBuf>> {
-    let Some(path_var) = path_var else {
-        return Ok(None);
-    };
-    for dir in std::env::split_paths(path_var) {
-        for name in candidate_file_names(program) {
-            let candidate = dir.join(&name);
-            if is_executable_file(&candidate)? {
-                return Ok(Some(candidate));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Executable spellings to try for a bare program name.
-fn candidate_file_names(program: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![
-            format!("{program}.exe"),
-            format!("{program}.cmd"),
-            format!("{program}.bat"),
-            program.to_string(),
-        ]
-    } else {
-        vec![program.to_string()]
-    }
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> Result<bool> {
-    use std::os::unix::fs::PermissionsExt;
-    match std::fs::metadata(path) {
-        Ok(metadata) if !metadata.is_file() => Ok(false),
-        Ok(metadata) if metadata.permissions().mode() & 0o111 != 0 => Ok(true),
-        Ok(_) => Err(TraceDecayError::Config {
-            message: format!(
-                "host CLI candidate `{}` exists but is not executable",
-                path.display()
-            ),
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(TraceDecayError::Io(error)),
-    }
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> Result<bool> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(TraceDecayError::Io(error)),
-    }
 }
 
 /// Spawn a host command, absorbing the transient `ETXTBSY` window that follows
@@ -773,37 +716,6 @@ printf '%s' "$HOME" > "$HOME/home"
     fn env_shebang_interpreter_is_resolved_before_ambient_path_is_cleared() {
         use std::os::unix::fs::PermissionsExt;
 
-        struct PathGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl PathGuard {
-            fn set(path: &std::ffi::OsStr) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("PATH");
-                // SAFETY: the shared profile-discovery lock serializes this
-                // process-global test environment mutation.
-                unsafe { std::env::set_var("PATH", path) };
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `PathGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("PATH", previous),
-                        None => std::env::remove_var("PATH"),
-                    }
-                }
-            }
-        }
-
         let home = tempfile::tempdir().unwrap();
         let node_dir = tempfile::tempdir().unwrap();
         let attacker_dir = tempfile::tempdir().unwrap();
@@ -838,7 +750,7 @@ exit 0
         std::fs::set_permissions(&launcher, launcher_permissions).unwrap();
 
         let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
-        let _path = PathGuard::set(&path);
+        let _path = crate::config::AmbientPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["mcp", "add"], home.path())
             .expect("env-shebang launchers must run after interpreter admission");
 
@@ -875,37 +787,6 @@ exit 0
     fn env_shebang_interpreter_preserves_multicall_symlink_name() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
-        struct PathGuard {
-            previous: Option<std::ffi::OsString>,
-            _lock: std::sync::MutexGuard<'static, ()>,
-        }
-
-        impl PathGuard {
-            fn set(path: &std::ffi::OsStr) -> Self {
-                let lock = crate::config::lock_user_data_dir_test_env();
-                let previous = std::env::var_os("PATH");
-                // SAFETY: the shared profile-discovery lock serializes this
-                // process-global test environment mutation.
-                unsafe { std::env::set_var("PATH", path) };
-                Self {
-                    previous,
-                    _lock: lock,
-                }
-            }
-        }
-
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: see `PathGuard::set`.
-                unsafe {
-                    match self.previous.take() {
-                        Some(previous) => std::env::set_var("PATH", previous),
-                        None => std::env::remove_var("PATH"),
-                    }
-                }
-            }
-        }
-
         let home = tempfile::tempdir().unwrap();
         let bin_dir = tempfile::tempdir().unwrap();
         let shim = bin_dir.path().join("volta-shim");
@@ -932,7 +813,7 @@ printf '%s' "$*" > "$HOME/node-args"
         std::fs::set_permissions(&launcher, permissions).unwrap();
 
         let path = std::env::join_paths([bin_dir.path()]).unwrap();
-        let _path = PathGuard::set(&path);
+        let _path = crate::config::AmbientPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["plugin", "add"], home.path())
             .expect("the admitted multicall interpreter must launch");
 

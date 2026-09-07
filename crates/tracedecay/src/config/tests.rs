@@ -325,6 +325,16 @@ fn semantic_config_rejects_uncataloged_model_ids() {
     assert!(semantic.validate().is_ok());
 }
 
+/// Host-absolute fixture path: `artifact_path` validation requires
+/// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+fn absolute_fixture_path(posix: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+    } else {
+        PathBuf::from(posix)
+    }
+}
+
 #[test]
 fn semantic_config_accepts_only_explicit_local_installed_profiles() {
     let local = SemanticProfileSelection {
@@ -335,7 +345,7 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
         ))
         .unwrap(),
         artifact_digest: "a".repeat(64),
-        artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
+        artifact_path: absolute_fixture_path("/var/lib/tracedecay/models/code-embedding"),
     };
     let mut semantic = SemanticConfig {
         active_profile: Some(local.clone()),
@@ -347,7 +357,7 @@ fn semantic_config_accepts_only_explicit_local_installed_profiles() {
             ))
             .unwrap(),
             artifact_digest: "b".repeat(64),
-            artifact_path: std::path::PathBuf::from(
+            artifact_path: absolute_fixture_path(
                 "/var/lib/tracedecay/models/code-embedding-previous",
             ),
         }),

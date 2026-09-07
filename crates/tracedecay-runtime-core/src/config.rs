@@ -271,6 +271,52 @@ impl Default for PinnedUserDataDir {
     }
 }
 
+/// Narrows the ambient `PATH` for the guard's lifetime under the shared
+/// profile-discovery lock.
+///
+/// The `git` program authority is resolved before `PATH` changes: it caches
+/// per process, so the first resolution must never happen inside a narrowed
+/// window, and fixtures that spawn through [`crate::git::try_git_program`]
+/// keep an absolute program while this guard is alive. Tests that read
+/// ambient `PATH` for consistency (for example resolving the product binary
+/// twice) take [`lock_user_data_dir_test_env`] so they never run inside a
+/// narrowed window.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct AmbientPathGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<OsString>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl AmbientPathGuard {
+    pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
+        let lock = lock_user_data_dir_test_env();
+        crate::git::try_git_program()
+            .unwrap_or_else(|error| panic!("git must resolve before PATH is narrowed: {error}"));
+        let previous = std::env::var_os("PATH");
+        // SAFETY: the shared profile-discovery lock serializes this
+        // process-global test environment mutation.
+        unsafe { std::env::set_var("PATH", path) };
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Drop for AmbientPathGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `AmbientPathGuard::set`.
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var("PATH", previous),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 impl Drop for PinnedUserDataDir {
     fn drop(&mut self) {
