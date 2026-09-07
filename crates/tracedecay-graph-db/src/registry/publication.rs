@@ -2264,7 +2264,6 @@ mod historical_publication_reuse_tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::UtcMicros;
-    #[cfg(feature = "graph-sealed-store")]
     use tracedecay_domain::{CodeGenerationId, RepositoryId};
     use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
     use tracedecay_store::{
@@ -2289,10 +2288,9 @@ mod historical_publication_reuse_tests {
 
     use crate::generation::{
         recovered_generation_enumerations, reset_recovered_generation_enumerations,
-        reset_sealed_copy_proofs, sealed_copy_proofs,
+        reset_sealed_copy_marker_hits, reset_sealed_copy_proofs, sealed_copy_marker_hits,
+        sealed_copy_proofs,
     };
-    #[cfg(feature = "graph-sealed-store")]
-    use crate::generation::{reset_sealed_copy_marker_hits, sealed_copy_marker_hits};
     use crate::lease::GenerationLocator;
     use crate::{
         GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
@@ -2301,7 +2299,6 @@ mod historical_publication_reuse_tests {
         GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
         SourceGeneration,
     };
-    #[cfg(feature = "graph-sealed-store")]
     use crate::{GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest};
 
     #[derive(Debug)]
@@ -2701,22 +2698,14 @@ mod historical_publication_reuse_tests {
             .unwrap();
         assert_eq!(
             recovered_generation_enumerations(),
-            if cfg!(feature = "graph-sealed-store") {
-                0
-            } else {
-                1
-            },
-            "the durable sealed proof must replace the staging proof when available"
+            0,
+            "the durable sealed proof must replace the staging proof"
         );
         // The sealed per-generation copy is proved after durable reopen,
         // before it can be installed or answer a read.
         assert_eq!(
             sealed_copy_proofs(),
-            if cfg!(feature = "graph-sealed-store") {
-                1
-            } else {
-                0
-            },
+            1,
             "a first seal proves the exact durable artifact before installation"
         );
         let head = first.head.clone();
@@ -2736,7 +2725,6 @@ mod historical_publication_reuse_tests {
         }
     }
 
-    #[cfg(feature = "graph-sealed-store")]
     #[test]
     fn sealed_snapshot_recovers_without_opening_the_staging_registry() {
         let mut fixture = published_fixture();
@@ -2978,7 +2966,6 @@ mod historical_publication_reuse_tests {
     /// ones the build's post-reopen proof ran over, so adoption resolves by
     /// stat instead of re-streaming the sealed row proof — which is exactly
     /// the second half of the boot-from-sealed double verification.
-    #[cfg(feature = "graph-sealed-store")]
     #[test]
     fn a_fresh_from_disk_recover_adopts_the_sealed_artifact_by_marker() {
         let mut fixture = published_fixture();

@@ -1275,8 +1275,8 @@ fn probe_reads(
 ///
 /// ```text
 /// TRACEDECAY_SEALED_PROBE_ROWS=500000 \
-///   cargo test -p tracedecay-graph-db --features test-helpers,graph-sealed-store \
-///   --profile perf --test verified_generation_contract -- --ignored --nocapture \
+///   cargo test -p tracedecay-graph-db --features test-helpers --profile perf \
+///   --test verified_generation_contract -- --ignored --nocapture \
 ///   sealed_store::sealed_artifact_open_probe
 /// ```
 #[test]

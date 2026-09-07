@@ -498,7 +498,6 @@ fn a_store_persisted_under_the_legacy_layout_opens_and_drains_its_per_generation
 ///
 /// Fails if release checks only `verified_head` and returns
 /// `NoVerifiedLease` before inspecting the durable cleanup tombstone.
-#[cfg(feature = "graph-sealed-store")]
 #[test]
 fn retired_legacy_replay_without_a_head_releases_its_verified_sealed_staging_rows() {
     let temp = TempDir::new().unwrap();

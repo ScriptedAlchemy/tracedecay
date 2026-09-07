@@ -206,7 +206,7 @@ struct SealedStoreReceiptV1 {
 /// How [`GraphDb::ensure_sealed_generation_store`] satisfied a publication's
 /// request for a sealed per-generation store.
 pub(crate) enum SealedStoreInstall {
-    /// The sealed-store lane cannot serve this database (feature off,
+    /// The sealed-store lane cannot serve this database (kill-switch set,
     /// memory-backed, or no reopen configuration); publication keeps the
     /// staging close/reopen proof.
     Unavailable,
@@ -303,9 +303,6 @@ impl SealedGenerationStore {
 /// Sealed stores are on by default: `TRACEDECAY_GRAPH_SEALED_STORE=off`
 /// (or `0`/`false`/`disabled`) is the operational kill-switch.
 fn sealed_store_disabled() -> bool {
-    if cfg!(not(feature = "graph-sealed-store")) {
-        return true;
-    }
     match std::env::var(SEALED_STORE_DISABLE_ENV) {
         Ok(value) => matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -1668,8 +1665,7 @@ mod hibernation_tests {
 ///
 /// ```text
 /// TRACEDECAY_VERIFY_PROBE_ROWS=50000 TRACEDECAY_VERIFY_PROBE_PAYLOAD=700 \
-///   cargo test -p tracedecay-graph-db --features graph-sealed-store \
-///   --profile perf --lib -- --ignored --nocapture \
+///   cargo test -p tracedecay-graph-db --profile perf --lib -- --ignored --nocapture \
 ///   sealed_store::cost_probe::sealed_verification_cost_probe
 /// ```
 #[cfg(test)]
