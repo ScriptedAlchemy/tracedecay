@@ -889,6 +889,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 self.registry.clone(),
                 self.graph_registry.clone(),
                 Arc::clone(&self.graph_lifecycle_cancelled),
+                Arc::clone(&self.semantic_vector_operation_task_owner),
                 self.profile_authority_pin("attach remote recovery authority")
                     .await?,
                 self.project_owners.clone(),

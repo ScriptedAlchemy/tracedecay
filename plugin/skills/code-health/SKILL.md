@@ -1,6 +1,6 @@
 ---
 name: code-health
-description: 'Assess code quality, architectural coupling, duplication, or test risk with TraceDecay health evidence. Use operational diagnostics for daemon or registry failures.'
+description: 'An overall quality, architecture, coupling, duplication, or test-risk read of a project or directory. Covers the health dimensions to start from, treating scores as leads and confirming redundancy findings, and generation-bound before/after deltas. Daemon or registry failures are operational diagnostics.'
 ---
 
 # Code health

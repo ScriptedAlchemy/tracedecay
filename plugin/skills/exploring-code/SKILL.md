@@ -1,6 +1,6 @@
 ---
 name: exploring-code
-description: 'Locate an unknown symbol or implementation, explore a concept across code, or inspect indexed type and branch structure. A known-file read alone does not need this workflow.'
+description: 'Locate a symbol, find where behavior lives, or explain how a flow works across files in an indexed repo. Covers which evidence answers which question (text, symbol, or concept), coverage and freshness caveats, and anchored continuation. Reading a file you already know needs no workflow.'
 ---
 
 # Exploring code
