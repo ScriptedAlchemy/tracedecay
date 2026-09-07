@@ -250,30 +250,15 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 if semantic_enabled && !redundancy_ready {
                     return Err(("semantic_redundancy_authority", ObserverError::Rejected));
                 }
-                let serving = registry
-                    .serving_code_scope(&project_root)
-                    .await
-                    .ok_or(("serving_code_scope", ObserverError::Unavailable))?;
-                if serving.repository_id != scope.repository_id
-                    || serving.worktree_id != scope.worktree_id
-                {
-                    return Err(("serving_scope_mismatch", ObserverError::Rejected));
-                }
-                // The "serving state" semantic must be compatible with is the
-                // generation queries pin, not the graph-bearing serving slot.
-                // A quiet remount of a partitioned (revision-7) generation
-                // deliberately leaves that slot empty forever: exact/lexical
-                // serve from the text owner and the graph seats from its
-                // verified head without ever decoding the full generation.
-                // Waiting on the slot here made the restored activation retry
-                // `Unavailable` indefinitely after every restart, while every
-                // query kept pinning the text-serving generation the whole
-                // time. The scheduler owns that selection; a mount with
-                // neither seat is deferred, never a mismatch.
+                // Semantic readiness observes the exact text generation strict
+                // queries pin. A complete graph seat may legitimately lag it,
+                // and the sealed text metadata already carries every source
+                // commitment needed for this decision.
                 let generation = registry
-                    .current_serving_generation_for_scope(&project_root, &scope)
+                    .latest_text_fresh_for_scope(&scope)
                     .await
-                    .ok_or(("serving_generation", ObserverError::Unavailable))?;
+                    .ok_or(("serving_text_generation", ObserverError::Unavailable))?;
+                let manifest = generation.metadata().manifest();
                 let cursor_keys = Arc::new(
                     session_db
                         .load_session_cursor_key_provider_result()
@@ -286,7 +271,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         scope.clone(),
                         committed.state.clone(),
                         cursor_keys,
-                        &generation.manifest().privacy_domain,
+                        &manifest.privacy_domain,
                     )
                     .map_err(|error| {
                         (
@@ -311,11 +296,10 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 } else {
                     None
                 };
-                // Cache observations are an exact CAS over the live semantic
-                // pointer and query-runtime binding. All of the preparation
-                // above may await or warm shared state, so observe only when
-                // the coherent install is ready to consume this snapshot.
-                let prepared_cache = if semantic_enabled {
+                // Runtime observations are an exact CAS over the live semantic
+                // pointer and query-runtime binding. The vector read port is
+                // hydrated lazily by the strict query that consumes it.
+                let prepared_runtime = if semantic_enabled {
                     let pins = committed
                         .current_activation
                         .as_ref()
@@ -336,40 +320,66 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     // keeps the newer pointer until the operator activates it.
                     // `semantic_source_coherence` is the one authority on that
                     // question; this gate never re-derives its own.
-                    if let SemanticSourceCoherenceOutcomeV1::Mismatch(mismatch) =
-                        semantic_source_coherence(&vectors, &generation)
-                    {
-                        tracing::warn!(
-                            event = "semantic_query_activation",
-                            step = SUPERSEDED_COMMITTED_ACTIVATION,
-                            project_root = %project_root.display(),
-                            serving_generation = %mismatch.serving_generation,
-                            serving_content_identity = %mismatch.serving_content_identity,
-                            vector_source_generation = %mismatch.vector_source_generation,
-                            vector_source_manifest_digest = %mismatch.vector_source_manifest_digest,
-                            vector_generation = ?pins.vector_generation_id,
-                            "the committed activation projected a superseded source; it is not \
-                             reinstalled over the generation now being served"
-                        );
-                        return Err((SUPERSEDED_COMMITTED_ACTIVATION, ObserverError::Rejected));
+                    match semantic_source_coherence(&vectors, manifest) {
+                        SemanticSourceCoherenceOutcomeV1::Mismatch(mismatch) => {
+                            tracing::warn!(
+                                event = "semantic_query_activation",
+                                step = SUPERSEDED_COMMITTED_ACTIVATION,
+                                project_root = %project_root.display(),
+                                serving_generation = %mismatch.serving_generation,
+                                serving_incremental_manifest_digest =
+                                    %mismatch.serving_incremental_manifest_digest,
+                                serving_source_full_replay_digest =
+                                    %mismatch.serving_source_full_replay_digest,
+                                vector_source_generation = %mismatch.vector_source_generation,
+                                vector_source_manifest_digest =
+                                    %mismatch.vector_source_manifest_digest,
+                                vector_source_full_replay_digest =
+                                    %mismatch.vector_source_full_replay_digest,
+                                vector_generation = ?pins.vector_generation_id,
+                                "the committed activation projected a superseded source; it is not \
+                                 reinstalled over the generation now being served"
+                            );
+                            return Err((
+                                SUPERSEDED_COMMITTED_ACTIVATION,
+                                ObserverError::Rejected,
+                            ));
+                        }
+                        SemanticSourceCoherenceOutcomeV1::Unavailable(reason) => {
+                            tracing::warn!(
+                                event = "semantic_query_activation",
+                                step = "source_commitments_unavailable",
+                                project_root = %project_root.display(),
+                                serving_generation = %manifest.generation_id,
+                                vector_generation = ?pins.vector_generation_id,
+                                reason = ?reason,
+                                "semantic readiness could not compare independently authenticated \
+                                 source commitments"
+                            );
+                            return Err((
+                                "source_commitments_unavailable",
+                                ObserverError::Unavailable,
+                            ));
+                        }
+                        SemanticSourceCoherenceOutcomeV1::Coherent(_) => {}
                     }
                     // The activation is coherent with the serving
                     // generation, so restore binds the pointer to it. The
                     // activation's own historical source is never restored
                     // over the publication queries pin.
-                    if !runtime.cache_ready_for(pins, &generation.manifest().generation_id) {
+                    if !runtime.runtime_ready_for(pins, &manifest.generation_id) {
                         Some(
                             runtime
-                                .prepare_restore_current(&generation, &pins.vector_generation_id)
+                                .prepare_restore_current(manifest, &pins.vector_generation_id)
                                 .await
                                 .map_err(|error| {
                                     tracing::warn!(
                                         event = "semantic_query_activation",
                                         step = "prepare_restore_current",
                                         error = ?error,
-                                        serving_generation = %generation.manifest().generation_id,
+                                        serving_generation = %manifest.generation_id,
                                         vector_generation = ?pins.vector_generation_id,
-                                        "the activated vector generation's cache could not be restored"
+                                        "the activated vector generation's runtime could not be restored"
                                     );
                                     ("prepare_restore_current", ObserverError::Unavailable)
                                 })?
@@ -381,12 +391,9 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                     } else {
                         Some(
                             runtime
-                                .prepare_current_cache_observation(
-                                    pins,
-                                    &generation.manifest().generation_id,
-                                )
+                                .prepare_current_runtime_observation(pins, &manifest.generation_id)
                                 .ok_or((
-                                    "prepare_current_cache_observation",
+                                    "prepare_current_runtime_observation",
                                     ObserverError::Unavailable,
                                 ))?,
                         )
@@ -400,11 +407,11 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 // this snapshot is stale, not mismatched, and the reconciler
                 // re-observes against the newer one.
                 if registry
-                    .current_serving_generation_for_scope(&project_root, &scope)
+                    .latest_text_fresh_for_scope(&scope)
                     .await
-                    .map(|current| current.manifest().generation_id.clone())
+                    .map(|current| current.metadata().manifest().generation_id.clone())
                     .as_ref()
-                    != Some(&generation.manifest().generation_id)
+                    != Some(&manifest.generation_id)
                 {
                     return Err(("serving_generation_moved", ObserverError::Unavailable));
                 }
@@ -425,7 +432,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                         },
                         prepared_view,
                         semantic_authority,
-                        prepared_cache,
+                        prepared_runtime,
                         rollback_semantic_generation.as_ref(),
                         prepared_redundancy,
                         &attempt,

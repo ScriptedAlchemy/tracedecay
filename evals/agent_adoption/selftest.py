@@ -17,9 +17,11 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import carry_claude_profile  # noqa: E402
 import grade  # noqa: E402
 
 FAILURES: list[str] = []
@@ -519,7 +521,53 @@ def test_skill_routing():
     check("routing: prose is not invocation", grade.invoked_skills(prose) == [])
 
 
+def test_transcript_base_repetitions():
+    check("reps: matrix basename without rep",
+          grade.parse_transcript_base("trace_callers__claude__opus__bare")
+          == ("trace_callers", "claude", "bare", "opus"))
+    check("reps: rep suffix carries no identity",
+          grade.parse_transcript_base("trace_callers__claude__opus__bare__r12")
+          == ("trace_callers", "claude", "bare", "opus"))
+    check("reps: rep suffix on full condition",
+          grade.parse_transcript_base("trace_callers__claude__opus__r3")
+          == ("trace_callers", "claude", "full", "opus"))
+    check("reps: legacy id__host keeps a trailing r-like host untouched",
+          grade.parse_transcript_base("routing_r1__claude")
+          == ("routing_r1", "claude", "full", ""))
+
+
+def test_carry_claude_profile():
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "settings.json")
+        dest = os.path.join(td, "throwaway.json")
+        with open(src, "w") as fh:
+            json.dump({
+                "env": {"ANTHROPIC_BASE_URL": "https://example.invalid/", "ANTHROPIC_API_KEY": "k"},
+                "model": "k3[1m]",
+                "permissions": {"allow": ["Bash(*)"], "defaultMode": "bypassPermissions"},
+                "enabledPlugins": {"tracedecay@tracedecay": True},
+                "hooks": {"PreToolUse": []},
+            }, fh)
+        check("carry: writes when env or model present",
+              carry_claude_profile.carry(Path(src), Path(dest)))
+        carried = json.load(open(dest))
+        check("carry: only env and model cross the boundary",
+              set(carried) == {"env", "model"} and carried["model"] == "k3[1m]"
+              and carried["env"]["ANTHROPIC_BASE_URL"] == "https://example.invalid/")
+        check("carry: copy is read-only",
+              oct(os.stat(dest).st_mode & 0o777) == "0o400")
+        with open(src, "w") as fh:
+            json.dump({"permissions": {"allow": []}}, fh)
+        dest2 = os.path.join(td, "none.json")
+        check("carry: nothing to carry writes nothing",
+              not carry_claude_profile.carry(Path(src), Path(dest2)) and not os.path.exists(dest2))
+        check("carry: missing source is a no-op",
+              not carry_claude_profile.carry(Path(td, "absent.json"), Path(dest2)))
+
+
 def main() -> int:
+    test_carry_claude_profile()
+    test_transcript_base_repetitions()
     test_skill_routing()
     check("lint: generated scenario id cannot escape artifacts",
           bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))

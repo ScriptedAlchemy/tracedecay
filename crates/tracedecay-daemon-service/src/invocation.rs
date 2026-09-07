@@ -77,7 +77,8 @@ use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCase
 use crate::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
     ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1,
-    RegisteredSemanticActivationOwnerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
+    RegisteredSemanticActivationOwnerV1, RegisteredSemanticOwnerTaskV1,
+    SemanticActivationOwnerWithdrawalV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
 };
 use tracedecay_agent_hosts::agents::context_scout_ports::{
@@ -254,7 +255,8 @@ pub use registrars::{
     DaemonConfigurationGrantAuthority, DaemonConfigurationRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
-    DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
+    DaemonRetainedRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
+    DaemonWorkRuntimeRegistrar,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use types::{
@@ -283,6 +285,23 @@ fn retained_request_admission_problem(admission: RequestAdmission) -> Option<App
         RequestAdmission::Cancelled => Some(ApplicationProblem::cancelled_before_admission()),
         RequestAdmission::TimedOut => Some(ApplicationProblem::timed_out_before_admission()),
     }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+struct ConfigurationRuntimeRegistrationPauseV1 {
+    project_root: PathBuf,
+    before_registration: tokio::sync::oneshot::Sender<()>,
+    allow_registration: tokio::sync::oneshot::Receiver<()>,
+    after_registration: tokio::sync::oneshot::Sender<()>,
+    allow_return: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct DaemonConfigurationRuntimeRegistrationPauseV1 {
+    pub before_registration: tokio::sync::oneshot::Receiver<()>,
+    pub allow_registration: tokio::sync::oneshot::Sender<()>,
+    pub after_registration: tokio::sync::oneshot::Receiver<()>,
+    pub allow_return: tokio::sync::oneshot::Sender<()>,
 }
 
 #[derive(Clone)]
@@ -341,6 +360,9 @@ pub struct DaemonInvocationService {
             >,
         >,
     >,
+    #[cfg(any(test, feature = "test-helpers"))]
+    configuration_runtime_registration_pause:
+        Arc<Mutex<Option<ConfigurationRuntimeRegistrationPauseV1>>>,
 }
 
 impl Default for DaemonInvocationService {
@@ -383,6 +405,49 @@ impl DaemonInvocationService {
                 tracedecay_agent_hosts::native_integration::daemon_worktree_holder_admission_fence(),
             session_holder_databases: Arc::new(Mutex::new(BTreeMap::new())),
             native_integration_status_broadcasts: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(any(test, feature = "test-helpers"))]
+            configuration_runtime_registration_pause: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn pause_configuration_runtime_registration(
+        &self,
+        project_root: PathBuf,
+    ) -> DaemonConfigurationRuntimeRegistrationPauseV1 {
+        let (before_registration, before_registration_observed) = tokio::sync::oneshot::channel();
+        let (allow_registration, registration_allowed) = tokio::sync::oneshot::channel();
+        let (after_registration, after_registration_observed) = tokio::sync::oneshot::channel();
+        let (allow_return, return_allowed) = tokio::sync::oneshot::channel();
+        *self.configuration_runtime_registration_pause.lock().await =
+            Some(ConfigurationRuntimeRegistrationPauseV1 {
+                project_root,
+                before_registration,
+                allow_registration: registration_allowed,
+                after_registration,
+                allow_return: return_allowed,
+            });
+        DaemonConfigurationRuntimeRegistrationPauseV1 {
+            before_registration: before_registration_observed,
+            allow_registration,
+            after_registration: after_registration_observed,
+            allow_return,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    async fn take_configuration_runtime_registration_pause(
+        &self,
+        project_root: &Path,
+    ) -> Option<ConfigurationRuntimeRegistrationPauseV1> {
+        let mut pause = self.configuration_runtime_registration_pause.lock().await;
+        if pause
+            .as_ref()
+            .is_some_and(|pause| pause.project_root == project_root)
+        {
+            pause.take()
+        } else {
+            None
         }
     }
 

@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::config::PinnedUserDataDir;
 use crate::host_admission::HostAdmissionTestRuntimeV1;
@@ -13,8 +14,8 @@ pub(super) fn git(root: &Path, args: &[&str]) {
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
     )
-    .current_dir(root)
-    .args(args)
+    .current_dir(plain_host_path(root))
+    .args(plain_git_args(args))
     .output()
     .expect("git runs");
     assert!(

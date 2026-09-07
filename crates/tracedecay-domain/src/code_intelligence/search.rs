@@ -33,6 +33,7 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
+const CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN: &str = "tracedecay.code-source-full-replay.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 const EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN: &str = "tracedecay.embedding-projection-key.v1";
 const SEMANTIC_SEARCH_INDEX_KEY_DIGEST_DOMAIN: &str = "tracedecay.semantic-search-index-key.v1";
@@ -730,6 +731,73 @@ struct ChangedCodeChunkSetDigestInput<'a> {
     added_or_changed: &'a [ChangedCodeChunkV1],
     deleted: &'a [ChangedCodeChunkV1],
     reused: &'a [ChangedCodeChunkV1],
+}
+
+/// The two source identities sealed by one code generation.
+///
+/// The incremental digest authenticates the physical generation transition
+/// and all three change partitions. The full-replay digest authenticates only
+/// the complete ordered chunk corpus, so byte-identical source remains the
+/// same across generation-id churn.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGenerationSourceCommitmentsV1 {
+    pub incremental_manifest_digest: ManifestDigest,
+    pub full_replay_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct CodeSourceFullReplayDigestInput<'a> {
+    domain: &'static str,
+    chunks: &'a [(CodeSearchChunkId, ContentDigest)],
+}
+
+/// Digest a complete source corpus in canonical chunk-identity order.
+pub fn code_source_full_replay_digest(
+    chunks: &[(CodeSearchChunkId, ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
+    for (chunk, digest) in chunks {
+        chunk.validate()?;
+        digest.validate()?;
+    }
+    if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(DomainError::NonCanonical {
+            field: "full replay source chunk order",
+        });
+    }
+    canonical_sha256(&CodeSourceFullReplayDigestInput {
+        domain: CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN,
+        chunks,
+    })
+}
+
+impl CodeGenerationSourceCommitmentsV1 {
+    pub fn from_changed_chunks(
+        changes: &ChangedCodeChunkSetV1,
+        full_source: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<Self, DomainError> {
+        changes.validate()?;
+        Ok(Self {
+            incremental_manifest_digest: changes.manifest_digest.clone(),
+            full_replay_digest: code_source_full_replay_digest(full_source)?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.incremental_manifest_digest.validate()?;
+        self.full_replay_digest.validate()
+    }
+
+    pub fn validate_for_source(
+        &self,
+        full_source: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        if self.full_replay_digest != code_source_full_replay_digest(full_source)? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl ChangedCodeChunkSetV1 {
@@ -1486,10 +1554,19 @@ pub struct CodeIndexCapabilityManifestV1 {
     pub manifest_digest: ManifestDigest,
 }
 
+/// Capability identity is deliberately generation-independent.
+///
+/// `generation_id` is provenance, not capability: two generations that sealed
+/// the same source under the same runtime revisions, coverage, sanitization
+/// receipts, and privacy identity offer the identical indexing authority, and
+/// a checkout that reseals the same commit must not be refused as
+/// capability-incompatible. The manifest still carries its `generation_id`,
+/// and `CodeIndexPublishedGenerationV1` still refuses a capability manifest
+/// naming a different generation than its own, so the pairing stays bound —
+/// by that invariant rather than by this digest.
 #[derive(Serialize)]
 struct CodeIndexCapabilityManifestDigestInput<'a> {
     domain: &'static str,
-    generation_id: &'a CodeGenerationId,
     chunk_schema_revision: &'a str,
     chunker_revision: &'a ChunkerRevision,
     language_descriptor_revisions: &'a [LanguageDescriptorRevision],
@@ -1507,7 +1584,6 @@ impl CodeIndexCapabilityManifestV1 {
     pub fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&CodeIndexCapabilityManifestDigestInput {
             domain: CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN,
-            generation_id: &self.generation_id,
             chunk_schema_revision: &self.chunk_schema_revision,
             chunker_revision: &self.chunker_revision,
             language_descriptor_revisions: &self.language_descriptor_revisions,
@@ -2045,6 +2121,48 @@ mod tests {
     }
 
     #[test]
+    fn source_commitments_preserve_incremental_and_full_replay_identities() {
+        let incremental = changed_set();
+        let full_source = vec![
+            (id("chunk.added"), id(&digest('a'))),
+            (id("chunk.reused"), id(&digest('c'))),
+        ];
+        let first =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&incremental, &full_source)
+                .expect("source commitments");
+
+        assert_eq!(
+            first.incremental_manifest_digest,
+            incremental.compute_digest().expect("incremental digest")
+        );
+        assert_ne!(
+            first.incremental_manifest_digest, first.full_replay_digest,
+            "the generation-bound changed-set digest is not a full replay identity"
+        );
+
+        let mut republished = incremental;
+        republished.from_generation = Some(id("generation.8"));
+        republished.to_generation = id("generation.9");
+        republished.manifest_digest = republished.compute_digest().expect("republished digest");
+        let second =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&republished, &full_source)
+                .expect("republished source commitments");
+
+        assert_ne!(
+            first.incremental_manifest_digest, second.incremental_manifest_digest,
+            "incremental identity must retain its generation watermarks"
+        );
+        assert_eq!(
+            first.full_replay_digest, second.full_replay_digest,
+            "full replay identity must survive generation-id churn over identical source"
+        );
+
+        let mut tampered = first;
+        tampered.full_replay_digest = id(&digest('f'));
+        assert!(tampered.validate_for_source(&full_source).is_err());
+    }
+
+    #[test]
     fn capability_manifest_requires_canonical_vectors_and_digest() {
         let valid = capability_manifest();
         valid.validate().expect("canonical capability manifest");
@@ -2065,6 +2183,50 @@ mod tests {
             tampered.validate(),
             Err(DomainError::DigestMismatch)
         ));
+    }
+
+    #[test]
+    fn capability_identity_survives_a_new_generation_but_not_a_new_capability() {
+        let sealed = capability_manifest();
+        // The same source resealed under a new generation id — a checkout, a
+        // detached HEAD, a rollback that mints a fresh generation.
+        let mut resealed = sealed.clone();
+        resealed.generation_id = id("generation.v1.0cbc773a.00000002.resealed");
+        resealed.manifest_digest = resealed.compute_digest().expect("digest computable");
+        assert_eq!(
+            sealed.manifest_digest, resealed.manifest_digest,
+            "a new generation id must not change capability identity"
+        );
+
+        // A real capability or coverage change still refuses.
+        for changed in [
+            {
+                let mut changed = sealed.clone();
+                changed.chunker_revision = id("chunker.v2");
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.privacy_key_epoch = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.source_coverage.files_eligible = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.sanitization_receipts = vec![id("receipt.other")];
+                changed
+            },
+        ] {
+            assert_ne!(
+                sealed.manifest_digest,
+                changed.compute_digest().expect("digest computable"),
+                "a capability, privacy, coverage, or sanitization change must refuse reuse"
+            );
+        }
     }
 
     #[test]
