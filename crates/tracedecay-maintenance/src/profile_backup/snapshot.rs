@@ -80,14 +80,7 @@ pub(super) fn snapshot_artifact(
     )? {
         snapshot_sqlite(source, destination)?;
     } else {
-        fs::copy(source, destination).map_err(|error| {
-            ProfileBackupError::unavailable(format!(
-                "copy backup file '{}' to '{}': {error}",
-                source.display(),
-                destination.display()
-            ))
-        })?;
-        sync_file(destination)?;
+        super::copy_private_file(source, destination)?;
     }
     super::sync_directory(parent)
 }

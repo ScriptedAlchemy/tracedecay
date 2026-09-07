@@ -50,6 +50,7 @@ use super::sql::{TemporalSqlRead, TemporalSqlRows};
 use super::store::execution_control_graph_cancellation;
 use candidates::*;
 use cursors::*;
+pub(crate) use queries::partial_summary_invalidation_exists;
 use records::*;
 use rows::*;
 

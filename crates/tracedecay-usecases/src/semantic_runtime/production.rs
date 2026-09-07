@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkV1,
-    CompactCandidate, ComponentRevision, EmbeddingDocumentCompositionV1, EvidenceRole,
-    FixedPointScore, LogicalEvidenceId, ManifestDigest, ProjectionBatchRequestV1,
+    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeGenerationManifestV1,
+    CodeSearchChunkV1, CompactCandidate, ComponentRevision, EmbeddingDocumentCompositionV1,
+    EvidenceRole, FixedPointScore, LogicalEvidenceId, ManifestDigest, ProjectionBatchRequestV1,
     ProjectionOperationV1, ProjectionReplayReasonV1, QueryFallbackSubpayload, RetrievalAnchorId,
     RetrievalCursorKeyId, RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainId,
     SemanticSearchIndexKeyV1, SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1,
@@ -78,7 +78,7 @@ use tracedecay_query::search_quality::{
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
+use tracedecay_semantic::projector::PreparedVectorGenerationV1;
 use tracedecay_semantic::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
 };
@@ -353,49 +353,39 @@ pub struct SemanticVectorPublicationLeaseV1 {
     _writer: tokio::sync::OwnedMutexGuard<()>,
 }
 
-pub struct PreparedProductionSemanticCacheCommitV1 {
+pub struct PreparedProductionSemanticRuntimeCommitV1 {
     handle: DaemonSemanticRuntimeHandleV1,
-    prepared: PreparedProductionSemanticCacheActionV1,
+    prepared: PreparedProductionSemanticRuntimeActionV1,
 }
 
-enum PreparedProductionSemanticCacheActionV1 {
+enum PreparedProductionSemanticRuntimeActionV1 {
     Observation {
-        prepared: PreparedSemanticRuntimeObservationV1,
+        prepared: Box<PreparedSemanticRuntimeObservationV1>,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     },
     Restore {
         prepared: Box<PreparedSemanticRuntimeRestoreV1>,
-        cache: Arc<Mutex<Option<CachedPublishedVectorsV1>>>,
-        vectors: CachedPublishedVectorsV1,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     },
 }
 
-impl PreparedProductionSemanticCacheCommitV1 {
+impl PreparedProductionSemanticRuntimeCommitV1 {
     pub fn commit(self) -> bool {
         match self.prepared {
-            PreparedProductionSemanticCacheActionV1::Observation {
+            PreparedProductionSemanticRuntimeActionV1::Observation {
                 prepared,
                 lifecycle,
-            } => commit_current_observation_and_then(&self.handle, prepared, || {
+            } => commit_current_observation_and_then(&self.handle, *prepared, || {
                 let _ = lifecycle.mark_ready();
             }),
-            PreparedProductionSemanticCacheActionV1::Restore {
+            PreparedProductionSemanticRuntimeActionV1::Restore {
                 prepared,
-                cache,
-                vectors,
                 lifecycle,
             } => {
-                let Ok(mut cached) = cache.lock() else {
-                    return false;
-                };
-                let previous = cached.replace(vectors);
                 let committed = self.handle.commit_restore(*prepared);
                 if !committed {
-                    *cached = previous;
                     return false;
                 }
-                drop(cached);
                 let _ = lifecycle.mark_ready();
                 true
             }
@@ -474,7 +464,7 @@ impl ProductionSemanticRuntimeV1 {
     #[hotpath::measure(label = "usecases.semantic.restore_current", future = true)]
     pub async fn restore_current(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        generation: &CodeGenerationManifestV1,
         required_generation: &VectorGenerationIdV1,
     ) -> Result<bool, SemanticRuntimeScheduleFailureV1> {
         let Some(prepared) = self
@@ -489,24 +479,18 @@ impl ProductionSemanticRuntimeV1 {
     #[hotpath::measure(label = "usecases.semantic.prepare_restore", future = true)]
     pub async fn prepare_restore_current(
         &self,
-        generation: &CodeIndexPublishedGenerationV1,
+        generation: &CodeGenerationManifestV1,
         required_generation: &VectorGenerationIdV1,
-    ) -> Result<Option<PreparedProductionSemanticCacheCommitV1>, SemanticRuntimeScheduleFailureV1>
+    ) -> Result<Option<PreparedProductionSemanticRuntimeCommitV1>, SemanticRuntimeScheduleFailureV1>
     {
         // Every step below answers a failure with the same `Publication`
         // category, and this is the stage a rollback's activation is installed
         // through. A bare category leaves an operator unable to tell a missing
         // graph from a retired generation from an unreadable index, so keep the
         // step and the store's own reason.
-        let retained = self
-            .graph
-            .graph_for_generation(generation)
-            .await
-            .map_err(|error| {
-                SemanticRuntimeScheduleFailureV1::publication(format!(
-                    "restore.retain_graph: {error}"
-                ))
-            })?;
+        let retained = self.graph.graph_for_current().await.map_err(|error| {
+            SemanticRuntimeScheduleFailureV1::publication(format!("restore.retain_graph: {error}"))
+        })?;
         let cancellation = Arc::clone(retained.cancellation());
         let store = match GraphVectorGenerationStoreV1::read_only_generation(
             &retained,
@@ -522,7 +506,7 @@ impl ProductionSemanticRuntimeV1 {
         };
         let projection = LoadedSemanticArtifactV1::lifecycle_projection(
             &self.lifecycle,
-            generation.manifest(),
+            generation,
             self.resources,
             self.document_composition,
         )?;
@@ -549,38 +533,11 @@ impl ProductionSemanticRuntimeV1 {
         }
         let pointer = SemanticGenerationPointerV1 {
             generation: active.generation_id().clone(),
-            source_generation: generation.manifest().generation_id.clone(),
+            source_generation: generation.generation_id.clone(),
             projection_key: active.projection_key().clone(),
         };
-        let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
-            .and_then(|profile| profile.index_key())
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
-        let ann = semantic_ann_serving_index(
-            &store,
-            &active,
-            &search_index_key,
-            Arc::clone(&cancellation),
-        )
-        .map_err(|error| {
-            SemanticRuntimeScheduleFailureV1::publication(format!("restore.ann_index: {error}"))
-        })?;
-        let port = Arc::new(
-            PublishedSemanticVectorReadPortV1::new_source_coherent(
-                active,
-                search_index_key.clone(),
-                generation,
-                ann,
-            )
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
-        );
-        let vectors = CachedPublishedVectorsV1 {
-            generation: port.generation.clone(),
-            search_index_key,
-            source_generation: port.source_generation.clone(),
-            port,
-        };
         let lifecycle = Arc::clone(&self.lifecycle);
-        let manifest = generation.manifest().clone();
+        let manifest = generation.clone();
         let resources = self.resources;
         let document_composition = self.document_composition;
         let artifact = tokio::task::spawn_blocking(move || {
@@ -602,32 +559,30 @@ impl ProductionSemanticRuntimeV1 {
             tokio::task::spawn_blocking(move || prepared_handle.prepare_restore(pointer, artifact))
                 .await
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
-        Ok(Some(PreparedProductionSemanticCacheCommitV1 {
+        Ok(Some(PreparedProductionSemanticRuntimeCommitV1 {
             handle,
-            prepared: PreparedProductionSemanticCacheActionV1::Restore {
+            prepared: PreparedProductionSemanticRuntimeActionV1::Restore {
                 prepared: Box::new(prepared),
-                cache: Arc::clone(&self.vector_read_cache),
-                vectors,
                 lifecycle: Arc::clone(&self.lifecycle),
             },
         }))
     }
 
-    pub fn prepare_current_cache_observation(
+    pub fn prepare_current_runtime_observation(
         &self,
         pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
         source_generation: &CodeGenerationId,
-    ) -> Option<PreparedProductionSemanticCacheCommitV1> {
+    ) -> Option<PreparedProductionSemanticRuntimeCommitV1> {
         let pointer = SemanticGenerationPointerV1 {
             generation: pins.vector_generation_id.clone(),
             source_generation: source_generation.clone(),
             projection_key: pins.projection.projection_key().clone(),
         };
         let prepared = self.handle.prepare_current_observation(&pointer)?;
-        Some(PreparedProductionSemanticCacheCommitV1 {
+        Some(PreparedProductionSemanticRuntimeCommitV1 {
             handle: self.handle.clone(),
-            prepared: PreparedProductionSemanticCacheActionV1::Observation {
-                prepared,
+            prepared: PreparedProductionSemanticRuntimeActionV1::Observation {
+                prepared: Box::new(prepared),
                 lifecycle: Arc::clone(&self.lifecycle),
             },
         })
@@ -1780,29 +1735,18 @@ impl ProductionSemanticRuntimeV1 {
         }
     }
 
-    pub fn cache_ready_for(
+    pub fn runtime_ready_for(
         &self,
         pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
         source_generation: &CodeGenerationId,
     ) -> bool {
-        let model_ready = self
-            .handle
+        self.handle
             .query_factory(
                 source_generation,
                 &pins.vector_generation_id,
                 pins.projection.projection_key(),
             )
-            .is_some();
-        let vectors_ready = retained_vector_read_port(
-            &self.vector_read_cache,
-            &pins.vector_generation_id,
-            pins.projection.projection_key(),
-            &pins.search_index_key,
-            source_generation,
-            &pins.calibration.capability_manifest_digest,
-        )
-        .is_some();
-        model_ready && vectors_ready
+            .is_some()
     }
 
     fn schedule_saved_generation_fair(
@@ -2403,7 +2347,7 @@ impl ProductionSemanticRuntimeV1 {
         let generation_id = &code_generation.manifest().generation_id;
         if active.embedding_key() != request.projection
             || request.code_generation != *generation_id
-            || !semantic_source_content_coherent(&active, code_generation)
+            || !semantic_source_content_coherent(&active, code_generation.manifest())
         {
             return execute_calibrated_semantic_query(
                 &NeverCalledSemanticLane,
@@ -2420,6 +2364,25 @@ impl ProductionSemanticRuntimeV1 {
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+        if let Some(field) = complete.mismatch(request) {
+            // The service collapses this into `IndexIncompatible`, the same
+            // public abstention a failed request contract produces. Name the
+            // field and both sides, or a serving-side drift is invisible.
+            tracing::warn!(
+                event = "semantic_serving_generation_mismatch",
+                field,
+                request_projection_key = ?request.projection.projection_key(),
+                serving_projection_key = ?active.projection_key(),
+                request_vector_generation = ?request.vector_generation,
+                serving_vector_generation = ?active.generation_id(),
+                request_code_generation = %request.code_generation,
+                serving_code_generation = %generation_id,
+                request_capability_manifest_digest = %request.capability_manifest_digest,
+                serving_capability_manifest_digest =
+                    %code_generation.capability().manifest_digest,
+                "the published semantic generation does not match the pinned request identity"
+            );
+        }
         let ann = match semantic_ann_serving_index(
             &store,
             &active,
@@ -3139,6 +3102,13 @@ pub enum SemanticSourceCoherenceV1 {
 pub enum SemanticSourceCoherenceOutcomeV1 {
     Coherent(SemanticSourceCoherenceV1),
     Mismatch(SemanticSourceMismatchV1),
+    Unavailable(SemanticSourceUnavailableV1),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticSourceUnavailableV1 {
+    ServingCommitmentsMissing,
+    VectorCommitmentInvalid,
 }
 
 /// A typed refusal: the identity the vectors were evaluated from and the
@@ -3152,37 +3122,44 @@ pub struct SemanticSourceMismatchV1 {
     /// The change-set manifest digest the vector generation recorded at
     /// projection time (its evaluated source identity).
     pub vector_source_manifest_digest: ManifestDigest,
+    /// Generation-neutral full replay identity derived from the vector
+    /// generation's independently authenticated accepted rows.
+    pub vector_source_full_replay_digest: ManifestDigest,
     /// The code generation currently offered for serving.
     pub serving_generation: CodeGenerationId,
-    /// The serving generation's sealed snapshot content identity.
-    pub serving_content_identity: tracedecay_domain::ContentDigest,
+    /// The sealed generation transition, including generation watermarks and
+    /// the added/deleted/reused partitions.
+    pub serving_incremental_manifest_digest: ManifestDigest,
+    /// The serving generation's sealed generation-neutral source identity.
+    pub serving_source_full_replay_digest: ManifestDigest,
 }
 
 /// Decide whether a published vector generation may serve a (possibly newer)
 /// sealed code generation, answering with the exact identities either way.
 ///
-/// The coherent arm is a bijection over the sealed chunk corpus: every sealed
-/// chunk must have a vector projected from the same chunk identity and content
-/// digest, and no vector may exist outside that corpus. Generation identifiers
-/// and change-set manifest digests are deliberately not consulted for the
-/// proof — both bind the physical publication (they hash `from`/`to`
-/// generation ids), while semantic compatibility is a property of the source
-/// bytes alone. Model, profile, and artifact identity are not decided here;
-/// callers must pin them separately (embedding/projection key equality).
+/// Both inputs are independently authenticated before they reach this
+/// boundary. The vector record projects its accepted rows into the same
+/// generation-neutral full-replay digest that the code manifest sealed once;
+/// no decoded code generation or candidate-owned digest is copied onto the
+/// serving side. Model, profile, and artifact identity are not decided here;
+/// callers pin them separately.
 pub fn semantic_source_coherence(
     vectors: &PublishedVectorGenerationV1,
-    code: &CodeIndexPublishedGenerationV1,
+    code: &CodeGenerationManifestV1,
 ) -> SemanticSourceCoherenceOutcomeV1 {
-    // The bijection is the proof on both arms. A shared generation identifier
-    // is only the label: it says the vectors name this publication, never that
-    // the corpus they projected is the corpus it sealed, and a caller that
-    // short-circuits on it re-derives its own weaker rule.
-    // ponytail: O(sealed corpus) per call; if query latency shows it, cache the
-    // verdict keyed by (vector generation, code generation) rather than
-    // reintroducing an identifier-only fast path.
-    if semantic_vector_rows_cover_chunk_corpus(vectors.vectors(), code.chunks().chunks()) {
+    let Some(serving) = code.source_commitments.as_ref() else {
+        return SemanticSourceCoherenceOutcomeV1::Unavailable(
+            SemanticSourceUnavailableV1::ServingCommitmentsMissing,
+        );
+    };
+    let Ok(vector_source_full_replay_digest) = vectors.accepted_source_full_replay_digest() else {
+        return SemanticSourceCoherenceOutcomeV1::Unavailable(
+            SemanticSourceUnavailableV1::VectorCommitmentInvalid,
+        );
+    };
+    if vector_source_full_replay_digest == serving.full_replay_digest {
         return SemanticSourceCoherenceOutcomeV1::Coherent(
-            if vectors.source_generation() == &code.manifest().generation_id {
+            if vectors.source_generation() == &code.generation_id {
                 SemanticSourceCoherenceV1::ExactGeneration
             } else {
                 SemanticSourceCoherenceV1::ProvenSourceContent
@@ -3192,8 +3169,10 @@ pub fn semantic_source_coherence(
     SemanticSourceCoherenceOutcomeV1::Mismatch(SemanticSourceMismatchV1 {
         vector_source_generation: vectors.source_generation().clone(),
         vector_source_manifest_digest: vectors.source_manifest_digest().clone(),
-        serving_generation: code.manifest().generation_id.clone(),
-        serving_content_identity: code.snapshot().content_identity.clone(),
+        vector_source_full_replay_digest,
+        serving_generation: code.generation_id.clone(),
+        serving_incremental_manifest_digest: serving.incremental_manifest_digest.clone(),
+        serving_source_full_replay_digest: serving.full_replay_digest.clone(),
     })
 }
 
@@ -3202,24 +3181,12 @@ pub fn semantic_source_coherence(
 /// of `code` (the exact-generation arm trivially satisfies this).
 pub fn semantic_source_content_coherent(
     vectors: &PublishedVectorGenerationV1,
-    code: &CodeIndexPublishedGenerationV1,
+    code: &CodeGenerationManifestV1,
 ) -> bool {
     matches!(
         semantic_source_coherence(vectors, code),
         SemanticSourceCoherenceOutcomeV1::Coherent(_)
     )
-}
-
-fn semantic_vector_rows_cover_chunk_corpus(
-    vectors: &BTreeMap<tracedecay_domain::CodeSearchChunkId, ProjectedChunkVectorV1>,
-    chunks: &[Arc<CodeSearchChunkV1>],
-) -> bool {
-    vectors.len() == chunks.len()
-        && chunks.iter().all(|chunk| {
-            vectors
-                .get(&chunk.id)
-                .is_some_and(|vector| vector.chunk_digest == chunk.content_digest)
-        })
 }
 
 struct PublishedSemanticVectorReadPortV1 {
@@ -3452,7 +3419,7 @@ impl PublishedSemanticVectorReadPortV1 {
     ) -> Result<Self, RetrievalPortError> {
         let SemanticSourceCoherenceOutcomeV1::Coherent(
             coherence @ SemanticSourceCoherenceV1::ExactGeneration,
-        ) = semantic_source_coherence(&vectors, code)
+        ) = semantic_source_coherence(&vectors, code.manifest())
         else {
             return Err(RetrievalPortError::GenerationMismatch);
         };
@@ -3473,7 +3440,7 @@ impl PublishedSemanticVectorReadPortV1 {
         ann: Option<SemanticAnnServingIndexV1>,
     ) -> Result<Self, RetrievalPortError> {
         let SemanticSourceCoherenceOutcomeV1::Coherent(coherence) =
-            semantic_source_coherence(&vectors, code)
+            semantic_source_coherence(&vectors, code.manifest())
         else {
             return Err(RetrievalPortError::GenerationMismatch);
         };
@@ -4477,7 +4444,10 @@ pub fn production_saved_generation_schedule_hook(
                             super::project_committed_semantic_pins(&project_root)
                             && matches!(
                                 runtime
-                                    .restore_current(&generation, &required.vector_generation_id)
+                                    .restore_current(
+                                        generation.manifest(),
+                                        &required.vector_generation_id
+                                    )
                                     .await,
                                 Ok(true)
                             )
@@ -5939,14 +5909,14 @@ mod tests {
             fn load_active(
                 &self,
                 scope: &CodeIndexGenerationScopeV1,
-            ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1>
+            ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1>
             {
                 Ok(self
                     .active
                     .lock()
                     .expect("publication lock")
                     .get(scope)
-                    .map(|generation| generation.as_ref().clone()))
+                    .map(Arc::clone))
             }
 
             fn publish_atomically(
@@ -6275,9 +6245,29 @@ mod tests {
             );
             let vectors = published_vectors_for(&first);
             assert_eq!(vectors.source_generation(), &first.manifest().generation_id);
+            let first_commitments = first
+                .manifest()
+                .source_commitments
+                .as_ref()
+                .expect("first source commitments");
+            let republished_commitments = republished
+                .manifest()
+                .source_commitments
+                .as_ref()
+                .expect("republished source commitments");
+            assert_eq!(
+                vectors
+                    .accepted_source_full_replay_digest()
+                    .expect("authenticated vector source"),
+                first_commitments.full_replay_digest
+            );
+            assert_eq!(
+                first_commitments.full_replay_digest,
+                republished_commitments.full_replay_digest
+            );
 
             assert_eq!(
-                semantic_source_coherence(&vectors, &republished),
+                semantic_source_coherence(&vectors, republished.manifest()),
                 SemanticSourceCoherenceOutcomeV1::Coherent(
                     SemanticSourceCoherenceV1::ProvenSourceContent
                 ),
@@ -6350,7 +6340,7 @@ mod tests {
             );
             let vectors = published_vectors_for(&first);
 
-            let outcome = semantic_source_coherence(&vectors, &edited);
+            let outcome = semantic_source_coherence(&vectors, edited.manifest());
             let SemanticSourceCoherenceOutcomeV1::Mismatch(mismatch) = outcome else {
                 panic!("different source content must be a typed mismatch: {outcome:?}");
             };
@@ -6370,8 +6360,23 @@ mod tests {
                 "the mismatch names the serving publication"
             );
             assert_eq!(
-                mismatch.serving_content_identity,
-                edited.snapshot().content_identity,
+                mismatch.vector_source_full_replay_digest,
+                first
+                    .manifest()
+                    .source_commitments
+                    .as_ref()
+                    .expect("first source commitments")
+                    .full_replay_digest,
+                "the mismatch names the vector source content identity"
+            );
+            assert_eq!(
+                mismatch.serving_source_full_replay_digest,
+                edited
+                    .manifest()
+                    .source_commitments
+                    .as_ref()
+                    .expect("edited source commitments")
+                    .full_replay_digest,
                 "the mismatch names the serving source content identity"
             );
 
@@ -6397,40 +6402,18 @@ mod tests {
             ));
         }
 
-        /// The corpus bijection itself: one missing, foreign, or re-digested
-        /// chunk breaks the proof.
         #[test]
-        fn corpus_coverage_requires_a_digest_exact_bijection() {
-            let (first, republished, _) = sealed_publications();
+        fn source_coherence_reports_missing_sealed_commitments_as_unavailable() {
+            let (first, _, _) = sealed_publications();
             let vectors = published_vectors_for(&first);
-            assert!(semantic_vector_rows_cover_chunk_corpus(
-                vectors.vectors(),
-                republished.chunks().chunks(),
-            ));
+            let mut historical = first.manifest().clone();
+            historical.source_commitments = None;
 
-            let mut missing = vectors.vectors().clone();
-            let (removed, _) = missing
-                .pop_first()
-                .expect("the fixture corpus has at least one vector");
-            assert!(
-                !semantic_vector_rows_cover_chunk_corpus(&missing, republished.chunks().chunks()),
-                "a chunk without a vector must break the proof ({removed})"
-            );
-
-            let mut redigested = vectors.vectors().clone();
-            let (chunk_id, vector) = redigested
-                .pop_first()
-                .expect("the fixture corpus has at least one vector");
-            let mut foreign = vector.clone();
-            foreign.chunk_digest = ContentDigest::new(format!("sha256:{}", "f".repeat(64)))
-                .expect("foreign content digest");
-            redigested.insert(chunk_id, foreign);
-            assert!(
-                !semantic_vector_rows_cover_chunk_corpus(
-                    &redigested,
-                    republished.chunks().chunks()
-                ),
-                "a vector projected from different bytes must break the proof"
+            assert_eq!(
+                semantic_source_coherence(&vectors, &historical),
+                SemanticSourceCoherenceOutcomeV1::Unavailable(
+                    SemanticSourceUnavailableV1::ServingCommitmentsMissing
+                )
             );
         }
     }

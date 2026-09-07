@@ -366,6 +366,7 @@ pub(crate) fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDra
         id: id.to_string(),
         title: title.to_string(),
         summary: format!("{title} summary."),
+        routing_description: format!("{title} summary."),
         category: "maintenance".to_string(),
         targets:
             tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(

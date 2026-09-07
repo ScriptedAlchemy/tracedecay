@@ -1,63 +1,19 @@
 ---
 name: managing-workflows
-description: 'Use when registering, validating, activating, or retiring Workflow definitions, issuing or redeeming handoffs, or starting, pausing, resuming, or canceling a Workflow run.'
+description: 'Register, validate, activate, or retire TraceDecay Workflow definitions; issue handoffs or control an existing Workflow run.'
 ---
 
 # Managing Workflows
 
-Workflow is the daemon-owned definition and run surface. Every operation
-below is projected from the same executable registry as HTTP and CLI. Use
-exact definition and run identities the previous step returned; do not
-reconstruct them from a label or path.
+Validate a definition before registering and activating it. Mutations consume
+the exact definition or run identity returned by a read or registration; a name,
+label, or filesystem path is not authority. Handoff redemption consumes the
+issued grant, never an invented grant identity.
 
-Announce: "Using tracedecay:managing-workflows to <define/handoff/run>."
+Starting a run differs from controlling an existing run. Preserve typed state
+when pausing, resuming, or canceling, and inspect terminal effects before retrying
+an interrupted request. Use live operation schemas for available arguments.
 
-This is not `tracedecay_workflows` (read-only session recovery of `wf_*`
-runs). That read stays in `tracedecay:managing-session-context`.
-
-## Definitions
-
-1. Validate before write → `tracedecay_workflow_validate_definition`.
-2. Register → `tracedecay_workflow_register_definition`, then
-   `tracedecay_workflow_activate_definition`.
-3. Leave the roster → `tracedecay_workflow_retire_definition` or
-   `tracedecay_workflow_reject_definition`.
-4. Inspect → `tracedecay_workflow_get_definition`,
-   `tracedecay_workflow_list_definitions`,
-   `tracedecay_workflow_definition_history`,
-   `tracedecay_workflow_diff_definition`.
-
-## Handoffs
-
-Issue a grant with `tracedecay_workflow_handoff_issue`. Redeem only that
-grant with `tracedecay_workflow_handoff_redeem`. Do not invent grant
-identities.
-
-## Runs
-
-Start with `tracedecay_workflow_start_run`. Control an existing run with
-`tracedecay_workflow_pause_run`, `tracedecay_workflow_resume_run`, or
-`tracedecay_workflow_cancel_run`. Inspect with `tracedecay_workflow_get_run`.
-
-## Guardrails
-
-- Work task/attempt/placement operations → `tracedecay:managing-work`.
-- Raw transcript recovery of a `wf_*` run →
-  `tracedecay:managing-session-context`.
-- Mutations require the exact definition or run identity from a prior read
-  or register; a display name is not enough.
-
-## If tools are deferred or MCP fails
-
-- Deferred: one ToolSearch call —
-  `select:tracedecay_workflow_list_definitions,tracedecay_workflow_validate_definition,tracedecay_workflow_register_definition,tracedecay_workflow_start_run,tracedecay_workflow_get_run`.
-- MCP transport error: use `tracedecay tool <name>` only while the daemon
-  remains available (see `tracedecay:using-the-cli`). Preserve an unavailable
-  or intentionally held daemon; report the gap instead of retrying or changing
-  lifecycle.
-
-## Deliverable
-
-Do not end without the definition or run identity, the last operation and
-its typed outcome, and whether a handoff grant remains unredeemed. Report
-any `tracedecay_metrics:` line.
+`tracedecay_workflows` retrieves historical `wf_*` session runs; it does not
+control Workflow definitions or execution. Use `managing-session-context` for
+that history and `managing-work` for task/attempt/placement operations.

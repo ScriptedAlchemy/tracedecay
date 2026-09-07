@@ -1,9 +1,8 @@
 //! Agent host integrations (`agents`) for TraceDecay.
 //!
 //! Self-improvement automation lives in `tracedecay-automation-runtime`.
-//! Host installers call that crate for skill-target installation; automation
-//! calls back through `tracedecay_automation_runtime::automation::host_io`
-//! (registered by [`register_automation_host_io`]).
+//! Host installers call that crate for skill-target installation and hand it
+//! the [`host_io`] bundle it writes host-owned files through.
 //!
 //! ## Registered ports
 //!
@@ -47,8 +46,14 @@
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
-    register_automation_host_io();
 }
+
+use std::path::Path;
+use std::sync::OnceLock;
+
+use tracedecay_automation_runtime::automation::host_io::{
+    HostIo, ManagedSkillExportReport, PluginFile,
+};
 
 pub mod agents;
 pub mod hooks;
@@ -59,14 +64,7 @@ pub mod shell;
 pub mod task_classifier;
 pub mod tool_name;
 
-/// The automation runtime whose host-io ports [`register_automation_host_io`]
-/// binds. Exposed so downstream test processes (including the runtime crate's
-/// own unit tests, which compile as a separate crate copy) can reach the
-/// registered production surface instead of re-implementing it.
-pub use tracedecay_automation_runtime as automation_runtime;
-
 pub use product_version::PRODUCT_VERSION;
-pub(crate) use tracedecay_session_memory::user_config;
 
 // Kernel shims. `tracedecay-runtime-core` owns the substrate these two
 // subsystems were extracted alongside; aliasing the kernel modules into this
@@ -74,25 +72,15 @@ pub(crate) use tracedecay_session_memory::user_config;
 // code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
 // do on the other side of the split.
 pub(crate) use tracedecay_domain::errors;
-pub(crate) use tracedecay_runtime_core::{branch, config, db, storage, worktree};
+pub(crate) use tracedecay_runtime_core::{config, db, storage};
 
-/// Kernel-owned slice of the former root `tracedecay` façade module.
-pub(crate) mod tracedecay {
-    pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
-}
-
-/// Registers the host-install surface automation used to call on `agents`.
+/// The host-install surface automation borrows from this crate.
 ///
-/// Idempotent. The composition root and this crate's test installer both call
-/// it so managed-skill export, host-config writes, and plugin-bundle files
-/// keep working after the automation split.
-pub fn register_automation_host_io() {
-    use std::path::{Path, PathBuf};
-
-    use tracedecay_automation_runtime::automation::host_io::{
-        HostIoRegistration, ManagedSkillExportReport, PluginFile,
-    };
-
+/// One `Copy` bundle of the managed-skill export sweeps, host-config writes,
+/// and plugin-bundle files that `tracedecay-automation-runtime` cannot depend
+/// on directly. Installers pass it to every automation entry point that
+/// writes host-owned files; nothing is registered process-wide.
+pub fn host_io() -> HostIo {
     fn export_to_agents(home: &Path, profile_root: &Path) -> Vec<ManagedSkillExportReport> {
         crate::agents::export_managed_skills_to_agents(home, profile_root)
             .into_iter()
@@ -120,7 +108,6 @@ pub fn register_automation_host_io() {
     }
 
     fn codex_agent_files() -> &'static [PluginFile] {
-        use std::sync::OnceLock;
         static FILES: OnceLock<Vec<PluginFile>> = OnceLock::new();
         FILES
             .get_or_init(|| {
@@ -135,18 +122,12 @@ pub fn register_automation_host_io() {
             .as_slice()
     }
 
-    fn with_write_intents(root: PathBuf, effect: &mut dyn FnMut()) {
-        crate::agents::with_host_config_write_intents(root, effect);
-    }
-
-    tracedecay_automation_runtime::automation::host_io::register(HostIoRegistration {
+    HostIo {
         export_to_agents,
         export_to_agent_hosts,
         write_text: crate::agents::safe_write_text_file,
         write_json: crate::agents::safe_write_json_file,
         remove_host_file: crate::agents::safe_remove_host_file,
-        resolve_on_path: crate::agents::host_cli::resolve_on_path,
         codex_agent_files,
-        with_write_intents,
-    });
+    }
 }

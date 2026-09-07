@@ -107,7 +107,10 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
                         .spawn(task)
                 },
             );
-        } else if !timed_out_retirement {
+        } else if self.retire && !timed_out_retirement {
+            // A failed end retains its blocker until the retired worker has
+            // shut down. Successful ends already released it before checkout
+            // return; clearing it here could erase a new lease's snapshot.
             self.inner.checkpoint_blockers.finish(self.worker.id);
         }
     }
@@ -353,6 +356,11 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
         receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT),
         Ok(Ok(()))
     );
+    if returned {
+        // Rollback is acknowledged. Release this snapshot's blocker before
+        // publishing the worker; its next lease may start immediately.
+        checkpoint_blockers.finish(reader_id);
+    }
     let discarded = {
         let mut state = inner
             .state
@@ -379,7 +387,9 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
             let _ = join.join();
         }
     }
-    checkpoint_blockers.finish(reader_id);
+    if !returned {
+        checkpoint_blockers.finish(reader_id);
+    }
 }
 
 type DeferredReturnTask = Box<dyn FnOnce() + Send + 'static>;
@@ -431,5 +441,126 @@ mod deferred_return_spawn_tests {
         );
 
         assert!(ran.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_return_tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use tracedecay_store::OperationPriorityV1;
+
+    use crate::checkpoint::CheckpointBlockerSource;
+    use crate::reader::ReaderPool;
+    use crate::reader::tests::{CountExecutor, Probe, TestStore, request, two_reader_budget};
+
+    #[test]
+    fn completed_checkout_return_does_not_touch_snapshot_blockers_again() {
+        let store = TestStore::new();
+        let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+        let read = request(&store.binding, OperationPriorityV1::Foreground);
+        let probe = Probe::for_request(&read);
+        let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+        let _other = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+        let reader_id = lease.checkout.worker.id;
+        lease
+            .begin_snapshot()
+            .unwrap()
+            .execute(read.clone(), &probe)
+            .unwrap();
+        assert!(
+            pool.inner
+                .checkpoint_blockers
+                .checkpoint_blockers()
+                .is_clear()
+        );
+
+        // Rollback has already relinquished this checkout's snapshot. Hold
+        // the shared authority to prove its return does not try to clear a
+        // blocker after publishing the worker to another borrower.
+        let blockers = pool.inner.checkpoint_blockers.active.lock().unwrap();
+        let (done, returned) = mpsc::channel();
+        let returning = thread::spawn(move || {
+            drop(lease);
+            done.send(()).unwrap();
+        });
+        let completed = returned.recv_timeout(Duration::from_secs(1)).is_ok();
+        drop(blockers);
+        returning.join().unwrap();
+        assert!(
+            completed,
+            "a completed checkout touched relinquished snapshot authority"
+        );
+
+        let mut next = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+        assert_eq!(next.checkout.worker.id, reader_id);
+        let _snapshot = next.begin_snapshot().unwrap();
+        assert_eq!(
+            pool.inner.checkpoint_blockers.checkpoint_blockers().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn deferred_return_keeps_worker_unavailable_until_snapshot_blocker_is_released() {
+        let store = TestStore::new();
+        let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+        let read = request(&store.binding, OperationPriorityV1::Foreground);
+        let probe = Probe::for_request(&read);
+        let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+        let other = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+        let reader_id = lease.checkout.worker.id;
+        lease.begin_exact_sql_snapshot().unwrap();
+
+        // Route the real worker's asynchronous rollback acknowledgement
+        // through deferred return without depending on the 5ms grace race.
+        let blockers = pool.inner.checkpoint_blockers.active.lock().unwrap();
+        lease.checkout.deferred_end = Some(lease.checkout.worker.client.begin_end().unwrap());
+        lease.snapshot_active = false;
+        drop(lease);
+        let state = pool.inner.state.lock().unwrap();
+        let (state, _) = pool
+            .inner
+            .capacity_changed
+            .wait_timeout_while(state, Duration::from_secs(1), |state| {
+                state.limbo_general == 1
+            })
+            .unwrap();
+        let unavailable = state.general.is_empty() && state.limbo_general == 1;
+        drop(state);
+        drop(blockers);
+
+        let state = pool.inner.state.lock().unwrap();
+        let (state, _) = pool
+            .inner
+            .capacity_changed
+            .wait_timeout_while(state, Duration::from_secs(3), |state| {
+                state.limbo_general != 0
+            })
+            .unwrap();
+        assert_eq!(state.limbo_general, 0, "rollback return never settled");
+        drop(state);
+        assert!(
+            unavailable,
+            "worker was published while its old snapshot still blocked checkpoints"
+        );
+
+        let mut next = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+        assert_eq!(next.checkout.worker.id, reader_id);
+        let snapshot = next.begin_snapshot().unwrap();
+        assert_eq!(
+            pool.inner.checkpoint_blockers.checkpoint_blockers().count(),
+            1
+        );
+        drop(snapshot);
+        assert!(
+            pool.inner
+                .checkpoint_blockers
+                .checkpoint_blockers()
+                .is_clear()
+        );
+        drop(other);
     }
 }

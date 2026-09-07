@@ -24,10 +24,9 @@ entry). Kimi Code also uses `tracedecay`, embedded inline in
 `.kimi-plugin/plugin.json`. The individual tool names keep their
 `tracedecay_` prefix (they are stable identifiers referenced by skills, docs,
 and analytics), and non-plugin/direct installs still register the server under
-the `tracedecay` key (the `mcp__tracedecay__*` namespace). Skills announce
-themselves as `Using tracedecay:<skill-slug>` — the host prefix plus the
-skill slug, never a doubled `tracedecay` — and that single convention is
-applied to every `Announce:` line.
+the `tracedecay` key (the `mcp__tracedecay__*` namespace). Skills are
+referenced as `tracedecay:<skill-slug>` — the host prefix plus the skill slug,
+never a doubled `tracedecay`.
 
 ## Source Layout
 

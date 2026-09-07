@@ -22,6 +22,14 @@ use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 mod projection;
 
+/// A state database name carrying URI-special characters, so the opener is
+/// proven to take it as a path and never as a `file:` URI. `?` is not a legal
+/// Windows filename character; `#` and `%` still cover the URI grammar there.
+#[cfg(not(windows))]
+const URI_SPECIAL_STATE_DB: &str = "state #?%.vscdb";
+#[cfg(windows)]
+const URI_SPECIAL_STATE_DB: &str = "state #%.vscdb";
+
 /// A failed durable message-id lookup is store *unavailability*, not proof the
 /// bubble is already durable. The sweep must defer it and ingest it on a later
 /// pass instead of skipping it — and it must not let a later header in the
@@ -2044,7 +2052,7 @@ async fn retry_cycle_high_water_wraps_despite_continuous_higher_insertions() {
 #[tokio::test]
 async fn composer_key_scan_reports_corrupt_or_incompatible_schema() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let path = tmp.path().join("state #?%.vscdb");
+    let path = tmp.path().join(URI_SPECIAL_STATE_DB);
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(

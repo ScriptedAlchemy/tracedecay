@@ -98,6 +98,7 @@ fn hook_invocation_rows_include_duration_telemetry() {
 
     {
         let _hook_telemetry = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Codex,
             "PostToolUse",

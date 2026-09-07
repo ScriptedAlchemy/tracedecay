@@ -133,6 +133,7 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
         // invocation itself is still adoption telemetry, and `TOOL_INPUT`
         // carries no event name, so the hook name is supplied here.
         tracedecay_agent_hosts::hooks::record_native_capture_invoked(
+            &tracedecay::hook_runtime(),
             std::env::current_dir().ok().as_deref(),
             HookHostV1::ClaudeCode,
             Some("preToolUse"),
@@ -242,6 +243,7 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     // unbound, unsupported, or rejected callback still proves the host fired
     // the hook, which is the one thing adoption telemetry must not lose.
     tracedecay_agent_hosts::hooks::record_native_capture_invoked(
+        &tracedecay::hook_runtime(),
         working_directory.as_deref().ok(),
         source.host(),
         None,

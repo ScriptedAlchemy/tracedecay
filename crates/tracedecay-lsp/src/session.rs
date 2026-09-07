@@ -639,6 +639,57 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn authorized_workspace_accepts_root_aliases_without_admitting_other_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        let alias = base.path().join("alias");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(real.join("src/lib.rs"), "pub fn inside() {}\n").unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        std::os::unix::fs::symlink(&outside, real.join("escape")).unwrap();
+        let uri = |path: &std::path::Path| url::Url::from_file_path(path).unwrap().to_string();
+        let canonical_uri = uri(&real.canonicalize().unwrap());
+        let alias_uri = uri(&alias);
+        let outside_uri = uri(&outside);
+        let admitted = AdmittedRoot::authorized(
+            canonical_uri.clone(),
+            ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        );
+        let workspace =
+            AuthorizedLspWorkspace::anchored(None, vec![admitted.clone()], alias_uri.clone())
+                .unwrap();
+
+        assert_eq!(workspace.primary(), &admitted);
+        assert!(workspace.admits_exact_root_hints(std::slice::from_ref(&alias_uri)));
+        assert!(!workspace.admits_exact_root_hints(&[canonical_uri, alias_uri]));
+        assert!(!workspace.admits_exact_root_hints(std::slice::from_ref(&outside_uri)));
+        for path in [alias.join("src/lib.rs"), alias.join("src/unsaved.rs")] {
+            assert_eq!(workspace.resolve_document(&uri(&path)), Ok(&admitted));
+        }
+        for path in [
+            outside.join("lib.rs"),
+            alias.join("escape/lib.rs"),
+            alias.clone(),
+        ] {
+            assert_eq!(
+                workspace.resolve_document(&uri(&path)),
+                Err(LspWorkspaceRouteError::OutsideAdmittedRoots),
+            );
+        }
+        // Repointing a presentation alias cannot move the admitted root.
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&outside, &alias).unwrap();
+        assert!(!workspace.admits_exact_root_hints(&[uri(&alias)]));
+        assert_eq!(
+            workspace.resolve_document(&uri(&alias.join("lib.rs"))),
+            Err(LspWorkspaceRouteError::OutsideAdmittedRoots),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn authorized_workspace_rejects_documents_through_symlink_escape() {
         use std::os::unix::fs::symlink;
 

@@ -58,6 +58,35 @@ macro_rules! summary_publication_provider {
     };
 }
 
+// Current-mode summary reads fail closed only while a raw revision's
+// invalidation closure is partially applied: the walk enqueues `summary_node`
+// work exactly when it has already staled at least one summary and has more
+// to visit, so a session with pending `summary_node` rows has a half-staled
+// summary set. Queued-but-unstarted work (only `raw_message` rows, which every
+// protection revision seeds) leaves a consistent view; hiding on those rows
+// would blank every freshly protected session until convergence drains it.
+// Mirrors `tracedecay_lcm::dag::load_uncondensed_summary_nodes`.
+macro_rules! partial_summary_invalidation_exists {
+    ($provider:expr, $session_id:literal) => {
+        concat!(
+            "EXISTS (
+          SELECT 1
+          FROM lcm_summary_convergence_invalidation_work AS partial
+          WHERE partial.provider = ",
+            $provider,
+            "
+            AND partial.session_id = ",
+            $session_id,
+            "
+            AND partial.source_kind = 'summary_node'
+            AND partial.state = 'pending'
+      )"
+        )
+    };
+}
+
+pub(crate) use partial_summary_invalidation_exists;
+
 // Shared per-row identity byte caps for occurrence candidate listing.
 // `$provider` is `o.source_provider` on session scope and
 // `authority_session.provider` on root queries (join-equality already holds).
@@ -364,14 +393,9 @@ pub(super) const SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     summary_publication_provider!(),
     " = ?3)
       AND a.availability <> 'unavailable'
-      AND (?11 <> 'current' OR NOT EXISTS (
-          SELECT 1
-          FROM lcm_summary_convergence_dirty_raw AS dirty
-          WHERE dirty.provider = ",
-    summary_publication_provider!(),
-    "
-            AND dirty.session_id = n.session_id
-      ))
+      AND (?11 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
+    ")
       ",
     summary_keyset!("?4", "?5"),
     "
@@ -406,14 +430,9 @@ pub(super) const ANCHOR_CANDIDATE_QUERY: &str = concat!(
     summary_publication_provider!(),
     " = ?3)
           AND n.summary_anchor_id = ?4
-          AND (?8 <> 'current' OR NOT EXISTS (
-              SELECT 1
-              FROM lcm_summary_convergence_dirty_raw AS dirty
-              WHERE dirty.provider = ",
-    summary_publication_provider!(),
-    "
-                AND dirty.session_id = n.session_id
-          ))
+          AND (?8 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
+    ")
     )
     WHERE knowledge_at < ?5 OR (knowledge_at = ?5 AND stable_id > ?6)
     ORDER BY knowledge_at DESC, stable_id
@@ -503,14 +522,9 @@ pub(super) const SUMMARY_CANDIDATE_QUERY: &str = concat!(
     WHERE n.session_id = ?1
       AND session_summary_nodes_fts MATCH ?3
       AND a.availability <> 'unavailable'
-      AND (?11 <> 'current' OR NOT EXISTS (
-          SELECT 1
-          FROM lcm_summary_convergence_dirty_raw AS dirty
-          WHERE dirty.provider = ",
-    summary_publication_provider!(),
-    "
-            AND dirty.session_id = n.session_id
-      ))
+      AND (?11 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
+    ")
       ",
     summary_keyset!("?4", "?5"),
     "
@@ -653,12 +667,9 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
     "
       AND session_summary_nodes_fts MATCH ?2
       AND a.availability <> 'unavailable'
-      AND (?12 <> 'current' OR NOT EXISTS (
-          SELECT 1
-          FROM lcm_summary_convergence_dirty_raw AS dirty
-          WHERE dirty.provider = authority_session.provider
-            AND dirty.session_id = n.session_id
-      ))
+      AND (?12 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!("authority_session.provider", "n.session_id"),
+    ")
       ",
     summary_root_keyset!("?3", "?4", "?5"),
     "
@@ -700,12 +711,9 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     "
       AND (?2 IS NULL OR authority_session.provider = ?2)
       AND a.availability <> 'unavailable'
-      AND (?12 <> 'current' OR NOT EXISTS (
-          SELECT 1
-          FROM lcm_summary_convergence_dirty_raw AS dirty
-          WHERE dirty.provider = authority_session.provider
-            AND dirty.session_id = n.session_id
-      ))
+      AND (?12 <> 'current' OR NOT ",
+    partial_summary_invalidation_exists!("authority_session.provider", "n.session_id"),
+    ")
       ",
     summary_root_keyset!("?3", "?4", "?5"),
     "

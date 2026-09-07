@@ -88,12 +88,6 @@ pub struct GraphProjectionTelemetry {
     pub relation_count: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct GraphProjectionLabelPage {
-    pub entities: Vec<GraphEntity>,
-    pub total_entities: u64,
-}
-
 impl GraphDb {
     #[hotpath::measure(label = "graph_db.projection.read", impl_type = "GraphDb")]
     pub fn read_projection(

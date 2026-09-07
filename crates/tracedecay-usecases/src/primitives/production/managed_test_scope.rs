@@ -42,7 +42,7 @@ impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
                 .map_err(|_| ApplicationContractError::Inconsistent {
                     field: "managed test result code generation",
                 })?
-                .admit_for_scope(&scope)
+                .admit_commit_scope(&scope)
                 .map_err(|_| ApplicationContractError::Inconsistent {
                     field: "managed test result sealed scope",
                 })?;

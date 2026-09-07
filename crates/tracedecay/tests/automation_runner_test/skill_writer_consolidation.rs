@@ -23,6 +23,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review automation run ledgers before applying changes.".to_string(),
+            routing_description: "Review automation run ledgers before applying changes.".to_string(),
             category: "workflow".to_string(),
             targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
@@ -40,6 +41,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             id: "automation-run-checks".to_string(),
             title: "Automation run checks".to_string(),
             summary: "Review automation run ledgers and validation gates.".to_string(),
+            routing_description: "Review automation run ledgers and validation gates.".to_string(),
             category: "workflow".to_string(),
             targets: tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
@@ -57,6 +59,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             id: "pinned-automation-guide".to_string(),
             title: "Pinned deployment guide".to_string(),
             summary: "Deployment rollback runbook kept pinned by the user.".to_string(),
+            routing_description: "Deployment rollback runbook kept pinned by the user.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),

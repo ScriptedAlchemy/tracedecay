@@ -126,6 +126,8 @@ fn combined_output_fixture() -> Value {
                 "id": "automation-run-review",
                 "title": "Automation run review",
                 "summary": "Review self-improvement automation run ledgers and apply policies.",
+                "routing_description": "Review self-improvement automation run ledgers and apply policies.",
+                "routing_validation": skill_routing_validation("automation-run-review"),
                 "category": "workflow",
                 "body_markdown": "Use when reviewing TraceDecay self-improvement runs.",
                 "reason": "Session evidence repeats automation workflow outcome review."

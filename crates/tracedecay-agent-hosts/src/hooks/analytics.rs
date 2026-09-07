@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::errors::TraceDecayError;
+use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_hooks::HookTransportDispositionV1;
 use tracedecay_sessions::admission::{
     HostAdmissionDispositionClass as HookDispositionClass, HostAdmissionStatus,
@@ -108,6 +109,7 @@ pub(crate) struct HookTimingSpan {
 impl HookTimingSpan {
     #[cfg(test)]
     fn new(
+        runtime: &HookRuntimeV1,
         root: Option<&Path>,
         agent: HintAgent,
         hook_name: &str,
@@ -115,6 +117,7 @@ impl HookTimingSpan {
         payload_bytes: Option<u64>,
     ) -> Self {
         Self::new_named(
+            runtime,
             root,
             agent.as_key(),
             hook_name,
@@ -124,6 +127,7 @@ impl HookTimingSpan {
     }
 
     fn new_named(
+        runtime: &HookRuntimeV1,
         root: Option<&Path>,
         agent: &'static str,
         hook_name: &str,
@@ -140,7 +144,7 @@ impl HookTimingSpan {
         // never finished. Only an authority that explicitly says timings are
         // off suppresses the completion row.
         let enabled = root
-            .and_then(crate::ports::hook_runtime::hook_timings_enabled)
+            .and_then(|root| runtime.hook_timings_enabled(root))
             .unwrap_or(true);
         Self {
             root: root.map(Path::to_path_buf),
@@ -482,6 +486,7 @@ fn disposition_from_daemon_error(error: &TraceDecayError) -> HookDispositionTele
 /// [`record_other_hook_invoked`], which differ only in how the analytics
 /// `agent` key is derived (a typed [`HintAgent`] vs. the literal `"other"`).
 fn record_hook_invoked_named(
+    runtime: &HookRuntimeV1,
     root: Option<&Path>,
     agent_key: &'static str,
     hook_name: &str,
@@ -503,40 +508,57 @@ fn record_hook_invoked_named(
             "payload_bytes": payload_bytes,
         }),
     );
-    HookTimingSpan::new_named(root, agent_key, hook_name, prompt_category, payload_bytes)
+    HookTimingSpan::new_named(
+        runtime,
+        root,
+        agent_key,
+        hook_name,
+        prompt_category,
+        payload_bytes,
+    )
 }
 
 /// Records `hook_invoked` for a handler that has not parsed the event itself.
 pub(crate) fn record_hook_invoked(
+    runtime: &HookRuntimeV1,
     root: Option<&Path>,
     agent: HintAgent,
     hook_name: &str,
     event_json: &str,
 ) -> HookTimingSpan {
     let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
-    record_hook_invoked_named(root, agent.as_key(), hook_name, event_json, &parsed)
+    record_hook_invoked_named(
+        runtime,
+        root,
+        agent.as_key(),
+        hook_name,
+        event_json,
+        &parsed,
+    )
 }
 
 /// [`record_hook_invoked`] for handlers that already hold the parsed event.
 /// Hooks run on every agent event, so a handler that has parsed the payload
 /// once must not pay for a second parse just to classify the prompt.
 pub(crate) fn record_hook_invoked_parsed(
+    runtime: &HookRuntimeV1,
     root: Option<&Path>,
     agent: HintAgent,
     hook_name: &str,
     event_json: &str,
     parsed: &Value,
 ) -> HookTimingSpan {
-    record_hook_invoked_named(root, agent.as_key(), hook_name, event_json, parsed)
+    record_hook_invoked_named(runtime, root, agent.as_key(), hook_name, event_json, parsed)
 }
 
 pub(crate) fn record_other_hook_invoked(
+    runtime: &HookRuntimeV1,
     root: Option<&Path>,
     hook_name: &str,
     event_json: &str,
 ) -> HookTimingSpan {
     let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
-    record_hook_invoked_named(root, "other", hook_name, event_json, &parsed)
+    record_hook_invoked_named(runtime, root, "other", hook_name, event_json, &parsed)
 }
 
 pub(super) fn mint_hint_id() -> String {

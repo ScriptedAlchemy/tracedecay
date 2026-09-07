@@ -26,7 +26,8 @@ const INTERSECTION_FRONTMATTER: &[&str] = &[
 
 const CURSOR_EXTRA_FRONTMATTER: &[&str] = &["disable-model-invocation", "paths"];
 
-const MIN_DESCRIPTION_CHARS: usize = 50;
+/// Host size limits only: description routing quality is judged by the
+/// `evals/agent_adoption` scenarios, not by prose shape.
 const MAX_DESCRIPTION_CHARS: usize = 320;
 const MAX_DESCRIPTION_WORDS: usize = 45;
 const MAX_SKILL_MD_LINES: usize = 500;
@@ -136,13 +137,7 @@ fn shared_skill_descriptions_meet_the_intersection_budget() {
         let Some(description) = scalar(skill, "description") else {
             continue; // missing-description already flagged
         };
-        let chars = description.chars().count();
-        if chars < MIN_DESCRIPTION_CHARS {
-            violations.push(format!(
-                "{at}: description under {MIN_DESCRIPTION_CHARS} chars"
-            ));
-        }
-        if chars > MAX_DESCRIPTION_CHARS {
+        if description.chars().count() > MAX_DESCRIPTION_CHARS {
             violations.push(format!(
                 "{at}: description over {MAX_DESCRIPTION_CHARS} chars"
             ));
@@ -151,14 +146,6 @@ fn shared_skill_descriptions_meet_the_intersection_budget() {
             violations.push(format!(
                 "{at}: description over {MAX_DESCRIPTION_WORDS} words"
             ));
-        }
-        if !(description.starts_with("Use ") || description.contains(". Use ")) {
-            violations.push(format!(
-                "{at}: description must be trigger-first (\"Use …\")"
-            ));
-        }
-        if !description.ends_with('.') {
-            violations.push(format!("{at}: description must end with a period"));
         }
         if description.contains(['<', '>']) {
             violations.push(format!("{at}: description contains angle brackets"));

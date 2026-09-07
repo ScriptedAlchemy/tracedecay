@@ -57,6 +57,7 @@ use tracedecay_lsp::{
 };
 
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
+use tracedecay_runtime_core::path_safety::canonicalize_existing_prefix;
 use url::Url;
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, FeedbackRuntime, ProjectFeedbackStore};
@@ -148,7 +149,10 @@ fn byte_offsets_to_utf16_range(
 const LSP_TEST_RUN_EXPANSION_TTL_MICROS: i64 = 15 * 60 * 1_000_000;
 
 mod projection_identity;
-pub use projection_identity::{LspCodeIndexProjectionIdentity, LspCodeIndexProjectionIdentityPort};
+pub use projection_identity::{
+    LspCodeIndexProjectionIdentity, LspCodeIndexProjectionIdentityPort,
+    LspCodeIndexWorktreeGraphScope,
+};
 mod overlay_admission;
 use overlay_admission::admit_overlay;
 mod diagnostic_records;
@@ -451,6 +455,27 @@ impl RegisteredProjectLspAuthority {
         Ok((document.absolute, relative_path))
     }
 
+    /// The URI retained evidence records for a saved document.
+    ///
+    /// A managed test run keys its document digests by the URI of the canonical
+    /// project root joined with the project-relative path. A client may spell
+    /// the same document through an OS or worktree alias of the root, so its
+    /// URI is never the lookup key; the resolved scope's relative path is.
+    fn retained_document_uri(
+        &self,
+        scope: &LspFeedbackProjectionScope,
+    ) -> Result<Option<String>, LspRuntimeFailure> {
+        scope
+            .document_relative_path
+            .as_deref()
+            .map(|relative| {
+                Url::from_file_path(self.project_root.join(relative))
+                    .map(|url| url.to_string())
+                    .map_err(|()| LspRuntimeFailure::new("document-uri-invalid"))
+            })
+            .transpose()
+    }
+
     #[hotpath::measure(label = "usecases.lsp.document.read", future = true)]
     async fn read_disk_document(&self, relative: &Path) -> Result<String, LspRuntimeFailure> {
         let (_canonical, file) = open_project_file(&self.project_dir, relative)?;
@@ -475,7 +500,7 @@ impl RegisteredProjectLspAuthority {
             .code_index
             .current_identity(self.project_root.clone(), document_relative_path.clone())
             .await?;
-        let mut projection = identity.admit_for_scope(scope)?;
+        let mut projection = identity.admit_commit_scope(scope)?;
         projection.document_relative_path = document_relative_path;
         Ok(projection)
     }
@@ -966,6 +991,9 @@ pub(crate) struct OperationEventTestRunProjection {
 
 #[derive(Clone)]
 struct CachedTestRunScope {
+    /// The client's spelling of the document, echoed on every projection and
+    /// change it receives. `current` carries the retained document identity.
+    document_uri: Option<String>,
     current: ManagedTestRunCurrentScope,
     projection: LspFeedbackProjectionScope,
 }
@@ -1096,20 +1124,30 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                         reason: reason.to_owned(),
                     };
                 }
+                let retained_document_uri = match projection.project.retained_document_uri(&scope) {
+                    Ok(uri) => uri,
+                    Err(error) => {
+                        return ContextProjectionOutcome::Deferred {
+                            reason: error.class().to_owned(),
+                        };
+                    }
+                };
                 let current = ManagedTestRunCurrentScope {
                     root_uri: root.uri().to_owned(),
                     head_commit_id: Some(scope.head_commit_id.clone()),
                     code_generation_id: Some(scope.code_generation_id.clone()),
-                    document_uri: document_uri.clone(),
+                    document_uri: retained_document_uri,
                     document_content_digest: scope.document_content_digest.clone(),
                 };
+                let scope_key = current_scope_key(root.uri(), document_uri.as_deref());
                 projection
                     .current_scopes
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(
-                        current_scope_key(&current),
+                        scope_key.clone(),
                         CachedTestRunScope {
+                            document_uri: document_uri.clone(),
                             current: current.clone(),
                             projection: scope.clone(),
                         },
@@ -1128,10 +1166,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                             .observed_revisions
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .insert(
-                                current_scope_key(&current),
-                                test_run_source_revision(&snapshot),
-                            );
+                            .insert(scope_key, test_run_source_revision(&snapshot));
                         let expansion_context = LspTestRunExpansionContext {
                             operation_id: snapshot.operation_id.to_string(),
                             operation_generation: snapshot.generation,
@@ -1146,6 +1181,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                         let mut outcome = test_run_projection(
                             root.clone(),
                             document_uri.clone(),
+                            current.document_uri.as_deref(),
                             scope.clone(),
                             snapshot,
                         );
@@ -1280,7 +1316,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
             else {
                 continue;
             };
-            let key = current_scope_key(&current);
+            let key = current_scope_key(root.uri(), cached.document_uri.as_deref());
             let source_revision = test_run_source_revision(&snapshot);
             let changed = {
                 let mut observed = self
@@ -1295,10 +1331,13 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
             if !changed {
                 continue;
             }
-            let document_uri = current.document_uri.clone();
-            let ContextProjectionOutcome::Ready(envelope) =
-                test_run_projection(root.clone(), document_uri, cached.projection, snapshot)
-            else {
+            let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
+                root.clone(),
+                cached.document_uri,
+                current.document_uri.as_deref(),
+                cached.projection,
+                snapshot,
+            ) else {
                 continue;
             };
             self.changes.offer(
@@ -1321,12 +1360,8 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
     }
 }
 
-fn current_scope_key(scope: &ManagedTestRunCurrentScope) -> String {
-    format!(
-        "{}\u{0}{}",
-        scope.root_uri,
-        scope.document_uri.as_deref().unwrap_or_default()
-    )
+fn current_scope_key(root_uri: &str, document_uri: Option<&str>) -> String {
+    format!("{root_uri}\u{0}{}", document_uri.unwrap_or_default())
 }
 
 fn test_run_source_revision(snapshot: &ManagedTestRunSnapshot) -> String {
@@ -1403,11 +1438,15 @@ impl OperationEventTestRunProjection {
                         ),
                     );
                 }
+                let Ok(retained_document_uri) = projection.project.retained_document_uri(&scope)
+                else {
+                    return ContextExpansionOutcome::Denied;
+                };
                 let current = ManagedTestRunCurrentScope {
                     root_uri: root.uri().to_owned(),
                     head_commit_id: Some(scope.head_commit_id.clone()),
                     code_generation_id: Some(scope.code_generation_id.clone()),
-                    document_uri: record.document_uri.clone(),
+                    document_uri: retained_document_uri,
                     document_content_digest: scope.document_content_digest.clone(),
                 };
                 let ManagedTestRunReadOutcome::Current(snapshot) =
@@ -2525,9 +2564,14 @@ where
     ))
 }
 
+/// `document_uri` is the client's spelling and is echoed on the envelope;
+/// `retained_document_uri` is the identity the managed run recorded the
+/// document's digest under (see
+/// `RegisteredProjectLspAuthority::retained_document_uri`).
 fn test_run_projection(
     root: AdmittedRoot,
     document_uri: Option<String>,
+    retained_document_uri: Option<&str>,
     scope: LspFeedbackProjectionScope,
     snapshot: ManagedTestRunSnapshot,
 ) -> ContextProjectionOutcome {
@@ -2551,13 +2595,14 @@ fn test_run_projection(
             reason: "managed-test-run-source-identity-stale".to_owned(),
         };
     }
-    if let Some(document_uri) = document_uri.as_ref() {
+    if let Some(retained_document_uri) = retained_document_uri {
         let Some(current_digest) = scope.document_content_digest.as_ref() else {
             return ContextProjectionOutcome::Deferred {
                 reason: "managed-test-run-document-content-unbound".to_owned(),
             };
         };
-        let Some(retained_digest) = snapshot.document_content_digests.get(document_uri) else {
+        let Some(retained_digest) = snapshot.document_content_digests.get(retained_document_uri)
+        else {
             return ContextProjectionOutcome::Deferred {
                 reason: "managed-test-run-document-content-unbound".to_owned(),
             };
@@ -3006,20 +3051,17 @@ fn validated_document_path(
 ) -> Result<ValidatedDocumentPath, LspRuntimeFailure> {
     let url = strict_file_url(document_uri)
         .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
-    let relative_uri = root_uri
-        .make_relative(&url)
-        .ok_or_else(|| LspRuntimeFailure::new("document-outside-registered-root"))?;
-    if relative_uri.is_empty()
-        || relative_uri.starts_with('/')
-        || relative_uri == ".."
-        || relative_uri.starts_with("../")
-    {
+    if root_uri.host_str() != url.host_str() {
         return Err(LspRuntimeFailure::new("document-outside-registered-root"));
     }
-
     let path = url
         .to_file_path()
         .map_err(|()| LspRuntimeFailure::new("document-uri-invalid"))?;
+    // Client URIs may address the admitted root through an OS or worktree
+    // alias. Resolve that spelling, then retain the directory capability for
+    // normalization and every subsequent file open.
+    let path = canonicalize_existing_prefix(&path)
+        .ok_or_else(|| LspRuntimeFailure::new("document-outside-registered-root"))?;
     let relative = path
         .strip_prefix(project_root)
         .map_err(|_| LspRuntimeFailure::new("document-outside-registered-root"))?;
@@ -3107,6 +3149,8 @@ fn open_project_file(
 
 #[cfg(test)]
 mod path_tests {
+    #[cfg(unix)]
+    use std::io::Read;
     use std::path::{Component, Path};
 
     use cap_std::ambient_authority;
@@ -3192,6 +3236,43 @@ mod path_tests {
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_alias_documents_resolve_and_open_under_the_admitted_directory() {
+        let (temp, root, root_url, root_dir) = admitted_root();
+        let alias = temp.path().join("alias");
+        symlink(&root, &alias).expect("root alias");
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn inside() {}\n").unwrap();
+        let uri = Url::from_file_path(alias.join("src/lib.rs")).unwrap();
+        let saved_document = validated_document_path(&root, &root_url, &root_dir, uri.as_str())
+            .expect("client alias resolves to the admitted directory");
+        assert_eq!(saved_document.absolute, root.join("src/lib.rs"));
+        assert_eq!(saved_document.relative, Path::new("src/lib.rs"));
+        let (_, mut file) = open_project_file(&root_dir, &saved_document.relative).unwrap();
+        let mut source = String::new();
+        file.read_to_string(&mut source).unwrap();
+        assert_eq!(source, "pub fn inside() {}\n");
+
+        let unsaved = Url::from_file_path(alias.join("src/new/unsaved.rs")).unwrap();
+        let document = validated_document_path(&root, &root_url, &root_dir, unsaved.as_str())
+            .expect("unsaved alias buffer resolves through its parent");
+        assert_eq!(document.relative, Path::new("src/new/unsaved.rs"));
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("lib.rs"), "outside evidence").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let escaped = Url::from_file_path(alias.join("escape/lib.rs")).unwrap();
+        assert!(validated_document_path(&root, &root_url, &root_dir, escaped.as_str()).is_err());
+
+        // A successful resolution does not grant an ambient-path read. The
+        // retained directory capability still refuses a replacement escape.
+        std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+        symlink(outside.join("lib.rs"), root.join("src/lib.rs")).unwrap();
+        assert!(open_project_file(&root_dir, &saved_document.relative).is_err());
     }
 
     #[cfg(unix)]
@@ -3726,7 +3807,13 @@ mod projection_tests {
         };
 
         assert_eq!(
-            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot),
+            test_run_projection(
+                AdmittedRoot::new("file:///root"),
+                None,
+                None,
+                scope,
+                snapshot
+            ),
             ContextProjectionOutcome::Deferred {
                 reason: "managed-test-run-head-unbound".to_owned(),
             }
@@ -3759,9 +3846,13 @@ mod projection_tests {
             receipt: None,
         };
 
-        let ContextProjectionOutcome::Ready(envelope) =
-            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
-        else {
+        let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
+            AdmittedRoot::new("file:///root"),
+            None,
+            None,
+            scope,
+            snapshot,
+        ) else {
             panic!("current complete run must be ready");
         };
         assert_eq!(envelope.coverage, ContextCoverage::Complete);
@@ -3815,9 +3906,13 @@ mod projection_tests {
             receipt: None,
         };
 
-        let ContextProjectionOutcome::Ready(envelope) =
-            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
-        else {
+        let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
+            AdmittedRoot::new("file:///root"),
+            None,
+            None,
+            scope,
+            snapshot,
+        ) else {
             panic!("bounded current run must be ready");
         };
         assert_eq!(envelope.coverage, ContextCoverage::Partial);
@@ -3886,6 +3981,7 @@ mod projection_tests {
             test_run_projection(
                 AdmittedRoot::new("file:///root"),
                 Some(document_uri.to_owned()),
+                Some(document_uri),
                 scope,
                 snapshot,
             ),
@@ -3928,6 +4024,7 @@ mod projection_tests {
             test_run_projection(
                 AdmittedRoot::new("file:///root"),
                 Some(document_uri.to_owned()),
+                Some(document_uri),
                 scope,
                 snapshot,
             ),
@@ -3960,9 +4057,13 @@ mod projection_tests {
             receipt: None,
         };
 
-        let ContextProjectionOutcome::Ready(envelope) =
-            test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
-        else {
+        let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
+            AdmittedRoot::new("file:///root"),
+            None,
+            None,
+            scope,
+            snapshot,
+        ) else {
             panic!("expired run must produce a terminal projection");
         };
         assert_eq!(envelope.coverage, ContextCoverage::Unavailable);
@@ -4009,9 +4110,13 @@ mod projection_tests {
                 termination: Some(termination),
                 receipt: None,
             };
-            let ContextProjectionOutcome::Ready(envelope) =
-                test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)
-            else {
+            let ContextProjectionOutcome::Ready(envelope) = test_run_projection(
+                AdmittedRoot::new("file:///root"),
+                None,
+                None,
+                scope,
+                snapshot,
+            ) else {
                 panic!("{termination:?} run must be ready");
             };
             assert_eq!(envelope.coverage, coverage);

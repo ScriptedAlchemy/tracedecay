@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationToken;
+use crate::path_safety::{plain_git_args, plain_host_path};
 
 const GIT_LITERAL: &str = "git";
 const GIT_CAPTURE_AT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -239,8 +240,8 @@ pub fn bounded_git_output(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
-        .args(args)
-        .current_dir(repo_root);
+        .args(plain_git_args(args))
+        .current_dir(plain_host_path(repo_root));
     bounded_command_output(command, None, bounds)
 }
 
@@ -499,7 +500,10 @@ fn git_command_at(repo_root: &Path, args: &[&str]) -> Result<Command, GitProgram
     command.env_remove("GIT_DIR");
     command.env_remove("GIT_WORK_TREE");
     command.env_remove("GIT_COMMON_DIR");
-    command.arg("-C").arg(repo_root).args(args);
+    command
+        .arg("-C")
+        .arg(plain_host_path(repo_root))
+        .args(plain_git_args(args));
     Ok(command)
 }
 
@@ -599,6 +603,17 @@ mod tests {
         )
         .expect("PATH candidate should resolve");
 
+        // Windows spells the candidate with the `PATHEXT` suffix it probed
+        // (`.EXE`), which the case-insensitive filesystem accepts for the
+        // on-disk `git.exe`; the two are one executable, so compare the file
+        // they name rather than the bytes. Unix has no such aliasing.
+        #[cfg(windows)]
+        assert!(
+            crate::path_safety::same_canonical_path(Path::new(&resolved), &executable),
+            "resolved {resolved:?} must name the fixture executable {}",
+            executable.display()
+        );
+        #[cfg(not(windows))]
         assert_eq!(resolved, executable.into_os_string());
     }
 

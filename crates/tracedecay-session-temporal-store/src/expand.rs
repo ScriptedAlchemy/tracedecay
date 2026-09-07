@@ -24,6 +24,7 @@ use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::query::{now_micros, storage, storage_message};
 use super::relations::{SessionRelationError, SummarySourceRef};
+use super::retrieval::partial_summary_invalidation_exists;
 use super::store::execution_control_graph_cancellation;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
 
@@ -535,7 +536,8 @@ async fn retrieve_summary_page(
         .map_err(|error| storage(EXPAND_OPERATION, error))?;
     let mut rows = read
         .query(
-            "SELECT node.summary_id, node.summary_anchor_id,
+            concat!(
+                "SELECT node.summary_id, node.summary_anchor_id,
                     node.source_horizon_json, node.created_at,
                     node.publication_json
              FROM session_summary_nodes AS node
@@ -546,15 +548,15 @@ async fn retrieve_summary_page(
               AND availability.availability = 'available'
              WHERE node.session_id = ?1
                AND (?3 <> 'as_of' OR node.created_at <= ?4)
-               AND (?3 <> 'current' OR NOT EXISTS (
-                   SELECT 1
-                   FROM lcm_summary_convergence_dirty_raw AS dirty
-                   WHERE dirty.provider =
-                       json_extract(node.publication_json, '$.provider')
-                     AND dirty.session_id = node.session_id
-               ))
+               AND (?3 <> 'current' OR NOT ",
+                partial_summary_invalidation_exists!(
+                    "json_extract(node.publication_json, '$.provider')",
+                    "node.session_id"
+                ),
+                ")
              ORDER BY node.created_at, node.summary_id
-             LIMIT ?5",
+             LIMIT ?5"
+            ),
             params![
                 request.session_id().as_str(),
                 generation,

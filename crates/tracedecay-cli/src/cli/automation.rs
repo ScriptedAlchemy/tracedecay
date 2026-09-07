@@ -214,6 +214,9 @@ pub enum AutomationSkillsAction {
         title: String,
         #[arg(long)]
         summary: String,
+        /// Discovery text describing when to use this skill.
+        #[arg(long)]
+        routing_description: String,
         #[arg(long)]
         category: String,
         #[arg(long)]
@@ -229,6 +232,9 @@ pub enum AutomationSkillsAction {
         title: Option<String>,
         #[arg(long)]
         summary: Option<String>,
+        /// Replacement discovery text describing when to use this skill.
+        #[arg(long)]
+        routing_description: Option<String>,
         #[arg(long)]
         category: Option<String>,
         #[arg(long)]

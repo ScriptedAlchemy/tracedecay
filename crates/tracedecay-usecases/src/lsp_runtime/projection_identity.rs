@@ -27,11 +27,34 @@ pub struct LspCodeIndexProjectionIdentity {
     pub document_content_digest: Option<ContentDigest>,
 }
 
+/// Sealed generation identity admitted for read-only graph queries against a
+/// mounted worktree.
+///
+/// A dirty worktree seals a generation whose content is not any commit's tree,
+/// so `source_revision` stays `None` rather than being fabricated from HEAD.
+/// Read-only queries bind to the exact generation and content identity, which
+/// is what changes when the worktree changes; consumers that need a clean HEAD
+/// commit go through [`LspCodeIndexProjectionIdentity::admit_commit_scope`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LspCodeIndexWorktreeGraphScope {
+    pub source_revision: Option<CommitId>,
+    pub code_generation_id: CodeGenerationId,
+    pub snapshot_digest: ManifestDigest,
+    pub invalidation_digest: ManifestDigest,
+    pub snapshot_content_digest: ContentDigest,
+    pub document_file_occurrence_id: Option<FileOccurrenceId>,
+    pub document_content_digest: Option<ContentDigest>,
+    pub generation: u64,
+}
+
 impl LspCodeIndexProjectionIdentity {
-    pub fn admit_for_scope(
+    /// Admit the sealed generation for read-only worktree graph queries: it
+    /// must belong to exactly this project, repository, worktree, and
+    /// reference and carry a valid generation sequence. No commit is required.
+    pub fn admit_worktree_scope(
         self,
         scope: &ResolvedScope,
-    ) -> Result<LspFeedbackProjectionScope, LspRuntimeFailure> {
+    ) -> Result<LspCodeIndexWorktreeGraphScope, LspRuntimeFailure> {
         scope
             .validate()
             .map_err(|_| LspRuntimeFailure::new("registered-project-scope-invalid"))?;
@@ -47,21 +70,43 @@ impl LspCodeIndexProjectionIdentity {
         if self.reference != scope.reference {
             return Err(LspRuntimeFailure::new("lsp-code-index-reference-mismatch"));
         }
-        let head_commit_id = self
-            .source_revision
-            .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-source-revision-unavailable"))?;
         let generation = generation_sequence(&self.code_generation_id)
             .ok_or_else(|| LspRuntimeFailure::new("current-generation-invalid"))?;
-        Ok(LspFeedbackProjectionScope {
-            head_commit_id,
+        Ok(LspCodeIndexWorktreeGraphScope {
+            source_revision: self.source_revision,
             code_generation_id: self.code_generation_id,
             snapshot_digest: self.snapshot_digest,
             invalidation_digest: self.invalidation_digest,
             snapshot_content_digest: self.snapshot_content_digest,
             document_file_occurrence_id: self.document_file_occurrence_id,
             document_content_digest: self.document_content_digest,
-            document_relative_path: None,
             generation,
+        })
+    }
+
+    /// Admit the sealed generation for commit-bound consumers (feedback
+    /// projections, managed test results): everything
+    /// [`Self::admit_worktree_scope`] checks, plus the exact HEAD commit the
+    /// sealed content came from. A dirty worktree has no such commit and
+    /// refuses with `lsp-code-index-source-revision-unavailable`.
+    pub fn admit_commit_scope(
+        self,
+        scope: &ResolvedScope,
+    ) -> Result<LspFeedbackProjectionScope, LspRuntimeFailure> {
+        let worktree = self.admit_worktree_scope(scope)?;
+        let head_commit_id = worktree
+            .source_revision
+            .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-source-revision-unavailable"))?;
+        Ok(LspFeedbackProjectionScope {
+            head_commit_id,
+            code_generation_id: worktree.code_generation_id,
+            snapshot_digest: worktree.snapshot_digest,
+            invalidation_digest: worktree.invalidation_digest,
+            snapshot_content_digest: worktree.snapshot_content_digest,
+            document_file_occurrence_id: worktree.document_file_occurrence_id,
+            document_content_digest: worktree.document_content_digest,
+            document_relative_path: None,
+            generation: worktree.generation,
         })
     }
 }

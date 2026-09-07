@@ -183,6 +183,8 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             summary: summary.to_string(),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "workflow".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: body.to_string(),

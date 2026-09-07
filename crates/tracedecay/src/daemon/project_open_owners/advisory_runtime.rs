@@ -72,7 +72,7 @@ use tracedecay_usecases::operation_stream::OperationKind;
 
 use super::{
     DaemonInvocationState, POLICY_REVISION_V1, daemon_owned_project_source_access_at,
-    register_semantic_activation_owner,
+    register_semantic_configuration_owners,
 };
 use crate::agents::context_scout_owner::ProjectContextScoutOwnerV1;
 use crate::agents::context_scout_ports::{
@@ -102,6 +102,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod deferred;
 mod model;
+pub(in crate::daemon) use deferred::spawn_semantic_owner_registration;
 pub(crate) use model::ProjectOpenDependentOwnerState;
 use model::advisory_monotonic_deadline;
 #[cfg(test)]
@@ -968,7 +969,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         .head(),
         Ok(GitHeadStateV1::Attached { .. })
     ) {
-        register_semantic_activation_owner(
+        register_semantic_configuration_owners(
             invocation,
             project_root,
             server,
@@ -1003,7 +1004,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
                 reason = %error,
                 "initial advisory mount raced its generation authority"
             );
-            register_semantic_activation_owner(
+            register_semantic_configuration_owners(
                 invocation,
                 project_root,
                 server,
@@ -1026,8 +1027,8 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             project = %project_root.display(),
             phase = "feedback_advisory_registered",
         );
-        let semantic_activation_started = Instant::now();
-        register_semantic_activation_owner(
+        let semantic_configuration_started = Instant::now();
+        register_semantic_configuration_owners(
             invocation,
             project_root,
             server,
@@ -1040,14 +1041,14 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
-            phase = "semantic_activation_resolved",
-            elapsed_ms = semantic_activation_started.elapsed().as_millis(),
+            phase = "semantic_configuration_resolved",
+            elapsed_ms = semantic_configuration_started.elapsed().as_millis(),
         );
         return Ok(());
     }
 
-    let semantic_activation_started = Instant::now();
-    register_semantic_activation_owner(
+    let semantic_configuration_started = Instant::now();
+    register_semantic_configuration_owners(
         invocation,
         project_root,
         server,
@@ -1060,8 +1061,8 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
-        phase = "semantic_activation_resolved",
-        elapsed_ms = semantic_activation_started.elapsed().as_millis(),
+        phase = "semantic_configuration_resolved",
+        elapsed_ms = semantic_configuration_started.elapsed().as_millis(),
     );
     tracing::info!(
         event = "project_open_owner_phase",

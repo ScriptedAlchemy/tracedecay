@@ -220,6 +220,7 @@ pub(crate) async fn handle_status(
     generation_census_reader: Option<
         &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
     >,
+    daemon_invocation_service: Option<&tracedecay_daemon_service::DaemonInvocationService>,
 ) -> Result<ToolResult> {
     if status_arg_flag(&args, "admission_only", false) {
         let mut output = json!({
@@ -254,6 +255,24 @@ pub(crate) async fn handle_status(
         "project_root": cg.project_root(),
         "graph_statistics": graph_statistics,
     });
+    output["semantic_owner"] = match daemon_invocation_service {
+        Some(service) => {
+            match tracedecay_daemon_service::DaemonSemanticOwnerRuntimeRegistrar::new(service)
+                .state(cg.project_root())
+                .await
+            {
+                Some(state) => serde_json::to_value(state)?,
+                None => json!({
+                    "status": "unavailable",
+                    "reason": "owner_task_unregistered",
+                }),
+            }
+        }
+        None => json!({
+            "status": "unavailable",
+            "reason": "authority_unattached",
+        }),
+    };
     let (code_index_freshness, retrieval_serving) = match code_index_freshness_reader {
         Some(reader) => match hotpath::future!(
             reader(cg.project_root().to_path_buf()),

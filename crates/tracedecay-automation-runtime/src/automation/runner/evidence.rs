@@ -845,6 +845,7 @@ pub(super) async fn build_skill_writer_evidence(
             }))?),
         });
     }
+    crate::automation::managed_skills::migrate_managed_skill_routing(&profile_root).await?;
     let existing_skills = list_managed_skills(&profile_root).await?;
     if let (Some(project_root), Some(analytics_db)) = (analytics_project_root, analytics_db) {
         ingest_project_analytics_events(
@@ -899,6 +900,7 @@ pub(super) async fn build_skill_writer_evidence(
                 "id": skill.metadata.id,
                 "title": skill.metadata.title,
                 "summary": skill.metadata.summary,
+                "routing_description": skill.metadata.routing_description,
                 "category": skill.metadata.category,
                 "state": skill.metadata.state,
                 "pinned": skill.metadata.pinned,

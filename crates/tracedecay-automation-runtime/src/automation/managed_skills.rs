@@ -21,6 +21,60 @@ use super::managed_skill_validation::{
     validate_managed_skill, validate_managed_skill_update, validate_skill_id,
 };
 
+/// Decode the retained summary-only format without mutating inspection state.
+fn decode_retained_skill(bytes: &[u8]) -> Result<(ManagedSkill, bool)> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let metadata = value
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| config_error("managed skill metadata must be an object"))?;
+    let legacy = !metadata.contains_key("routing_description");
+    if legacy {
+        let summary = metadata
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| config_error("retained managed skill summary is required"))?;
+        let routing =
+            tracedecay_automation::managed_skills::legacy_managed_skill_routing_description(
+                summary,
+            );
+        metadata.insert(
+            "routing_description".to_owned(),
+            serde_json::Value::String(routing),
+        );
+    }
+    let skill: ManagedSkill = serde_json::from_value(value)?;
+    validate_managed_skill(&skill)?;
+    Ok((skill, legacy))
+}
+
+/// Upgrade retained routing metadata before authoring evidence is captured.
+/// Inspection reads use the decoder only; this explicit mutation uses the same
+/// journal and lock as skill edits, without changing authored timestamps or provenance.
+pub async fn migrate_managed_skill_routing(profile_root: &Path) -> Result<()> {
+    if !managed_skill_root(profile_root).exists() {
+        return Ok(());
+    }
+    let _lock = lock_skill_store_async(profile_root).await?;
+    let root = managed_skill_root(profile_root);
+    let mut migrated = Vec::new();
+    for entry in std::fs::read_dir(&root)? {
+        let path = entry?.path().join("skill.json");
+        if !path.is_file() {
+            continue;
+        }
+        let (mut skill, legacy) = decode_retained_skill(&std::fs::read(path)?)?;
+        if legacy {
+            skill.refresh_checksum();
+            migrated.push(skill);
+        }
+    }
+    if !migrated.is_empty() {
+        persist_skill_transaction_unlocked(profile_root, &migrated.iter().collect::<Vec<_>>())?;
+    }
+    Ok(())
+}
+
 pub fn managed_skill_root(profile_root: &Path) -> PathBuf {
     profile_root.join("agent_managed").join("skills")
 }
@@ -405,6 +459,10 @@ async fn apply_managed_skill_consolidation_kind(
     source.metadata.absorbed_into = target_id.map(ToOwned::to_owned);
     source.metadata.archived_reason = Some(kind.archived_reason().to_string());
     source.set_state(ManagedSkillState::Archived);
+    source.refresh_checksum();
+    if let Some(target) = target.as_mut() {
+        target.refresh_checksum();
+    }
     let mut revisions: Vec<&ManagedSkill> = target.iter().collect();
     revisions.push(&source);
     persist_skill_transaction_unlocked(profile_root, &revisions)?;
@@ -548,12 +606,14 @@ fn load_managed_skill_unlocked(profile_root: &Path, id: &str) -> Result<ManagedS
             ))
         }
     })?;
-    let mut skill: ManagedSkill = serde_json::from_slice(&bytes).map_err(|e| {
-        config_error(format!(
-            "failed to parse managed skill record '{}': {e}",
-            path.display()
-        ))
-    })?;
+    let mut skill: ManagedSkill = decode_retained_skill(&bytes)
+        .map(|(skill, _)| skill)
+        .map_err(|e| {
+            config_error(format!(
+                "failed to parse managed skill record '{}': {e}",
+                path.display()
+            ))
+        })?;
     skill.normalize_timestamps();
     validate_managed_skill(&skill)?;
     Ok(skill)
@@ -599,12 +659,14 @@ fn list_managed_skills_unlocked(profile_root: &Path) -> Result<Vec<ManagedSkill>
                 path.display()
             ))
         })?;
-        let mut skill = serde_json::from_slice::<ManagedSkill>(&bytes).map_err(|e| {
-            config_error(format!(
-                "failed to parse managed skill record '{}': {e}",
-                path.display()
-            ))
-        })?;
+        let mut skill = decode_retained_skill(&bytes)
+            .map(|(skill, _)| skill)
+            .map_err(|e| {
+                config_error(format!(
+                    "failed to parse managed skill record '{}': {e}",
+                    path.display()
+                ))
+            })?;
         skill.normalize_timestamps();
         validate_managed_skill(&skill)?;
         skills.push(skill);
@@ -632,6 +694,7 @@ fn set_managed_skill_state_unlocked(
 ) -> Result<ManagedSkill> {
     let mut skill = load_managed_skill_unlocked(profile_root, id)?;
     skill.set_state(state);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     Ok(skill)
 }
@@ -656,6 +719,7 @@ pub async fn set_managed_skill_pinned(
     let lock = lock_skill_store_async(profile_root).await?;
     let mut skill = load_managed_skill_unlocked(profile_root, id)?;
     skill.set_pinned(pinned);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     drop(lock);
     record_skill_patch_best_effort(profile_root, &skill, "pin").await;
@@ -710,9 +774,8 @@ pub fn preview_managed_skill_update(
             skill.metadata.id
         )));
     }
-    if content_changed {
-        skill.refresh_checksum();
-    }
+    // Metadata-only updates also complete a retained-format checksum cutover.
+    skill.refresh_checksum();
     skill.set_state(ManagedSkillState::Active);
     skill.touch();
     Ok(skill)
@@ -796,6 +859,7 @@ fn apply_managed_skill_archive_unlocked(
     }
     skill.metadata.archived_reason = reason;
     skill.set_state(ManagedSkillState::Archived);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     Ok(skill)
 }
@@ -821,6 +885,10 @@ fn apply_managed_skill_update_fields(
     }
     if let Some(summary) = update.summary {
         content_changed |= replace_if_changed(&mut skill.metadata.summary, summary);
+    }
+    if let Some(routing_description) = update.routing_description {
+        content_changed |=
+            replace_if_changed(&mut skill.metadata.routing_description, routing_description);
     }
     if let Some(category) = update.category {
         content_changed |= replace_if_changed(&mut skill.metadata.category, category);
@@ -871,6 +939,7 @@ pub async fn restore_managed_skill(profile_root: &Path, id: &str) -> Result<Mana
     skill.metadata.absorbed_into = None;
     skill.metadata.archived_reason = None;
     skill.set_state(ManagedSkillState::Active);
+    skill.refresh_checksum();
     persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     drop(lock);
     record_skill_patch_best_effort(profile_root, &skill, "restore").await;
@@ -888,6 +957,8 @@ mod transaction_tests {
             id: id.to_string(),
             title: id.to_string(),
             summary: format!("Reusable workflow for {id}."),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "testing".to_string(),
             targets: vec![SkillInstallTarget::Codex],
             body_markdown: body.to_string(),
@@ -1122,6 +1193,8 @@ mod transaction_tests {
                 id: "waiting-skill".to_string(),
                 title: "Waiting skill".to_string(),
                 summary: "Exercises asynchronous lock acquisition.".to_string(),
+                routing_description:
+                    "Repeated repository workflows requiring this maintained procedure.".to_owned(),
                 category: "testing".to_string(),
                 targets: vec![SkillInstallTarget::Codex],
                 body_markdown: "# Waiting".to_string(),
@@ -1247,3 +1320,7 @@ mod transaction_tests {
         assert_eq!(exported[0].body_markdown, "# A\nnew");
     }
 }
+
+#[cfg(test)]
+#[path = "managed_skills/routing_tests.rs"]
+mod routing_tests;

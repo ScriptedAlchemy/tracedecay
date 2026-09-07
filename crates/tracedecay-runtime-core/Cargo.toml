@@ -110,12 +110,18 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [[bench]]
+name = "exact_sql_writer_workload"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
 name = "git_repository_authority"
 harness = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(tracedecay_observation_fault_harness)",
+    "cfg(tokio_unstable)",
     # Gates the one db::coverage test that drives a real graph query; the
     # `GraphQueryManager` it needs lives above this kernel.
     "cfg(tracedecay_graph_query_tests)",
