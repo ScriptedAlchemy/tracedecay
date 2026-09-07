@@ -6,8 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use tracedecay_runtime_core::db::engine::{
-    Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection,
-    WriteStatement, params,
+    Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
 };
 
 use crate::RegisteredGlobalDb;
@@ -34,11 +33,36 @@ impl QueryExecutor for CountingQuery<'_> {
     }
 }
 
-async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection, PathBuf) {
+/// The registered root every fixture project lives under, spelled the way
+/// `upsert_code_project` stores it on this host: a bare `/fixture` literal is
+/// not absolute on Windows, and the registry keys its rows by the canonical
+/// (`\\?\`-prefixed) spelling there.
+fn large_registry_root() -> PathBuf {
+    let posix = "/fixture";
+    let host = if cfg!(windows) {
+        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+    } else {
+        PathBuf::from(posix)
+    };
+    super::canonical_project_path(&host)
+}
+
+async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection) {
     let directory = tempfile::tempdir().expect("project registry fixture");
-    let fixture_root = directory.path().join("projects");
-    assert!(fixture_root.is_absolute(), "fixture root must be absolute");
     let connection = TestConnection::open(&directory.path().join("global.db"));
+    // Text columns take the project root spelled as text; the primary-root
+    // evidence column takes it in the host's native encoding (UTF-8 bytes on
+    // Unix, UTF-16LE on Windows). The constant prefix is encoded once by the
+    // production encoder and the five ASCII digits are widened in SQL (`||`
+    // yields text even for blob operands, hence the outer cast), so the seed
+    // stays one set-based statement on every host.
+    let root_prefix = format!(
+        "{}{}project-",
+        large_registry_root().display(),
+        std::path::MAIN_SEPARATOR
+    );
+    let native_prefix = super::encode_native_project_path(Path::new(&root_prefix));
+    let native_pad: &[u8] = if cfg!(windows) { &[0] } else { &[] };
     connection
         .execute_batch(
             "CREATE TABLE code_projects (
@@ -64,41 +88,55 @@ async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection, PathBuf
         )
         .await
         .expect("create project registry fixture schema");
-    let insert_project = "INSERT INTO code_projects (
+    connection
+        .execute(
+            "WITH digits(value) AS (
+                 VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+             ),
+             sequence(value) AS (
+                 SELECT ones.value
+                      + tens.value * 10
+                      + hundreds.value * 100
+                      + thousands.value * 1000
+                      + 1
+                 FROM digits ones
+                 CROSS JOIN digits tens
+                 CROSS JOIN digits hundreds
+                 CROSS JOIN digits thousands
+             )
+             INSERT INTO code_projects (
                  project_id, canonical_root, display_root,
                  primary_root_platform, primary_root_bytes,
                  primary_root_last_seen_at, git_common_dir, git_remote_url,
                  default_branch, created_at, last_seen_at
              )
-             VALUES (?1, ?2, ?2, ?3, ?4, ?5, NULL, NULL, 'main', ?6, ?5)";
-    let mut statements = Vec::with_capacity(10_000);
-    for value in 1_i64..=10_000 {
-        let project_root = fixture_root.join(format!("project-{value:05}"));
-        let display_root = project_root.to_string_lossy().into_owned();
-        statements.push(
-            WriteStatement::new(
-                insert_project,
-                params![
-                    format!("project-{value:05}"),
-                    display_root,
-                    super::native_project_path_platform(),
-                    super::encode_native_project_path(&project_root),
-                    10_001_i64 - value,
+             SELECT printf('project-%05d', value),
+                    ?2 || printf('%05d', value),
+                    ?2 || printf('%05d', value),
+                    ?1,
+                    CAST(?3 || CAST(substr(printf('%05d', value), 1, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 2, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 3, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 4, 1) AS BLOB) || ?4
+                            || CAST(substr(printf('%05d', value), 5, 1) AS BLOB) || ?4
+                         AS BLOB),
+                    10001 - value,
+                    NULL,
+                    NULL,
+                    'main',
                     value,
-                ],
-            )
-            .expect("build code project fixture insert"),
-        );
-    }
-    let transaction = connection
-        .transaction()
-        .await
-        .expect("open project registry fixture transaction");
-    transaction
-        .execute_statements(statements)
+                    10001 - value
+             FROM sequence",
+            params![
+                super::native_project_path_platform(),
+                root_prefix,
+                native_prefix,
+                native_pad
+            ],
+        )
         .await
         .expect("seed 10k code projects");
-    transaction
+    connection
         .execute(
             "INSERT INTO project_aliases(alias_path, project_id, last_seen_at)
              SELECT canonical_root, project_id, last_seen_at
@@ -107,11 +145,7 @@ async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection, PathBuf
         )
         .await
         .expect("seed current project aliases");
-    transaction
-        .commit()
-        .await
-        .expect("commit project registry fixture");
-    (directory, connection, fixture_root)
+    (directory, connection)
 }
 
 async fn explain(
@@ -402,7 +436,7 @@ async fn project_registry_indexes_migrate_on_reopen_and_cover_actual_read_shapes
 
 #[tokio::test]
 async fn listing_ten_thousand_projects_uses_one_set_based_statement() {
-    let (_directory, connection, fixture_root) = large_registry_fixture().await;
+    let (_directory, connection) = large_registry_fixture().await;
     let query = CountingQuery {
         inner: &connection,
         statements: Cell::new(0),
@@ -413,8 +447,9 @@ async fn listing_ten_thousand_projects_uses_one_set_based_statement() {
         .expect("list project paths");
 
     assert_eq!(paths.len(), 10_000);
-    assert_eq!(paths.first(), Some(&fixture_root.join("project-00001")));
-    assert_eq!(paths.last(), Some(&fixture_root.join("project-10000")));
+    let root = large_registry_root();
+    assert_eq!(paths.first(), Some(&root.join("project-00001")));
+    assert_eq!(paths.last(), Some(&root.join("project-10000")));
     assert_eq!(
         query.statements.get(),
         1,

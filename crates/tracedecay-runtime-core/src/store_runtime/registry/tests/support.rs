@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,6 +21,17 @@ where
     <T as TryFrom<String>>::Error: Debug,
 {
     T::try_from(value.to_owned()).unwrap()
+}
+
+/// Host-absolute fixture path: store locators require `Path::is_absolute`,
+/// which a bare `/...` literal fails on Windows, where the same fixture is
+/// spelled `C:\...`.
+pub(super) fn absolute_fixture_path(posix: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+    } else {
+        PathBuf::from(posix)
+    }
 }
 
 pub(super) fn incarnation() -> StoreIncarnationV1 {
@@ -75,20 +87,10 @@ fn code_shard(worktree: &str) -> StoreShardIdV1 {
     )
 }
 
+#[derive(Default)]
 pub(super) struct TestResolver {
     pub(super) calls: AtomicUsize,
     pub(super) graph_calls: AtomicUsize,
-    fixture_root: tempfile::TempDir,
-}
-
-impl Default for TestResolver {
-    fn default() -> Self {
-        Self {
-            calls: AtomicUsize::new(0),
-            graph_calls: AtomicUsize::new(0),
-            fixture_root: tempfile::tempdir().expect("store runtime resolver fixture root"),
-        }
-    }
 }
 
 impl StoreRuntimeResolver for TestResolver {
@@ -105,12 +107,12 @@ impl StoreRuntimeResolver for TestResolver {
             key.incarnation,
             LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
         );
-        let path = self
-            .fixture_root
-            .path()
-            .join("verified")
-            .join(call.to_string());
-        Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
+        Box::pin(async move {
+            Ok(ResolvedStoreLocator::new(
+                locator,
+                absolute_fixture_path(&format!("/verified/{call}")),
+            ))
+        })
     }
 
     fn resolve_graph<'a>(
@@ -124,13 +126,11 @@ impl StoreRuntimeResolver for TestResolver {
             key.incarnation,
             LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
-        let path = self
-            .fixture_root
-            .path()
-            .join("verified")
-            .join("graph")
-            .join(format!("{:?}", key.shard_id.scope))
-            .join(key.incarnation.get().to_string());
+        let path = absolute_fixture_path(&format!(
+            "/verified/graph/{:?}/{}",
+            key.shard_id.scope,
+            key.incarnation.get()
+        ));
         Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
     }
 }

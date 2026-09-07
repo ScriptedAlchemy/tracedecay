@@ -332,11 +332,20 @@ mod tests {
         assert!(!HostAnalyzerOwnership::from_opencode_project_root(project.path()).is_engaged());
     }
 
+    /// Host-absolute fixture path: `$XDG_CONFIG_HOME` only wins when it is
+    /// absolute, and a bare `/xdg/...` literal is not absolute on Windows.
+    fn absolute_fixture_path(posix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+        } else {
+            PathBuf::from(posix)
+        }
+    }
+
     #[test]
     fn the_home_config_path_prefers_an_absolute_xdg_config_home() {
-        let fixture = tempfile::tempdir().expect("home configuration fixture");
-        let home = fixture.path().join("home");
-        let xdg_config_home = fixture.path().join("xdg-config");
+        let home = absolute_fixture_path("/isolated/home");
+        let xdg_config_home = absolute_fixture_path("/xdg/config");
 
         assert_eq!(
             opencode_home_config_path(&home, None),

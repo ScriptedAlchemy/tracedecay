@@ -2451,32 +2451,33 @@ mod tests {
     fn scoop_restore_rewrites_only_the_service_executable() {
         let identity = TaskIdentity::for_package_user_sid(WindowsPackageId::Stable, TEST_SID)
             .expect("stable identity");
-        let expected_profile_root = PathBuf::from("C:/profiles/stable & exact");
         let original = render_task_xml_for(
             &spec(
                 "C:/scoop/apps/tracedecay/5.0.0/tracedecay.exe",
-                expected_profile_root.clone(),
+                "C:/profiles/stable & exact",
             ),
             &identity,
         )
         .expect("task XML");
-        let original_action = task_action_from_xml(&original).expect("original action");
         let replacement =
             Path::new("C:/Users/alice/AppData/Local/TraceDecay/service/tracedecay/tracedecay.exe");
         let restored =
             replace_task_action_executable(&original, replacement).expect("rewritten action");
         let action = task_action_from_xml(&restored).expect("restored action");
         assert_eq!(action.executable, replacement);
-        let restored_profile_root =
-            profile_root_from_task_xml(&restored).expect("restored task profile root");
-        #[cfg(windows)]
-        assert!(
-            windows_paths_equal(&restored_profile_root, &expected_profile_root)
-                .expect("compare Windows profile paths")
+        assert_eq!(
+            profile_root_from_task_xml(&restored),
+            Some(PathBuf::from("C:/profiles/stable & exact"))
         );
+        // The action text is wire data for Task Scheduler, so it is asserted
+        // byte-exactly. On Windows `render_task_xml_for` fully qualifies the
+        // profile root, which spells it with the native separator; the Unix
+        // arm renders the fixture text verbatim.
+        #[cfg(windows)]
+        let expected_arguments = r#"daemon run --profile-root "C:\profiles\stable & exact""#;
         #[cfg(not(windows))]
-        assert_eq!(restored_profile_root, expected_profile_root);
-        assert_eq!(action.arguments, original_action.arguments);
+        let expected_arguments = r#"daemon run --profile-root "C:/profiles/stable & exact""#;
+        assert_eq!(action.arguments, expected_arguments);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

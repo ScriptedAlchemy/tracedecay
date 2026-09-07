@@ -552,7 +552,6 @@ fn capture_child_with_deadline(mut child: Child, timeout: Duration) -> ChildCapt
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::path_safety::same_canonical_path;
 
     #[test]
     fn git_program_is_stable_and_absolute() {
@@ -604,10 +603,18 @@ mod tests {
         )
         .expect("PATH candidate should resolve");
 
+        // Windows spells the candidate with the `PATHEXT` suffix it probed
+        // (`.EXE`), which the case-insensitive filesystem accepts for the
+        // on-disk `git.exe`; the two are one executable, so compare the file
+        // they name rather than the bytes. Unix has no such aliasing.
+        #[cfg(windows)]
         assert!(
-            same_canonical_path(Path::new(&resolved), &executable),
-            "resolved PATH candidate must identify the fixture executable: resolved={resolved:?}, fixture={executable:?}"
+            crate::path_safety::same_canonical_path(Path::new(&resolved), &executable),
+            "resolved {resolved:?} must name the fixture executable {}",
+            executable.display()
         );
+        #[cfg(not(windows))]
+        assert_eq!(resolved, executable.into_os_string());
     }
 
     #[test]

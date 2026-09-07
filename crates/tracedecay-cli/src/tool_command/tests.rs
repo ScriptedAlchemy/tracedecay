@@ -348,15 +348,19 @@ fn finalize_arrays_splits_csv() {
 
 #[test]
 fn explicit_project_lcm_dispatch_allows_first_touch_init() {
-    let fixture = tempfile::tempdir().expect("explicit LCM project fixture");
-    let project_path = fixture.path().to_path_buf();
-    let dispatch = DaemonToolDispatch::project_scoped(
-        Some(project_path.to_string_lossy().into_owned()),
-        "tracedecay_lcm_status",
-    );
+    // An explicit absolute --project must pass through untouched; a bare
+    // `/tmp/project` is drive-relative on Windows and would be re-rooted on
+    // the current drive, which is not the property under test.
+    let project = if cfg!(windows) {
+        r"C:\tmp\project"
+    } else {
+        "/tmp/project"
+    };
+    let dispatch =
+        DaemonToolDispatch::project_scoped(Some(project.to_string()), "tracedecay_lcm_status");
 
     assert!(dispatch.allow_init);
-    assert_eq!(dispatch.project_path, Some(project_path));
+    assert_eq!(dispatch.project_path, Some(PathBuf::from(project)));
 }
 
 #[test]
