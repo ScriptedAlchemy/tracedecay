@@ -6,7 +6,7 @@
 use std::future::Future;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
@@ -153,6 +153,7 @@ pub async fn dispatch_kimi_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    started: Instant,
 ) -> Option<String> {
     let telemetry =
         record_other_hook_invoked(runtime, Some(project_root), "kimi_event", event_json);
@@ -162,6 +163,7 @@ pub async fn dispatch_kimi_event(
         event_json,
         project_root,
         Some(&telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&telemetry)
@@ -173,6 +175,7 @@ pub async fn dispatch_opencode_event(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    started: Instant,
 ) -> Option<String> {
     let telemetry =
         record_other_hook_invoked(runtime, Some(project_root), "opencode_event", event_json);
@@ -186,6 +189,7 @@ pub async fn dispatch_opencode_event(
             event_json,
             project_root,
             Some(&telemetry),
+            started,
         )
         .await
     };
@@ -200,6 +204,7 @@ pub async fn dispatch_opencode_tool_after(
     runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
+    started: Instant,
 ) -> Option<String> {
     let telemetry = record_other_hook_invoked(
         runtime,
@@ -207,20 +212,25 @@ pub async fn dispatch_opencode_tool_after(
         "opencode_tool_after",
         event_json,
     );
-    dispatch::dispatch_opencode_tool_after(runtime, event_json, project_root, Some(&telemetry))
-        .await
-        .into_recorded_guidance(&telemetry)
-        .flatten()
+    dispatch::dispatch_opencode_tool_after(
+        runtime,
+        event_json,
+        project_root,
+        Some(&telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(&telemetry)
+    .flatten()
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
 pub(crate) async fn write_hook_output(
-    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
     host: tracedecay_hooks::HookHostV1,
     event_json: &str,
     output: &str,
-    telemetry: Option<&analytics::HookTimingSpan>,
+    started: Instant,
 ) -> bool {
     let delivery_writer = match project_root {
         None => None,
@@ -232,8 +242,14 @@ pub(crate) async fn write_hook_output(
                 );
                 return false;
             };
-            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+            let Some(deadline) = started.checked_add(Duration::from_micros(
+                tracedecay_hooks::HookSynchronousDeadlineV1::start().remaining_micros(),
+            )) else {
+                return false;
+            };
+            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_until(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
+                deadline,
             ) {
                 Ok(writer) => Some(writer),
                 Err(error) => {
@@ -243,10 +259,6 @@ pub(crate) async fn write_hook_output(
             }
         }
     };
-    // Scoped so both the stdout handle and its lock guard (neither of which is
-    // `Send`) are fully dropped before the delivery-settlement await below;
-    // otherwise the compiler must treat this future as holding a `!Send`
-    // guard across that suspend point.
     let written = {
         let stdout = std::io::stdout();
         let mut stdout = stdout.lock();
@@ -259,7 +271,7 @@ pub(crate) async fn write_hook_output(
         eprintln!("tracedecay hook: failed to flush host output: {error}");
         return false;
     }
-    let Some(project_root) = project_root else {
+    let Some(_) = project_root else {
         return true;
     };
     let Some(delivery_writer) = delivery_writer else {
@@ -318,30 +330,15 @@ pub(crate) async fn write_hook_output(
             return false;
         }
     };
-    let receipt = match delivery_writer.append_or_replay(&receipt) {
-        Ok(receipt) => receipt,
+    match delivery_writer.append_or_replay(&receipt) {
+        Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "Hook output delivery receipt could not be persisted");
             return false;
         }
-    };
-    let settlement = receipt.settlement;
-    drop(delivery_writer);
-    if let Err(error) = daemon_hook_action(
-        runtime,
-        Some(project_root),
-        serde_json::json!({
-            "action": "delivery_settlement",
-            "settlement": settlement,
-        }),
-        telemetry,
-    )
-    .await
-    {
-        // The source receipt is durable and the daemon replay lane will retry
-        // the exact retained settlement after a transport or daemon failure.
-        tracing::warn!(%error, "Hook output delivery receipt could not be reported; retained for replay");
     }
+    // The daemon replay lane settles and acknowledges this durable source
+    // receipt, including when the callback runs while the daemon is offline.
     true
 }
 
@@ -388,14 +385,15 @@ pub(crate) use read_hook_event;
 async fn hook_native_event(
     runtime: &HookRuntimeV1,
     host: tracedecay_hooks::HookHostV1,
-    dispatch: impl AsyncFnOnce(&HookRuntimeV1, &str, &Path) -> Option<String>,
+    dispatch: impl AsyncFnOnce(&HookRuntimeV1, &str, &Path, Instant) -> Option<String>,
 ) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     let Some(root) = native_event_project_root(runtime, &event).await else {
         return 0;
     };
-    if let Some(guidance) = dispatch(runtime, &event, &root).await
-        && !write_hook_output(runtime, Some(&root), host, &event, &guidance, None).await
+    if let Some(guidance) = dispatch(runtime, &event, &root, started).await
+        && !write_hook_output(Some(&root), host, &event, &guidance, started).await
     {
         return 1;
     }
@@ -698,6 +696,7 @@ pub(crate) async fn notify_hook_event_with_telemetry(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
 pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event_json = read_hook_event!();
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event_json) else {
         return 0;
@@ -741,6 +740,7 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
         &event_json,
         project_root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
@@ -772,12 +772,11 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
         |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
     );
     if !write_hook_output(
-        runtime,
         project_root.as_deref(),
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         &output,
-        Some(&hook_telemetry),
+        started,
     )
     .await
     {

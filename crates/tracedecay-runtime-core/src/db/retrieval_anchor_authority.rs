@@ -8,7 +8,7 @@ use tracedecay_store::{
     RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1,
 };
 
-use crate::db::engine::{QueryExecutor, params};
+use crate::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const OPERATION: &str = "retrieval anchor authority";
@@ -54,7 +54,7 @@ fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
 }
 
 async fn current_disposition(
-    connection: &(impl QueryExecutor + Sync),
+    connection: &impl QueryExecutor,
     anchor_id: &RetrievalAnchorId,
     owner: &str,
 ) -> Result<Option<AnchorDispositionStateV1>> {
@@ -262,6 +262,81 @@ where
         .map_err(database_error)
 }
 
+/// Append within the caller's transaction so alias activation and derivative
+/// suppression share one commit. The caller must roll back on any error.
+pub async fn append_retrieval_anchor_disposition_on(
+    transaction: &impl Executor,
+    record: &RetrievalAnchorDispositionRecordV1,
+) -> Result<AnchorDispositionAppendOutcomeV1> {
+    record.validate()?;
+    let owner = owner_json(record.owner())?;
+    let record_json = serde_json::to_string(record).map_err(database_error)?;
+    let mut replay = transaction
+        .query(
+            "SELECT record_json FROM retrieval_anchor_dispositions
+             WHERE disposition_id = ?1 AND owner_json = ?2",
+            params![record.disposition_id(), owner.as_str()],
+        )
+        .await
+        .map_err(database_error)?;
+    if let Some(row) = replay.next().await.map_err(database_error)? {
+        let outcome = if row.get::<String>(0).map_err(database_error)? == record_json {
+            AnchorDispositionAppendOutcomeV1::Replayed
+        } else {
+            return Err(authority_error("anchor disposition identity collision"));
+        };
+        drop(replay);
+        return Ok(outcome);
+    }
+    drop(replay);
+    if !disposition_transition_allowed(
+        current_disposition(transaction, record.anchor_id(), &owner).await?,
+        record.state(),
+    ) {
+        return Err(authority_error("invalid anchor disposition transition"));
+    }
+    transaction
+        .execute(
+            "INSERT INTO retrieval_anchor_dispositions (
+                disposition_id, anchor_id, owner_json, state, superseded_by,
+                reason_class, effective_at, record_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                record.disposition_id(),
+                record.anchor_id().as_str(),
+                owner.as_str(),
+                record.state().as_str(),
+                record.superseded_by().map(RetrievalAnchorId::as_str),
+                record.reason_class().as_str(),
+                record.effective_at().0,
+                record_json,
+            ],
+        )
+        .await
+        .map_err(database_error)?;
+    if suppresses_derivatives(record.state()) {
+        transaction
+            .execute(
+                "INSERT INTO retrieval_anchor_derivative_tombstones (
+                    source_anchor_id, owner_json, derivative_kind, derivative_id,
+                    disposition_id, effective_at
+                 )
+                 SELECT source_anchor_id, owner_json, derivative_kind, derivative_id, ?3, ?4
+                 FROM retrieval_anchor_reverse_lineage
+                 WHERE source_anchor_id = ?1 AND owner_json = ?2",
+                params![
+                    record.anchor_id().as_str(),
+                    owner.as_str(),
+                    record.disposition_id(),
+                    record.effective_at().0,
+                ],
+            )
+            .await
+            .map_err(database_error)?;
+    }
+    Ok(AnchorDispositionAppendOutcomeV1::Appended)
+}
+
 impl super::Database {
     #[hotpath::measure(label = "runtime_core.db.anchor_disposition_append")]
     pub(crate) async fn append_retrieval_anchor_disposition(
@@ -270,74 +345,9 @@ impl super::Database {
     ) -> Result<AnchorDispositionAppendOutcomeV1> {
         record.validate()?;
         let transaction = self.begin_write_transaction(OPERATION).await?;
-        let owner = owner_json(record.owner())?;
-        let record_json = serde_json::to_string(record).map_err(database_error)?;
-        let mut replay = transaction
-            .query(
-                "SELECT record_json FROM retrieval_anchor_dispositions
-                 WHERE disposition_id = ?1 AND owner_json = ?2",
-                params![record.disposition_id(), owner.as_str()],
-            )
-            .await
-            .map_err(database_error)?;
-        if let Some(row) = replay.next().await.map_err(database_error)? {
-            let outcome = if row.get::<String>(0).map_err(database_error)? == record_json {
-                AnchorDispositionAppendOutcomeV1::Replayed
-            } else {
-                return Err(authority_error("anchor disposition identity collision"));
-            };
-            drop(replay);
-            transaction.commit().await?;
-            return Ok(outcome);
-        }
-        drop(replay);
-        if !disposition_transition_allowed(
-            current_disposition(&transaction, record.anchor_id(), &owner).await?,
-            record.state(),
-        ) {
-            return Err(authority_error("invalid anchor disposition transition"));
-        }
-        transaction
-            .execute(
-                "INSERT INTO retrieval_anchor_dispositions (
-                    disposition_id, anchor_id, owner_json, state, superseded_by,
-                    reason_class, effective_at, record_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    record.disposition_id(),
-                    record.anchor_id().as_str(),
-                    owner.as_str(),
-                    record.state().as_str(),
-                    record.superseded_by().map(RetrievalAnchorId::as_str),
-                    record.reason_class().as_str(),
-                    record.effective_at().0,
-                    record_json,
-                ],
-            )
-            .await
-            .map_err(database_error)?;
-        if suppresses_derivatives(record.state()) {
-            transaction
-                .execute(
-                    "INSERT INTO retrieval_anchor_derivative_tombstones (
-                        source_anchor_id, owner_json, derivative_kind, derivative_id,
-                        disposition_id, effective_at
-                     )
-                     SELECT source_anchor_id, owner_json, derivative_kind, derivative_id, ?3, ?4
-                     FROM retrieval_anchor_reverse_lineage
-                     WHERE source_anchor_id = ?1 AND owner_json = ?2",
-                    params![
-                        record.anchor_id().as_str(),
-                        owner.as_str(),
-                        record.disposition_id(),
-                        record.effective_at().0,
-                    ],
-                )
-                .await
-                .map_err(database_error)?;
-        }
+        let outcome = append_retrieval_anchor_disposition_on(&transaction, record).await?;
         transaction.commit().await?;
-        Ok(AnchorDispositionAppendOutcomeV1::Appended)
+        Ok(outcome)
     }
 
     #[hotpath::skip]

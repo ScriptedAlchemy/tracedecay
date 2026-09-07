@@ -1,7 +1,7 @@
 //! Strict advisory runtime acceptance over authentic provider response captures.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -948,7 +948,12 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         );
     }
     common::initialize_tracedecay_cli_project(environment.home(), &project);
-    let _daemon = common::spawn_tracedecay_daemon(environment.home());
+    let daemon_log = environment.home().join("advisory-daemon.log");
+    let _daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        command.stderr(Stdio::from(
+            std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
+        ));
+    });
     let transcript = project.join("cursor-proximity.jsonl");
     std::fs::write(
         &transcript,
@@ -1140,7 +1145,8 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         );
         assert!(
             std::time::Instant::now() < advisory_deadline,
-            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}",
+            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}\ndaemon log:\n{}",
+            std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };

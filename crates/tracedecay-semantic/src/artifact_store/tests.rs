@@ -157,6 +157,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn nested_package_paths_import_into_verified_role_layout() {
+        let (root, store) = store();
+        let model = model_bytes();
+        let mut manifest = manifest_for(&model);
+        for member in &mut manifest.payload.members {
+            member.path = format!("package/{}", member.path);
+        }
+        // Source suffixes do not choose the runtime's physical model format.
+        manifest.payload.members[0].path = "weights/model.safetensors".to_owned();
+        let source = root.path().join("package-source");
+        write_local_package(&source, &manifest, &model);
+        let record = store
+            .import_local_directory(&manifest, &source, NOW)
+            .unwrap();
+        let installed = store.installed_directory(&record.artifact_digest);
+        assert!(installed.join("model.onnx").is_file());
+        assert!(installed.join("tokenizer.json").is_file());
+        assert!(!installed.join("weights").exists());
+        drop(store);
+        let reopened = ModelArtifactStore::open(
+            root.path().join("store"),
+            RetentionPolicyV1 { grace_seconds: 100 },
+        )
+        .unwrap();
+        let admitted = reopened
+            .admit_for_runtime_by_digest(&record.artifact_digest, &env())
+            .unwrap();
+        for member in &manifest.payload.members {
+            assert_eq!(
+                admitted.read_member_bytes(member.role).unwrap(),
+                member_bytes(member.role, &model)
+            );
+        }
+        let mut escaped = manifest;
+        escaped.payload.members[0].path = "../model.onnx".to_owned();
+        assert_eq!(
+            reopened
+                .import_local_directory(&escaped, &source, NOW)
+                .unwrap_err(),
+            ArtifactImportErrorV1::ManifestRejected
+        );
+    }
+
     struct FixtureHttpsTransport {
         members: BTreeMap<String, Vec<u8>>,
         revision: String,

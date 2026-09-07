@@ -93,12 +93,9 @@ async fn assert_restart_requires_readmission(
     prior_request: CodeIndexIgnoredDependencyRequestV1,
     expected: CodeIndexIgnoredDependencyRefusalV1,
 ) {
-    let error = if registry
-        .latest_generation_id(fixture.path())
-        .await
-        .is_some()
-    {
-        let restored = latest(registry, fixture.path()).await;
+    // A retained publication can still have an identity while its invalid
+    // ignored-source roster prevents complete-generation admission.
+    let error = if let Some(restored) = registry.latest_complete_fresh(fixture.path()).await {
         assert!(
             restored.generation().ignored_source_admissions().is_empty(),
             "restart cannot activate a generation with an invalid ignored-source roster"
@@ -123,12 +120,13 @@ async fn assert_restart_requires_readmission(
     };
     assert!(
         matches!(
-            error,
+            &error,
             CodeIndexSchedulerErrorV1::IgnoredDependency(refusal)
-                if refusal == expected
-                    || refusal == CodeIndexIgnoredDependencyRefusalV1::StaleGeneration
+                if refusal == &expected
+                    || refusal == &CodeIndexIgnoredDependencyRefusalV1::StaleGeneration
         ),
-        "restart must expose the exact validation refusal or a stale-generation re-admission fence"
+        "restart must expose the exact validation refusal or a stale-generation re-admission \
+         fence, expected {expected:?}, observed {error:?}"
     );
 }
 

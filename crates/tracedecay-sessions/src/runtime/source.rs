@@ -761,13 +761,13 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         title,
         started_at,
         ended_at,
-        // The durable cursor key and the physical transcript path are
-        // separate identities: opaque keys (Codex's hashed key, Claude's
-        // non-Unicode encoding) address `parse_offsets`, while
-        // `transcript_path` stays the real source path that the ingest-health
-        // placeholder scan, the workflow-agent join and the session record
-        // itself all read as a path.
-        transcript_path: Some(path.to_string_lossy().into_owned()),
+        // A provider's opaque checkpoint is not the physical Unicode path.
+        // Preserve Codex/Claude's opaque identities for non-Unicode paths;
+        // rendering their bytes lossily would alias distinct files.
+        transcript_path: Some(
+            path.to_str()
+                .map_or_else(|| cursor_key.durable_text(), str::to_owned),
+        ),
         metadata_json,
         parent_session_id,
         is_subagent,

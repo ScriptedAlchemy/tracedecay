@@ -1,76 +1,73 @@
 impl SemanticModelLifecycleOwnerV1 {
-    /// Reconcile store leases from the durable lifecycle authority.
-    ///
-    /// Lifecycle JSON and artifact inventory are separate crash-safe files.
-    /// Restart and compensation therefore derive both lease slots from the
-    /// committed lifecycle state before any artifact may be admitted.
+    /// Reconcile this owner's slots from committed selection state after restart
+    /// or compensation; foreign owners' inventory leases are never touched.
     fn reconcile_embedding_artifact_leases(
         &self,
         durable: &DurableLifecycleV1,
         now_unix: u64,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        let store_root = self.root.join("verified-artifacts").join("artifacts");
-        let digest_for = |state: Option<&SemanticModelLifecycleStateV1>| {
-            state
-                .filter(|state| {
-                    install_path_of(state).is_some_and(|path| path.starts_with(&store_root))
-                })
-                .map(|state| {
-                    Sha256DigestHex::new(state.artifact_digest().to_owned())
-                        .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)
-                })
-                .transpose()
-        };
-        let desired_active = digest_for(durable.state.as_ref())?;
-        let desired_rollback = digest_for(durable.previous_ready.as_ref())?
-            .filter(|digest| Some(digest) != desired_active.as_ref());
-        let current_active = self.artifact_store.artifact_digest_for_lease(
-            EMBEDDING_ACTIVE_LEASE_ID_V1,
-            ArtifactLeaseKindV1::Active,
+        reconcile_embedding_artifact_leases(
+            &self.artifact_store,
+            &self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1),
+            &self.lease_id(EMBEDDING_ROLLBACK_LEASE_ID_V1),
+            durable,
             now_unix,
-        )?;
-        match desired_active.as_ref() {
-            Some(digest) => self.artifact_store.activate_artifact_with_rollback(
-                digest,
-                EMBEDDING_ACTIVE_LEASE_ID_V1,
-                EMBEDDING_ROLLBACK_LEASE_ID_V1,
-                now_unix,
-            )?,
-            None => {
-                if let Some(digest) = current_active {
-                    self.artifact_store.release_artifact_lease(
-                        &digest,
-                        EMBEDDING_ACTIVE_LEASE_ID_V1,
-                        ArtifactLeaseKindV1::Active,
-                    )?;
-                }
-            }
-        }
-        let current_rollback = self.artifact_store.artifact_digest_for_lease(
-            EMBEDDING_ROLLBACK_LEASE_ID_V1,
-            ArtifactLeaseKindV1::Rollback,
-            now_unix,
-        )?;
-        if current_rollback != desired_rollback {
-            if let Some(digest) = current_rollback {
-                self.artifact_store.release_artifact_lease(
-                    &digest,
-                    EMBEDDING_ROLLBACK_LEASE_ID_V1,
-                    ArtifactLeaseKindV1::Rollback,
-                )?;
-            }
-            if let Some(digest) = desired_rollback {
-                self.artifact_store.acquire_artifact_lease(
-                    &digest,
-                    ArtifactLeaseV1 {
-                        lease_id: EMBEDDING_ROLLBACK_LEASE_ID_V1.to_owned(),
-                        kind: ArtifactLeaseKindV1::Rollback,
-                        expires_at_unix: u64::MAX,
-                    },
-                    now_unix,
-                )?;
-            }
-        }
-        Ok(())
+        )
     }
+}
+
+fn reconcile_embedding_artifact_leases(
+    store: &ModelArtifactStore,
+    active_lease: &str,
+    rollback_lease: &str,
+    durable: &DurableLifecycleV1,
+    now_unix: u64,
+) -> Result<(), ModelLifecycleErrorV1> {
+    let digest_for = |state: Option<&SemanticModelLifecycleStateV1>| {
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        let Some(path) = install_path_of(state) else {
+            return Ok(None);
+        };
+        let digest = Sha256DigestHex::new(state.artifact_digest().to_owned())
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        Ok::<_, ModelLifecycleErrorV1>(
+            (path == store.installed_directory(&digest)).then_some(digest),
+        )
+    };
+    let desired_active = digest_for(durable.state.as_ref())?;
+    let desired_rollback = digest_for(durable.previous_ready.as_ref())?
+        .filter(|digest| Some(digest) != desired_active.as_ref());
+    let current_active =
+        store.artifact_digest_for_lease(active_lease, ArtifactLeaseKindV1::Active, now_unix)?;
+    match desired_active.as_ref() {
+        Some(digest) => {
+            store.activate_artifact_with_rollback(digest, active_lease, rollback_lease, now_unix)?
+        }
+        None => {
+            if let Some(digest) = current_active {
+                store.release_artifact_lease(&digest, active_lease, ArtifactLeaseKindV1::Active)?;
+            }
+        }
+    }
+    let current_rollback =
+        store.artifact_digest_for_lease(rollback_lease, ArtifactLeaseKindV1::Rollback, now_unix)?;
+    if current_rollback != desired_rollback {
+        if let Some(digest) = current_rollback {
+            store.release_artifact_lease(&digest, rollback_lease, ArtifactLeaseKindV1::Rollback)?;
+        }
+        if let Some(digest) = desired_rollback {
+            store.acquire_artifact_lease(
+                &digest,
+                ArtifactLeaseV1 {
+                    lease_id: rollback_lease.to_owned(),
+                    kind: ArtifactLeaseKindV1::Rollback,
+                    expires_at_unix: u64::MAX,
+                },
+                now_unix,
+            )?;
+        }
+    }
+    Ok(())
 }

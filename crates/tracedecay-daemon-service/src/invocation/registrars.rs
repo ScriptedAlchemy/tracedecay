@@ -1068,6 +1068,8 @@ impl DaemonConfigurationRuntimeRegistrar {
                         .to_owned(),
             })?;
         let project_root = project_root.to_path_buf();
+        let semantic_project_root = project_root.clone();
+        let semantic_schedulers = self.service.code_index_schedulers.clone();
         self.service
             .project_runtimes
             .register_or_reconcile::<RegisteredSemanticActivationOwnerV1, TraceDecayError, _, _, _>(
@@ -1079,6 +1081,8 @@ impl DaemonConfigurationRuntimeRegistrar {
                             Arc::clone(&coordinator),
                             lifecycle_events,
                             committed_activation_wake,
+                            semantic_project_root,
+                            semantic_schedulers,
                         ),
                     );
                     Ok(RegisteredSemanticActivationOwnerV1 {

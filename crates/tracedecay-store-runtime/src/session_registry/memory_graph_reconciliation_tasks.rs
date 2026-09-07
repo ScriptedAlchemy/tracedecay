@@ -30,10 +30,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                 super::ProjectRuntimeOwnerStateV1::Faulted(faulted) => {
                     faulted.retained.memory.as_ref()
                 }
-                super::ProjectRuntimeOwnerStateV1::Opening
-                | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | super::ProjectRuntimeOwnerStateV1::Recovering
-                | super::ProjectRuntimeOwnerStateV1::Retiring => None,
+                super::ProjectRuntimeOwnerStateV1::Opening(_)
+                | super::ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                | super::ProjectRuntimeOwnerStateV1::Recovering(_)
+                | super::ProjectRuntimeOwnerStateV1::Retiring(_) => None,
             };
             if let Some(owner) = memory
                 && let Some(reconciliation) = owner.reconciliation_owner()
@@ -109,10 +109,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                         faulted.retained.memory.as_ref()
                     }
                     Some(
-                        super::ProjectRuntimeOwnerStateV1::Opening
-                        | super::ProjectRuntimeOwnerStateV1::ReplacingSessions
-                        | super::ProjectRuntimeOwnerStateV1::Recovering
-                        | super::ProjectRuntimeOwnerStateV1::Retiring,
+                        super::ProjectRuntimeOwnerStateV1::Opening(_)
+                        | super::ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                        | super::ProjectRuntimeOwnerStateV1::Recovering(_)
+                        | super::ProjectRuntimeOwnerStateV1::Retiring(_),
                     )
                     | None => None,
                 };

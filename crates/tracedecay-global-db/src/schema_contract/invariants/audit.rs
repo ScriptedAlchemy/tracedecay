@@ -1512,6 +1512,31 @@ async fn validate_projection_authority_suffix_pages(
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 "projected observation authority JSON",
             )?;
+            if disposition.as_ref().is_some_and(|value| {
+                value.reason == ProjectionSkipReason::NativeSourceSuperseded.as_str()
+            }) {
+                if !state.is_skip() {
+                    return Err(authority_violation(
+                        "superseded source retains projection outputs",
+                    ));
+                }
+                crate::observation_projection::verify_native_source_supersession(
+                    conn,
+                    &observation,
+                )
+                .await
+                .map_err(|error| {
+                    authority_violation(format!("invalid native source supersession: {error}"))
+                })?;
+                validate_skipped_projection_row(
+                    &observation,
+                    disposition
+                        .as_ref()
+                        .ok_or_else(|| authority_violation("source disposition disappeared"))?,
+                    ProjectionSkipReason::NativeSourceSuperseded,
+                )?;
+                continue;
+            }
             let skip_reason = match crate::observation_projection::derive_projection(&observation)
                 .map_err(|error| {
                 authority_violation(format!("invalid projection authority: {error}"))
@@ -1732,11 +1757,16 @@ mod tests {
     use tracedecay_domain::{
         CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
         ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-        PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, UtcMicros,
     };
-    use tracedecay_store::{ObservationProjection, SESSION_MESSAGE_PROJECTOR_VERSION};
+    use tracedecay_store::{
+        AnchoredObservationWrite, ObservationProjection, ObservationStore, ObservationWrite,
+        SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
+        build_observation_retrieval_anchor_v2,
+    };
 
     use super::{
         AuditCheckpoint, BTreeSet, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
@@ -2058,62 +2088,35 @@ mod tests {
     /// decode. The observation's own projection outcome is irrelevant here: the
     /// resolver only selects and decodes the owner row.
     async fn seed_authority_observation(
-        conn: &impl Executor,
+        conn: &RegisteredGlobalDbTestFixture,
         index: usize,
     ) -> DurableObservationV1 {
         let observation = skipped_observation(index);
-        let receipt = observation.receipt();
-        conn.execute(
-            "INSERT INTO sanitization_receipts (
-                receipt_id, sanitizer_version, payload_digest, receipt_json
-             ) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                receipt.receipt().receipt_id().as_str(),
-                receipt.receipt().sanitizer_version().as_str(),
-                observation.payload_reference().digest().as_str(),
-                serde_json::to_string(receipt).unwrap()
-            ],
+        let cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
         )
-        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO observations (
-                observation_id, payload_digest, receipt_id,
-                observation_json, committed_cursor_json
-             ) VALUES (?1, ?2, ?3, ?4, '{}')",
-            params![
-                observation.observation_id().as_str(),
-                observation.payload_reference().digest().as_str(),
-                receipt.receipt().receipt_id().as_str(),
-                serde_json::to_string(&observation).unwrap()
-            ],
+        let generation = ProjectionGenerationId::new("projection.audit-test").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(&observation, "audit-test").unwrap();
+        let anchor = build_observation_retrieval_anchor_v2(
+            &observation,
+            generation.clone(),
+            UtcMicros(1),
+            authorization,
         )
-        .await
         .unwrap();
-        // Session-projector provenance must bind a retrieval anchor owned by
-        // the same observation and receipt; the binding triggers refuse an
-        // unbound row for every `claude-session-message-v*` projector.
-        let anchor_id = audit_anchor_id(&observation);
-        conn.execute(
-            "INSERT INTO retrieval_anchors (
-                anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES (?1, '{\"kind\":\"audit\"}', '{\"owner\":\"audit\"}', 'projection.gen.v1')",
-            params![anchor_id.as_str()],
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
-             VALUES (?1, ?2)",
-            params![observation.observation_id().as_str(), anchor_id.as_str()],
-        )
-        .await
-        .unwrap();
+        let write = ObservationWrite::new(observation.clone(), None, cursor).unwrap();
+        conn.database()
+            .observation_store()
+            .persist_observation(AnchoredObservationWrite::new(write, anchor, generation).unwrap())
+            .await
+            .unwrap();
         observation
-    }
-
-    fn audit_anchor_id(observation: &DurableObservationV1) -> String {
-        format!("anchor.{}", observation.observation_id().as_str())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2141,7 +2144,12 @@ mod tests {
                 output_message_id,
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                 message_created,
-                audit_anchor_id(observation)
+                tracedecay_domain::derive_exact_observation_anchor_id(
+                    observation.scope(),
+                    observation.observation_id(),
+                )
+                .unwrap()
+                .as_str(),
             ],
         )
         .await

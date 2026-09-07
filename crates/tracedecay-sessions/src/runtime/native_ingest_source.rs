@@ -5,24 +5,17 @@
 //! same identity instead of collapsing every stream of a session onto
 //! `for_provider`.
 //!
-//! Every host but one commits under the plain provider/session pair, so this
-//! is a constructor rather than a registry. Codex is the exception: its
-//! observations commit under the host-owned hashed v2 identity, while
-//! `for_provider` names only the pre-v2 legacy source. The provider dispatch
-//! remains here because callers such as restart cursor reads hold only the
-//! provider string.
-
-use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
+use tracedecay_domain::{
+    ClineTranscriptStream, ObservationSourceIdentityV1, ProviderId, SessionId,
+};
 
 use crate::runtime::source::TranscriptIngestResult;
 
 /// Source identity admission writes for one native stream.
 ///
-/// `source_key` names an independently appended stream inside the session
-/// (a Cline task's `<task>:ui_messages`, from
-/// [`crate::runtime::cline_like::ui_messages_source_key`]). `None` keeps the
-/// session's own single-source identity. Codex uses its v2 canonical source
-/// key for the session stream.
+/// `source_key` identifies an explicit native stream. Cline-family lookups
+/// without a stream select API history through the canonical domain authority;
+/// Codex selects its hashed v2 source. Other hosts retain their session source.
 pub fn native_ingest_source_identity(
     provider: &str,
     session_id: &str,
@@ -30,6 +23,10 @@ pub fn native_ingest_source_identity(
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
     if provider == "codex" && source_key.is_none() {
         return crate::runtime::codex::codex_observation_source_v2(session_id);
+    }
+    if matches!(provider, "cline" | "roo-code" | "kilo") && source_key.is_none() {
+        return Ok(ClineTranscriptStream::ApiHistory
+            .source_identity(ProviderId::new(provider)?, SessionId::new(session_id)?)?);
     }
     let provider = ProviderId::new(provider)?;
     let session_id = SessionId::new(session_id.to_string())?;
@@ -46,23 +43,37 @@ pub fn native_ingest_source_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::cline_like::ui_messages_source_key;
-    use tracedecay_domain::{ObservationSourceIdentityV1, ProviderId, SessionId};
+    use tracedecay_domain::{
+        ClineTranscriptStream, ObservationSourceIdentityV1, ProviderId, SessionId,
+    };
 
     #[test]
     fn cline_ui_stream_stays_independent_of_the_api_session_source() {
         let api = native_ingest_source_identity("cline", "task-1", None).unwrap();
-        let ui = native_ingest_source_identity(
-            "cline",
-            "task-1",
-            Some(&ui_messages_source_key("task-1")),
-        )
-        .unwrap();
+        let ui = native_ingest_source_identity("cline", "task-1", Some("ui_messages")).unwrap();
+        assert_eq!(
+            api,
+            ClineTranscriptStream::ApiHistory
+                .source_identity(
+                    ProviderId::new("cline").unwrap(),
+                    SessionId::new("task-1").unwrap(),
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            ui,
+            ClineTranscriptStream::UiMessages
+                .source_identity(
+                    ProviderId::new("cline").unwrap(),
+                    SessionId::new("task-1").unwrap(),
+                )
+                .unwrap()
+        );
         assert_ne!(api, ui);
         assert_eq!(api.session_id().as_str(), "task-1");
         assert_eq!(
             ui.explicit_source_key().map(SessionId::as_str),
-            Some("task-1:ui_messages")
+            Some("ui_messages")
         );
     }
 

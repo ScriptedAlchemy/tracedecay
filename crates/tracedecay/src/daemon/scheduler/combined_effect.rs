@@ -1152,13 +1152,9 @@ mod tests {
     impl CombinedAdmissionFixture {
         async fn new() -> Self {
             let temp = TempDir::new().expect("combined admission fixture");
-            // The fixture initializes the project under this root and then
-            // re-reads it canonicalized; on macOS (`/var` -> `/private/var`)
-            // the two spellings register two authorities for one typed project
-            // and `project_sessions` is refused as `DuplicateProjectAuthority`.
-            let base = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(temp.path());
-            let project_root = base.join("project");
-            let profile_root = base.join("profile");
+            let fixture_root = temp.path().canonicalize().expect("canonical fixture root");
+            let project_root = fixture_root.join("project");
+            let profile_root = fixture_root.join("profile");
             std::fs::create_dir_all(project_root.join("src"))
                 .expect("combined admission source directory");
             std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")

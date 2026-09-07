@@ -9,7 +9,7 @@ use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
-use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
+use tracedecay_usecases::semantic_runtime::{SemanticConfigurationPinV1, project_lifecycle_status};
 
 #[path = "core_doctor_schema.rs"]
 mod schema;
@@ -117,6 +117,7 @@ fn doctor_runtime_unavailable(
             "reason": "session_store_unavailable",
         },
         "semantic_runtime": doctor_semantic_runtime_status(project_path, None),
+        "semantic_model": project_path.and_then(project_lifecycle_status),
     })
 }
 
@@ -472,6 +473,9 @@ async fn doctor_runtime_value_inner(
         });
     value["semantic_runtime"] =
         doctor_semantic_runtime_status(Some(project_path), semantic_configuration);
+    // Model acquisition and loading are independent of serving-generation
+    // readiness; both observations come from this exact mounted project.
+    value["semantic_model"] = json!(project_lifecycle_status(project_path));
     value
 }
 

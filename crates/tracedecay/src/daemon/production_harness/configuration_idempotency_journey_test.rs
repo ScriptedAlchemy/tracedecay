@@ -444,6 +444,35 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("restarted production composition");
+    // Source readiness precedes the deferred query-authority mount. Only its
+    // typed pre-admission refusal may retry; an admitted answer must be exact.
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let search = harness
+                .call_tool(
+                    &project,
+                    "tracedecay_search",
+                    serde_json::json!({ "query": "probe", "limit": 10, "format": "json" }),
+                )
+                .await
+                .expect("query restored project");
+            let payload = tool_payload(&search);
+            if payload["status"] != "unavailable" || payload["reason"] != "authority_unavailable" {
+                break payload;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("restored query authority must become ready within the existing bound");
+    assert!(
+        payload["results"]
+            .as_array()
+            .expect("restored search results")
+            .iter()
+            .any(|result| result["display"]["name"] == "probe"),
+        "restored readiness must serve the retained source symbol: {payload}"
+    );
     let mut replay_args = serde_json::to_value(&request).expect("replay request");
     replay_args
         .as_object_mut()

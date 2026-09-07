@@ -198,7 +198,7 @@ impl ExactPairNativeIntegrationTopology {
         {
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Denied);
         }
-        let runtime_profile = &runtime.relational_binding().shard_id.profile_id;
+        let runtime_shard = &runtime.relational_binding().shard_id;
         let exact_profile = request
             .authorized_scope_set
             .roots()
@@ -208,8 +208,10 @@ impl ExactPairNativeIntegrationTopology {
                     && root.scope().repository_id == self.repository_id
             })
             .all(|root| {
-                root.locator()
-                    .is_some_and(|locator| &locator.profile.profile_id == runtime_profile)
+                root.locator().is_some_and(|locator| {
+                    locator.profile.brain_id == runtime_shard.brain_id
+                        && locator.profile.profile_id == runtime_shard.profile_id
+                })
             });
         if !exact_profile {
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);

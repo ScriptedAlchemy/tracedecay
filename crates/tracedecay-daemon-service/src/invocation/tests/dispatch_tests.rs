@@ -3,8 +3,9 @@ use tracedecay_application::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeNavigationSurfaceRequest,
     CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest, RegisteredRootLocatorV1,
+    SharedProfileStoreLocatorV1,
 };
-use tracedecay_domain::{RepositoryId, WorktreeId};
+use tracedecay_domain::{BrainId, RepositoryId, WorktreeId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn lsp_deadline() -> Deadline {
@@ -743,8 +744,12 @@ async fn federated_lsp_admission_preserves_exact_profile_factory_and_root_pairin
             .expect("register owner");
         let locator = RegisteredRootLocatorV1::new(
             scope.project_id.clone(),
-            profile.clone(),
-            "store.workspace",
+            SharedProfileStoreLocatorV1::new(
+                BrainId::new("brain.fixture").unwrap(),
+                profile.clone(),
+                "store.workspace",
+            )
+            .unwrap(),
             root.clone(),
         )
         .expect("registered root");

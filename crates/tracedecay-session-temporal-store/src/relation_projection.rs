@@ -102,21 +102,56 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let mut last_race = None;
         for _ in 0..APPLY_PUBLICATION_RACE_ATTEMPTS {
-            let generation = self.active_relation_generation(session_id).await?;
             let snapshot = self
                 .read_snapshot()
                 .await
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let projection = reconstruct_session_relation_projection(
-                &snapshot,
-                &scope,
-                session_id,
-                generation,
-                DEFAULT_MAX_ENTITIES,
-                DEFAULT_MAX_RELATIONS,
-                Arc::clone(&cancellation),
-            )
-            .await?;
+            let generation = active_generation(&snapshot, session_id).await?;
+            // Publication freezes the complete retained graph in its effect journal.
+            // Availability can change without removing historical graph members, so
+            // replay that authority rather than deriving membership from live roots.
+            let mut rows = snapshot
+                .query(
+                    "SELECT projection_json FROM session_relation_effect_journal
+                     WHERE session_id = ?1 AND generation = ?2",
+                    params![
+                        session_id.as_str(),
+                        generation_i64(generation, RECONSTRUCT_OPERATION)?
+                    ],
+                )
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let projection = if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            {
+                let encoded: String = row
+                    .get(0)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+                serde_json::from_str::<SessionRelationProjection>(&encoded)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            } else {
+                seed_session_relation_projection(
+                    self.inner(),
+                    &snapshot,
+                    session_id,
+                    Arc::clone(&cancellation),
+                )
+                .await?
+            };
+            drop(rows);
+            if projection.scope != scope
+                || projection.session_id != *session_id
+                || projection.generation != generation.value()
+            {
+                return Err(SessionStoreError::ReceiptIdentityMismatch {
+                    context: "active relation projection identity",
+                });
+            }
+            enforce_projection_bounds(&projection, DEFAULT_MAX_ENTITIES, DEFAULT_MAX_RELATIONS)?;
+            super::relations::validate_projection(&projection)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
             drop(snapshot);
             let error = match super::relation_receipts::apply_relation_projection(
                 self.inner(),
@@ -546,17 +581,40 @@ async fn reconstruct_summaries(
     max_relations: usize,
     cancellation: &Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<Vec<SummaryRelationNode>> {
+    // Availability selects retrieval roots, not the immutable graph's membership:
+    // a live successor still names its stale predecessor and that node's sources.
+    // Bound the closure itself, retain absent members through the LEFT JOIN so
+    // decoding fails closed, and leave content availability to the read authority.
     let mut rows = conn
         .query(
-            "SELECT node.summary_id, node.publication_json
-             FROM session_summary_availability AS availability
-             JOIN session_summary_nodes AS node
+            "WITH RECURSIVE lineage(summary_id) AS (
+                 SELECT summary_id FROM session_summary_availability
+                 WHERE session_id = ?1 AND generation = ?2
+                   AND availability = 'available'
+                 UNION
+                 SELECT json_extract(node.publication_json, '$.predecessor_summary_id')
+                 FROM lineage
+                 JOIN session_summary_nodes AS node
+                   ON node.session_id = ?1 AND node.summary_id = lineage.summary_id
+                 WHERE json_extract(node.publication_json, '$.predecessor_summary_id') IS NOT NULL
+                 UNION
+                 SELECT json_extract(source.value, '$.id')
+                 FROM lineage
+                 JOIN session_summary_nodes AS node
+                   ON node.session_id = ?1 AND node.summary_id = lineage.summary_id
+                 JOIN json_each(node.publication_json, '$.canonical_sources') AS source
+                 WHERE json_extract(source.value, '$.kind') = 'summary'
+                 LIMIT ?3
+             )
+             SELECT lineage.summary_id, node.publication_json
+             FROM lineage
+             LEFT JOIN session_summary_availability AS availability
+               ON availability.session_id = ?1 AND availability.generation = ?2
+              AND availability.summary_id = lineage.summary_id
+             LEFT JOIN session_summary_nodes AS node
                ON node.summary_id = availability.summary_id
               AND node.session_id = availability.session_id
-             WHERE availability.session_id = ?1
-               AND availability.generation = ?2
-             ORDER BY node.created_at, node.summary_id
-             LIMIT ?3",
+             ORDER BY node.created_at, lineage.summary_id",
             params![
                 session_id.as_str(),
                 generation_i64(generation, RECONSTRUCT_OPERATION)?,

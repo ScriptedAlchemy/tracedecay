@@ -6209,6 +6209,7 @@ dependencies = [
  "tracedecay-session-memory",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
+ "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
  "tracing",

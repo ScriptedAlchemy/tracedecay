@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
 use tracedecay_usecases::semantic_runtime::{
     SemanticSourceCoherenceOutcomeV1, semantic_source_coherence,
 };
@@ -26,8 +25,9 @@ use tracedecay_usecases::store::vector_generations::{
 
 use super::journey_test_support::git;
 use super::semantic_activation_journey_test::{
-    assert_semantic_probe_contribution, evaluate_native_profile, installed_selection_material,
-    seed_distribution_fixture, selection, set_semantic_profile, wait_for_semantic_generation,
+    assert_semantic_probe_contribution, evaluate_native_profile,
+    install_project_distribution_fixture, installed_selection_material, selection,
+    set_semantic_profile, wait_for_semantic_generation,
 };
 use super::*;
 
@@ -216,19 +216,6 @@ async fn strict_semantic_answers_again_after_daemon_restart_without_rebuild() {
 
     // ---- Fresh install. ---------------------------------------------------
     let _profile = crate::config::PinnedUserDataDir::new();
-    let lifecycle_root =
-        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
-    let lifecycle =
-        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
-
     let isolation = tempfile::TempDir::new().expect("journey isolation");
     let project = isolation.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source directory");
@@ -257,6 +244,8 @@ async fn strict_semantic_answers_again_after_daemon_restart_without_rebuild() {
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("production composition");
+    let lifecycle = install_project_distribution_fixture(&harness, &project, &fixture_root).await;
+    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
     let code_id = harness
         .resources
         .as_ref()

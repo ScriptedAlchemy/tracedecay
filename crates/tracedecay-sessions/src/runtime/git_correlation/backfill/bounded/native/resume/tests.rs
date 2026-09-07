@@ -9,7 +9,7 @@ fn control() -> BoundedGitControl {
     BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10))
 }
 
-fn git(path: &Path, args: &[&str]) {
+fn git<T: AsRef<std::ffi::OsStr> + std::fmt::Debug>(path: &Path, args: &[T]) {
     let output = Command::new(
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
@@ -279,29 +279,35 @@ fn non_utf8_local_ref_is_sealed_without_fabricated_branch_text() {
     use std::os::unix::ffi::OsStrExt as _;
 
     let fixture = fixture();
-    if !crate::runtime::git_correlation::backfill::bounded::tests::non_utf8_file_names_supported(
-        fixture.path(),
-    )
-    .expect("probe non-UTF-8 file-name support without hiding storage failures")
-    {
-        println!(
-            "skipping non_utf8_local_ref_is_sealed_without_fabricated_branch_text: \
-             this filesystem refuses non-UTF-8 file names"
-        );
-        return;
-    }
+    let expected_oid = gix::discover(fixture.path())
+        .unwrap()
+        .head_id()
+        .unwrap()
+        .detach()
+        .to_hex()
+        .to_string();
+    // Packed refs retain arbitrary ref bytes without requiring the filesystem
+    // to accept a non-UTF8 loose-ref filename (not supported on macOS).
+    git(fixture.path(), &["branch", "topic-x"]);
+    git(fixture.path(), &["pack-refs", "--all"]);
+    let packed_refs = fixture.path().join(".git/packed-refs");
+    let mut packed = std::fs::read(&packed_refs).unwrap();
+    let reference = b"refs/heads/topic-x\n";
+    let position = packed
+        .windows(reference.len())
+        .position(|bytes| bytes == reference)
+        .unwrap();
+    packed[position + reference.len() - 2] = 0xff;
+    std::fs::write(packed_refs, packed).unwrap();
+
     let branch = std::ffi::OsStr::from_bytes(b"topic-\xff");
-    let output = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(fixture.path())
-    .arg("checkout")
-    .arg("-b")
-    .arg(branch)
-    .output()
-    .unwrap();
-    assert!(output.status.success());
+    git(fixture.path(), &[std::ffi::OsStr::new("checkout"), branch]);
+    let cursor = initialize_reflog_cursor(fixture.path(), i64::MAX, &control()).unwrap();
+    assert_eq!(
+        cursor.source_head_referent.as_deref(),
+        Some(b"refs/heads/topic-\xff".as_slice())
+    );
+    assert_eq!(cursor.source_head_oid, expected_oid);
     git(fixture.path(), &["checkout", "main"]);
     assert!(
         collect_segments(fixture.path())
@@ -346,4 +352,47 @@ fn reflog_oid_discontinuity_is_unsupported_framing() {
         scan_reflog_chunk(fixture.path(), 0, i64::MAX, changed, &control()).unwrap_err(),
         BoundedBackfillInterruption::UnsupportedSourceFraming
     );
+}
+
+#[test]
+fn unborn_source_rejects_first_commit_and_repository_replacement() {
+    let fixture = tempfile::tempdir().unwrap();
+    git(fixture.path(), &["init", "-b", "main"]);
+    let HistorySource::Unborn(source) =
+        initialize_history_source(fixture.path(), 1, &control()).unwrap()
+    else {
+        panic!("expected unborn source");
+    };
+    verify_unborn_source(fixture.path(), &source, &control()).unwrap();
+    git(fixture.path(), &["commit", "--allow-empty", "-m", "first"]);
+    assert_eq!(
+        verify_unborn_source(fixture.path(), &source, &control()).unwrap_err(),
+        BoundedBackfillInterruption::SourceChanged
+    );
+    std::fs::rename(fixture.path().join(".git"), fixture.path().join(".git.old")).unwrap();
+    git(fixture.path(), &["init", "-b", "main"]);
+    assert_eq!(
+        verify_unborn_source(fixture.path(), &source, &control()).unwrap_err(),
+        BoundedBackfillInterruption::SourceChanged
+    );
+}
+
+#[test]
+fn unborn_source_preserves_retained_history_and_cancellation() {
+    let fixture = fixture();
+    git(fixture.path(), &["checkout", "--orphan", "new"]);
+    assert!(matches!(
+        initialize_history_source(fixture.path(), 1, &control()),
+        Err(BoundedBackfillInterruption::UnsupportedSourceFraming)
+    ));
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+    assert!(matches!(
+        initialize_history_source(
+            fixture.path(),
+            1,
+            &BoundedGitControl::new(cancellation, Duration::from_secs(10))
+        ),
+        Err(BoundedBackfillInterruption::Cancelled)
+    ));
 }

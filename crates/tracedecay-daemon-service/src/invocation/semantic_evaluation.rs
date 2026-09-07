@@ -243,6 +243,7 @@ impl DaemonInvocationService {
         let scope = registered.scope.clone();
         let scheduler = self.code_index_schedulers.clone();
         let workers = Arc::clone(&registered.semantic_evaluation_workers);
+        let lifecycle_owner = scheduler.semantic_lifecycle_owner_for_scope(&scope).await;
         let execution = match input {
             SemanticExecutionInputV1::Qualify(evaluated_profile_id) => {
                 workers
@@ -262,6 +263,7 @@ impl DaemonInvocationService {
                                 scheduler,
                                 candidate.clone(),
                                 control,
+                                lifecycle_owner,
                             );
                             let qualification = tracedecay_usecases::semantic_runtime::ProductionSemanticConfigurationOperationV1::qualify_profile(
                                 &authority,
@@ -342,6 +344,7 @@ impl DaemonInvocationService {
                                 scheduler,
                                 candidate.clone(),
                                 control,
+                                lifecycle_owner,
                             );
                             let authority = tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationPublicationAuthorityV1::new(snapshot);
                             operation

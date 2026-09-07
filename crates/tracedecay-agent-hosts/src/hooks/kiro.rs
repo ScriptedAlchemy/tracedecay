@@ -5,6 +5,7 @@
 //! with stderr sent back to the model).
 
 use std::path::Path;
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -119,8 +120,33 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 /// user/project memory relevant to the submitted prompt.
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.kiro.prompt_submit")]
 pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let profile = crate::storage::default_profile_root().and_then(|root| {
+        crate::storage::read_existing_profile_identity_record(
+            &root.join(crate::storage::PROFILE_IDENTITY_FILENAME),
+        )
+    });
+    match profile {
+        Ok(None) => {
+            return i32::from(
+                !super::write_hook_output(
+                    None,
+                    tracedecay_hooks::HookHostV1::Kiro,
+                    &event,
+                    "{}",
+                    started,
+                )
+                .await,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Kiro prompt profile identity is unavailable");
+            return 1;
+        }
+        Ok(Some(_)) => {}
+    }
     let root = event_project_root_or_process_cwd(&parsed);
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
@@ -137,6 +163,7 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
             &event,
             root,
             Some(&hook_telemetry),
+            started,
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
@@ -166,12 +193,11 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         .flatten()
         .unwrap_or_else(|| serde_json::json!({}).to_string());
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Kiro,
         &event,
         &output,
-        Some(&hook_telemetry),
+        started,
     )
     .await
     {

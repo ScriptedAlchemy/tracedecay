@@ -24,8 +24,8 @@ use crate::runtime::opencode_frontier::{
 use crate::runtime::opencode_snapshot::MAX_SNAPSHOT_DATABASE_IO_BYTES;
 use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionRecord, SnapshotAdmissionRunner,
-    SnapshotCaptureOutcome,
+    MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionBatch, SnapshotAdmissionRecord,
+    SnapshotAdmissionRunner, SnapshotCaptureOutcome,
 };
 use crate::runtime::source::{
     HostProviderCoverage, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
@@ -400,7 +400,12 @@ pub(crate) async fn capture_opencode_observations(
                         materialized.input_bytes,
                         &scope,
                         cancellation,
-                        || Ok(Some((snapshot.generation, materialized.records))),
+                        || {
+                            Ok(Some(vec![SnapshotAdmissionBatch::new(
+                                snapshot.generation,
+                                materialized.records,
+                            )]))
+                        },
                     )
                     .await?;
             }

@@ -11,6 +11,7 @@ mod metadata;
 pub mod migrations;
 mod purpose;
 mod retrieval_anchor_authority;
+pub use retrieval_anchor_authority::append_retrieval_anchor_disposition_on;
 pub mod retrieval_anchor_schema;
 mod semantic_vector_staging;
 mod sql;

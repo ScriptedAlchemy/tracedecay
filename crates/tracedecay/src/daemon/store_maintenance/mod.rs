@@ -357,30 +357,70 @@ pub(super) async fn resolve_vector_retention_inventory(
     schedulers: &CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
 ) -> VectorRetentionInventoryV1 {
-    let expected_vector_revision =
-        match observations.semantic_vector_retention_read(graph.project_root()) {
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Observed { receipt } => {
-                receipt.revision
-            }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::SemanticUnseated => {
+    // A mounted provider can still own vector activation leases when a census
+    // or configuration read fails. Distinguish that refusal from an absent
+    // provider; neither unknown state proves its source generations are dead.
+    let vector_provider = schedulers
+        .semantic_vector_graph_provider(graph.project_root())
+        .await;
+    let vector_provider_mounted = vector_provider.is_some();
+    let unavailable = |reason: String| {
+        if vector_provider_mounted {
+            VectorRetentionInventoryV1::Refused { reason }
+        } else {
+            VectorRetentionInventoryV1::Offline { reason }
+        }
+    };
+    let expected_vector_revision = match observations
+        .semantic_vector_retention_read(graph.project_root())
+    {
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::Observed { receipt } => {
+            receipt.revision
+        }
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::SemanticUnseated => {
+            let Some(provider) = vector_provider.as_ref() else {
                 return VectorRetentionInventoryV1::SemanticUnseated;
+            };
+            // Providers are mounted even with semantic search disabled.
+            // An exact empty first page proves there are no retained stages;
+            // a nonempty page must never be mistaken for disabled liveness.
+            let empty = async {
+                let retained = provider
+                    .graph_for_current()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let store = tracedecay_usecases::store::vector_generations::GraphVectorGenerationStoreV1::read_only(&retained)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let census = store
+                    .project_stage_census(std::sync::Arc::clone(retained.cancellation()))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(census.records.is_empty()
+                    && census.continuation.is_none()
+                    && census.complete_receipt.is_some())
             }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
-                return VectorRetentionInventoryV1::CensusScanning;
-            }
-            crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown => {
-                return VectorRetentionInventoryV1::Offline {
-                    reason: "vector_census_incomplete".to_owned(),
-                };
-            }
-        };
+            .await;
+            return match empty {
+                Ok(true) => VectorRetentionInventoryV1::SemanticUnseated,
+                Ok(false) => VectorRetentionInventoryV1::Refused {
+                    reason: "unseated_semantic_vector_stages_remain".to_owned(),
+                },
+                Err(reason) => VectorRetentionInventoryV1::Refused { reason },
+            };
+        }
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::Scanning => {
+            return VectorRetentionInventoryV1::CensusScanning;
+        }
+        crate::daemon::maintenance::SemanticVectorRetentionReadV1::Unknown => {
+            return unavailable("vector_census_incomplete".to_owned());
+        }
+    };
     let Some(configuration) = graph
         .configuration_runtime()
         .semantic_configuration_inventory_authority()
     else {
-        return VectorRetentionInventoryV1::Offline {
-            reason: "configuration_inventory_unavailable".to_owned(),
-        };
+        return unavailable("configuration_inventory_unavailable".to_owned());
     };
     let project_root = graph.hook_store_layout().project_root.clone();
     let sources = tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources(
@@ -390,7 +430,10 @@ pub(super) async fn resolve_vector_retention_inventory(
         expected_vector_revision,
     )
     .await;
-    classify_vector_readable_sources(sources, configuration, expected_vector_revision)
+    match classify_vector_readable_sources(sources, configuration, expected_vector_revision) {
+        VectorRetentionInventoryV1::Offline { reason } => unavailable(reason),
+        inventory => inventory,
+    }
 }
 
 /// Map the mounted graph's readable-source read onto the retention inventory:
@@ -1184,7 +1227,9 @@ async fn collect_scope_root_proof_inputs(
     };
     let configuration_roots =
         tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
-            revision: configuration_receipt.revision().to_string(),
+            revision: configuration_receipt
+                .revision()
+                .map_or_else(|| "absent".to_owned(), |revision| revision.to_string()),
             terminal_count: configuration_receipt.root_binding_count(),
             digest: configuration_receipt.inventory_digest().as_str().to_owned(),
         };
@@ -1196,7 +1241,9 @@ async fn collect_scope_root_proof_inputs(
     .map_err(|_| "vector_dependency_inventory_digest_failed")?;
     let vector_dependencies =
         tracedecay_code_index_retention::code_index_generations::ScopeRootAuthorityReceiptV1 {
-            revision: configured_root_receipt.revision().to_string(),
+            revision: configured_root_receipt
+                .revision()
+                .map_or_else(|| "absent".to_owned(), |revision| revision.to_string()),
             terminal_count: configured_root_receipt.root_count(),
             digest: vector_dependency_digest.as_str().to_owned(),
         };

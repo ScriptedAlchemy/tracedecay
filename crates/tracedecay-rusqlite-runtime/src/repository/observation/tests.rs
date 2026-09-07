@@ -1,17 +1,20 @@
 use rusqlite::Connection;
 use serde_json::json;
 use tracedecay_domain::{
-    ComponentVersion, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
-    ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
+    CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
+    CanonicalObservationRelationsV1, ComponentVersion, FactOwnerV1, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId,
+    ProviderUsageContractDimensionV1, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
-    ObservationCoverageReason, ObservationCursorAdvance, ObservationReadOperationV1,
-    ObservationReadResultV1, ObservationWrite, SESSION_MESSAGE_PROJECTOR_VERSION,
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
+    CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1, ObservationCoverageReason,
+    ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
+    ObservationWrite, RetrievalAnchorDispositionRecordV1, SESSION_MESSAGE_PROJECTOR_VERSION,
     StorageRuntimeErrorV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
@@ -923,5 +926,216 @@ fn point_and_replay_reads_reject_incomplete_observation_authority() {
                 .to_string()
                 .contains("observation retrieval anchor is missing")
         );
+    }
+}
+
+fn cline_ui_write(stream_key: Option<&str>, ordinal: u64, tokens: u64) -> AnchoredObservationWrite {
+    let provider = ProviderId::new("cline").unwrap();
+    let session = SessionId::new("native-task").unwrap();
+    let source = match stream_key {
+        Some(key) => ObservationSourceIdentityV1::for_provider_source(
+            provider.clone(),
+            session.clone(),
+            SessionId::new(key).unwrap(),
+        )
+        .unwrap(),
+        None => {
+            ObservationSourceIdentityV1::for_provider(provider.clone(), session.clone()).unwrap()
+        }
+    };
+    let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let generation =
+        ObservationSourceGenerationV1::new(if stream_key.is_some() { 2 } else { 1 }).unwrap();
+    let native_id = ObservationId::new("native-ui-record").unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider,
+        "usage",
+        native_id.clone(),
+        CanonicalObservationRelationsV1::new(session),
+        vec![CanonicalObservationFactV1::UncorrelatedUsage {
+            input_tokens: Some(tokens),
+            output_tokens: Some(350),
+            cache_read_tokens: Some(8000),
+            cache_write_tokens: Some(500),
+            reasoning_tokens: None,
+            total_tokens: None,
+            native_kind: "usage".into(),
+            native_field: "usage".into(),
+            missing_dimensions: [
+                ProviderUsageContractDimensionV1::Model,
+                ProviderUsageContractDimensionV1::Scope,
+                ProviderUsageContractDimensionV1::CounterSemantics,
+                ProviderUsageContractDimensionV1::Correlation,
+            ]
+            .into_iter()
+            .collect(),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range)
+            .with_native_sequence(ordinal)
+            .with_native_timestamp(1_800_000_005),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(format!(
+                "receipt.cline.{}.{}",
+                stream_key.unwrap_or("combined"),
+                tokens
+            ))
+            .unwrap(),
+            ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+    )
+    .unwrap();
+    let observation = tracedecay_domain::DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            source.clone(),
+            scope.clone(),
+            generation,
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            native_id,
+        )
+        .unwrap(),
+        receipt,
+        RetentionClass::new("transcript.cline.v1").unwrap(),
+        payload,
+    )
+    .unwrap();
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        source,
+        scope,
+        generation,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        ordinal + 1,
+    )
+    .unwrap();
+    anchored(ObservationWrite::new(observation, None, cursor).unwrap())
+}
+
+#[test]
+fn cline_stream_alias_waits_for_projection_and_preserves_historical_receipt() {
+    let mut connection = connection();
+    connection
+        .execute_batch(
+            "CREATE TABLE retrieval_anchor_dispositions (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, disposition_id TEXT NOT NULL UNIQUE,
+            anchor_id TEXT NOT NULL, owner_json TEXT NOT NULL, state TEXT NOT NULL,
+            superseded_by TEXT, reason_class TEXT NOT NULL, effective_at INTEGER NOT NULL,
+            record_json TEXT NOT NULL);
+         CREATE TABLE retrieval_anchor_reverse_lineage (
+            source_anchor_id TEXT, owner_json TEXT, derivative_kind TEXT, derivative_id TEXT);
+         CREATE TABLE retrieval_anchor_derivative_tombstones (
+            source_anchor_id TEXT, owner_json TEXT, derivative_kind TEXT, derivative_id TEXT,
+            disposition_id TEXT, effective_at INTEGER);",
+        )
+        .unwrap();
+    let old = cline_ui_write(None, 2, 1200);
+    let new = cline_ui_write(Some("ui_messages"), 0, 1200);
+    execute(&mut connection, &old).unwrap();
+    let old_anchor_json: String = connection
+        .query_row(
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
+            [old.retrieval_anchor_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    execute(&mut connection, &new)
+        .expect("verified successor capture keeps current alias readable");
+    let alias: String = connection
+        .query_row(
+            "SELECT anchor_id FROM retrieval_anchor_aliases",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(alias, old.retrieval_anchor_id().as_str());
+    execute(&mut connection, &old).unwrap();
+    execute(&mut connection, &new).unwrap();
+
+    // Exercise the writer's historical verification boundary independently of
+    // projector scheduling: alias promotion without its disposition is invalid.
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE retrieval_anchor_aliases SET anchor_id = ?1 WHERE anchor_id = ?2",
+                [
+                    new.retrieval_anchor_id().as_str(),
+                    old.retrieval_anchor_id().as_str()
+                ],
+            )
+            .unwrap(),
+        1
+    );
+    assert!(execute(&mut connection, &old).is_err());
+    let disposition = RetrievalAnchorDispositionRecordV1::new(
+        "cline-source-transition",
+        old.retrieval_anchor_id().clone(),
+        FactOwnerV1::from(old.observation().scope().clone()),
+        AnchorDispositionStateV1::Superseded,
+        Some(new.retrieval_anchor_id().clone()),
+        AnchorDispositionReasonClassV1::Correction,
+        UtcMicros(2),
+    )
+    .unwrap();
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    super::super::retrieval_anchor::RetrievalAnchorExecutor
+        .execute_disposition_write(&savepoint, &disposition)
+        .unwrap();
+    savepoint.commit().unwrap();
+    transaction.commit().unwrap();
+    execute(&mut connection, &old).expect("exact historical receipt remains verifiable");
+    execute(&mut connection, &new).unwrap();
+    let retained: String = connection
+        .query_row(
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
+            [old.retrieval_anchor_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, old_anchor_json);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn cline_stream_alias_refuses_changed_usage_or_wrong_native_stream() {
+    for (stream, tokens) in [
+        ("ui_messages", 1201),
+        ("api_history", 1200),
+        ("foreign", 1200),
+    ] {
+        let mut connection = connection();
+        let old = cline_ui_write(None, 2, 1200);
+        execute(&mut connection, &old).unwrap();
+        let candidate = cline_ui_write(Some(stream), 0, tokens);
+        assert!(execute(&mut connection, &candidate).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let alias: String = connection
+            .query_row(
+                "SELECT anchor_id FROM retrieval_anchor_aliases",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias, old.retrieval_anchor_id().as_str());
     }
 }

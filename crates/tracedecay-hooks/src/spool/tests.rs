@@ -1298,3 +1298,41 @@ fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
     );
     assert_eq!(spool.pending.len(), 1);
 }
+
+#[test]
+fn bounded_writer_admission_preserves_failfast_and_times_out_without_mutation() {
+    let root = TestDir::new("bounded-admission");
+    let (owner, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let before = fs::read(meta_path(&root.0)).unwrap();
+    assert_eq!(
+        HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap_err(),
+        HookSpoolError::WriterLeaseHeld
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    assert_eq!(
+        HookSpoolV1::open_until(&root.0, config(), UtcMicros(11), deadline).unwrap_err(),
+        HookSpoolError::AdmissionTimedOut
+    );
+    assert_eq!(fs::read(meta_path(&root.0)).unwrap(), before);
+    drop(owner);
+    assert_eq!(
+        HookSpoolV1::open_until(&root.0, config(), UtcMicros(11), deadline).unwrap_err(),
+        HookSpoolError::AdmissionTimedOut
+    );
+    let (mut admitted, _) = HookSpoolV1::open_until(
+        &root.0,
+        config(),
+        UtcMicros(11),
+        std::time::Instant::now()
+            + std::time::Duration::from_micros(
+                crate::HookSynchronousDeadlineV1::start().remaining_micros(),
+            ),
+    )
+    .unwrap();
+    admitted
+        .append(envelope(1, 1), &binding(), UtcMicros(12))
+        .unwrap();
+    drop(admitted);
+    let (_, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(13)).unwrap();
+    assert_eq!(report.next_sequence, 2);
+}

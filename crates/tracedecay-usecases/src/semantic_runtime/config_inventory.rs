@@ -14,7 +14,7 @@ pub const MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE: u16 = 128;
 pub struct SemanticConfigurationInventoryCursorV1 {
     project_id: ProjectId,
     store_binding_digest: ManifestDigest,
-    revision: u64,
+    revision: Option<u64>,
     after_scope_digest: ManifestDigest,
     cumulative_scope_count: u64,
     cumulative_root_binding_count: u64,
@@ -25,14 +25,15 @@ pub struct SemanticConfigurationInventoryCursorV1 {
 pub struct SemanticConfigurationInventoryReceiptV1 {
     project_id: ProjectId,
     store_binding_digest: ManifestDigest,
-    revision: u64,
+    revision: Option<u64>,
     scope_count: u64,
     root_binding_count: u64,
     inventory_digest: ManifestDigest,
 }
 
 impl SemanticConfigurationInventoryReceiptV1 {
-    pub fn revision(&self) -> u64 {
+    /// `None` records authoritative absence before the first profile mutation.
+    pub fn revision(&self) -> Option<u64> {
         self.revision
     }
 
@@ -88,7 +89,7 @@ pub struct SemanticConfigurationInventoryPageV1 {
 pub struct SemanticConfiguredVectorRootCursorV1 {
     project_id: ProjectId,
     store_binding_digest: ManifestDigest,
-    revision: u64,
+    revision: Option<u64>,
     configuration_inventory_digest: ManifestDigest,
     after_generation: VectorGenerationIdV1,
     cumulative_root_count: u64,
@@ -99,14 +100,15 @@ pub struct SemanticConfiguredVectorRootCursorV1 {
 pub struct SemanticConfiguredVectorRootReceiptV1 {
     project_id: ProjectId,
     store_binding_digest: ManifestDigest,
-    revision: u64,
+    revision: Option<u64>,
     configuration_inventory_digest: ManifestDigest,
     root_count: u64,
     root_digest: ManifestDigest,
 }
 
 impl SemanticConfiguredVectorRootReceiptV1 {
-    pub fn revision(&self) -> u64 {
+    /// `None` records authoritative absence before the first profile mutation.
+    pub fn revision(&self) -> Option<u64> {
         self.revision
     }
 
@@ -238,30 +240,11 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             records.push(decode_inventory_record(&row, &project_id)?);
         }
         drop(rows);
-        // No scope rows at this cursor is a successful, complete read of an
-        // empty corpus, not an unavailable authority: the revision recheck
-        // below is what proves the emptiness was not torn by a concurrent
-        // mutation. Retention depends on the distinction — an unreadable
-        // inventory retains every source, while this canonically empty one
-        // proves no vector stage requires protection and lets the ordinary
-        // default-off cleanup run.
-        if records.is_empty() {
-            if inventory_revision(&snapshot, &project_id).await? != revision {
-                return Err(SemanticConfigurationBackendErrorV1::Conflict);
-            }
-            return Ok(SemanticConfigurationInventoryPageV1 {
-                scanned_scopes: 0,
-                scanned_root_bindings: 0,
-                continuation: None,
-                complete_receipt: Some(SemanticConfigurationInventoryReceiptV1 {
-                    project_id,
-                    store_binding_digest,
-                    revision,
-                    scope_count,
-                    root_binding_count,
-                    inventory_digest: digest,
-                }),
-            });
+        // A successful project-scoped snapshot before the first profile is
+        // authoritative absence, not an unavailable configuration backend.
+        // Once a revision exists, losing every state row is inconsistent.
+        if revision.is_none() != records.is_empty() {
+            return Err(SemanticConfigurationBackendErrorV1::Rejected);
         }
         let has_more = records.len() > usize::from(request.max_scopes);
         records.truncate(usize::from(request.max_scopes));
@@ -297,13 +280,13 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         if inventory_revision(&snapshot, &project_id).await? != revision {
             return Err(SemanticConfigurationBackendErrorV1::Conflict);
         }
-        let last_scope = records
-            .last()
-            .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?
-            .scope
-            .scope_digest
-            .clone();
         let (continuation, complete_receipt) = if has_more {
+            let last_scope = records
+                .last()
+                .ok_or(SemanticConfigurationBackendErrorV1::Rejected)?
+                .scope
+                .scope_digest
+                .clone();
             (
                 Some(SemanticConfigurationInventoryCursorV1 {
                     project_id,
@@ -655,7 +638,7 @@ fn decode_inventory_record(
 async fn inventory_revision(
     executor: &impl QueryExecutor,
     project_id: &ProjectId,
-) -> Result<u64, SemanticConfigurationBackendErrorV1> {
+) -> Result<Option<u64>, SemanticConfigurationBackendErrorV1> {
     let mut rows = executor
         .query(
             "SELECT revision
@@ -665,21 +648,12 @@ async fn inventory_revision(
         )
         .await
         .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-    // A project that never committed a semantic retrieval state has no
-    // inventory row at all. That is authoritative absence — revision 0,
-    // nothing was ever enrolled — not an unavailable authority. Reporting it
-    // as unavailable made a readable, canonically empty inventory
-    // indistinguishable from an unreadable one, and code-generation retention
-    // then planned against the offline protection set instead of an exact
-    // (empty) vector pin set. Every mutation trigger writes revision 1 on
-    // first insert, so receipts minted at revision 0 are rejected as stale
-    // from the first configuration mutation onward.
     let Some(row) = rows
         .next()
         .await
         .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?
     else {
-        return Ok(0);
+        return Ok(None);
     };
     let revision = row
         .get::<i64>(0)
@@ -692,7 +666,9 @@ async fn inventory_revision(
     {
         return Err(SemanticConfigurationBackendErrorV1::Rejected);
     }
-    u64::try_from(revision).map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
+    u64::try_from(revision)
+        .map(Some)
+        .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
 }
 
 async fn require_no_uncommitted_transition(

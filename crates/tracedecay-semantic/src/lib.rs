@@ -84,8 +84,7 @@ pub use model_lifecycle::ModelMemberSourceV1;
 pub use model_lifecycle::{
     ModelLifecycleErrorV1, SemanticModelLifecycleEvaluationPublicationLeaseV1,
     SemanticModelLifecycleOwnerV1, SemanticModelLifecyclePublicationIdentityV1,
-    apply_config_selection, apply_default_config_selection, default_shared_lifecycle_owner,
-    open_local_semantic_evaluation_lifecycle, shared_lifecycle_owner,
+    open_local_semantic_evaluation_lifecycle,
 };
 
 pub use runtime_service::{

@@ -41,9 +41,14 @@ fn admitted_source_read_observes_live_cancellation_between_chunks() {
     // Admission validates the roster path before the bounded reader begins.
     // Cancel on the second read checkpoint, after one full chunk was observed.
     let control = CancelAfterChecks::new(5);
+    // The scheduler supplies a canonical root; TempDir may retain a system alias.
+    let project_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
 
     let error = tracedecay_code_index_runtime::code_index_scheduler::ignored_dependencies::read_bounded_admitted_source(
-        fixture.path(),
+        &project_root,
         "node_modules/pkg/index.d.ts",
         Some(&control),
     )

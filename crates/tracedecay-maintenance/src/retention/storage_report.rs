@@ -1133,19 +1133,7 @@ mod tests {
             .unwrap();
     }
 
-    /// A full pass over a directory mutated mid-iteration must miss nothing,
-    /// repeat nothing, and terminate.
-    ///
-    /// `read_project_directory_page` resumes on a project-directory *name*,
-    /// not on a `telldir` cookie, so the pass is exact rather than
-    /// best-effort: pages walk ascending name order, an entry that existed for
-    /// the whole pass is returned exactly once, and an entry deleted or
-    /// created mid-pass can only fall on the side of the cursor its name puts
-    /// it on. The cost of that order is one directory pass per page — the only
-    /// alternatives are per-pass state that a restart invalidates or a name set
-    /// proportional to the directory — so the accounting bound below is per
-    /// page, and the expensive per-store work each page drives stays bounded by
-    /// the page limit.
+    /// Inventory positions survive directory mutation without repeating records.
     #[test]
     fn project_directory_pages_cover_every_entry_within_a_bounded_pass() {
         for page_size in [64, 256] {
@@ -1163,12 +1151,10 @@ mod tests {
             let mut observed = BTreeSet::new();
             let mut entries_scanned = 0usize;
             let mut returned = 0usize;
-            let mut pages = 0usize;
             let mut first_page = true;
             loop {
                 let page =
                     list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
-                pages = pages.saturating_add(1);
                 entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
                 for (name, _) in page.directories {
                     returned = returned.saturating_add(1);
@@ -1186,42 +1172,237 @@ mod tests {
                 }
             }
 
-            // `proj_0500` sorts past the first page for both page sizes, so it
-            // is removed before it is reached and never returned;
-            // `proj_foreign_added` sorts after every `proj_0…` name, so it is
-            // created before it is reached and always is.
-            let mut expected_after_mutation = expected
+            let expected_without_removed = expected
                 .iter()
                 .filter(|name| name.as_str() != "proj_0500")
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            expected_after_mutation.insert("proj_foreign_added".to_owned());
-            assert_eq!(
-                observed, expected_after_mutation,
-                "page size {page_size} did not cover the mutated directory exactly"
-            );
-            assert_eq!(
-                returned,
-                observed.len(),
-                "page size {page_size} returned a directory twice"
-            );
-            // Each page reads the directory once to select the next ordered
-            // slice, so the pass stays bounded by pages × directory size and
-            // cannot degrade into an unbounded rescan loop.
             assert!(
-                entries_scanned <= pages.saturating_mul(expected.len().saturating_add(2)),
-                "page size {page_size} rescanned entries: {entries_scanned} over {pages} pages"
+                observed.is_superset(&expected_without_removed),
+                "page size {page_size} skipped an original directory"
             );
-            assert_eq!(
-                pages,
-                observed.len().div_ceil(page_size),
-                "page size {page_size} did not converge in one page per ordered slice"
+            assert!(
+                returned == observed.len(),
+                "page size {page_size} returned {returned} entries for {} directories",
+                expected.len()
+            );
+            assert!(
+                entries_scanned <= (expected.len() + 1).saturating_mul(2),
+                "page size {page_size} rescanned directory or inventory entries: {entries_scanned}"
             );
             assert!(
                 entries_scanned >= observed.len(),
                 "entry accounting must cover every returned directory"
             );
         }
+    }
+
+    #[test]
+    fn project_directory_report_resume_is_stable_after_mutation_and_repeated_requests() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects = profile_root.join("projects");
+        for index in 0..17 {
+            std::fs::create_dir_all(projects.join(format!("proj_{index:02}"))).unwrap();
+        }
+        let first = list_project_directories_page(&profile_root, "", 2).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        for (_, path) in &first.directories {
+            std::fs::remove_dir(path).unwrap();
+        }
+        std::fs::create_dir_all(projects.join("proj_added")).unwrap();
+        let resumed = list_project_directories_page(&profile_root, &cursor, 2).unwrap();
+        let repeated = list_project_directories_page(&profile_root, &cursor, 2).unwrap();
+        assert_eq!(resumed.directories, repeated.directories);
+        assert_eq!(resumed.next_cursor, repeated.next_cursor);
+        let mut observed = first
+            .directories
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<BTreeSet<_>>();
+        let mut cursor = Some(cursor);
+        let mut pages = 0;
+        while let Some(saved) = cursor {
+            let page = list_project_directories_page(&profile_root, &saved, 2).unwrap();
+            for (name, _) in page.directories {
+                assert!(
+                    observed.insert(name),
+                    "resumption repeated an inventory record"
+                );
+            }
+            cursor = page.next_cursor;
+            pages += 1;
+            assert!(pages <= 10, "resumption failed to converge");
+        }
+        assert!((0..17).all(|index| observed.contains(&format!("proj_{index:02}"))));
+    }
+
+    #[tokio::test]
+    async fn project_directory_storage_report_counts_stable_resume_and_rejects_invalid_position() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path();
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            profile_root,
+        )
+        .await
+        .unwrap();
+        let db = runtime.profile_database_arc();
+        for index in 0..3 {
+            let project = profile_root
+                .join("projects")
+                .join(format!("proj_report_{index}"));
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("payload"), b"1234").unwrap();
+        }
+        let first = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            Some(DIRECTORY_CURSOR_PREFIX),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (first.unregistered_dir_count, first.unregistered_bytes),
+            (1, 4)
+        );
+        let cursor = first.coverage.next_cursor.unwrap();
+        let second = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            Some(&cursor),
+            1,
+        )
+        .await
+        .unwrap();
+        let repeated = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            Some(&cursor),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (second.unregistered_dir_count, second.unregistered_bytes),
+            (1, 4)
+        );
+        assert_eq!(second.coverage.next_cursor, repeated.coverage.next_cursor);
+        assert_eq!(second.unregistered_bytes, repeated.unregistered_bytes);
+        let (prefix, _) = cursor.rsplit_once(':').unwrap();
+        let invalid = format!("{prefix}:{}", u64::MAX);
+        assert!(matches!(
+            build_storage_report_page_from_registered_global_db(
+                profile_root,
+                &db,
+                Some(&invalid),
+                1
+            )
+            .await,
+            Err(tracedecay_domain::errors::TraceDecayError::Config { .. })
+        ));
+        let third = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            second.coverage.next_cursor.as_deref(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (third.unregistered_dir_count, third.unregistered_bytes),
+            (1, 4)
+        );
+        let exhausted = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            third.coverage.next_cursor.as_deref(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                exhausted.unregistered_dir_count,
+                exhausted.unregistered_bytes
+            ),
+            (0, 0)
+        );
+        assert!(exhausted.coverage.next_cursor.is_none());
+    }
+
+    #[test]
+    fn project_directory_report_rejects_invalidated_inventory_positions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        for index in 0..3 {
+            std::fs::create_dir_all(profile_root.join("projects").join(format!("proj_{index}")))
+                .unwrap();
+        }
+        let first = list_project_directories_page(&profile_root, "", 1).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        let (prefix, _) = cursor.rsplit_once(':').unwrap();
+        for offset in [1, u64::MAX] {
+            let error =
+                list_project_directories_page(&profile_root, &format!("{prefix}:{offset}"), 1)
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                tracedecay_domain::errors::TraceDecayError::Config { .. }
+            ));
+        }
+        // Rejected positions must not modify the inventory or poison its valid continuation.
+        let resumed = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
+        assert_eq!(resumed.directories.len(), 1);
+        assert_ne!(first.directories, resumed.directories);
+    }
+
+    #[test]
+    fn project_directory_report_empty_locked_page_retains_continuation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects = profile_root.join("projects");
+        std::fs::create_dir_all(projects.join("proj_pending")).unwrap();
+        let metadata = projects.metadata().unwrap();
+        let modified = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let signature = format!(
+            "{}-{}-{}",
+            modified.as_secs(),
+            modified.subsec_nanos(),
+            metadata.len()
+        );
+        let inventory = profile_root
+            .join("maintenance/unregistered-project-directory-inventory-v2")
+            .join(format!("{signature}.log"));
+        std::fs::create_dir_all(inventory.parent().unwrap()).unwrap();
+        let lock = tracedecay_runtime_core::storage::try_acquire_sidecar_lock(
+            &tracedecay_runtime_core::storage::append_lock_path(&inventory),
+        )
+        .unwrap()
+        .unwrap();
+        let empty = list_project_directories_page(&profile_root, "", 1).unwrap();
+        assert!(empty.directories.is_empty());
+        let cursor = empty
+            .next_cursor
+            .expect("lock contention is incomplete, never empty success");
+        let repeated = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
+        assert!(repeated.directories.is_empty());
+        assert_eq!(repeated.next_cursor.as_deref(), Some(cursor.as_str()));
+        drop(lock);
+        let resumed = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
+        assert_eq!(resumed.directories[0].0, "proj_pending");
+        let final_page = list_project_directories_page(
+            &profile_root,
+            resumed.next_cursor.as_deref().unwrap(),
+            1,
+        )
+        .unwrap();
+        assert!(final_page.directories.is_empty());
+        assert!(final_page.next_cursor.is_none());
     }
 
     #[test]
@@ -1247,10 +1428,6 @@ mod tests {
         assert_eq!(restarted.next_cursor, None);
     }
 
-    /// Ordered paging reads the directory once per page, so a full pass is
-    /// `pages × directory` raw entries. This measures that the wall-clock cost
-    /// of the cheap name read stays negligible next to the bounded per-store
-    /// work each page drives.
     #[test]
     #[ignore = "manual filesystem scaling measurement"]
     fn project_directory_paging_measurements_are_linear() {
@@ -1271,11 +1448,9 @@ mod tests {
                 let mut cursor = String::new();
                 let mut entries_scanned = 0usize;
                 let mut observed = 0usize;
-                let mut pages = 0usize;
                 loop {
                     let page =
                         list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
-                    pages = pages.saturating_add(1);
                     entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
                     observed = observed.saturating_add(page.directories.len());
                     let Some(next_cursor) = page.next_cursor else {
@@ -1286,10 +1461,9 @@ mod tests {
                 let elapsed = started.elapsed();
 
                 assert_eq!(observed, directory_count);
-                assert_eq!(pages, directory_count.div_ceil(page_size));
-                assert_eq!(entries_scanned, directory_count.saturating_mul(pages));
+                assert_eq!(entries_scanned, directory_count.saturating_mul(2));
                 eprintln!(
-                    "directories={directory_count} page_size={page_size} pages={pages} \
+                    "directories={directory_count} page_size={page_size} \
                      entries_scanned={entries_scanned} elapsed={elapsed:?}"
                 );
             }

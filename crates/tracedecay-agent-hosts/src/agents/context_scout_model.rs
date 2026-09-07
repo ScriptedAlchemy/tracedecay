@@ -381,6 +381,15 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
+    fn execution_with_ready_tokenizer() -> ContextScoutModelExecutionV1 {
+        // These fixtures check backend outcomes with a live budget. Measured cold
+        // vocabulary initialization dominates encoding this bounded request, so
+        // complete tokenizer setup before starting their unchanged deadline.
+        assert!(serialized_token_count(&request()).is_some_and(|tokens| tokens > 0));
+        execution(CancellationToken::new())
+    }
+
     #[test]
     fn backend_mapping_uses_only_the_final_automation_backends() {
         assert_eq!(
@@ -434,7 +443,7 @@ mod tests {
             ContextScoutModelBackendV1::CodexAppServer,
         );
         assistant
-            .propose(request(), execution(CancellationToken::new()))
+            .propose(request(), execution_with_ready_tokenizer())
             .await
     }
 
@@ -509,7 +518,7 @@ mod tests {
         );
 
         let proposal = assistant
-            .propose(request(), execution(CancellationToken::new()))
+            .propose(request(), execution_with_ready_tokenizer())
             .await
             .unwrap();
 
@@ -549,7 +558,7 @@ mod tests {
         );
 
         let proposal = assistant
-            .propose(request(), execution(CancellationToken::new()))
+            .propose(request(), execution_with_ready_tokenizer())
             .await
             .unwrap();
 

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde_json::Value;
 #[cfg(test)]
@@ -49,6 +50,7 @@ pub fn codex_additional_context_json(event_name: &str, additional_context: &str)
 /// Codex `SessionStart` hook handler.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.session_start")]
 pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -66,6 +68,7 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
         &event,
         root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
@@ -75,12 +78,11 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
         |guidance| additional_context_json("SessionStart", &guidance),
     );
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &output,
-        Some(&hook_telemetry),
+        started,
     )
     .await
     {
@@ -99,9 +101,36 @@ fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
 /// Resets the local counter and injects steering context for the new turn.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.user_prompt_submit")]
 pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
+    // A compatibility prompt callback can run before TraceDecay is installed
+    // for this profile. Only an existing profile can own projectless ingest.
+    let profile = crate::storage::default_profile_root().and_then(|root| {
+        crate::storage::read_existing_profile_identity_record(
+            &root.join(crate::storage::PROFILE_IDENTITY_FILENAME),
+        )
+    });
+    match profile {
+        Ok(None) => {
+            return i32::from(
+                !super::write_hook_output(
+                    None,
+                    tracedecay_hooks::HookHostV1::Codex,
+                    &event,
+                    "{}",
+                    started,
+                )
+                .await,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Codex prompt profile identity is unavailable");
+            return 1;
+        }
+        Ok(Some(_)) => {}
+    }
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
@@ -135,12 +164,11 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         additional_context_json("UserPromptSubmit", &context)
     };
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &output,
-        Some(&hook_telemetry),
+        started,
     )
     .await
     {
@@ -186,6 +214,7 @@ async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option
 /// `additionalContext` shape; unavailable or guidance-free admission is silent.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.post_tool_use")]
 pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     // One parse supplies exact scope and analytics attribution.
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -204,18 +233,18 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
         &event,
         root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten();
     if let Some(guidance) = guidance
         && !super::write_hook_output(
-            runtime,
             root.as_deref(),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             &additional_context_json("PostToolUse", &guidance),
-            Some(&hook_telemetry),
+            started,
         )
         .await
     {
@@ -232,6 +261,7 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
 /// itself only forwards the boundary and fails open.
 #[hotpath::measure(future = true, label = "hosts.hooks.codex.post_compact")]
 pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(runtime, &parsed).await;
@@ -249,12 +279,11 @@ pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
         codex_post_compact(runtime, &event, Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(
-        runtime,
         root.as_deref(),
         tracedecay_hooks::HookHostV1::Codex,
         &event,
         &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
+        started,
     )
     .await
     {

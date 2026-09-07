@@ -184,6 +184,14 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for DaemonVerifiedSemanticVectorGraphR
         )
     }
 
+    fn project_stage_census(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorStageCensusPage, GraphDbError> {
+        self.retained
+            .semantic_vector_project_stage_census(authority.cancellation(), authority.deadline())
+    }
+
     fn reserve_one_generation(
         &self,
         after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,

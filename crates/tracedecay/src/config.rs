@@ -28,6 +28,7 @@ use tracedecay_domain::configuration::{
 };
 
 use tracedecay_configuration::ConfigurationControlStore;
+use tracedecay_configuration::config::semantic_config_from_snapshot;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
@@ -1434,32 +1435,6 @@ pub fn runtime_config_from_snapshot(
             timings: required_bool(snapshot, TELEMETRY_TIMINGS_SETTING_KEY)?,
         },
     })
-}
-
-fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<SemanticConfig> {
-    let key = SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).map_err(|error| {
-        config_error(format!(
-            "invalid runtime setting key '{SEMANTIC_RUNTIME_SETTING_KEY}': {error}"
-        ))
-    })?;
-    let semantic = match snapshot.effective_values.get(&key) {
-        None => SemanticConfig::default(),
-        Some(ConfigurationValueV1::Text(value)) => {
-            serde_json::from_str(value).map_err(|error| {
-                config_error(format!(
-                    "resolved semantic runtime setting is invalid: {error}"
-                ))
-            })?
-        }
-        Some(value) => {
-            return Err(config_error(format!(
-                "resolved configuration setting '{SEMANTIC_RUNTIME_SETTING_KEY}' has wrong type: expected text, got {:?}",
-                value.kind()
-            )));
-        }
-    };
-    semantic.validate()?;
-    Ok(semantic)
 }
 
 fn retention_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<RetentionConfig> {

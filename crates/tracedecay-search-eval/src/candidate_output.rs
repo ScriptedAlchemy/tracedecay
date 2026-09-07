@@ -51,8 +51,7 @@ use tracedecay_domain::{
     RepositoryDirtyStateV1, RepositoryId, RerankPolicy, RetrievalBudget, RetrievalFailure,
     RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -286,7 +285,6 @@ fn build_query_projections(
     generation: &CodeIndexPublishedGenerationV1,
     file_scopes: &BTreeMap<String, String>,
     queries: &[WorkloadQueryV1],
-    symbol_qualified_names: &BTreeMap<SymbolOccurrenceId, String>,
 ) -> Result<
     (
         ScopedLexicalProjections,
@@ -319,6 +317,8 @@ fn build_query_projections(
         )?,
         exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
     };
+    // Keep the generation's weak admission memo alive across every scoped
+    // projection so each scope does not re-admit the complete corpus.
     let admitted = generation
         .admitted_chunks()
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
@@ -335,17 +335,19 @@ fn build_query_projections(
                 .get(file_occurrence_id)
                 .is_some_and(|scope| scope_key.binary_search(scope).is_ok())
         };
-        let scoped_admitted = admitted
+        let allowed_files = generation
+            .snapshot()
+            .files
             .iter()
-            .filter(|chunk| scope_contains(chunk.chunk().anchor.file_occurrence_id.as_str()))
-            .cloned()
+            .filter(|file| scope_contains(file.file_occurrence_id.as_str()))
+            .map(|file| file.file_occurrence_id.clone())
             .collect();
         lexical.insert(
             scope_key.clone(),
-            CodeLexicalProjectionAdapterV1::new_admitted(
+            CodeLexicalProjectionAdapterV1::new_published(
                 metadata.clone(),
-                scoped_admitted,
-                symbol_qualified_names.clone(),
+                generation,
+                &allowed_files,
             )
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
@@ -375,6 +377,7 @@ fn build_query_projections(
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
     }
+    drop(admitted);
     Ok((lexical, graph, semantic_allowed_chunks))
 }
 
@@ -2283,12 +2286,7 @@ fn publish_corpus_with_scale(
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
         .len() as u64;
     let (lexical_projections, graph_projections, semantic_allowed_chunks) =
-        build_query_projections(
-            &generation,
-            &file_scopes,
-            &workload.queries,
-            &qualified_names,
-        )?;
+        build_query_projections(&generation, &file_scopes, &workload.queries)?;
     Ok(PublishedCorpus {
         generation,
         lexical_projections,

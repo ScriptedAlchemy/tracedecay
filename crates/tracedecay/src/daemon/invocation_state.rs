@@ -497,7 +497,7 @@ impl DaemonInvocationState {
             ),
         );
         let semantic_schedule = semantic_runtime
-            .zip(semantic_lifecycle)
+            .zip(semantic_lifecycle.clone())
             .zip(semantic_resources)
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
             .map(|(((handle, lifecycle), resources), worktree_id)| {
@@ -527,6 +527,7 @@ impl DaemonInvocationState {
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
                 ),
+                semantic_lifecycle,
             )
             .await
             .map_err(|error| {
