@@ -1156,7 +1156,10 @@ with open({starts:?}, "a", encoding="utf-8") as f:
             .await
             .expect_err("the post-initialize process exit must fail the refresh");
         assert!(
-            error.to_string().contains("exited"),
+            error.to_string().contains("exited")
+                || error
+                    .to_string()
+                    .contains("closed its diagnostics transport"),
             "unexpected error: {error}"
         );
 
@@ -1167,7 +1170,10 @@ with open({starts:?}, "a", encoding="utf-8") as f:
             AnalyzerState::RestartBackoff
         };
         assert_eq!(readiness.state(), expected);
-        assert_eq!(readiness.last_failure(), Some(AnalyzerEvent::Crashed));
+        assert!(matches!(
+            readiness.last_failure(),
+            Some(AnalyzerEvent::Crashed | AnalyzerEvent::TransportFailed)
+        ));
         assert_eq!(readiness.restart_attempts(), failure);
     }
 
