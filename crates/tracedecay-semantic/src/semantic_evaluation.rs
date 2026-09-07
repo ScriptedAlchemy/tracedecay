@@ -402,10 +402,6 @@ impl SemanticEvaluationProjectionBatchStoreV1 {
                             .saturating_mul(u64::try_from(hit_copies).unwrap_or(u64::MAX))
                     })
                     .unwrap_or(0);
-                let transient_clone_bytes = state
-                    .entries
-                    .get(key)
-                    .map_or(0, |entry| cache_vector_bytes(&entry.vectors));
                 if let Some(request) = state.active_requests.get_mut(&request_id) {
                     request.hit_vector_bytes =
                         request.hit_vector_bytes.saturating_add(hit_vector_bytes);
@@ -413,7 +409,7 @@ impl SemanticEvaluationProjectionBatchStoreV1 {
                 state.active_hit_vector_bytes = state
                     .active_hit_vector_bytes
                     .saturating_add(hit_vector_bytes);
-                state.observe_peak(transient_clone_bytes);
+                state.observe_peak(0);
                 let Some(entry) = state.entries.get_mut(key) else {
                     return Err("semantic evaluator cache lost a completed vector group".to_owned());
                 };
@@ -767,44 +763,106 @@ where
         let request_id = self.request_id;
         let cancellation = Arc::clone(&self.cancellation);
         let interrupted = move || semantic_execution_interruption_error(cancellation.as_ref());
-        let mut encoded = Vec::with_capacity(groups.len());
-        for group in groups {
-            let cache_key = self.exact_key(key, group)?;
-            let _lookup_memory = store.begin_lookup(request_id, cache_key_bytes(&cache_key))?;
-            let vectors = match store.claim(&cache_key, request_id, 1, &interrupted)? {
-                SemanticEvaluationProjectionBatchClaimV1::Hit(vectors) => vectors,
-                SemanticEvaluationProjectionBatchClaimV1::Build(guard) => {
-                    let mut built = self
-                        .inner
-                        .encode_batches(key, std::slice::from_ref(group))?;
-                    if built.len() != 1 {
+        let mut encoded = vec![None; groups.len()];
+        let mut distinct =
+            BTreeMap::<SemanticEvaluationProjectionBatchCacheKeyV1, Vec<usize>>::new();
+        for (position, group) in groups.iter().enumerate() {
+            distinct
+                .entry(self.exact_key(key, group)?)
+                .or_default()
+                .push(position);
+        }
+        let lookup_key_bytes = distinct.keys().fold(0_u64, |total, key| {
+            total.saturating_add(cache_key_bytes(key))
+        });
+        let _lookup_memory = store.begin_lookup(request_id, lookup_key_bytes)?;
+        let mut unique_misses = Vec::<(
+            SemanticEvaluationProjectionBatchBuildGuardV1<'_>,
+            usize,
+            Vec<usize>,
+        )>::new();
+        // Every request takes claims in this total order, so overlapping batch
+        // sets cannot form a wait cycle while the owner-level permit bounds
+        // concurrent model construction.
+        for (cache_key, positions) in distinct {
+            match store.claim(&cache_key, request_id, positions.len(), &interrupted)? {
+                SemanticEvaluationProjectionBatchClaimV1::Hit(vectors) => {
+                    let mut positions = positions.into_iter();
+                    let Some(first) = positions.next() else {
                         return Err(
-                            "semantic evaluator returned an unexpected uncached vector group count"
-                                .to_owned(),
+                            "semantic evaluator cache found an empty batch position set".to_owned()
                         );
+                    };
+                    for position in positions {
+                        encoded[position] = Some(vectors.clone());
                     }
-                    if let Some(error) = self.cancellation_error() {
-                        return Err(error);
-                    }
-                    let vectors = built.pop().ok_or_else(|| {
-                        "semantic evaluator returned no uncached vector group".to_owned()
-                    })?;
-                    if vectors.len() != guard.key().group_len {
-                        return Err(
-                            "semantic evaluator returned an unexpected uncached vector batch size"
-                                .to_owned(),
-                        );
-                    }
-                    store.install(guard, &vectors, request_id);
-                    vectors
+                    encoded[first] = Some(vectors);
                 }
-            };
+                SemanticEvaluationProjectionBatchClaimV1::Build(guard) => {
+                    let first = positions.first().copied().ok_or_else(|| {
+                        "semantic evaluator cache found an empty batch position set".to_owned()
+                    })?;
+                    unique_misses.push((guard, first, positions));
+                }
+            }
+        }
+        if unique_misses.is_empty() {
             if let Some(error) = self.cancellation_error() {
                 return Err(error);
             }
-            encoded.push(vectors);
+            return encoded
+                .into_iter()
+                .map(|group| {
+                    group.ok_or_else(|| {
+                        "semantic evaluator cache lost a completed vector group".to_owned()
+                    })
+                })
+                .collect();
         }
-        Ok(encoded)
+
+        let miss_groups = unique_misses
+            .iter()
+            .map(|(_, position, _)| groups[*position])
+            .collect::<Vec<_>>();
+        let miss_encoded = self.inner.encode_batches(key, &miss_groups)?;
+        if miss_encoded.len() != unique_misses.len() {
+            return Err(
+                "semantic evaluator returned an unexpected uncached vector group count".to_owned(),
+            );
+        }
+        if let Some(error) = self.cancellation_error() {
+            return Err(error);
+        }
+        for ((guard, _, _), vectors) in unique_misses.iter().zip(&miss_encoded) {
+            if vectors.len() != guard.key().group_len {
+                return Err(
+                    "semantic evaluator returned an unexpected uncached vector batch size"
+                        .to_owned(),
+                );
+            }
+        }
+        for ((guard, _, positions), vectors) in unique_misses.into_iter().zip(miss_encoded) {
+            if let Some(error) = self.cancellation_error() {
+                return Err(error);
+            }
+            store.install(guard, &vectors, request_id);
+            let mut positions = positions.into_iter();
+            let Some(first) = positions.next() else {
+                return Err("semantic evaluator cache lost an uncached batch position".to_owned());
+            };
+            for position in positions {
+                encoded[position] = Some(vectors.clone());
+            }
+            encoded[first] = Some(vectors);
+        }
+        encoded
+            .into_iter()
+            .map(|group| {
+                group.ok_or_else(|| {
+                    "semantic evaluator cache lost an uncached vector group".to_owned()
+                })
+            })
+            .collect()
     }
 
     fn encode_concurrency(&self) -> usize {
@@ -1238,6 +1296,7 @@ mod tests {
     impl SemanticEvaluationCancellationV1 for TriggeredCancellation {}
 
     struct CountingEncoderV1 {
+        batch_invocations: usize,
         group_invocations: usize,
         attempted_group_invocations: usize,
         fail: bool,
@@ -1246,6 +1305,7 @@ mod tests {
     impl CountingEncoderV1 {
         fn healthy() -> Self {
             Self {
+                batch_invocations: 0,
                 group_invocations: 0,
                 attempted_group_invocations: 0,
                 fail: false,
@@ -1254,6 +1314,7 @@ mod tests {
 
         fn failing() -> Self {
             Self {
+                batch_invocations: 0,
                 group_invocations: 0,
                 attempted_group_invocations: 0,
                 fail: true,
@@ -1293,6 +1354,7 @@ mod tests {
             key: &EmbeddingProjectionKeyV1,
             groups: &[&[&CodeSearchChunkV1]],
         ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+            self.batch_invocations = self.batch_invocations.saturating_add(1);
             self.attempted_group_invocations = self
                 .attempted_group_invocations
                 .saturating_add(groups.len());
@@ -1850,10 +1912,15 @@ mod tests {
         let projection = authority.projection().clone();
         let generation =
             CodeGenerationId::new("evaluation-cache.generation".to_owned()).expect("generation");
-        let chunks = vec![Arc::new(chunk(
-            'a',
-            "pub fn byte_exact_fastembed_cache_probe() {}",
-        ))];
+        let chunks = (0_u8..6)
+            .map(|ordinal| {
+                let label = char::from(b'a'.saturating_add(ordinal));
+                Arc::new(chunk(
+                    label,
+                    &format!("pub fn byte_exact_fastembed_cache_probe_{ordinal}() {{}}"),
+                ))
+            })
+            .collect::<Vec<_>>();
         let request = projection_case_request(
             &generation,
             None,
@@ -2101,6 +2168,30 @@ mod tests {
              acceptance decision computed from them is identical too"
         );
         assert!(store.retained_bytes() <= store.max_retained_bytes());
+    }
+
+    #[test]
+    fn multiple_cold_misses_preserve_one_batched_runtime_dispatch() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let chunks = ['a', 'b', 'c'].map(|label| chunk(label, &format!("cold batch {label}")));
+        let singles = chunks.each_ref().map(|chunk| [chunk]);
+        let groups = singles
+            .iter()
+            .map(|group| &group[..])
+            .collect::<Vec<&[&CodeSearchChunkV1]>>();
+        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let mut encoder = request_encoder(&cache);
+
+        encoder
+            .encode_batches(&embedding_key, &groups)
+            .expect("batched cold projection");
+
+        assert_eq!(encoder.inner.group_invocations, 3);
+        assert_eq!(
+            encoder.inner.batch_invocations, 1,
+            "cache claims must not split one admitted runtime batch into N dispatches"
+        );
     }
 
     #[test]
