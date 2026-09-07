@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use rusqlite::backup::StepResult;
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
@@ -410,6 +411,91 @@ fn retiring_owned_staging_removes_the_complete_sqlite_family() {
             )
             .all(|member| !member.exists())
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_backup_refuses_to_replace_destination_with_wal_sidecars() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
+        )
+        .unwrap();
+    let dest_writer = wal_writer(&destination);
+    let dest_wal = with_suffix(&destination, "-wal");
+    let dest_shm = with_suffix(&destination, "-shm");
+    let identity = sqlite_generation_identity(&destination).unwrap();
+    let bytes = fs::read(&destination).unwrap();
+    let wal_bytes = fs::read(&dest_wal).unwrap();
+
+    let error = backup_live_sqlite_database(&source, &destination)
+        .await
+        .expect_err("replacing a destination that still has a WAL family is not coherent");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(&destination).unwrap(), bytes);
+    assert_eq!(sqlite_generation_identity(&destination).unwrap(), identity);
+    assert_eq!(fs::read(&dest_wal).unwrap(), wal_bytes);
+    assert!(dest_shm.is_file());
+    assert_no_attempt_scratch(&destination);
+    drop(dest_writer);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_backup_refuses_to_replace_destination_with_rollback_journal() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
+        )
+        .unwrap();
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
+    let journal = with_suffix(&destination, "-journal");
+    fs::write(&journal, b"stale-hot-journal").unwrap();
+
+    let error = backup_live_sqlite_database(&source, &destination)
+        .await
+        .expect_err("a leftover dest journal must block replace");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_destination_survived(&destination, identity, &bytes);
+    assert_eq!(fs::read(&journal).unwrap(), b"stale-hot-journal");
+}
+
+#[tokio::test]
+async fn live_backup_of_wal_without_shm_does_not_write_the_source_directory() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("offline.db");
+    let destination = temp.path().join("snapshot.db");
+    let writer = wal_writer(&source);
+    writer
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    drop(writer);
+    let shm = with_suffix(&source, "-shm");
+    fs::remove_file(&shm).expect("offline WAL family must start with a removable SHM file");
+    assert!(with_suffix(&source, "-wal").metadata().unwrap().len() > 0);
+    assert!(!shm.exists());
+    let before = family_state(&source).unwrap();
+
+    backup_live_sqlite_database(&source, &destination)
+        .await
+        .unwrap();
+
+    assert_eq!(integrity_ok(&destination), "ok");
+    assert_eq!(snapshot_ids(&destination), [0, 1]);
+    assert_eq!(family_state(&source).unwrap(), before);
+    assert!(!shm.exists());
 }
 
 #[cfg(unix)]
