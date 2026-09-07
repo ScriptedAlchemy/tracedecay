@@ -1,18 +1,10 @@
 # Agent-adoption evals
 
-The first **agent-in-the-loop** eval tier for TraceDecay. Where
-`src/hooks/tool_hints/evals/` grade what the *classifier* would decide offline,
-this harness launches **real headless Claude Code and Codex agents** against a
-small indexed fixture project and grades what the agents **actually do** — which
-tool they reach for first, whether they fall back to raw `grep`/`glob`/`cat`
-before any tracedecay tool, whether they hit the right answer within a tool
-budget, and whether they ever rate a memory fact they relied on.
-
-It exists because measured baselines show the gap this tier is meant to track:
-agents default to native grep/read until manually steered; fact feedback almost
-never happens; and tool-driven session recovery has failed end-to-end in the
-wild. Those are behaviors, not classifier outputs, so only a live harness can
-score them.
+This harness launches real headless Claude Code and Codex agents against a
+small indexed fixture and records task outcomes, tool efficiency, skill routing,
+and discovery channels. Native reads can be the appropriate first action;
+invocation rate alone is not a measure of usefulness. Scenario-specific outcomes
+and transcript review distinguish helpful graph evidence from unnecessary calls.
 
 ## Layout
 
@@ -85,6 +77,8 @@ paths, so do **not** commit run artifacts.
 | `CLAUDE_MODELS` | `opus sonnet` | space-separated `claude --model` matrix |
 | `CODEX_MODELS` | `gpt-5.5 gpt-5.6-terra` | space-separated `codex exec -m` matrix |
 | `SCENARIO_TIMEOUT` | `240` | per scenario wall-clock seconds |
+| `REPS` | `1` | repetitions per scenario x host x model x condition cell; `>1` suffixes transcripts with `__r<N>` and the grader pools the repetitions, so a cell of n=15 gives a usable exact-binomial interval instead of a single draw |
+| `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
 | `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 
@@ -109,7 +103,10 @@ never loaded or mutated.
 Live runs build a debug `tracedecay` binary from the checked-out candidate
 branch with ordinary Cargo and use it for fixture setup, MCP, hooks, and the
 throwaway Codex plugin install.
-`TRACEDECAY_BIN` is an explicit override for release-binary comparisons. Every
+`TRACEDECAY_BIN` pins a previously built candidate or release binary and avoids
+the runner build path. The daemon also receives a disposable HOME, XDG paths,
+host-config paths, temporary directory, and working directory. Only explicit
+read-only authentication sources are carried across that boundary. Every
 Claude condition, including `full`, loads the candidate `plugin/` via
 `--plugin-dir`; Codex `full` installs candidate assets into its throwaway
 profile. Ambient global plugins, skills, hooks, and steering cannot leak in.
@@ -206,8 +203,8 @@ Weighted, applicable-subscore-normalized:
 
 | subscore | weight | pass condition |
 |----------|--------|----------------|
-| `first_tool_choice` | 0.30 | first meaningful tool ∈ `required_first` (tracedecay_grep counts; raw Grep/Glob/cat do not) |
-| `not_forbidden_first` | 0.25 | no forbidden raw-search tool before the first tracedecay tool |
+| `first_tool_choice` | 0.30 | first meaningful tool belongs to the scenario’s `required_first` choices |
+| `not_forbidden_first` | 0.25 | no scenario-forbidden tool before the first TraceDecay tool (legacy preference, not a universal native-tool ban) |
 | `outcome` | 0.25 | fraction of `ground_truth` fragments present in the final answer |
 | `efficiency` | 0.10 | meaningful tool-call count ≤ `max_tool_calls` |
 | `feedback` | 0.30 | (feedback scenarios) `tracedecay_fact_feedback` called `helpful` on the seeded fact |
@@ -281,8 +278,9 @@ hooks + skills + MCP together, so cleanly removing *one* channel requires a
 hermetic, componentized plugin. For every condition `run.sh`:
 
 * copies `plugin/` into `$work/plugins/<condition>` and strips the ablated part
-  (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` for
-  `no-skills`/`bare`, and MCP manifests for `cli-only`),
+  (`hooks/*.json` for `no-hints`/`bare`/`cli-only`, `skills/` plus
+  `commands/` for `no-skills`/`bare` — Claude exposes plugin commands as
+  `tracedecay:*` skills too — and MCP manifests for `cli-only`),
   substituting the hook binary path;
 * launches `claude` with a throwaway `HOME`, `--setting-sources project,local`
   (drops the ambient user config, global plugin, and user `CLAUDE.md`),
@@ -354,3 +352,68 @@ the fixture project path (recorded + ingested), which the fixture cannot
 reproduce deterministically from static files. It is kept in the corpus as a
 documented gap; wire it up once the harness can record and replay a seed session
 against the fixture path. Run it with `EVAL_INCLUDE_DEFERRED=1`.
+
+## Task routing and unnecessary calls
+
+Scenarios may declare `expected_skill` and `allowed_skills`. Omitted allowed
+skills defaults to the expected skill; explicit `[]` marks a no-skill case.
+Claude exposes plugin `commands/` as `tracedecay:*` skills alongside `skills/`,
+so a scenario whose task is exactly one workflow command's job (for example
+`check-health` for the health scorecard, `find-impact` for the impact case)
+lists that command in `allowed_skills`; routing to it is a correct workflow,
+not a false trigger.
+
+Claude Code (2.1.x) defers MCP tool schemas behind `ToolSearch` once a server's
+definitions exceed its context budget; only tools the server marks
+`anthropic/alwaysLoad` are in the prompt from turn one. For TraceDecay that is
+a small core (`search`, `grep`, `context`, `callers`, `status`,
+`active_project`, `storage_status`). Every other graph tool — `impact`,
+`health`, `redundancy`, `affected_tests`, `body`, `outline`, `rename_preview`
+— is a name the model must load first. Read `bare`/`no-skills` adoption with
+that in mind: "pure MCP-description pull" only applies to the always-loaded
+core, and a `ToolSearch` call in a transcript marks the model discovering a
+deferred tool, not an unnecessary detour.
+`max_tracedecay_calls` bounds graph/CLI calls independently of `max_tool_calls`.
+The grader reports per-skill true positives, misses, false positives, and no-skill
+over-trigger counts. Explicit host invocation is evidence; prose naming a skill
+is not. Skill routing does not replace or increase the task-outcome subscore.
+
+Neighbor scenarios distinguish exploration, tracing, impact, review, structural
+editing, and health. Negative cases cover known files, supplied documentation,
+local comment suggestions, and clarification. These are routing checks, not proof
+of an applied edit. Ground-truth fragments are a bounded answer check and still
+need transcript review; plausible prose is not evidence of persisted effects.
+
+Compare full, no-skills, and bare conditions on the same cases. Claude supports
+these existing conditions; the runner currently skips non-full Codex conditions.
+Adoption rate alone is descriptive, not a success target. Retained legacy
+first-tool preferences are scenario-specific; native reads are not intrinsically
+failures. Review outcomes, first useful action, unnecessary calls, and routing
+errors together. Offline self-tests verify grading only, not live skill quality.
+
+Skill-routing counts currently cover Claude's explicit Skill invocation events.
+Codex native exec/read skill loading is not reliably normalized as invocation;
+Codex routing is reported as unmeasured and excluded from TP/FN/FP and no-skill
+denominators. Its task outcomes and tool efficiency remain measured.
+
+The evaluator uses its own isolation re-entry flag. An existing general daemon
+harness does not bypass evaluator HOME/XDG or working-directory isolation; the
+evaluator creates its own daemon profile before launching host processes.
+
+## Evaluating writer-generated routing cases
+
+The same runner accepts `EVAL_SCENARIOS_DIR=/absolute/path/to/cases` (default:
+checked-in `scenarios`). Read a writer's advertised artifact through the supported
+verified artifact view. Export its `proposed_ops.skills[*].routing_validation`
+objects, or the original output's `skills[*].routing_validation`, as one scenario
+object per file in a fresh directory. Use fixed-index filenames such as
+`case-0001.json`; never derive filesystem paths from generated ids. Keep each
+case's neutral prompt, expected/allowed skills, ground truth, and call budgets
+unchanged. Scenario ids must be unique safe basename identifiers because they
+identify transcript outputs.
+
+Run `python3 evals/agent_adoption/grade.py --lint-only --scenarios /absolute/path/to/cases`
+before scheduling the existing runner with that directory and a pinned candidate
+binary. Use bounded host/model/condition selections. Validation of proposed
+cases is not a live routing result; retain the resulting transcripts and task
+outcomes before claiming effectiveness.

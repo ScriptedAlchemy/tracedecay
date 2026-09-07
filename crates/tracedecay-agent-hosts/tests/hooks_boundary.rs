@@ -1,12 +1,20 @@
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tracedecay_agent_hosts::hooks::{
     HookWorkspaceStatus, build_codex_session_context_for_workspace, codex_apply_patch_rel_paths,
     cursor_session_start_json, native_capture_material,
 };
+use tracedecay_agent_hosts::ports::hook_runtime;
+use tracedecay_application::ResolvedScope;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ProjectId, UtcMicros};
-use tracedecay_hooks::{HookHostV1, NativeHookCaptureSourceV1, NativeHookDecodeError};
+use tracedecay_hooks::{
+    DaemonHookEvent, HookHostV1, NativeHookCaptureSourceV1, NativeHookDecodeError,
+};
+use tracedecay_runtime_core::storage::StoreLayout;
 
 #[test]
 fn codex_unindexed_workspace_context_preserves_tool_routing() {
@@ -94,48 +102,90 @@ fn installed_but_unsupported_events_remain_successful_noop_candidates() {
     ));
 }
 
-/// No composition root runs in this test binary, so the hook runtime handle is
-/// absent — the one condition, reported the same way by every reader instead
-/// of nine per-capability defaults.
+/// Two independently constructed handles coexist in one process and each
+/// answers only for itself: there is no slot to win, so the fixture that
+/// built the second handle cannot inherit the first one's capabilities.
 #[tokio::test]
-async fn an_uninstalled_hook_runtime_is_reported_as_a_bootstrap_failure() {
-    use tracedecay_agent_hosts::ports::hook_runtime;
+async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
+    fn runtime(
+        timing_gate: hook_runtime::HookTimingGate,
+        daemon_tool: hook_runtime::DaemonToolInvoker,
+    ) -> hook_runtime::HookRuntimeV1 {
+        fn project_root(_: &Path) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + '_>> {
+            Box::pin(async { None })
+        }
+        fn scope(_: &Path, _: &ProjectId) -> Result<ResolvedScope, String> {
+            Err("fixture has no scope resolver".to_owned())
+        }
+        fn notify(_: &Path, _: DaemonHookEvent) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async {})
+        }
+        fn initialized(_: &Path) -> bool {
+            false
+        }
+        fn layout(
+            _: &Path,
+        ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<StoreLayout>> + Send + '_>>
+        {
+            Box::pin(async {
+                Err(TraceDecayError::Config {
+                    message: "fixture has no store layout".to_owned(),
+                })
+            })
+        }
+        hook_runtime::HookRuntimeV1 {
+            daemon_tool,
+            project_root_resolver: project_root,
+            scope_resolver: scope,
+            event_notifier: notify,
+            timing_gate,
+            project_initialization_gate: initialized,
+            store_layout_resolver: layout,
+        }
+    }
+    fn timings_on(_: &Path) -> Option<bool> {
+        Some(true)
+    }
+    fn timings_off(_: &Path) -> Option<bool> {
+        Some(false)
+    }
+    fn tool_first<'a>(
+        _: Option<&'a Path>,
+        _: &'a str,
+        _: Value,
+        _: bool,
+    ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<Value>> + Send + 'a>> {
+        Box::pin(async { Ok(json!({ "handle": "first" })) })
+    }
+    fn tool_second<'a>(
+        _: Option<&'a Path>,
+        _: &'a str,
+        _: Value,
+        _: bool,
+    ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<Value>> + Send + 'a>> {
+        Box::pin(async {
+            Err(TraceDecayError::Config {
+                message: "second handle has no daemon".to_owned(),
+            })
+        })
+    }
 
-    assert!(
-        hook_runtime::installed().is_none(),
-        "this binary has no composition root"
-    );
+    let first = runtime(timings_on, tool_first);
+    let second = runtime(timings_off, tool_second);
+    let root = Path::new("/workspace/project");
 
-    let error = hook_runtime::daemon_tool_json(None, "tracedecay_status", json!({}), false)
-        .await
-        .expect_err("an uninstalled hook runtime must not fabricate success");
-    assert!(error.to_string().contains("never installed HookRuntimeV1"));
-
-    let scope_error = hook_runtime::resolve_hook_scope(
-        Path::new("/workspace/project"),
-        &ProjectId::new("project.hooks-boundary").expect("valid project id"),
-    )
-    .expect_err("an uninstalled hook runtime must not fabricate a scope");
-    assert!(scope_error.contains("never installed HookRuntimeV1"));
-
-    let layout_error = hook_runtime::resolve_store_layout(Path::new("/workspace/project"))
-        .await
-        .expect_err("an uninstalled hook runtime must not fabricate a layout");
-    assert!(
-        layout_error
-            .to_string()
-            .contains("never installed HookRuntimeV1")
-    );
-
-    // Readers whose signature cannot carry the failure log it and answer
-    // conservatively; none of them substitutes a plausible production value.
-    assert!(
-        hook_runtime::resolve_project_root_with_identity(Path::new("/workspace/project"))
+    assert_eq!(first.hook_timings_enabled(root), Some(true));
+    assert_eq!(second.hook_timings_enabled(root), Some(false));
+    assert_eq!(
+        first
+            .daemon_tool_json(None, "tracedecay_status", json!({}), false)
             .await
-            .is_none()
+            .expect("first handle's daemon answers"),
+        json!({ "handle": "first" })
     );
-    assert!(hook_runtime::hook_timings_enabled(Path::new("/workspace/project")).is_none());
-    assert!(!hook_runtime::is_project_initialized(Path::new(
-        "/workspace/project"
-    )));
+    let error = second
+        .daemon_tool_json(None, "tracedecay_status", json!({}), false)
+        .await
+        .expect_err("second handle must not borrow the first handle's daemon");
+    assert!(error.to_string().contains("second handle has no daemon"));
 }

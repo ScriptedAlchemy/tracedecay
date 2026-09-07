@@ -1,154 +1,36 @@
 ---
 name: managing-session-context
-description: 'Use when you need LCM, session search, transcript search, raw past-session replay, scoped/time grep, summary-DAG drill-down, branch/worktree/commit history, workflow recovery, post-compaction context recovery, or read-only LCM diagnosis.'
+description: 'Recover raw prior-session messages, temporal or Git-scoped history, summary sources, or post-compaction context; inspect read-only LCM health.'
 ---
 
 # Managing session context
 
-This is the read-only session retrieval and health workflow. Compression
-admission and session-boundary writes are daemon-owned host integrations, not
-agent-callable tools. Never reconstruct those operations from chat content or
-substitute an agent-generated summary for an authenticated host payload.
-Doctor is separately safe for read-only diagnosis, never casual recall.
+Use message search to locate an ingested conversation, scoped temporal grep to
+narrow it, and lossless session replay for exact messages. Durable decisions and
+facts belong to `project-memory`. Cross-project retrieval must select the
+registered target store rather than implicitly searching the active project.
 
-For durable *decisions and facts* (rather than raw conversation), start with
-`tracedecay:project-memory` instead — it owns the FTS → fact lane of
-`tracedecay_message_search`; this skill owns the FTS → LCM lane.
+Summary-DAG description locates a node without opening its body; expansion opens
+its bounded sources. Continue using the returned opaque cursor unchanged with
+the same target and slice bounds. Never manufacture a cursor from row numbers.
+When expansion says `needs_synthesis`, synthesize from its bounded context rather
+than presenting a direct answer as authoritative.
 
-## Retrieval ladder (read-only, start here)
+Preserve coverage, anchors, watermarks, redaction, and hidden-content notices.
+Partial coverage does not prove content never existed. Git-scoped session
+relations distinguish produced from observed commits; workflow recovery reads
+`wf_*` session runs, not the Workflow definition/run mutation surface.
 
-Climb cheapest-first; stop as soon as the question is answered. For
-cross-project or sibling-repo session search, first resolve the target project
-with `tracedecay_project_search`/`tracedecay_project_context`, then pass
-`project_id`, `project_path`, or `project_selector` to
-`tracedecay_message_search` instead of searching the active project by accident.
+Recall does not ingest or refresh. A `refresh_required` result needs authorized
+lifecycle intent before refresh begin. Preserve returned project/profile scope
+and opaque handles through status or cancellation; only receipt-backed success
+proves durable cancellation. Never route a profile refresh through an arbitrary
+active project or reconstruct its authority from chat text.
 
-1. **Fast full-text recall → `tracedecay_message_search`:** FTS over ingested
-   transcripts, returning messages and session ids. Its defaults are
-   `provider=all`, `include_subagents=true`, `scope=all`, `message_type=all`,
-   `limit=10`, and `catch_up=false`; it never ingests or refreshes data.
-2. **Scoped temporal grep → `tracedecay_lcm_grep`:** bounded raw-message
-   snippets with `query`, `scope` (`current`|`session`|`all`), `session_id`,
-   role/source/time filters, and an opaque cursor. It defaults to
-   `temporal_mode=current`, `relationship_scope=all`, `message_type=all`,
-   `include_summaries=false`, and `sort=relevance`.
-3. **Lossless temporal replay → `tracedecay_lcm_load_session`:** ordered raw
-   messages for one `session_id`, with `roles` and bounded
-   `content_offset`/`content_limit` slices. It defaults to
-   `temporal_mode=forensic`. Continue only with the returned opaque
-   `next_cursor` unchanged; never manufacture a continuation from an offset or
-   row number.
-4. **Summary-DAG drill-down:** use `tracedecay_lcm_describe` (`provider`,
-   `session_id`, optional target) to inspect a session or node without opening
-   its body, then `tracedecay_lcm_expand` (`provider`, `session_id`, target) to
-   open one raw message, summary node, or external payload. Bound immediate
-   summary sources with `source_limit`. Continue only with the
-   returned opaque `next_cursor` unchanged with the same target, source limit, and content slice;
-   changing a bound continuation input is denied. For a bounded prompt
-   context, `tracedecay_lcm_expand_query` takes `provider`, `session_id`, and
-   `prompt`: when it returns `needs_synthesis=true`, the host must synthesize
-   from the bounded context; use its direct answer only when synthesis is not
-   needed.
-5. **Read temporal bounds:** inspect every response's `coverage`, `anchors`,
-   watermarks, and explanations. Partial, hidden, or redacted coverage is not
-   evidence that content never existed; retain anchors when citing or drilling
-   further.
-6. **Git-scoped session lookup → `tracedecay_sessions_for` /
-   `tracedecay_session_lookup`:** use `git_ref`
-   (`branch`|`worktree`|`commit`) and `value`, optionally `since`/`until`.
-   Commit queries default to `relation=produced` and `limit=20`; feed returned
-   session ids back into rungs 2–4.
-7. **Workflow-run recovery → `tracedecay_workflows`:** recover multi-agent
-   `wf_*` runs and their per-phase agents. List a parent thread with
-   `session_id`, list by `branch`/`worktree`/`commit`, inspect a `run_id`, or
-   drill into `run_id` + `agent_label`; its default is `limit=20`. Then scope
-   `tracedecay_message_search` with `workflow_run` and optional
-   `workflow_agent`, or replay with rungs 3–4.
+Compression admission and session boundaries are authenticated daemon-owned
+host operations, not agent-generated summaries or callable recall operations.
+LCM doctor is bounded read-only diagnosis, with no repair or cleanup controls.
 
-Use `tracedecay_lcm_status` to inspect counts, token estimates, DAG
-depth/compression ratio, and payload health.
-
-On Hermes, the context engine exposes native aliases `lcm_grep`,
-`lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
-`lcm_status`, and `lcm_doctor` for their matching TraceDecay LCM commands.
-Use the native alias's schema when it is offered: for example,
-`lcm_grep` uses `session_scope` and `time_from`/`time_to`, while
-`lcm_load_session` uses `max_content_chars`. Do not mix those host aliases with
-canonical command fields, and do not assume the aliases exist in another host.
-
-After a compaction, if prior-session context seems missing, run this ladder
-before assuming the compacted summary is complete.
-
-## Freshness is explicit
-
-Recall never performs catch-up. If a read returns `refresh_required`, get clear
-host or user lifecycle intent before starting refresh. Preserve the exact scope
-returned by the read:
-
-- For a project-scoped read with authoritative project identity, call
-  `tracedecay_session_refresh_begin`, preserve its opaque handle, inspect it
-  with the read-only `tracedecay_session_refresh_status`, and call
-  `tracedecay_session_refresh_cancel` only on an explicit cancellation request.
-- For an authorized profile-root read, use the compatibility
-  `tracedecay_session_refresh` lifecycle (`action`: `start` / `join` / `resume`
-  / `begin`, then `status` or `cancel`) with the same profile selectors. The
-  split tools require project identity and must not redirect a profile refresh
-  through whichever project happens to be active.
-
-Only a receipt-backed success proves durable cancellation. The
-`tracedecay sessions refresh begin|status|cancel` CLI follows the same
-scope-preserving rule. Never reconstruct refresh identity from chat text or a
-filesystem path.
-
-## LCM status and diagnosis
-
-Compression admission and session boundaries are daemon-owned host lifecycle
-operations. They are not callable MCP tools and must not be reconstructed from
-chat content.
-
-- **Status → `tracedecay_lcm_status`** (optional `provider`, `session-id`,
-  `deep`): schema/message/summary/payload counts, token estimates, summary
-  depth distribution + compression ratio, payload byte totals, and GC status.
-  Read-only; `deep: true` adds an on-disk integrity sweep.
-- **Doctor → `tracedecay_lcm_doctor`** (no arguments): bounded, redacted
-  store-wide temporal health report through the daemon-owned LCM authority —
-  integrity findings and retention or cleanup candidates without payload
-  bodies. Doctor has no repair, clean, garbage-collection, or apply controls;
-  daemon-owned maintenance owns any later action.
-
-## Guardrails
-
-- Recall and inspection tools in this workflow, including refresh status, are
-  read-only; grep/status may touch access counters. Refresh begin and cancel
-  are lifecycle mutations, require clear intent, and cancellation is proven
-  only by receipt-backed success. Neither path compacts, repairs, cleans, or
-  applies maintenance state.
-- When a read supports `provider`, use an exact provider for provider-local
-  evidence or `all` only where its schema permits aggregation.
-- For multi-step recall, dispatch scoped read-only subagents by session id, time
-  window, provider, role, or query variant. The parent agent validates cited
-  messages/summaries and produces the final timeline.
-
-## Handoff
-
-- Durable decisions/facts and persisting new ones → `tracedecay:project-memory`.
-- Dereferencing a truncated response handle → `tracedecay:using-the-cli`.
-- CLI fallback when MCP transport fails → `tracedecay:using-the-cli`.
-
-## If tools are deferred or MCP fails
-
-- Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_describe,tracedecay_lcm_expand,tracedecay_lcm_expand_query,tracedecay_lcm_status,tracedecay_sessions_for,tracedecay_workflows,tracedecay_session_refresh,tracedecay_session_refresh_begin,tracedecay_session_refresh_status,tracedecay_session_refresh_cancel,tracedecay_project_search,tracedecay_project_context`
-  (one batched call, add only the rungs needed) — then call normally.
-- MCP transport error/timeout/disconnect: use the same tool and args via the
-  CLI only while the daemon remains available (see
-  `tracedecay:using-the-cli`). Preserve an unavailable or intentionally held
-  daemon; report the gap instead of retrying or changing lifecycle. Never
-  query `.tracedecay` databases directly.
-
-## Deliverable
-
-Do not end this workflow without: (recall) the messages/summaries found with
-session ids and timestamps, and which rung answered the question; or
-(health) the store counts, compression ratio, and bounded health signals.
-Report any `tracedecay_metrics:` line to the user.
+Hermes native LCM aliases have their own schemas (for example session_scope and
+max_content_chars); do not mix alias fields with canonical command fields or
+assume those aliases exist on another host.

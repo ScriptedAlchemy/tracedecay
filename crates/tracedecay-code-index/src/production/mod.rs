@@ -35,10 +35,7 @@ use super::{
     },
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1},
-    incremental::{
-        ChunkIncrementErrorV1, GenerationChunkManifestV1, materialize_generation_increment,
-        plan_chunk_increment,
-    },
+    incremental::{ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment},
     intake::{
         CodeIndexIntake, ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1,
         SanitizedCodeIntake, SanitizedSnapshotCapabilityV1,
@@ -344,7 +341,7 @@ pub trait CodeIndexAtomicPublicationPort {
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1>;
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1>;
 
     fn publish_atomically(
         &mut self,
@@ -373,7 +370,6 @@ enum IncrementFileMaterializationV1 {
     ReExtracted {
         reuse_key: ManifestDigest,
         artifact: Arc<FileGenerationArtifactsV1>,
-        fallback: bool,
     },
     Deleted,
 }
@@ -1384,7 +1380,7 @@ pub enum CodeIndexProductionErrorV1 {
 /// or the prior-label incumbent after a same-checkout label move that must
 /// rebuild while still replacing the worktree slot atomically.
 struct ActiveGenerationLookupV1 {
-    reusable: Option<CodeIndexPublishedGenerationV1>,
+    reusable: Option<Arc<CodeIndexPublishedGenerationV1>>,
     cas_incumbent: Option<CodeGenerationId>,
 }
 
@@ -1453,7 +1449,7 @@ where
     pub fn active_generation(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexProductionErrorV1> {
         Ok(self.lookup_active_generation(scope)?.reusable)
     }
 
@@ -1682,7 +1678,7 @@ where
             .emit(&manifest)
             .map_err(CodeIndexProductionErrorV1::Capability)?;
             let projection_request = projection_request(
-                active.as_ref(),
+                active.as_deref(),
                 increment.as_ref(),
                 request.target_projection_key,
                 changes,
@@ -2126,7 +2122,6 @@ where
                             Ok(IncrementFileMaterializationV1::ReExtracted {
                                 reuse_key,
                                 artifact,
-                                fallback: true,
                             })
                         }
                     }
@@ -2149,7 +2144,6 @@ where
                         Ok(IncrementFileMaterializationV1::ReExtracted {
                             reuse_key,
                             artifact,
-                            fallback: false,
                         })
                     }
                     FileExtractionActionV1::Deleted { .. } => {
@@ -2161,9 +2155,6 @@ where
         )?;
 
         let mut files = Vec::new();
-        let mut reextracted_files = Vec::new();
-        let mut reextracted_symbols = Vec::new();
-        let mut used_reextraction_fallback = false;
 
         for materialization in file_materializations {
             Self::checkpoint(control)?;
@@ -2172,14 +2163,8 @@ where
                 IncrementFileMaterializationV1::ReExtracted {
                     reuse_key,
                     artifact,
-                    fallback,
                 } => {
                     physical_artifacts.insert(reuse_key, &artifact);
-                    used_reextraction_fallback |= fallback;
-                    if !fallback {
-                        reextracted_files.push(artifact.artifacts.chunks.clone());
-                        reextracted_symbols.extend(artifact.artifacts.symbols.clone());
-                    }
                     files.push(artifact);
                 }
                 IncrementFileMaterializationV1::Deleted => {}
@@ -2187,44 +2172,11 @@ where
         }
         Self::checkpoint(control)?;
 
-        if used_reextraction_fallback {
-            let mut staged = staged_generation(manifest.generation_id.clone(), files, Vec::new())?;
-            staged.lineage = SymbolLineageResolver::new()
-                .resolve(&active.symbols, &staged.symbols)
-                .map_err(CodeIndexProductionErrorV1::Lineage)?;
-            return Ok(staged);
-        }
-
-        let prior_files = active
-            .files
-            .iter()
-            .map(|file| file.artifacts.chunks.clone())
-            .collect::<Vec<_>>();
-        let materialized = materialize_generation_increment(
-            increment,
-            manifest.generation_id.clone(),
-            &prior_files,
-            reextracted_files,
-            &active.symbols,
-            reextracted_symbols,
-        )
-        .map_err(CodeIndexProductionErrorV1::Increment)?;
-        let expected = staged_generation(
-            manifest.generation_id.clone(),
-            files,
-            materialized.lineage.clone(),
-        )?;
-        if expected.chunks != materialized.chunks || expected.symbols != materialized.symbols {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "incremental materialization disagrees with file evidence".to_owned(),
-            ));
-        }
-        Ok(StagedGenerationV1 {
-            chunks: materialized.chunks,
-            symbols: materialized.symbols,
-            lineage: materialized.lineage,
-            files: expected.files,
-        })
+        let mut staged = staged_generation(manifest.generation_id.clone(), files, Vec::new())?;
+        staged.lineage = SymbolLineageResolver::new()
+            .resolve(&active.symbols, &staged.symbols)
+            .map_err(CodeIndexProductionErrorV1::Lineage)?;
+        Ok(staged)
     }
 }
 

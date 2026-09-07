@@ -37,14 +37,24 @@ use super::{
 
 pub struct KiroIntegration;
 
-const PROMPT_MARKER: &str = "## TraceDecay: mandatory tool routing";
-/// Heading an older tracedecay version wrote for the same steering block. An
-/// existing install carries this marker (with the same [`PROMPT_END_MARKER`]),
-/// so install/uninstall/doctor must recognize it too — otherwise a reinstall
-/// appends the new block and strands the old one (duplicate steering), and
+/// Ownership sentinels of the tracedecay steering block. The end sentinel is
+/// the one shipped releases already wrote; the start sentinel replaces the
+/// heading text as the block's identity so wording can change without another
+/// marker migration.
+const STEERING_SENTINELS: super::prompt_rules::OwnedBlockSentinels =
+    super::prompt_rules::OwnedBlockSentinels {
+        start: "<!-- tracedecay:kiro:start -->",
+        end: "<!-- tracedecay:kiro:end -->",
+    };
+/// Heading markers shipped releases (through v0.1.0-beta.37) used as the
+/// block's identity. An existing install carries one of them, usually closed by
+/// the same end sentinel, so update and uninstall must recognize them —
+/// otherwise a reinstall appends the new block and strands the old one, and
 /// uninstall never removes it.
-const PROMPT_MARKER_LEGACY: &str = "## Prefer tracedecay MCP tools";
-const PROMPT_END_MARKER: &str = "<!-- tracedecay:kiro:end -->";
+const HISTORICAL_STEERING_HEADINGS: [&str; 2] = [
+    "## TraceDecay: mandatory tool routing",
+    "## Prefer tracedecay MCP tools",
+];
 const KIRO_AGENT_NAME: &str = "tracedecay";
 const OWNED_AGENT_DESCRIPTION: &str =
     "Default Kiro agent with tracedecay MCP tools and code-research guardrails.";
@@ -691,104 +701,55 @@ fn is_builtin_default_agent(agent: &str) -> bool {
 }
 
 /// Add or refresh tracedecay's global steering resource for default Kiro
-/// sessions. When the marker is present but the block content is stale (an
-/// older tracedecay version wrote it), the block is replaced in place: a
-/// marker-to-end-marker splice when the owned end marker exists, otherwise
-/// the generic marker-to-next-heading strip plus a fresh append.
+/// sessions. Every owned block — the current sentinel-delimited shape or a
+/// historical heading-marked one — converges onto exactly one copy of the
+/// current block in place; operator text around it is preserved.
 fn install_steering_rules(path: &Path) -> Result<()> {
-    let block = prompt_rules_text();
+    let block = steering_block_text();
     super::prompt_rules::reconcile_prompt_rules_with(path, |existing| {
-        if existing.contains(&block) {
-            return Ok(super::prompt_rules::PromptRulesEdit::Unchanged);
-        }
-        if contains_prompt_marker(existing) {
-            if let Some(range) = tracedecay_prompt_block_range(existing) {
-                let mut new_contents = String::with_capacity(existing.len() + block.len());
-                new_contents.push_str(&existing[..range.start]);
-                new_contents.push_str(&block);
-                new_contents.push_str(&existing[range.end..]);
-                return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
-                    new_contents,
-                ));
-            }
-            let marker = if existing.contains(PROMPT_MARKER) {
-                PROMPT_MARKER
-            } else {
-                PROMPT_MARKER_LEGACY
-            };
-            let stripped =
-                super::prompt_rules::strip_heading_block(existing, marker).ok_or_else(|| {
-                    TraceDecayError::Config {
-                        message: format!(
-                            "could not isolate tracedecay steering block in {}",
-                            path.display()
-                        ),
-                    }
-                })?;
-            return Ok(super::prompt_rules::PromptRulesEdit::Refreshed(
-                super::prompt_rules::refreshed_contents(&stripped, &block),
-            ));
-        }
-        let separator = if existing.trim().is_empty() {
-            ""
-        } else {
-            "\n\n"
-        };
-        Ok(super::prompt_rules::PromptRulesEdit::Added(format!(
-            "{existing}{separator}{block}\n"
-        )))
+        let ranges = owned_steering_ranges(existing);
+        Ok(super::prompt_rules::converge_owned_block(
+            existing, &ranges, &block,
+        ))
     })
 }
 
-fn prompt_rules_text() -> String {
-    format!(
-        "{}\n\n{}",
-        prompt_rules_text_without_end_marker(),
-        PROMPT_END_MARKER
-    )
+fn steering_block_text() -> String {
+    STEERING_SENTINELS.render(&steering_guidance_text())
 }
 
-fn prompt_rules_text_without_end_marker() -> String {
+fn steering_guidance_text() -> String {
     format!(
-        "## TraceDecay: mandatory tool routing\n\n\
-This project has a live TraceDecay code graph. If there is even a 1% chance a \
-tracedecay tool applies, you MUST use it BEFORE Kiro's file reads, codebase scan, \
-or `delegate`. This is a mandate, not a preference — you cannot rationalize your \
-way out of it.\n\n\
-| The moment you are in | Do this first |\n\
-|---|---|\n\
-| Searching for literal/regex code text | `tracedecay_grep` |\n\
-| Searching for a symbol or concept | `tracedecay_search` (names) or `tracedecay_context` (concepts) |\n\
-| About to read a source file | `tracedecay_outline` -> `tracedecay_body` -> `tracedecay_read` slices |\n\
-| \"Who calls X\" / \"what does X call\" / \"trace this\" | `tracedecay_callers` / `tracedecay_callees` |\n\
-| About to change code, wondering what breaks | `tracedecay_impact` / `tracedecay_diff_context` / `tracedecay_affected` |\n\
-| Project / storage identity question | `tracedecay_active_project` / `tracedecay_storage_status` |\n\
-| A prior decision or past conversation is referenced | `tracedecay_message_search` / `tracedecay_lcm_expand_query` |\n\n\
-| Red-flag thought | Reality |\n\
-|---|---|\n\
-| \"Grep is faster for this\" | `tracedecay_grep` handles literal/regex code search; `tracedecay_search` is pre-ranked for names. |\n\
-| \"I'll just read the whole file\" | `tracedecay_outline` / `tracedecay_body` answer at a fraction of the tokens. |\n\
-| \"This is a simple lookup\" | Simple lookups are exactly what the graph is for. |\n\
-| \"I already know this codebase\" | The graph is fresher than your memory. Check it. |\n\n\
-SUBAGENT-STOP: if you were handed the exact files, symbols, or excerpts to act on, \
-do NOT re-run discovery — act on what you were given. Explicit user instructions and \
-project rules (CLAUDE.md / AGENTS.md) win over this mandate; the mandate wins over the \
-default \"just grep it\" habit. Never fight a direct instruction to satisfy it.\n\n\
-Do not use Kiro's `delegate` tool for codebase exploration, architecture mapping, \
-call graph work, symbol lookup, or other code research until tracedecay MCP tools \
-have been tried. Delegation is still appropriate for long-running execution work \
-such as builds, tests, generated reports, or independent implementation tasks.\n\n\
-For durable project/user facts, use `tracedecay_fact_store_add` to persist them and \
-`tracedecay_fact_store_search` to recall or deduplicate them; use \
-`tracedecay_fact_feedback` and read-only `tracedecay_memory_status` over ad-hoc notes. Do not \
-store secrets, credentials, or unnecessary PII in persistent facts. Use \
-`memory_scope=user` for durable preferences or projectless chat and \
-`memory_scope=project` for active-codebase facts.\n\n\
+        "## TraceDecay code intelligence\n\n\
+This project has a TraceDecay code graph exposed as `tracedecay_*` MCP tools. Use it \
+when the task is about code structure, callers, impact, or where something lives; use \
+Kiro's native file reads and edits for known files, ordinary local edits, and \
+non-indexed material.\n\n\
+Routing:\n\
+- Literal or regex text in code: `tracedecay_grep`.\n\
+- A symbol by name: `tracedecay_search`; a concept or \"how does X work\": `tracedecay_context`.\n\
+- A source file you have not seen: `tracedecay_outline`, then `tracedecay_body` / \
+`tracedecay_read` slices.\n\
+- Callers, callees, call chains: `tracedecay_callers` / `tracedecay_callees`.\n\
+- What a change breaks: `tracedecay_impact`, `tracedecay_diff_context`, `tracedecay_affected`.\n\
+- Project or storage identity: `tracedecay_active_project` / `tracedecay_storage_status`, \
+not repo-local marker files or database paths.\n\
+- Prior decisions or conversations: `tracedecay_message_search` / `tracedecay_lcm_expand_query`.\n\n\
+Read the freshness and coverage line that opens each result; an empty result does not \
+prove absence. When you were handed the exact files, symbols, or excerpts to act on, act \
+on them instead of re-running discovery. Explicit user instructions and project rules win \
+over this guidance.\n\n\
+Kiro's `delegate` fits long-running execution such as builds, tests, generated reports, \
+and independent implementation; code research is usually answered faster by the graph.\n\n\
+For durable project/user facts, `tracedecay_fact_store_add` persists and \
+`tracedecay_fact_store_search` recalls or deduplicates them; prefer `tracedecay_fact_feedback` \
+and read-only `tracedecay_memory_status` over ad-hoc notes. Use `memory_scope=user` for \
+durable preferences or projectless chat and `memory_scope=project` for active-codebase \
+facts. Do not store secrets, credentials, or unnecessary PII in persistent facts.\n\n\
 {cli_fallback}\n\n\
-If you discover a gap where an extractor, schema, or tracedecay tool could answer a \
-question natively, propose opening an issue at \
-https://github.com/ScriptedAlchemy/tracedecay. Remind the user to strip sensitive \
-or proprietary code from the bug description before submitting.",
+If an extractor, schema, or tracedecay tool could answer a question natively but does \
+not, propose opening an issue at https://github.com/ScriptedAlchemy/tracedecay and remind \
+the user to strip sensitive or proprietary code from the description first.",
         cli_fallback = super::CLI_FALLBACK_PROMPT_RULES,
     )
 }
@@ -809,22 +770,11 @@ fn uninstall_mcp_server(path: &Path) -> Result<()> {
     )
 }
 
+/// Remove every tracedecay-owned steering block, current or historical.
 fn remove_steering_rules(path: &Path) -> Result<()> {
     super::prompt_rules::remove_prompt_rules_with(path, |contents| {
-        if !contains_prompt_marker(contents) {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        }
-        let Some(range) = tracedecay_prompt_block_range(contents) else {
-            return Ok(super::prompt_rules::PromptRulesRemoval::Unchanged);
-        };
-        let new_contents = super::prompt_rules::splice_out(contents, range.start, range.end);
-        if new_contents.is_empty() {
-            Ok(super::prompt_rules::PromptRulesRemoval::Remove)
-        } else {
-            Ok(super::prompt_rules::PromptRulesRemoval::Rewrite(format!(
-                "{new_contents}\n"
-            )))
-        }
+        let ranges = owned_steering_ranges(contents);
+        Ok(super::prompt_rules::remove_owned_blocks(contents, &ranges))
     })
 }
 
@@ -892,25 +842,43 @@ fn kiro_context_mcp_registration_state(
     State::Current
 }
 
-/// True when the steering file carries either the current or the legacy
-/// tracedecay block marker.
-fn contains_prompt_marker(contents: &str) -> bool {
-    contents.contains(PROMPT_MARKER) || contents.contains(PROMPT_MARKER_LEGACY)
+/// Every tracedecay-owned steering range in document order: current
+/// sentinel-delimited blocks plus historical heading-marked ones.
+fn owned_steering_ranges(contents: &str) -> Vec<Range<usize>> {
+    super::prompt_rules::owned_block_ranges(contents, first_owned_steering_range)
 }
 
-/// Byte range of the tracedecay steering block, starting at whichever marker
-/// (current or legacy) appears first and running to the owned end marker. The
-/// legacy block carries the same [`PROMPT_END_MARKER`], so a legacy install is
-/// spliced/removed in place exactly like a current one.
-fn tracedecay_prompt_block_range(contents: &str) -> Option<Range<usize>> {
-    let start = [PROMPT_MARKER, PROMPT_MARKER_LEGACY]
+/// Earliest owned block at or after `from`. A historical heading block runs to
+/// the shipped end sentinel when that sentinel closes it before any other
+/// boundary; otherwise it ends at the next heading, the managed skill index, a
+/// current start sentinel, or EOF — the shape the oldest installs wrote.
+fn first_owned_steering_range(contents: &str, from: usize) -> Option<Range<usize>> {
+    let current = STEERING_SENTINELS.block_range(contents, from);
+    let historical = HISTORICAL_STEERING_HEADINGS
         .iter()
-        .filter_map(|marker| contents.find(marker))
-        .min()?;
-    let marker = PROMPT_END_MARKER;
-    let end_marker = contents[start..].find(marker)?;
-    let end = start + end_marker + marker.len();
-    Some(start..end)
+        .filter_map(|heading| {
+            contents[from..]
+                .find(heading)
+                .map(|at| (from + at, heading))
+        })
+        .min_by_key(|(start, _)| *start)
+        .map(|(start, heading)| {
+            let body_from = start + heading.len();
+            let boundary = super::prompt_rules::historical_heading_block_end(
+                contents,
+                body_from,
+                STEERING_SENTINELS,
+            );
+            let end = contents[body_from..boundary]
+                .find(STEERING_SENTINELS.end)
+                .map_or(boundary, |at| body_from + at + STEERING_SENTINELS.end.len());
+            start..end
+        });
+    match (current, historical) {
+        (Some(current), Some(historical)) if historical.start < current.start => Some(historical),
+        (Some(current), _) => Some(current),
+        (None, historical) => historical,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,17 +1017,33 @@ fn doctor_check_steering(dc: &mut DoctorCounters, home: &Path) {
         dc.warn("~/.kiro/steering/tracedecay.md does not exist");
         return;
     }
-    let contents = std::fs::read_to_string(&path).unwrap_or_default();
-    if !contains_prompt_marker(&contents) {
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            dc.fail(&format!(
+                "Kiro global tracedecay.md is unreadable ({error}) -- run `tracedecay install --agent kiro`"
+            ));
+            return;
+        }
+    };
+    // Health is judged by the ownership sentinels and byte identity with the
+    // embedded block, never by prose inside it.
+    let ranges = owned_steering_ranges(&contents);
+    if ranges.is_empty() {
         dc.fail(
             "Kiro global tracedecay.md missing tracedecay rules -- run `tracedecay install --agent kiro`",
         );
-    } else if tracedecay_prompt_block_range(&contents).is_none() {
-        dc.fail(
-            "Kiro global tracedecay.md contains tracedecay rules without an owned end marker -- remove the stale block and run `tracedecay install --agent kiro`",
-        );
+    } else if super::prompt_rules::owned_block_is_current(
+        &contents,
+        &ranges,
+        &steering_block_text(),
+    ) {
+        dc.pass("Kiro global tracedecay.md contains current tracedecay rules");
     } else {
-        dc.pass("Kiro global tracedecay.md contains tracedecay rules");
+        dc.fail(&format!(
+            "Kiro global tracedecay.md carries {} outdated or duplicate tracedecay block(s) -- run `tracedecay install --agent kiro` to converge them",
+            ranges.len()
+        ));
     }
 }
 
