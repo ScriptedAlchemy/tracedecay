@@ -208,10 +208,21 @@ fn polyglot_semantics_route_unique_extensions_and_fall_back_on_ambiguity() {
     let routed: Arc<dyn SemanticProviderPort + Send + Sync> = Arc::new(PendingSemanticProvider);
     let fallback: Arc<dyn SemanticProviderPort + Send + Sync> =
         Arc::new(UnavailableSemanticProvider);
-    let root = AdmittedRoot::new("file:///project");
+    let fixture = tempfile::tempdir().expect("polyglot semantic fixture");
+    let document_path = fixture.path().join("src/app.TS");
+    std::fs::create_dir_all(document_path.parent().expect("document parent"))
+        .expect("polyglot source directory");
+    std::fs::write(&document_path, b"").expect("polyglot source file");
+    let root = AdmittedRoot::new(
+        url::Url::from_directory_path(fixture.path())
+            .expect("fixture root must convert to a file URL")
+            .to_string(),
+    );
     let request_id = LspRequestId::Number(1);
     let request = SemanticRequest::DocumentSymbols {
-        document_uri: "file:///project/src/app.TS".to_string(),
+        document_uri: url::Url::from_file_path(&document_path)
+            .expect("fixture document must convert to a file URL")
+            .to_string(),
     };
 
     let unique = lsp::PolyglotSemanticProvider::new(
