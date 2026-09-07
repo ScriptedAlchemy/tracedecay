@@ -30,10 +30,12 @@
 //! retained alias whose record was revised refuses it deterministically —
 //! either way the rebuild the reset promises never happens.
 //!
-//! The derived usage (`observation_provider_usage`) and the admission cursors
-//! (`source_cursors`, `source_cursor_advances`) always reset together: leaving
-//! either behind is what would let the rebuilt authority double-count or skip
-//! the native events it re-reads.
+//! The derived usage (`observation_provider_usage`), the admission cursors
+//! (`source_cursors`, `source_cursor_advances`), and the native-source
+//! scheduling cursors in `parse_offsets` (see
+//! [`NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE`]) always reset together: leaving
+//! any of them behind is what would let the rebuilt authority double-count or
+//! skip the native events it re-reads.
 //!
 //! Two invariants bound the deletion. Rows the reset preserves must never be
 //! left pointing at rows it removes: [`PRESERVED_DEPENDENT_TABLES`] refuses
@@ -194,6 +196,19 @@ const OBSERVATION_ANCHOR_BINDING_COLUMNS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The `parse_offsets` rows that schedule native-source admission, by key
+/// namespace: per-provider coverage verdicts (`host-coverage://`), host
+/// discovery frontiers (`host-frontier://`), the discovery queue
+/// (`host-discovery-queue://`), and the internal history frontiers, corpus
+/// epochs, and provider-rotation cursors (`tracedecay-internal:`). A retained
+/// Codex epoch that says the corpus was swept, or a coverage row that says
+/// `complete`, makes the rebuilt authority skip exactly the transcripts the
+/// reset promised to re-read — so they reset with the observation cursors.
+/// The only other tenant of the table, the hook-analytics import cursor, feeds
+/// `analytics_events` and is not a derivation of observations; it stays.
+const NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE: &str =
+    "DELETE FROM parse_offsets WHERE file_path NOT LIKE 'hook_analytics:%'";
+
 /// Preserved rows that would be orphaned by the reset, with the authority
 /// they would be orphaned from.
 ///
@@ -225,6 +240,10 @@ pub struct ObservationAuthorityResetV1 {
     /// cleared because the reset observation stream bound them (see
     /// [`OBSERVATION_ANCHOR_BINDING_COLUMNS`]).
     pub cleared_retrieval_anchor_rows: u64,
+    /// Native-source scheduling cursors cleared so the next open re-reads
+    /// every provider transcript (see
+    /// [`NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE`]).
+    pub cleared_native_source_cursor_rows: u64,
 }
 
 fn reset_storage(error: rusqlite::Error) -> TraceDecayError {
@@ -430,6 +449,19 @@ fn reset_within_maintenance_transaction(
         transaction.execute_batch(sql).map_err(reset_storage)?;
     }
     let cleared_retrieval_anchor_rows = clear_observation_bound_anchors(&transaction)?;
+    let cleared_native_source_cursor_rows = if table_exists(&transaction, "parse_offsets")? {
+        u64::try_from(
+            transaction
+                .execute(NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE, [])
+                .map_err(reset_storage)?,
+        )
+        .map_err(|_| TraceDecayError::Database {
+            operation: OPERATION.to_string(),
+            message: "parse_offsets delete count overflowed".to_string(),
+        })?
+    } else {
+        0
+    };
 
     // Clear the recoverable projector output before dropping the projection
     // tables: the audit-invalidation trigger on `session_messages` reads
@@ -509,6 +541,7 @@ fn reset_within_maintenance_transaction(
         cleared_session_message_rows,
         cleared_derived_temporal_rows,
         cleared_retrieval_anchor_rows,
+        cleared_native_source_cursor_rows,
     })
 }
 

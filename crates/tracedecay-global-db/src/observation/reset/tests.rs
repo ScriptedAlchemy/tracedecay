@@ -732,6 +732,54 @@ async fn observation_bound_anchors_and_aliases_reset_with_the_stream() {
     .expect("the rebuilt authority must own the anchor identity again");
 }
 
+/// The rebuilt authority re-reads every native transcript only if nothing
+/// tells it the corpus was already swept. The Codex history frontier and
+/// corpus epoch, per-provider coverage verdicts, host discovery frontiers, and
+/// queued discovery paths all live in `parse_offsets`; a surviving `complete`
+/// verdict would leave the reset store empty forever while every read reports
+/// a healthy, current, empty projection. The hook-analytics import cursor
+/// shares the table but feeds `analytics_events`, so it stays.
+#[tokio::test]
+async fn native_source_scheduling_cursors_reset_with_the_stream() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        install_legacy_observation_shape(&raw);
+        raw.execute_batch(
+            "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id) VALUES
+                ('host-coverage://codex/v1', 0, 2, 1),
+                ('tracedecay-internal:codex-history-frontier:v2', 0, 0, 3),
+                ('tracedecay-internal:codex-history-epoch:v2', -5565623358034642743,
+                 -2743919526740859943, 1),
+                ('tracedecay-internal:project-ingest-provider-frontier:v1', 11, 0, 1),
+                ('host-frontier://kimi/discovery/v1', 0, 4, 0),
+                ('host-discovery-queue://codex/v1/L2hvbWUvcm9sbG91dA', 1, 0, 1),
+                ('hook_analytics:/project/.tracedecay/hook_analytics.jsonl', 4096, 7, 1);",
+        )
+        .expect("seed every parse-offset tenant");
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report = reset_refused_observation_authority(&mut raw)
+        .expect("scoped reset of a store with scheduling cursors");
+    assert_eq!(
+        report.cleared_native_source_cursor_rows, 6,
+        "every native-source scheduling cursor must be accounted for: {report:?}"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT group_concat(file_path, ',') FROM parse_offsets",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "hook_analytics:/project/.tracedecay/hook_analytics.jsonl",
+        "only the analytics import cursor may survive the reset"
+    );
+}
+
 /// A disposition (for example a redaction) recorded against an observation
 /// anchor is preserved evidence the reset cannot rebind, so a store carrying
 /// one refuses atomically instead of orphaning it.
