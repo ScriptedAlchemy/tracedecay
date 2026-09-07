@@ -546,8 +546,13 @@ fn destination_family_created_after_the_check_is_refused_and_kept_intact() {
         .unwrap();
     let dest_wal = with_suffix(&destination, "-wal");
     let dest_shm = with_suffix(&destination, "-shm");
-    let concurrent: Rc<RefCell<Option<(Connection, u64, Vec<u8>, Vec<u8>)>>> =
-        Rc::new(RefCell::new(None));
+    struct ConcurrentFamily {
+        writer: Connection,
+        identity: u64,
+        main_bytes: Vec<u8>,
+        wal_bytes: Vec<u8>,
+    }
+    let concurrent: Rc<RefCell<Option<ConcurrentFamily>>> = Rc::new(RefCell::new(None));
     let hook_destination = destination.clone();
     let hook_slot = Rc::clone(&concurrent);
     super::before_next_publish(move || {
@@ -556,10 +561,12 @@ fn destination_family_created_after_the_check_is_refused_and_kept_intact() {
             "the seam must run after the destination-family check found nothing"
         );
         let writer = wal_writer(&hook_destination);
-        let identity = sqlite_generation_identity(&hook_destination).unwrap();
-        let main_bytes = fs::read(&hook_destination).unwrap();
-        let wal_bytes = fs::read(with_suffix(&hook_destination, "-wal")).unwrap();
-        *hook_slot.borrow_mut() = Some((writer, identity, main_bytes, wal_bytes));
+        *hook_slot.borrow_mut() = Some(ConcurrentFamily {
+            identity: sqlite_generation_identity(&hook_destination).unwrap(),
+            main_bytes: fs::read(&hook_destination).unwrap(),
+            wal_bytes: fs::read(with_suffix(&hook_destination, "-wal")).unwrap(),
+            writer,
+        });
         Ok(())
     });
 
@@ -567,7 +574,12 @@ fn destination_family_created_after_the_check_is_refused_and_kept_intact() {
         .expect_err("a main that appeared after the check must never be replaced");
 
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    let (writer, identity, main_bytes, wal_bytes) = concurrent
+    let ConcurrentFamily {
+        writer,
+        identity,
+        main_bytes,
+        wal_bytes,
+    } = concurrent
         .borrow_mut()
         .take()
         .expect("the seam must have created the concurrent destination family");

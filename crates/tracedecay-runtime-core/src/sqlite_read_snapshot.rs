@@ -79,7 +79,7 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
 /// `-wal`, `-shm`, or `-journal` at the destination is refused with
 /// `AlreadyExists` before the source is opened, and publication is a
 /// kernel-atomic no-replace rename, so a main created concurrently keeps its
-/// own family and fails the backup instead. SQLite durability is a
+/// own family and fails the backup instead. `SQLite` durability is a
 /// family-level invariant: pathname existence cannot prove which main a later
 /// sidecar belongs to, so a displaced family can only be handled by an owner
 /// with lifecycle exclusion (see
