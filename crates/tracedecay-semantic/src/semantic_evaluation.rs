@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tracedecay_code_index::embedding_document::{EmbeddingDocumentComposerV1, EmbeddingDocumentV1};
 use tracedecay_domain::{
@@ -33,8 +33,9 @@ use super::{LoadedSemanticArtifactV1, RuntimeChunkVectorEncoderV1};
 pub trait SemanticEvaluationCancellationV1: SemanticExecutionAuthority {}
 
 const EVALUATION_BATCH_CACHE_MAX_ENTRIES: usize = 3_072;
-const EVALUATION_BATCH_CACHE_MAX_BYTES: u64 = 80 * 1024 * 1024;
+const EVALUATION_BATCH_CACHE_MAX_RETAINED_BYTES: u64 = 80 * 1024 * 1024;
 const EVALUATION_BATCH_CACHE_ENTRY_OVERHEAD_BYTES: u64 = 4_096;
+const EVALUATION_BATCH_CACHE_KEY_OWNER_OVERHEAD_BYTES: u64 = 512;
 
 /// Controls whether one projection reaches the request-local exact-batch
 /// cache. The cancellation probe must execute a real model batch even when a
@@ -46,25 +47,176 @@ pub enum SemanticEvaluationProjectionBatchCachePolicyV1 {
     Bypass,
 }
 
-/// Bounded, caller-owned cache for one semantic evaluation request. It is
-/// intentionally neither global nor durable: its entries only bridge repeated
-/// evaluator observations that share the same admitted model/runtime and
-/// exact canonical tensor input.
-pub struct SemanticEvaluationProjectionBatchCacheV1 {
+/// Bounded store of completed projection batches, owned for as long as its
+/// holder chooses. It is not durable and never leaves the process: its entries
+/// only bridge repeated evaluator observations that share the same admitted
+/// model/runtime and exact canonical tensor input.
+///
+/// A daemon-lifetime owner keeps one store across qualification requests and
+/// calls [`Self::release`] when it shuts down. Each request takes its own
+/// [`SemanticEvaluationProjectionBatchCacheV1`] handle from
+/// [`Self::request_cache`]; completed batches stay under
+/// [`Self::max_retained_bytes`], while [`Self::memory_usage`] also reports
+/// in-flight keys and request-owned warm-hit clones.
+pub struct SemanticEvaluationProjectionBatchStoreV1 {
     limits: SemanticEvaluationProjectionBatchCacheLimitsV1,
     state: Mutex<SemanticEvaluationProjectionBatchCacheStateV1>,
+    /// Signalled whenever a build claim is resolved (installed or abandoned),
+    /// so a waiter for that exact batch can re-read the entry.
+    resolved: Condvar,
+}
+
+/// One request's view of a projection batch store.
+///
+/// The handle carries that request's borrower identity, which every projection
+/// pass the request runs shares. Every entry records all current borrowers, so
+/// one request ending cannot erase another request's pin.
+pub struct SemanticEvaluationProjectionBatchCacheV1 {
+    store: Arc<SemanticEvaluationProjectionBatchStoreV1>,
+    request_id: u64,
+}
+
+impl Drop for SemanticEvaluationProjectionBatchCacheV1 {
+    fn drop(&mut self) {
+        self.store.end_request(self.request_id);
+    }
 }
 
 #[derive(Clone, Copy)]
 struct SemanticEvaluationProjectionBatchCacheLimitsV1 {
     max_entries: usize,
-    max_bytes: u64,
+    max_retained_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SemanticEvaluationProjectionBatchCacheMemoryV1 {
+    /// Whether this store has crossed its irreversible retirement fence.
+    pub retired: bool,
+    /// Completed cache entries, including exact keys, vectors, and container
+    /// overhead.
+    pub retained_batch_bytes: u64,
+    /// Exact composed-input key copies owned by active build claims.
+    pub in_flight_key_bytes: u64,
+    /// Exact composed-input keys currently probing this store.
+    pub active_lookup_key_bytes: u64,
+    /// Warm-hit vector clones conservatively charged until their request ends.
+    pub active_hit_vector_bytes: u64,
+    /// Sum of all currently cache-associated categories above.
+    pub total_accounted_bytes: u64,
+    /// Highest total plus short-lived clone reservations observed by this
+    /// store.
+    pub peak_accounted_bytes: u64,
+}
+
+struct SemanticEvaluationProjectionBatchCacheEntryV1 {
+    vectors: Vec<Vec<f32>>,
+    retained_bytes: u64,
+    last_used_sequence: u64,
+    borrowers: BTreeSet<u64>,
+}
+
+#[derive(Default)]
+struct SemanticEvaluationProjectionBatchRequestMemoryV1 {
+    lookup_key_bytes: u64,
+    hit_vector_bytes: u64,
 }
 
 #[derive(Default)]
 struct SemanticEvaluationProjectionBatchCacheStateV1 {
-    entries: BTreeMap<SemanticEvaluationProjectionBatchCacheKeyV1, Vec<Vec<f32>>>,
+    entries: BTreeMap<
+        SemanticEvaluationProjectionBatchCacheKeyV1,
+        SemanticEvaluationProjectionBatchCacheEntryV1,
+    >,
+    in_flight: BTreeSet<SemanticEvaluationProjectionBatchCacheKeyV1>,
     retained_bytes: u64,
+    in_flight_key_bytes: u64,
+    active_lookup_key_bytes: u64,
+    active_hit_vector_bytes: u64,
+    peak_accounted_bytes: u64,
+    next_request_id: u64,
+    next_use_sequence: u64,
+    active_requests: BTreeMap<u64, SemanticEvaluationProjectionBatchRequestMemoryV1>,
+    retired: bool,
+}
+
+impl SemanticEvaluationProjectionBatchCacheStateV1 {
+    fn total_accounted_bytes(&self) -> u64 {
+        self.retained_bytes
+            .saturating_add(self.in_flight_key_bytes)
+            .saturating_add(self.active_lookup_key_bytes)
+            .saturating_add(self.active_hit_vector_bytes)
+    }
+
+    fn observe_peak(&mut self, additional_transient_bytes: u64) {
+        self.peak_accounted_bytes = self.peak_accounted_bytes.max(
+            self.total_accounted_bytes()
+                .saturating_add(additional_transient_bytes),
+        );
+    }
+
+    fn memory_usage(&self) -> SemanticEvaluationProjectionBatchCacheMemoryV1 {
+        SemanticEvaluationProjectionBatchCacheMemoryV1 {
+            retired: self.retired,
+            retained_batch_bytes: self.retained_bytes,
+            in_flight_key_bytes: self.in_flight_key_bytes,
+            active_lookup_key_bytes: self.active_lookup_key_bytes,
+            active_hit_vector_bytes: self.active_hit_vector_bytes,
+            total_accounted_bytes: self.total_accounted_bytes(),
+            peak_accounted_bytes: self.peak_accounted_bytes,
+        }
+    }
+}
+
+/// Outcome of asking the cache for one batch.
+enum SemanticEvaluationProjectionBatchClaimV1<'cache> {
+    /// Another pass already produced these exact vectors.
+    Hit(Vec<Vec<f32>>),
+    /// This caller owns construction of the batch; nobody else will build it
+    /// until the guard is dropped or the vectors are installed.
+    Build(SemanticEvaluationProjectionBatchBuildGuardV1<'cache>),
+}
+
+/// Exclusive right to build one cache entry. Dropping it without installing
+/// vectors -- because the request was cancelled or the model failed -- releases
+/// the claim and wakes the waiters, who then build it themselves. A failed or
+/// cancelled request therefore never leaves another request without its batch.
+struct SemanticEvaluationProjectionBatchBuildGuardV1<'cache> {
+    store: &'cache SemanticEvaluationProjectionBatchStoreV1,
+    /// Boxed: the key owns the batch's whole composed input, which does not
+    /// belong inline in the claim enum next to a plain cache hit.
+    key: Box<SemanticEvaluationProjectionBatchCacheKeyV1>,
+    accounted_bytes: u64,
+}
+
+impl SemanticEvaluationProjectionBatchBuildGuardV1<'_> {
+    fn key(&self) -> &SemanticEvaluationProjectionBatchCacheKeyV1 {
+        &self.key
+    }
+}
+
+impl Drop for SemanticEvaluationProjectionBatchBuildGuardV1<'_> {
+    fn drop(&mut self) {
+        let mut state = self.store.lock_state();
+        if state.in_flight.remove(self.key.as_ref()) {
+            state.in_flight_key_bytes = state
+                .in_flight_key_bytes
+                .saturating_sub(self.accounted_bytes);
+        }
+        drop(state);
+        self.store.resolved.notify_all();
+    }
+}
+
+struct SemanticEvaluationProjectionBatchLookupGuardV1<'cache> {
+    store: &'cache SemanticEvaluationProjectionBatchStoreV1,
+    request_id: u64,
+    accounted_bytes: u64,
+}
+
+impl Drop for SemanticEvaluationProjectionBatchLookupGuardV1<'_> {
+    fn drop(&mut self) {
+        self.store.end_lookup(self.request_id, self.accounted_bytes);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,27 +234,104 @@ struct SemanticEvaluationProjectionBatchCacheKeyV1 {
     ordered_documents: Vec<String>,
 }
 
-impl SemanticEvaluationProjectionBatchCacheV1 {
-    pub fn new() -> Self {
+impl SemanticEvaluationProjectionBatchStoreV1 {
+    #[must_use]
+    pub fn new() -> Arc<Self> {
         Self::with_limits(SemanticEvaluationProjectionBatchCacheLimitsV1 {
             max_entries: EVALUATION_BATCH_CACHE_MAX_ENTRIES,
-            max_bytes: EVALUATION_BATCH_CACHE_MAX_BYTES,
+            max_retained_bytes: EVALUATION_BATCH_CACHE_MAX_RETAINED_BYTES,
         })
     }
 
     #[cfg(test)]
-    fn with_limits_for_tests(max_entries: usize, max_bytes: u64) -> Self {
+    fn with_limits_for_tests(max_entries: usize, max_retained_bytes: u64) -> Arc<Self> {
         Self::with_limits(SemanticEvaluationProjectionBatchCacheLimitsV1 {
             max_entries,
-            max_bytes,
+            max_retained_bytes,
         })
     }
 
-    fn with_limits(limits: SemanticEvaluationProjectionBatchCacheLimitsV1) -> Self {
-        Self {
+    fn with_limits(limits: SemanticEvaluationProjectionBatchCacheLimitsV1) -> Arc<Self> {
+        Arc::new(Self {
             limits,
             state: Mutex::new(SemanticEvaluationProjectionBatchCacheStateV1::default()),
+            resolved: Condvar::new(),
+        })
+    }
+
+    /// Open one request's view of this store. A handle opened after retirement
+    /// remains unusable because retirement is irreversible.
+    #[must_use]
+    pub fn request_cache(self: &Arc<Self>) -> SemanticEvaluationProjectionBatchCacheV1 {
+        let request_id = {
+            let mut state = self.lock_state();
+            let request_id = state.next_request_id.saturating_add(1);
+            state.next_request_id = request_id;
+            if !state.retired {
+                state.active_requests.insert(
+                    request_id,
+                    SemanticEvaluationProjectionBatchRequestMemoryV1::default(),
+                );
+            }
+            request_id
+        };
+        SemanticEvaluationProjectionBatchCacheV1 {
+            store: Arc::clone(self),
+            request_id,
         }
+    }
+
+    fn end_request(&self, request_id: u64) {
+        let mut state = self.lock_state();
+        if let Some(memory) = state.active_requests.remove(&request_id) {
+            state.active_lookup_key_bytes = state
+                .active_lookup_key_bytes
+                .saturating_sub(memory.lookup_key_bytes);
+            state.active_hit_vector_bytes = state
+                .active_hit_vector_bytes
+                .saturating_sub(memory.hit_vector_bytes);
+        }
+        for entry in state.entries.values_mut() {
+            entry.borrowers.remove(&request_id);
+        }
+    }
+
+    /// Bytes currently retained by cached batches. Never above the byte bound.
+    pub fn retained_bytes(&self) -> u64 {
+        self.lock_state().retained_bytes
+    }
+
+    /// Cache-associated memory currently owned or conservatively charged to
+    /// live request handles, plus the process-lifetime peak for this store.
+    pub fn memory_usage(&self) -> SemanticEvaluationProjectionBatchCacheMemoryV1 {
+        self.lock_state().memory_usage()
+    }
+
+    /// Cached batches currently retained.
+    pub fn entry_count(&self) -> usize {
+        self.lock_state().entries.len()
+    }
+
+    /// Configured bound for completed batches retained by the store. Transient
+    /// and request-borrowed allocations are reported separately by
+    /// [`Self::memory_usage`].
+    pub fn max_retained_bytes(&self) -> u64 {
+        self.limits.max_retained_bytes
+    }
+
+    /// Irreversibly retire this store and drop every completed batch.
+    ///
+    /// Existing builders keep their claim only long enough to settle it; a
+    /// late install is refused under the same state lock. Waiters are woken so
+    /// they observe retirement instead of waiting for an outliving worker.
+    pub fn release(&self) {
+        {
+            let mut state = self.lock_state();
+            state.retired = true;
+            state.entries.clear();
+            state.retained_bytes = 0;
+        }
+        self.resolved.notify_all();
     }
 
     fn lock_state(
@@ -111,37 +340,220 @@ impl SemanticEvaluationProjectionBatchCacheV1 {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn lookup(&self, key: &SemanticEvaluationProjectionBatchCacheKeyV1) -> Option<Vec<Vec<f32>>> {
-        self.lock_state().entries.get(key).cloned()
+    fn begin_lookup(
+        &self,
+        request_id: u64,
+        accounted_bytes: u64,
+    ) -> Result<SemanticEvaluationProjectionBatchLookupGuardV1<'_>, String> {
+        let mut state = self.lock_state();
+        if state.retired || !state.active_requests.contains_key(&request_id) {
+            return Err("semantic evaluation projection batch cache is retired".to_owned());
+        }
+        let Some(request) = state.active_requests.get_mut(&request_id) else {
+            return Err("semantic evaluation projection batch cache is retired".to_owned());
+        };
+        request.lookup_key_bytes = request.lookup_key_bytes.saturating_add(accounted_bytes);
+        state.active_lookup_key_bytes = state
+            .active_lookup_key_bytes
+            .saturating_add(accounted_bytes);
+        state.observe_peak(0);
+        Ok(SemanticEvaluationProjectionBatchLookupGuardV1 {
+            store: self,
+            request_id,
+            accounted_bytes,
+        })
     }
 
-    fn insert(&self, key: SemanticEvaluationProjectionBatchCacheKeyV1, vectors: Vec<Vec<f32>>) {
-        let retained_bytes = cache_entry_bytes(&key, &vectors);
+    fn end_lookup(&self, request_id: u64, accounted_bytes: u64) {
+        let mut state = self.lock_state();
+        if let Some(request) = state.active_requests.get_mut(&request_id) {
+            request.lookup_key_bytes = request.lookup_key_bytes.saturating_sub(accounted_bytes);
+        }
+        state.active_lookup_key_bytes = state
+            .active_lookup_key_bytes
+            .saturating_sub(accounted_bytes);
+    }
+
+    /// Read one batch, or take the exclusive right to build it, waiting while
+    /// another caller is already building that exact batch.
+    ///
+    /// `interrupted` is polled between waits so a cancelled or expired request
+    /// stops waiting instead of blocking on someone else's model work.
+    fn claim(
+        &self,
+        key: &SemanticEvaluationProjectionBatchCacheKeyV1,
+        request_id: u64,
+        hit_copies: usize,
+        interrupted: &dyn Fn() -> Option<String>,
+    ) -> Result<SemanticEvaluationProjectionBatchClaimV1<'_>, String> {
+        let mut state = self.lock_state();
+        loop {
+            if state.retired || !state.active_requests.contains_key(&request_id) {
+                return Err("semantic evaluation projection batch cache is retired".to_owned());
+            }
+            state.next_use_sequence = state.next_use_sequence.saturating_add(1);
+            let use_sequence = state.next_use_sequence;
+            if state.entries.contains_key(key) {
+                let hit_vector_bytes = state
+                    .entries
+                    .get(key)
+                    .map(|entry| {
+                        cache_vector_bytes(&entry.vectors)
+                            .saturating_mul(u64::try_from(hit_copies).unwrap_or(u64::MAX))
+                    })
+                    .unwrap_or(0);
+                if let Some(request) = state.active_requests.get_mut(&request_id) {
+                    request.hit_vector_bytes =
+                        request.hit_vector_bytes.saturating_add(hit_vector_bytes);
+                }
+                state.active_hit_vector_bytes = state
+                    .active_hit_vector_bytes
+                    .saturating_add(hit_vector_bytes);
+                state.observe_peak(0);
+                let Some(entry) = state.entries.get_mut(key) else {
+                    return Err("semantic evaluator cache lost a completed vector group".to_owned());
+                };
+                entry.last_used_sequence = use_sequence;
+                entry.borrowers.insert(request_id);
+                return Ok(SemanticEvaluationProjectionBatchClaimV1::Hit(
+                    entry.vectors.clone(),
+                ));
+            }
+            if !state.in_flight.contains(key) {
+                let accounted_bytes = cache_key_bytes(key)
+                    .saturating_add(EVALUATION_BATCH_CACHE_KEY_OWNER_OVERHEAD_BYTES)
+                    .saturating_mul(2);
+                state.in_flight.insert(key.clone());
+                state.in_flight_key_bytes =
+                    state.in_flight_key_bytes.saturating_add(accounted_bytes);
+                state.observe_peak(0);
+                return Ok(SemanticEvaluationProjectionBatchClaimV1::Build(
+                    SemanticEvaluationProjectionBatchBuildGuardV1 {
+                        store: self,
+                        key: Box::new(key.clone()),
+                        accounted_bytes,
+                    },
+                ));
+            }
+            if let Some(error) = interrupted() {
+                return Err(error);
+            }
+            // ponytail: fixed 250ms wait slice so cancellation is observed
+            // promptly; a notified waiter wakes immediately either way.
+            let (next, _) = self
+                .resolved
+                .wait_timeout(state, std::time::Duration::from_millis(250))
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+        }
+    }
+
+    /// Install the vectors this caller built, then release its claim.
+    ///
+    /// Admission evicts only batches no request currently holding a handle has
+    /// touched, so the bound is honoured without a running request ever
+    /// evicting a batch it is still using. When nothing is evictable the batch
+    /// is simply not retained.
+    fn install(
+        &self,
+        guard: SemanticEvaluationProjectionBatchBuildGuardV1<'_>,
+        vectors: &[Vec<f32>],
+        request_id: u64,
+    ) {
+        let retained_bytes = cache_entry_bytes(guard.key(), vectors);
         if self.limits.max_entries == 0
-            || retained_bytes > self.limits.max_bytes
-            || self.limits.max_bytes == 0
+            || self.limits.max_retained_bytes == 0
+            || retained_bytes > self.limits.max_retained_bytes
         {
             return;
         }
         let mut state = self.lock_state();
-        if state.entries.contains_key(&key)
-            || state.entries.len() >= self.limits.max_entries
-            || state.retained_bytes.saturating_add(retained_bytes) > self.limits.max_bytes
-        {
+        if state.retired || !state.active_requests.contains_key(&request_id) {
             return;
         }
+        if state.entries.contains_key(guard.key()) {
+            return;
+        }
+        while state.entries.len() >= self.limits.max_entries
+            || state.retained_bytes.saturating_add(retained_bytes) > self.limits.max_retained_bytes
+        {
+            // ponytail: linear least-recently-used scan, bounded by
+            // max_entries; swap in a recency index if eviction ever shows up
+            // next to a 200ms model batch.
+            let evictable = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.borrowers.is_empty())
+                .min_by_key(|(_, entry)| entry.last_used_sequence)
+                .map(|(key, _)| key.clone());
+            let Some(evictable) = evictable else {
+                return;
+            };
+            if let Some(evicted) = state.entries.remove(&evictable) {
+                state.retained_bytes = state.retained_bytes.saturating_sub(evicted.retained_bytes);
+            }
+        }
+        state.next_use_sequence = state.next_use_sequence.saturating_add(1);
+        let use_sequence = state.next_use_sequence;
         state.retained_bytes = state.retained_bytes.saturating_add(retained_bytes);
-        state.entries.insert(key, vectors);
+        state.observe_peak(0);
+        state.entries.insert(
+            guard.key().clone(),
+            SemanticEvaluationProjectionBatchCacheEntryV1 {
+                vectors: vectors.to_vec(),
+                retained_bytes,
+                last_used_sequence: use_sequence,
+                borrowers: BTreeSet::from([request_id]),
+            },
+        );
+        // Release the state lock before the claim guard, which takes it again
+        // to wake the waiters for this batch.
+        drop(state);
+    }
+}
+
+impl SemanticEvaluationProjectionBatchCacheV1 {
+    /// A standalone request cache over a private store. Callers that own the
+    /// whole cache for one request use this; a daemon-lifetime owner keeps a
+    /// [`SemanticEvaluationProjectionBatchStoreV1`] and hands out
+    /// [`SemanticEvaluationProjectionBatchStoreV1::request_cache`] handles.
+    #[must_use]
+    pub fn new() -> Self {
+        SemanticEvaluationProjectionBatchStoreV1::new().request_cache()
+    }
+
+    #[cfg(test)]
+    fn with_limits_for_tests(max_entries: usize, max_retained_bytes: u64) -> Self {
+        SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(
+            max_entries,
+            max_retained_bytes,
+        )
+        .request_cache()
+    }
+
+    /// Bytes currently retained by the backing store.
+    pub fn retained_bytes(&self) -> u64 {
+        self.store.retained_bytes()
+    }
+
+    /// Cached batches currently retained by the backing store.
+    pub fn entry_count(&self) -> usize {
+        self.store.entry_count()
+    }
+
+    /// The backing store's completed-batch retention bound.
+    pub fn max_retained_bytes(&self) -> u64 {
+        self.store.max_retained_bytes()
     }
 
     #[cfg(test)]
     fn entry_count_for_tests(&self) -> usize {
-        self.lock_state().entries.len()
+        self.entry_count()
     }
 
     #[cfg(test)]
     fn retained_bytes_for_tests(&self) -> u64 {
-        self.lock_state().retained_bytes
+        self.retained_bytes()
     }
 }
 
@@ -155,6 +567,13 @@ fn cache_entry_bytes(
     key: &SemanticEvaluationProjectionBatchCacheKeyV1,
     vectors: &[Vec<f32>],
 ) -> u64 {
+    cache_key_bytes(key)
+        .checked_add(cache_vector_bytes(vectors))
+        .and_then(|bytes| bytes.checked_add(EVALUATION_BATCH_CACHE_ENTRY_OVERHEAD_BYTES))
+        .unwrap_or(u64::MAX)
+}
+
+fn cache_key_bytes(key: &SemanticEvaluationProjectionBatchCacheKeyV1) -> u64 {
     // The map retains the complete identity. Its canonical JSON representation
     // conservatively includes every owned identity string plus field names, so
     // it bounds the retained identity without relying on a digest match.
@@ -168,35 +587,43 @@ fn cache_entry_bytes(
         .ordered_documents
         .iter()
         .try_fold(0_u64, |total, input| {
-            total.checked_add(u64::try_from(input.len()).ok()?)
+            total.checked_add(u64::try_from(input.capacity()).ok()?)
         });
-    let input_headers = u64::try_from(key.ordered_documents.len())
+    let input_headers = u64::try_from(key.ordered_documents.capacity())
         .ok()
         .and_then(|count| count.checked_mul(u64::try_from(std::mem::size_of::<String>()).ok()?));
+    identity_bytes
+        .and_then(|identity| identity.checked_add(input_bytes?))
+        .and_then(|bytes| bytes.checked_add(input_headers?))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                u64::try_from(std::mem::size_of::<
+                    SemanticEvaluationProjectionBatchCacheKeyV1,
+                >())
+                .ok()?,
+            )
+        })
+        .unwrap_or(u64::MAX)
+}
+
+fn cache_vector_bytes(vectors: &[Vec<f32>]) -> u64 {
     let vector_bytes = vectors.iter().try_fold(0_u64, |total, vector| {
         let bytes = u64::try_from(vector.capacity())
             .ok()?
             .checked_mul(u64::try_from(std::mem::size_of::<f32>()).ok()?)?;
         total.checked_add(bytes)
     });
-    let container_headers = u64::try_from(std::mem::size_of::<
-        SemanticEvaluationProjectionBatchCacheKeyV1,
-    >())
-    .ok()
-    .and_then(|bytes| bytes.checked_add(u64::try_from(std::mem::size_of::<Vec<Vec<f32>>>()).ok()?))
-    .and_then(|bytes| {
-        bytes.checked_add(
-            u64::try_from(vectors.len())
-                .ok()?
-                .checked_mul(u64::try_from(std::mem::size_of::<Vec<f32>>()).ok()?)?,
-        )
-    });
-    identity_bytes
-        .and_then(|identity| identity.checked_add(input_bytes?))
-        .and_then(|bytes| bytes.checked_add(input_headers?))
-        .and_then(|bytes| bytes.checked_add(vector_bytes?))
+    let container_headers = u64::try_from(std::mem::size_of::<Vec<Vec<f32>>>())
+        .ok()
+        .and_then(|bytes| {
+            bytes.checked_add(
+                u64::try_from(vectors.len())
+                    .ok()?
+                    .checked_mul(u64::try_from(std::mem::size_of::<Vec<f32>>()).ok()?)?,
+            )
+        });
+    vector_bytes
         .and_then(|bytes| bytes.checked_add(container_headers?))
-        .and_then(|bytes| bytes.checked_add(EVALUATION_BATCH_CACHE_ENTRY_OVERHEAD_BYTES))
         .unwrap_or(u64::MAX)
 }
 
@@ -206,6 +633,7 @@ struct CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     max_threads: u32,
     cache: &'a SemanticEvaluationProjectionBatchCacheV1,
     cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
+    request_id: u64,
     cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     documents: Arc<EmbeddingDocumentComposerV1>,
 }
@@ -224,6 +652,7 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
             admitted_projection: artifact_authority.projection().clone(),
             max_threads: u32::try_from(artifact_authority.embedding_execution_plan().intra_threads)
                 .unwrap_or(u32::MAX),
+            request_id: cache.request_id,
             cache,
             cache_policy,
             cancellation,
@@ -232,18 +661,26 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     }
 
     fn cancellation_error(&self) -> Option<String> {
-        self.cancellation
-            .interruption()
-            .map(|interruption| match interruption {
-                SemanticExecutionInterruptionV1::Cancelled => {
-                    "semantic projection cancelled".to_owned()
-                }
-                SemanticExecutionInterruptionV1::DeadlineExceeded => {
-                    "semantic projection deadline exceeded".to_owned()
-                }
-            })
+        semantic_execution_interruption_error(self.cancellation.as_ref())
     }
+}
 
+fn semantic_execution_interruption_error(
+    cancellation: &dyn SemanticEvaluationCancellationV1,
+) -> Option<String> {
+    cancellation
+        .interruption()
+        .map(|interruption| match interruption {
+            SemanticExecutionInterruptionV1::Cancelled => {
+                "semantic projection cancelled".to_owned()
+            }
+            SemanticExecutionInterruptionV1::DeadlineExceeded => {
+                "semantic projection deadline exceeded".to_owned()
+            }
+        })
+}
+
+impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     fn exact_key(
         &self,
         embedding_key: &EmbeddingProjectionKeyV1,
@@ -322,23 +759,51 @@ where
             return self.inner.encode_batches(key, groups);
         }
 
+        let store = self.cache.store.as_ref();
+        let request_id = self.request_id;
+        let cancellation = Arc::clone(&self.cancellation);
+        let interrupted = move || semantic_execution_interruption_error(cancellation.as_ref());
         let mut encoded = vec![None; groups.len()];
-        let mut unique_miss_indices =
-            BTreeMap::<SemanticEvaluationProjectionBatchCacheKeyV1, usize>::new();
+        let mut distinct =
+            BTreeMap::<SemanticEvaluationProjectionBatchCacheKeyV1, Vec<usize>>::new();
+        for (position, group) in groups.iter().enumerate() {
+            distinct
+                .entry(self.exact_key(key, group)?)
+                .or_default()
+                .push(position);
+        }
+        let lookup_key_bytes = distinct.keys().fold(0_u64, |total, key| {
+            total.saturating_add(cache_key_bytes(key))
+        });
+        let _lookup_memory = store.begin_lookup(request_id, lookup_key_bytes)?;
         let mut unique_misses = Vec::<(
-            SemanticEvaluationProjectionBatchCacheKeyV1,
+            SemanticEvaluationProjectionBatchBuildGuardV1<'_>,
             usize,
             Vec<usize>,
         )>::new();
-        for (position, group) in groups.iter().enumerate() {
-            let cache_key = self.exact_key(key, group)?;
-            if let Some(vectors) = self.cache.lookup(&cache_key) {
-                encoded[position] = Some(vectors);
-            } else if let Some(miss_index) = unique_miss_indices.get(&cache_key) {
-                unique_misses[*miss_index].2.push(position);
-            } else {
-                unique_miss_indices.insert(cache_key.clone(), unique_misses.len());
-                unique_misses.push((cache_key, position, vec![position]));
+        // Every request takes claims in this total order, so overlapping batch
+        // sets cannot form a wait cycle while the owner-level permit bounds
+        // concurrent model construction.
+        for (cache_key, positions) in distinct {
+            match store.claim(&cache_key, request_id, positions.len(), &interrupted)? {
+                SemanticEvaluationProjectionBatchClaimV1::Hit(vectors) => {
+                    let mut positions = positions.into_iter();
+                    let Some(first) = positions.next() else {
+                        return Err(
+                            "semantic evaluator cache found an empty batch position set".to_owned()
+                        );
+                    };
+                    for position in positions {
+                        encoded[position] = Some(vectors.clone());
+                    }
+                    encoded[first] = Some(vectors);
+                }
+                SemanticEvaluationProjectionBatchClaimV1::Build(guard) => {
+                    let first = positions.first().copied().ok_or_else(|| {
+                        "semantic evaluator cache found an empty batch position set".to_owned()
+                    })?;
+                    unique_misses.push((guard, first, positions));
+                }
             }
         }
         if unique_misses.is_empty() {
@@ -368,22 +833,27 @@ where
         if let Some(error) = self.cancellation_error() {
             return Err(error);
         }
-        for ((cache_key, _, _), vectors) in unique_misses.iter().zip(&miss_encoded) {
-            if vectors.len() != cache_key.group_len {
+        for ((guard, _, _), vectors) in unique_misses.iter().zip(&miss_encoded) {
+            if vectors.len() != guard.key().group_len {
                 return Err(
                     "semantic evaluator returned an unexpected uncached vector batch size"
                         .to_owned(),
                 );
             }
         }
-        for ((cache_key, _, positions), vectors) in unique_misses.into_iter().zip(miss_encoded) {
+        for ((guard, _, positions), vectors) in unique_misses.into_iter().zip(miss_encoded) {
             if let Some(error) = self.cancellation_error() {
                 return Err(error);
             }
-            self.cache.insert(cache_key, vectors.clone());
+            store.install(guard, &vectors, request_id);
+            let mut positions = positions.into_iter();
+            let Some(first) = positions.next() else {
+                return Err("semantic evaluator cache lost an uncached batch position".to_owned());
+            };
             for position in positions {
                 encoded[position] = Some(vectors.clone());
             }
+            encoded[first] = Some(vectors);
         }
         encoded
             .into_iter()
@@ -487,6 +957,16 @@ pub fn prepare_semantic_evaluation_projection(
         }
         None => {
             let runtime = semantic_evaluation_runtime(Arc::clone(&authority), factory, resources)?;
+            // Open this request's one model session up front and let the pool
+            // time it. The cold load is acceptance evidence -- the request's
+            // own observation that the admitted runtime opens within its
+            // deadline -- so it cannot depend on whether a projection batch
+            // happened to miss the exact-batch cache. The session returns to
+            // the pool immediately and every later projection group and query
+            // reuses it, so the request still opens exactly one session.
+            runtime
+                .warm_query_session()
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
             let query_factory = SemanticEvaluationQueryFactoryV1::from_runtime(
                 PooledSemanticQueryEmbedderFactory::new(Arc::clone(&runtime)),
             );
@@ -737,6 +1217,7 @@ mod tests {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     };
 
     use sha2::{Digest, Sha256};
@@ -756,15 +1237,20 @@ mod tests {
     use tracedecay_query::retrieval::semantic::{
         SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
     };
+    #[cfg(feature = "semantic-fastembed")]
+    use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
     use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
     use super::{
         CachedSemanticEvaluationChunkEncoderV1, CanonicalChunkVectorEncoderV1, CodeSearchChunkV1,
         EmbeddingProjectionKeyV1, SemanticEvaluationCancellationV1,
         SemanticEvaluationProjectionBatchCachePolicyV1, SemanticEvaluationProjectionBatchCacheV1,
-        SemanticEvaluationProjectionResourcesV1, SemanticExecutionAuthority,
-        SemanticExecutionInterruptionV1, prepare_vector_generation, semantic_evaluation_runtime,
+        SemanticEvaluationProjectionBatchStoreV1, SemanticEvaluationProjectionResourcesV1,
+        SemanticExecutionAuthority, SemanticExecutionInterruptionV1, prepare_vector_generation,
+        semantic_evaluation_runtime,
     };
+    #[cfg(feature = "semantic-fastembed")]
+    use super::{LoadedSemanticArtifactV1, prepare_semantic_evaluation_projection};
     use crate::AdmittedProjectionArtifactV1;
     use crate::RuntimeChunkVectorEncoderV1;
     use crate::embedding_parallelism::{
@@ -810,6 +1296,7 @@ mod tests {
     impl SemanticEvaluationCancellationV1 for TriggeredCancellation {}
 
     struct CountingEncoderV1 {
+        batch_invocations: usize,
         group_invocations: usize,
         attempted_group_invocations: usize,
         fail: bool,
@@ -818,6 +1305,7 @@ mod tests {
     impl CountingEncoderV1 {
         fn healthy() -> Self {
             Self {
+                batch_invocations: 0,
                 group_invocations: 0,
                 attempted_group_invocations: 0,
                 fail: false,
@@ -826,6 +1314,7 @@ mod tests {
 
         fn failing() -> Self {
             Self {
+                batch_invocations: 0,
                 group_invocations: 0,
                 attempted_group_invocations: 0,
                 fail: true,
@@ -865,6 +1354,7 @@ mod tests {
             key: &EmbeddingProjectionKeyV1,
             groups: &[&[&CodeSearchChunkV1]],
         ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+            self.batch_invocations = self.batch_invocations.saturating_add(1);
             self.attempted_group_invocations = self
                 .attempted_group_invocations
                 .saturating_add(groups.len());
@@ -1370,6 +1860,181 @@ mod tests {
         assert_eq!(cache.entry_count_for_tests(), 1);
     }
 
+    #[cfg(feature = "semantic-fastembed")]
+    #[test]
+    fn real_fastembed_cold_and_cached_projection_are_byte_exact() {
+        let current_rss_bytes = || {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()?
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()?
+                .checked_mul(1_024)
+        };
+        let Some(fixture_root) = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_dir())
+        else {
+            eprintln!(
+                "skipping real cache equivalence; set \
+                 TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"
+            );
+            return;
+        };
+        let model = crate::model_catalog::production_fastembed_catalog()
+            .get(DEFAULT_FASTEMBED_MODEL_ID)
+            .expect("production Jina model")
+            .clone();
+        let resources = SemanticResourceCeilings {
+            max_model_bytes: 1024 * 1024 * 1024,
+            max_tokenizer_bytes: 64 * 1024 * 1024,
+            max_resident_bytes: 4 * 1024 * 1024 * 1024,
+            max_threads: 1,
+            max_concurrent_sessions: 1,
+            max_batch_size: 4,
+            max_sequence_length: 512,
+            load_deadline_ms: 180_000,
+        };
+        let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
+            &model,
+            &fixture_root,
+            ChunkerRevision::new("chunker.v1").expect("chunker fixture"),
+            tracedecay_domain::PrivacyDomainId::new("privacy.fastembed-cache-equivalence")
+                .expect("privacy fixture"),
+            1,
+            resources,
+            EmbeddingDocumentCompositionV1::SanitizedText,
+        )
+        .expect("verified FastEmbed fixture");
+        let projection = authority.projection().clone();
+        let generation =
+            CodeGenerationId::new("evaluation-cache.generation".to_owned()).expect("generation");
+        let chunks = (0_u8..6)
+            .map(|ordinal| {
+                let label = char::from(b'a'.saturating_add(ordinal));
+                Arc::new(chunk(
+                    label,
+                    &format!("pub fn byte_exact_fastembed_cache_probe_{ordinal}() {{}}"),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let request = projection_case_request(
+            &generation,
+            None,
+            &chunks,
+            &projection,
+            ProjectionReplayReasonV1::InitialProjection,
+        );
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let rss_before = current_rss_bytes();
+
+        let cold_request = store.request_cache();
+        let cold = prepare_semantic_evaluation_projection(
+            LoadedSemanticArtifactV1(Arc::new(authority.clone())),
+            None,
+            request.clone(),
+            &chunks,
+            documents(),
+            SemanticEvaluationProjectionResourcesV1 {
+                memory_ceiling_bytes: resources.max_resident_bytes,
+            },
+            &cold_request,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+            cancellation(),
+        )
+        .expect("cold real FastEmbed projection");
+        let cold_vectors = serde_json::to_vec(&cold.prepared.vectors).expect("cold vector bytes");
+        let cold_receipt = serde_json::to_vec(&cold.prepared.receipt).expect("cold receipt bytes");
+        assert_eq!(cold.query_factory.model_open_count(), 1);
+        let cold_memory = store.memory_usage();
+        let rss_after_cold = current_rss_bytes();
+        drop(cold);
+        drop(cold_request);
+
+        let warm_request = store.request_cache();
+        let warm = prepare_semantic_evaluation_projection(
+            LoadedSemanticArtifactV1(Arc::new(authority.clone())),
+            None,
+            request.clone(),
+            &chunks,
+            documents(),
+            SemanticEvaluationProjectionResourcesV1 {
+                memory_ceiling_bytes: resources.max_resident_bytes,
+            },
+            &warm_request,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+            cancellation(),
+        )
+        .expect("cached real FastEmbed projection");
+        assert_eq!(warm.query_factory.model_open_count(), 1);
+        assert_eq!(
+            serde_json::to_vec(&warm.prepared.vectors).expect("warm vector bytes"),
+            cold_vectors
+        );
+        assert_eq!(
+            serde_json::to_vec(&warm.prepared.receipt).expect("warm receipt bytes"),
+            cold_receipt
+        );
+        assert!(
+            store.memory_usage().active_hit_vector_bytes > 0,
+            "the second projection must be served from the retained batch"
+        );
+        let warm_memory = store.memory_usage();
+        let rss_after_warm = current_rss_bytes();
+        drop(warm);
+        drop(warm_request);
+
+        // Each project worker owns one store. A second store exercises the
+        // exact multi-project memory topology without introducing another
+        // daemon or weakening the shared scheduler-admission test.
+        let second_store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let second_request = second_store.request_cache();
+        let second = prepare_semantic_evaluation_projection(
+            LoadedSemanticArtifactV1(Arc::new(authority)),
+            None,
+            request,
+            &chunks,
+            documents(),
+            SemanticEvaluationProjectionResourcesV1 {
+                memory_ceiling_bytes: resources.max_resident_bytes,
+            },
+            &second_request,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+            cancellation(),
+        )
+        .expect("second project real FastEmbed projection");
+        assert_eq!(
+            serde_json::to_vec(&second.prepared.vectors).expect("second project vector bytes"),
+            cold_vectors
+        );
+        let second_memory = second_store.memory_usage();
+        let rss_with_two_project_stores = current_rss_bytes();
+        drop(second);
+        drop(second_request);
+
+        eprintln!(
+            "semantic cache memory: rss_before={rss_before:?} \
+             rss_after_cold={rss_after_cold:?} rss_after_warm={rss_after_warm:?} \
+             rss_with_two_project_stores={rss_with_two_project_stores:?} \
+             cold={cold_memory:?} warm={warm_memory:?} second={second_memory:?}"
+        );
+        store.release();
+        second_store.release();
+        let first_retired = store.memory_usage();
+        let second_retired = second_store.memory_usage();
+        let rss_after_retirement = current_rss_bytes();
+        assert!(first_retired.retired && second_retired.retired);
+        assert_eq!(first_retired.total_accounted_bytes, 0);
+        assert_eq!(second_retired.total_accounted_bytes, 0);
+        eprintln!(
+            "semantic cache retirement: rss_after_retirement={rss_after_retirement:?} \
+             first={first_retired:?} second={second_retired:?}"
+        );
+    }
+
     #[test]
     fn failures_are_not_cached() {
         let projection = projection();
@@ -1439,6 +2104,789 @@ mod tests {
         assert_eq!(one_thread.inner.group_invocations, 1);
         assert_eq!(four_threads.inner.group_invocations, 1);
         assert_eq!(cache.entry_count_for_tests(), 2);
+    }
+
+    /// A daemon-lifetime owner keeps the cache across requests; each request
+    /// builds its own encoder over it, exactly as one activation's projection
+    /// scan does.
+    fn request_encoder<'a>(
+        cache: &'a SemanticEvaluationProjectionBatchCacheV1,
+    ) -> CachedSemanticEvaluationChunkEncoderV1<'a, CountingEncoderV1> {
+        cached_encoder(
+            CountingEncoderV1::healthy(),
+            cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        )
+    }
+
+    #[test]
+    fn a_second_request_over_a_retained_cache_projects_the_identical_vectors() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let chunks = ['a', 'b', 'c'].map(|label| chunk(label, &format!("corpus {label}")));
+        let singles = chunks.each_ref().map(|chunk| [chunk]);
+        let groups = singles
+            .iter()
+            .map(|group| &group[..])
+            .collect::<Vec<&[&CodeSearchChunkV1]>>();
+
+        let cold_cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let mut cold = cached_encoder(
+            CountingEncoderV1::healthy(),
+            &cold_cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::Bypass,
+        );
+        let cold_vectors = cold
+            .encode_batches(&embedding_key, &groups)
+            .expect("cold projection");
+        assert_eq!(cold.inner.group_invocations, 3);
+
+        // One daemon-lifetime store, two successive request handles.
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let first_request = store.request_cache();
+        let mut first = request_encoder(&first_request);
+        let first_vectors = first
+            .encode_batches(&embedding_key, &groups)
+            .expect("first request projection");
+        assert_eq!(first.inner.group_invocations, 3);
+        drop(first);
+        drop(first_request);
+
+        let second_request = store.request_cache();
+        let mut second = request_encoder(&second_request);
+        let second_vectors = second
+            .encode_batches(&embedding_key, &groups)
+            .expect("second request projection");
+        assert_eq!(
+            second.inner.group_invocations, 0,
+            "a retained batch must not be re-embedded for the next request"
+        );
+        assert_eq!(first_vectors, cold_vectors);
+        assert_eq!(
+            second_vectors, cold_vectors,
+            "the cached path must produce byte-identical vectors, so the \
+             acceptance decision computed from them is identical too"
+        );
+        assert!(store.retained_bytes() <= store.max_retained_bytes());
+    }
+
+    #[test]
+    fn multiple_cold_misses_preserve_one_batched_runtime_dispatch() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let chunks = ['a', 'b', 'c'].map(|label| chunk(label, &format!("cold batch {label}")));
+        let singles = chunks.each_ref().map(|chunk| [chunk]);
+        let groups = singles
+            .iter()
+            .map(|group| &group[..])
+            .collect::<Vec<&[&CodeSearchChunkV1]>>();
+        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let mut encoder = request_encoder(&cache);
+
+        encoder
+            .encode_batches(&embedding_key, &groups)
+            .expect("batched cold projection");
+
+        assert_eq!(encoder.inner.group_invocations, 3);
+        assert_eq!(
+            encoder.inner.batch_invocations, 1,
+            "cache claims must not split one admitted runtime batch into N dispatches"
+        );
+    }
+
+    #[test]
+    fn a_changed_privacy_partition_or_workload_input_misses_the_retained_cache() {
+        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let admitted = chunk('a', "shared corpus text");
+        let admitted_group = [&admitted];
+
+        let first_authority =
+            crate::session_pool::test_support::authority_with_privacy("domain-a", 7);
+        let mut first = cached_encoder_with_authority(
+            CountingEncoderV1::healthy(),
+            &first_authority,
+            &cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        );
+        first
+            .encode_batches(
+                first_authority.projection().embedding_key(),
+                &[&admitted_group],
+            )
+            .expect("first partition projection");
+        assert_eq!(first.inner.group_invocations, 1);
+        drop(first);
+
+        // Same text, different privacy partition: the admitted projection
+        // identity is part of the key, so this must not read the other
+        // partition's vectors.
+        let other_partition =
+            crate::session_pool::test_support::authority_with_privacy("domain-b", 7);
+        let mut across_partition = cached_encoder_with_authority(
+            CountingEncoderV1::healthy(),
+            &other_partition,
+            &cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        );
+        across_partition
+            .encode_batches(
+                other_partition.projection().embedding_key(),
+                &[&admitted_group],
+            )
+            .expect("other partition projection");
+        assert_eq!(
+            across_partition.inner.group_invocations, 1,
+            "a different privacy partition must miss"
+        );
+        drop(across_partition);
+
+        // Same partition, different key epoch: still a different admitted
+        // projection identity.
+        let rotated = crate::session_pool::test_support::authority_with_privacy("domain-a", 8);
+        let mut rotated_encoder = cached_encoder_with_authority(
+            CountingEncoderV1::healthy(),
+            &rotated,
+            &cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        );
+        rotated_encoder
+            .encode_batches(rotated.projection().embedding_key(), &[&admitted_group])
+            .expect("rotated key epoch projection");
+        assert_eq!(
+            rotated_encoder.inner.group_invocations, 1,
+            "a rotated privacy key epoch must miss"
+        );
+        drop(rotated_encoder);
+
+        // Same identity, different workload content.
+        let changed = chunk('a', "changed corpus text");
+        let changed_group = [&changed];
+        let mut changed_encoder = cached_encoder_with_authority(
+            CountingEncoderV1::healthy(),
+            &first_authority,
+            &cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        );
+        changed_encoder
+            .encode_batches(
+                first_authority.projection().embedding_key(),
+                &[&changed_group],
+            )
+            .expect("changed workload projection");
+        assert_eq!(
+            changed_encoder.inner.group_invocations, 1,
+            "changed composed embedding input must miss"
+        );
+        drop(changed_encoder);
+
+        // And the original entry is still exactly one hit away.
+        let mut replay = request_encoder(&cache);
+        replay
+            .encode_batches(
+                first_authority.projection().embedding_key(),
+                &[&admitted_group],
+            )
+            .expect("replay projection");
+        assert_eq!(replay.inner.group_invocations, 0);
+        assert_eq!(cache.entry_count(), 4);
+    }
+
+    #[test]
+    fn an_abandoned_build_does_not_poison_the_next_requests_batch() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let subject = chunk('a', "abandoned then rebuilt");
+        let group = [&subject];
+
+        let mut failing = cached_encoder(
+            CountingEncoderV1::failing(),
+            &cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        );
+        failing
+            .encode_batches(&embedding_key, &[&group])
+            .expect_err("injected encoder failure");
+        drop(failing);
+        assert_eq!(
+            cache.entry_count(),
+            0,
+            "an abandoned build must retain nothing"
+        );
+
+        let mut recovered = request_encoder(&cache);
+        recovered
+            .encode_batches(&embedding_key, &[&group])
+            .expect("the next request must be able to build the same batch");
+        assert_eq!(recovered.inner.group_invocations, 1);
+        assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_fills_of_one_batch_run_the_model_once() {
+        struct GatedEncoderV1 {
+            inner: CountingEncoderV1,
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl CanonicalChunkVectorEncoderV1 for GatedEncoderV1 {
+            fn encode(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunk: &CodeSearchChunkV1,
+            ) -> Result<Vec<f32>, String> {
+                self.inner.encode(key, chunk)
+            }
+
+            fn encode_batch(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunks: &[&CodeSearchChunkV1],
+            ) -> Result<Vec<Vec<f32>>, String> {
+                self.inner.encode_batch(key, chunks)
+            }
+
+            fn encode_batches(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                groups: &[&[&CodeSearchChunkV1]],
+            ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
+                self.inner.encode_batches(key, groups)
+            }
+        }
+
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let contested = chunk('a', "contested batch");
+        let group = [&contested];
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let authority = crate::session_pool::test_support::authority();
+
+        std::thread::scope(|scope| {
+            let builder = scope.spawn(|| {
+                let mut builder = CachedSemanticEvaluationChunkEncoderV1::new(
+                    GatedEncoderV1 {
+                        inner: CountingEncoderV1::healthy(),
+                        entered: entered_tx,
+                        release: release_rx,
+                    },
+                    &authority,
+                    &cache,
+                    SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+                    cancellation(),
+                    documents(),
+                );
+                let vectors = builder
+                    .encode_batches(&embedding_key, &[&group])
+                    .expect("builder projection");
+                (vectors, builder.inner.inner.group_invocations)
+            });
+            entered_rx.recv().expect("builder reached the model");
+            let waiter = scope.spawn(|| {
+                let mut waiter = request_encoder(&cache);
+                let vectors = waiter
+                    .encode_batches(&embedding_key, &[&group])
+                    .expect("waiter projection");
+                (vectors, waiter.inner.group_invocations)
+            });
+            // The waiter is parked on the build claim; releasing the builder
+            // is what lets it finish.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            release_tx.send(()).expect("release the builder");
+            let (built, built_invocations) = builder.join().expect("builder thread");
+            let (waited, waited_invocations) = waiter.join().expect("waiter thread");
+            assert_eq!(built_invocations, 1);
+            assert_eq!(
+                waited_invocations, 0,
+                "a concurrent request for the same batch must wait for the one \
+                 builder instead of running the model again"
+            );
+            assert_eq!(built, waited);
+        });
+        assert_eq!(cache.entry_count(), 1);
+        assert!(cache.retained_bytes() <= cache.max_retained_bytes());
+    }
+
+    #[test]
+    fn every_active_request_remains_a_borrower_after_a_later_request_drops() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let first = chunk('a', "alpha");
+        let second = chunk('b', "bravo");
+        let entry_bytes = {
+            let sizing = SemanticEvaluationProjectionBatchCacheV1::new();
+            let mut encoder = request_encoder(&sizing);
+            encoder
+                .encode_batches(&embedding_key, &[&[&first][..]])
+                .expect("sizing projection");
+            sizing.retained_bytes()
+        };
+        let store = SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(
+            usize::MAX,
+            entry_bytes,
+        );
+
+        let request_a = store.request_cache();
+        let mut first_a = request_encoder(&request_a);
+        first_a
+            .encode_batches(&embedding_key, &[&[&first][..]])
+            .expect("request A builds the first batch");
+        drop(first_a);
+
+        let request_b = store.request_cache();
+        let mut first_b = request_encoder(&request_b);
+        first_b
+            .encode_batches(&embedding_key, &[&[&first][..]])
+            .expect("request B borrows the first batch");
+        assert_eq!(first_b.inner.group_invocations, 0);
+        drop(first_b);
+        drop(request_b);
+
+        let request_c = store.request_cache();
+        let mut second_c = request_encoder(&request_c);
+        second_c
+            .encode_batches(&embedding_key, &[&[&second][..]])
+            .expect("request C computes a competing batch");
+        assert_eq!(second_c.inner.group_invocations, 1);
+
+        let mut replay_a = request_encoder(&request_a);
+        replay_a
+            .encode_batches(&embedding_key, &[&[&first][..]])
+            .expect("request A reuses its borrowed batch");
+        assert_eq!(
+            replay_a.inner.group_invocations, 0,
+            "request B dropping must not erase request A's pin"
+        );
+    }
+
+    #[test]
+    fn a_later_request_evicts_stale_batches_to_stay_under_the_byte_bound() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        // Equal-length texts so both batches cost the same retained bytes and
+        // the bound below admits exactly one of them.
+        let first = chunk('a', "alpha");
+        let second = chunk('b', "bravo");
+        let entry_bytes = {
+            let sizing = SemanticEvaluationProjectionBatchCacheV1::new();
+            let mut encoder = request_encoder(&sizing);
+            encoder
+                .encode_batches(&embedding_key, &[&[&first][..]])
+                .expect("sizing projection");
+            sizing.retained_bytes()
+        };
+        assert!(entry_bytes > 0);
+
+        // Room for exactly one batch.
+        let store = SemanticEvaluationProjectionBatchStoreV1::with_limits_for_tests(
+            usize::MAX,
+            entry_bytes,
+        );
+        let earlier_request = store.request_cache();
+        let mut earlier = request_encoder(&earlier_request);
+        earlier
+            .encode_batches(&embedding_key, &[&[&first][..]])
+            .expect("earlier request");
+        assert_eq!(store.entry_count(), 1);
+        assert!(store.retained_bytes() <= store.max_retained_bytes());
+
+        // A second pass of the SAME request must not evict what the first
+        // pass retained; there is no room, so its batch is simply not kept.
+        let mut same_request_second_pass = request_encoder(&earlier_request);
+        same_request_second_pass
+            .encode_batches(&embedding_key, &[&[&second][..]])
+            .expect("same request second pass");
+        assert_eq!(store.entry_count(), 1);
+        let mut same_request_replay = request_encoder(&earlier_request);
+        same_request_replay
+            .encode_batches(&embedding_key, &[&[&first][..]])
+            .expect("same request replay");
+        assert_eq!(
+            same_request_replay.inner.group_invocations, 0,
+            "a running request must never evict the batches its own earlier \
+             passes retained"
+        );
+        drop(same_request_replay);
+        drop(same_request_second_pass);
+        drop(earlier);
+        drop(earlier_request);
+
+        // A later request needs the bytes; nothing pins the earlier batch any
+        // more, so it is evicted rather than refused.
+        let later_request = store.request_cache();
+        let mut later = request_encoder(&later_request);
+        later
+            .encode_batches(&embedding_key, &[&[&second][..]])
+            .expect("later request");
+        assert_eq!(store.entry_count(), 1);
+        assert!(
+            store.retained_bytes() <= store.max_retained_bytes(),
+            "eviction must keep the store under its byte bound"
+        );
+        later
+            .encode_batches(&embedding_key, &[&[&second][..]])
+            .expect("later request replay");
+        assert_eq!(
+            later.inner.group_invocations, 1,
+            "the batch this request just retained must not have been evicted"
+        );
+        drop(later);
+
+        let mut evicted_replay = request_encoder(&later_request);
+        evicted_replay
+            .encode_batches(&embedding_key, &[&[&first][..]])
+            .expect("evicted batch replay");
+        assert_eq!(
+            evicted_replay.inner.group_invocations, 1,
+            "the evicted batch must be rebuilt rather than served stale"
+        );
+    }
+
+    #[test]
+    fn retirement_releases_completed_bytes_and_refuses_reinstallation() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let mut encoder = request_encoder(&cache);
+        for label in ['a', 'b', 'c'] {
+            let retained = chunk(label, &format!("retained {label}"));
+            encoder
+                .encode_batches(&embedding_key, &[&[&retained][..]])
+                .expect("retained projection");
+        }
+        assert_eq!(cache.entry_count(), 3);
+        assert!(cache.retained_bytes() > 0);
+        drop(encoder);
+
+        cache.store.release();
+        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(
+            cache.retained_bytes(),
+            0,
+            "shutdown must return the cache's bytes"
+        );
+
+        let mut after = request_encoder(&cache);
+        let rebuilt = chunk('a', "retained a");
+        let error = after
+            .encode_batches(&embedding_key, &[&[&rebuilt][..]])
+            .expect_err("a retired cache must refuse new claims");
+        assert!(
+            error.contains("retired"),
+            "retirement refusal must name the cache state: {error}"
+        );
+        assert_eq!(
+            after.inner.group_invocations, 0,
+            "retirement must fence model construction before it starts"
+        );
+        assert_eq!(cache.entry_count(), 0);
+        assert_eq!(cache.retained_bytes(), 0);
+    }
+
+    #[test]
+    fn a_claim_cannot_install_after_the_store_retires() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let subject = chunk('a', "late builder");
+        let group = [&subject];
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let request = store.request_cache();
+        let encoder = request_encoder(&request);
+        let key = encoder
+            .exact_key(&embedding_key, &group)
+            .expect("exact cache key");
+        let claim = store
+            .claim(&key, request.request_id, 1, &|| None)
+            .expect("build claim");
+        let super::SemanticEvaluationProjectionBatchClaimV1::Build(guard) = claim else {
+            panic!("an empty store must grant a build claim");
+        };
+
+        store.release();
+        store.install(guard, &[vec![1.0; 8]], request.request_id);
+
+        assert_eq!(store.entry_count(), 0);
+        assert_eq!(store.retained_bytes(), 0);
+    }
+
+    #[test]
+    fn memory_accounting_includes_in_flight_keys_and_retained_batches() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let subject = chunk('a', "account every cache-owned allocation");
+        let group = [&subject];
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let request = store.request_cache();
+        let encoder = request_encoder(&request);
+        let key = encoder
+            .exact_key(&embedding_key, &group)
+            .expect("exact cache key");
+        let claim = store
+            .claim(&key, request.request_id, 1, &|| None)
+            .expect("build claim");
+        let super::SemanticEvaluationProjectionBatchClaimV1::Build(guard) = claim else {
+            panic!("an empty store must grant a build claim");
+        };
+
+        let building = store.memory_usage();
+        assert_eq!(building.retained_batch_bytes, 0);
+        assert!(
+            building.in_flight_key_bytes > 0,
+            "the builder's owned key copies must be accounted"
+        );
+        assert_eq!(building.total_accounted_bytes, building.in_flight_key_bytes);
+
+        store.install(guard, &[vec![1.0; 8]], request.request_id);
+        let retained = store.memory_usage();
+        assert_eq!(retained.in_flight_key_bytes, 0);
+        assert!(retained.retained_batch_bytes > 0);
+        assert_eq!(
+            retained.total_accounted_bytes,
+            retained.retained_batch_bytes
+        );
+        assert!(retained.peak_accounted_bytes >= retained.total_accounted_bytes);
+    }
+
+    #[test]
+    fn memory_accounting_keeps_warm_hit_clones_until_the_request_finishes() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let subject = chunk('a', "warm hit accounting");
+        let group = [&subject];
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let cold_request = store.request_cache();
+        let mut cold = request_encoder(&cold_request);
+        cold.encode_batches(&embedding_key, &[&group])
+            .expect("cold cache fill");
+        drop(cold);
+        drop(cold_request);
+        let retained_bytes = store.memory_usage().retained_batch_bytes;
+
+        let warm_request = store.request_cache();
+        let mut warm = request_encoder(&warm_request);
+        warm.encode_batches(&embedding_key, &[&group])
+            .expect("warm cache hit");
+        assert_eq!(warm.inner.group_invocations, 0);
+        drop(warm);
+
+        let borrowed = store.memory_usage();
+        assert_eq!(borrowed.retained_batch_bytes, retained_bytes);
+        assert!(
+            borrowed.active_hit_vector_bytes > 0,
+            "warm output clones remain charged to their request"
+        );
+        assert_eq!(
+            borrowed.total_accounted_bytes,
+            borrowed
+                .retained_batch_bytes
+                .saturating_add(borrowed.active_hit_vector_bytes)
+        );
+
+        drop(warm_request);
+        let released = store.memory_usage();
+        assert_eq!(released.active_hit_vector_bytes, 0);
+        assert_eq!(released.total_accounted_bytes, retained_bytes);
+    }
+
+    #[test]
+    fn memory_accounting_includes_composed_lookup_keys_during_model_work() {
+        struct ObservingEncoderV1<'a> {
+            store: &'a SemanticEvaluationProjectionBatchStoreV1,
+        }
+
+        impl CanonicalChunkVectorEncoderV1 for ObservingEncoderV1<'_> {
+            fn encode(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunk: &CodeSearchChunkV1,
+            ) -> Result<Vec<f32>, String> {
+                Ok(test_vector(key, chunk))
+            }
+
+            fn encode_batch(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                chunks: &[&CodeSearchChunkV1],
+            ) -> Result<Vec<Vec<f32>>, String> {
+                Ok(chunks.iter().map(|chunk| test_vector(key, chunk)).collect())
+            }
+
+            fn encode_batches(
+                &mut self,
+                key: &EmbeddingProjectionKeyV1,
+                groups: &[&[&CodeSearchChunkV1]],
+            ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+                let memory = self.store.memory_usage();
+                assert!(
+                    memory.active_lookup_key_bytes > 0,
+                    "composed cache lookup keys must stay accounted during model work"
+                );
+                assert!(
+                    memory.in_flight_key_bytes > 0,
+                    "owned build keys must stay accounted during model work"
+                );
+                Ok(groups
+                    .iter()
+                    .map(|group| group.iter().map(|chunk| test_vector(key, chunk)).collect())
+                    .collect())
+            }
+        }
+
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let subject = chunk('a', "composed lookup accounting");
+        let group = [&subject];
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let request = store.request_cache();
+        let authority = crate::session_pool::test_support::authority();
+        let mut encoder = CachedSemanticEvaluationChunkEncoderV1::new(
+            ObservingEncoderV1 { store: &store },
+            &authority,
+            &request,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+            cancellation(),
+            documents(),
+        );
+
+        encoder
+            .encode_batches(&embedding_key, &[&group])
+            .expect("accounted projection");
+        assert_eq!(store.memory_usage().active_lookup_key_bytes, 0);
+    }
+
+    #[test]
+    fn retirement_keeps_outliving_claim_memory_visible_until_settlement() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let subject = chunk('a', "outliving claim");
+        let group = [&subject];
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let request = store.request_cache();
+        let encoder = request_encoder(&request);
+        let key = encoder
+            .exact_key(&embedding_key, &group)
+            .expect("exact cache key");
+        let claim = store
+            .claim(&key, request.request_id, 1, &|| None)
+            .expect("build claim");
+        let super::SemanticEvaluationProjectionBatchClaimV1::Build(guard) = claim else {
+            panic!("an empty store must grant a build claim");
+        };
+
+        store.release();
+        let retired = store.memory_usage();
+        assert!(retired.retired);
+        assert_eq!(retired.retained_batch_bytes, 0);
+        assert!(
+            retired.in_flight_key_bytes > 0,
+            "release is not evidence that an outliving builder freed its key"
+        );
+
+        drop(guard);
+        let settled = store.memory_usage();
+        assert_eq!(settled.in_flight_key_bytes, 0);
+        assert_eq!(settled.total_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn a_waiter_observes_cancellation_while_another_request_builds() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let subject = chunk('a', "cancelled waiter");
+        let group = [&subject];
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let builder_request = store.request_cache();
+        let builder_encoder = request_encoder(&builder_request);
+        let key = builder_encoder
+            .exact_key(&embedding_key, &group)
+            .expect("exact cache key");
+        let claim = store
+            .claim(&key, builder_request.request_id, 1, &|| None)
+            .expect("build claim");
+        let super::SemanticEvaluationProjectionBatchClaimV1::Build(builder_guard) = claim else {
+            panic!("an empty store must grant a build claim");
+        };
+        let waiter_request = store.request_cache();
+        let waiter_cancellation = Arc::new(TriggeredCancellation {
+            cancelled: AtomicBool::new(false),
+        });
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let cancellation = Arc::clone(&waiter_cancellation);
+            let waiter_store = Arc::clone(&store);
+            let waiter_key = key.clone();
+            let waiter = scope.spawn(move || {
+                waiting_tx.send(()).expect("waiter started");
+                waiter_store
+                    .claim(&waiter_key, waiter_request.request_id, 1, &|| {
+                        super::semantic_execution_interruption_error(cancellation.as_ref())
+                    })
+                    .map(drop)
+            });
+            waiting_rx.recv().expect("waiter reached claim");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            waiter_cancellation.cancel();
+
+            let error = match waiter.join().expect("waiter thread") {
+                Err(error) => error,
+                Ok(_) => panic!("cancelled waiter must stop waiting"),
+            };
+            assert!(error.contains("cancelled"));
+        });
+        drop(builder_guard);
+    }
+
+    #[test]
+    fn retirement_wakes_waiters_without_reopening_the_claim() {
+        let projection = projection();
+        let embedding_key = projection.embedding_key().clone();
+        let subject = chunk('a', "retired waiter");
+        let group = [&subject];
+        let store = SemanticEvaluationProjectionBatchStoreV1::new();
+        let builder_request = store.request_cache();
+        let builder_encoder = request_encoder(&builder_request);
+        let key = builder_encoder
+            .exact_key(&embedding_key, &group)
+            .expect("exact cache key");
+        let claim = store
+            .claim(&key, builder_request.request_id, 1, &|| None)
+            .expect("build claim");
+        let super::SemanticEvaluationProjectionBatchClaimV1::Build(builder_guard) = claim else {
+            panic!("an empty store must grant a build claim");
+        };
+        let waiter_request = store.request_cache();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let waiter_store = Arc::clone(&store);
+            let waiter_key = key.clone();
+            let waiter = scope.spawn(move || {
+                waiting_tx.send(()).expect("waiter started");
+                waiter_store
+                    .claim(&waiter_key, waiter_request.request_id, 1, &|| None)
+                    .map(drop)
+            });
+            waiting_rx.recv().expect("waiter reached claim");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            store.release();
+
+            let error = match waiter.join().expect("waiter thread") {
+                Err(error) => error,
+                Ok(()) => panic!("retirement must settle the waiter with a refusal"),
+            };
+            assert!(
+                error.contains("retired"),
+                "retirement refusal must name the cache state: {error}"
+            );
+        });
+        drop(builder_guard);
+        assert_eq!(store.memory_usage().total_accounted_bytes, 0);
     }
 
     #[test]

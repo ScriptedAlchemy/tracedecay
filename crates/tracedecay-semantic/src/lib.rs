@@ -94,7 +94,8 @@ pub use runtime_service::{
 };
 pub use semantic_evaluation::{
     PreparedSemanticEvaluationProjectionV1, SemanticEvaluationCancellationV1,
-    SemanticEvaluationProjectionBatchCachePolicyV1, SemanticEvaluationProjectionBatchCacheV1,
+    SemanticEvaluationProjectionBatchCacheMemoryV1, SemanticEvaluationProjectionBatchCachePolicyV1,
+    SemanticEvaluationProjectionBatchCacheV1, SemanticEvaluationProjectionBatchStoreV1,
     SemanticEvaluationProjectionCancellationV1, SemanticEvaluationProjectionResourcesV1,
     SemanticEvaluationQueryEmbedderV1, SemanticEvaluationQueryFactoryV1,
     measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
