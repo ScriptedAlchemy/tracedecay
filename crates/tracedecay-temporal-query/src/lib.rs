@@ -421,10 +421,20 @@ pub async fn execute_temporal_candidate_export(
     .map_err(map_port_error)?;
     let mut record_state = TemporalRecordReadState::new(record_limits);
     let mut records = TemporalRecordBatch::default();
+    // Candidate channels are ranking evidence; temporal records are stable-anchor
+    // state. Resolve each anchor once, then retain every channel contribution for
+    // rank fusion below.
+    let mut record_candidate_anchors = BTreeSet::new();
+    let record_candidates = candidates
+        .iter()
+        .filter(|candidate| record_candidate_anchors.insert(&candidate.anchor_id))
+        .cloned()
+        .collect::<Vec<_>>();
     loop {
-        let page = pull_temporal_record_page(read_port, &snapshot, &candidates, &mut record_state)
-            .await
-            .map_err(map_port_error)?;
+        let page =
+            pull_temporal_record_page(read_port, &snapshot, &record_candidates, &mut record_state)
+                .await
+                .map_err(map_port_error)?;
         let status = page.status();
         for record in page.into_items() {
             match record {

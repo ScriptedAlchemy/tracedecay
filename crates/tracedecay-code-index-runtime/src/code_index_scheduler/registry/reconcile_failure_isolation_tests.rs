@@ -14,9 +14,12 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use super::super::reconcile_panic_guard::{
-    MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
-    ReconcileFaultInjectionV1, ReconcileFaultKindV1,
+use super::super::{
+    CodeIndexCadenceTriggerV1,
+    reconcile_panic_guard::{
+        MAX_CONSECUTIVE_CAPACITY_RETRIES_V1, MAX_CONSECUTIVE_RECONCILE_PANICS_V1,
+        ReconcileFaultInjectionV1, ReconcileFaultKindV1,
+    },
 };
 use super::CodeIndexSchedulerRegistryV1;
 
@@ -133,6 +136,30 @@ impl Fixture {
         worktree.wake.notify_one();
     }
 
+    /// One attributable wake with no epoch advance.
+    async fn wake_with_pending_arrival(&self) {
+        let canonical = self.project.canonicalize().expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        CodeIndexSchedulerRegistryV1::note_wake(
+            &worktree.pending_wake,
+            &worktree.wake,
+            CodeIndexCadenceTriggerV1::QueryAdmission,
+        );
+    }
+
+    async fn pending_wake_micros(&self) -> u64 {
+        let canonical = self.project.canonicalize().expect("canonical project");
+        let mounted = self.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        let pending = worktree
+            .pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.micros
+    }
+
     /// Drive `EXTERNAL_WAKE_ROUNDS` spaced wakes over unchanged input.
     async fn drive_external_wakes(&self) {
         for _ in 0..EXTERNAL_WAKE_ROUNDS {
@@ -234,6 +261,62 @@ async fn changed_input_lifts_a_quarantined_reconcile() {
     assert!(
         after_hint > quarantined_at,
         "changed input must earn another attempt; stayed at {quarantined_at}"
+    );
+
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn superseded_reconcile_retains_its_arrival_until_a_later_wake() {
+    let fixture = Fixture::mount("project.reconcile-superseded-arrival").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::Cancelled, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        1,
+        "an interrupted pass relies on the source observation's wake instead of self-retrying"
+    );
+    assert_ne!(
+        fixture.pending_wake_micros().await,
+        0,
+        "the interrupted pass must restore the arrival a later source wake will consume"
+    );
+
+    let attempts_before_shutdown = fault.attempts();
+    fixture.registry.shutdown().await;
+    assert_eq!(
+        fault.attempts(),
+        attempts_before_shutdown,
+        "terminal shutdown must not retry the interrupted pass"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deadline_interruption_retains_arrival_without_retrying_expired_work() {
+    let fixture = Fixture::mount("project.reconcile-deadline-arrival").await;
+    let fault = fixture
+        .install_fault(ReconcileFaultKindV1::DeadlineExceeded, usize::MAX)
+        .await;
+
+    fixture.wake_with_pending_arrival().await;
+    wait_for_attempts(&fault, 1).await;
+    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+
+    assert_eq!(
+        fault.attempts(),
+        1,
+        "an expired reconcile must not retry the same deadline"
+    );
+    assert_ne!(
+        fixture.pending_wake_micros().await,
+        0,
+        "deadline attribution must not erase the accepted arrival"
     );
 
     fixture.registry.shutdown().await;
