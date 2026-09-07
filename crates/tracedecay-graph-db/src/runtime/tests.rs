@@ -176,12 +176,7 @@ fn stable_replay_native_identity(
 ) {
     let guard = db.read_guard().unwrap();
     let database = guard.as_ref().unwrap();
-    let existing = crate::state::ExistingBatchState::load(
-        database,
-        batch,
-        crate::state::ExistingRowsV1::Probe,
-    )
-    .unwrap();
+    let existing = crate::state::ExistingBatchState::load(database, batch).unwrap();
     let entities = existing
         .entities
         .values()

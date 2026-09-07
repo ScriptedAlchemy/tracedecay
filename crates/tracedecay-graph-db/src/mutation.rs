@@ -13,8 +13,8 @@ use crate::schema::{
     relation_type_for_kind, stable_key_from_encoded,
 };
 use crate::state::{
-    ExistingBatchState, ExistingRowsV1, FormatState, StoredEntity, StoredRelation,
-    latest_projection, relation_references_for_entity,
+    ExistingBatchState, FormatState, StoredEntity, StoredRelation, latest_projection,
+    relation_references_for_entity,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace,
@@ -53,14 +53,12 @@ impl CommitMetadata {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply(
     database: &GrafeoDB,
     state: &mut FormatState,
     batch: GraphWriteBatch,
     metadata: CommitMetadata,
     endpoint_namespaces: &RelationEndpointNamespaces,
-    existing_rows: ExistingRowsV1<'_>,
     poisoned: &AtomicBool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphCommit, GraphDbError> {
@@ -72,7 +70,7 @@ pub(crate) fn apply(
     } = metadata;
     let existing = hotpath::measure_block!(
         "graph_db.mutation.existing_state",
-        ExistingBatchState::load(database, &batch, existing_rows)
+        ExistingBatchState::load(database, &batch)
     )?;
     let external_endpoints = hotpath::measure_block!(
         "graph_db.mutation.validate_references",

@@ -72,18 +72,19 @@ graph-disk-tier = [
 ]
 
 # Per-generation sealed compact stores (`src/sealed_store.rs`): at seal time
-# the verified generation's rows are copied into their own single-generation
-# Grafeo database, compacted with `GrafeoDB::compact()` (whose whole-database
-# scope then coincides exactly with the one immutable generation), and served
-# read-only after a recovered-digest proof. This is the narrow slice of the
-# grafeo storage features that lane needs: `compact-store` for `compact()`
-# and the columnar section, `mmap` for the mmap-backed base on reopen. It
-# deliberately excludes `spill`, so the staging database's memory behavior is
-# untouched — see `graph-disk-tier` above for that half.
+# the verified generation's rows are streamed straight into a columnar
+# `CompactStore` (`IncrementalCompactStoreBuilder`) and written as their own
+# single-generation container (`GrafeoDB::write_compact_container`), then
+# served read-only after a recovered-digest proof. This is the narrow slice
+# of the grafeo storage features that lane needs: `compact-store` for the
+# builder and the columnar section, `mmap` for the mmap-backed base on
+# reopen. It deliberately excludes `spill`, so the staging database's memory
+# behavior is untouched — see `graph-disk-tier` above for that half.
 #
 # Without this feature the sealed-store lane is compiled out and every read
 # serves from the staging database exactly as before.
 graph-sealed-store = [
+    "grafeo-core/compact-store",
     "grafeo-engine/mmap",
     "grafeo-engine/compact-store",
 ]

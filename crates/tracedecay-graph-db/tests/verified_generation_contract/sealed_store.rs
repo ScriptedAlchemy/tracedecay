@@ -571,11 +571,12 @@ fn seal_builds_compact_store_while_second_generation_stages_and_seals() {
     assert_snapshot_reads(&g1_commit.snapshot, &identity, "one");
 }
 
-/// Small generations carrying Bytes properties stay in replay form and still
-/// read exactly. Eager compact construction is reserved for generations above
-/// the measured size threshold where its publication cost can be amortized.
+/// Generations carrying Bytes properties seal in compact form and read every
+/// byte back exactly: the compact dictionary carries a typed Bytes entry, so
+/// no size threshold or replay fallback stands between a Bytes row and the
+/// columnar artifact.
 #[test]
-fn small_bytes_rows_seal_in_replay_form_and_read_exactly() {
+fn bytes_rows_seal_compact_and_read_exactly() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -607,8 +608,8 @@ fn small_bytes_rows_seal_in_replay_form_and_read_exactly() {
     let receipt = receipt_for_generation(temp.path(), "bytes-g1")
         .expect("seal must write the artifact receipt");
     assert!(
-        receipt.contains("\"form\": \"replay\""),
-        "small Bytes generations must not pay eager compact construction: {receipt}"
+        receipt.contains("\"form\": \"compact\""),
+        "every sealed generation is a compact artifact: {receipt}"
     );
     assert_snapshot_reads(&commit.snapshot, &identity, "payload");
     let entity = commit
@@ -627,11 +628,12 @@ fn small_bytes_rows_seal_in_replay_form_and_read_exactly() {
     );
 }
 
-/// Rows carrying Vector properties seal in replay form: the sealed lane never
-/// serves vector search, so compacting these rows buys nothing, and
-/// mixed-dimension vectors still fall back to a lossy display dictionary.
+/// Rows carrying Vector properties seal in compact form and read back
+/// exactly, even when one property name carries two dimensions across the
+/// generation: the native vector key embeds the dimension, so each column
+/// holds one dimension and the `Float32Vector` codec round-trips every value.
 #[test]
-fn vector_rows_seal_in_replay_form_and_read_exactly() {
+fn vector_rows_seal_compact_and_read_exactly() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -639,10 +641,16 @@ fn vector_rows_seal_in_replay_form_and_read_exactly() {
 
     let mut g1 = rich_manifest(identity.clone(), "vectors-g1", "payload");
     let vector = GraphVector::new(vec![0.25_f32, -0.5, 0.75], 3, VectorMetric::Cosine).unwrap();
+    let wider = GraphVector::new(vec![1.0_f32, 2.0, 3.0, 4.0], 4, VectorMetric::Cosine).unwrap();
     for entity in &mut g1.entities {
+        let embedding = if entity.identity.as_str() == "entity:b" {
+            vector.clone()
+        } else {
+            wider.clone()
+        };
         entity.properties.insert(
             GraphPropertyName::new("embedding").unwrap(),
-            GraphProperty::Vector(vector.clone()),
+            GraphProperty::Vector(embedding),
         );
     }
     let record = stage_manifest(
@@ -663,24 +671,27 @@ fn vector_rows_seal_in_replay_form_and_read_exactly() {
     let receipt = receipt_for_generation(temp.path(), "vectors-g1")
         .expect("seal must write the artifact receipt");
     assert!(
-        receipt.contains("\"form\": \"replay\""),
-        "vector rows must seal in replay form on the pinned engine: {receipt}"
+        receipt.contains("\"form\": \"compact\""),
+        "every sealed generation is a compact artifact: {receipt}"
     );
     assert_snapshot_reads(&commit.snapshot, &identity, "payload");
-    let entity = commit
-        .snapshot
-        .entity(
-            &GraphEntityRef::new(identity.clone(), GraphEntityId::new("entity:b").unwrap()),
-            Arc::new(TestCancellation),
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        entity
-            .properties
-            .get(&GraphPropertyName::new("embedding").unwrap()),
-        Some(&GraphProperty::Vector(vector)),
-    );
+    for (id, expected) in [("entity:b", vector), ("entity:a", wider)] {
+        let entity = commit
+            .snapshot
+            .entity(
+                &GraphEntityRef::new(identity.clone(), GraphEntityId::new(id).unwrap()),
+                Arc::new(TestCancellation),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entity
+                .properties
+                .get(&GraphPropertyName::new("embedding").unwrap()),
+            Some(&GraphProperty::Vector(expected)),
+            "{id}"
+        );
+    }
 }
 
 /// A restage of the same generation identity with different content is
