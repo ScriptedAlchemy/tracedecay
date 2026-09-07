@@ -2745,6 +2745,42 @@ mod tests {
         assert!(!root.matches_root_uri("file:///root/project-other/"));
     }
 
+    /// Host aliases (`/var` → `/private/var`) and Windows verbatim vs native
+    /// spellings name one directory. Segment equality alone treats them as
+    /// two roots and refuses initialize before any capability is negotiated.
+    #[cfg(unix)]
+    #[test]
+    fn admitted_root_matches_host_alias_spelling_and_refuses_siblings() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let real = temp.path().join("private").join("root");
+        std::fs::create_dir_all(&real).expect("create real root");
+        std::os::unix::fs::symlink(temp.path().join("private"), temp.path().join("var"))
+            .expect("host alias");
+        let alias = temp.path().join("var").join("root");
+        let sibling = temp.path().join("var").join("root-other");
+        std::fs::create_dir(&sibling).expect("create sibling root");
+
+        let admitted = url::Url::from_file_path(real.canonicalize().expect("canonical root"))
+            .expect("admitted file URI")
+            .to_string();
+        let candidate = url::Url::from_directory_path(&alias)
+            .expect("alias directory URI")
+            .to_string();
+        let sibling_uri = url::Url::from_directory_path(&sibling)
+            .expect("sibling directory URI")
+            .to_string();
+
+        let root = AdmittedRoot::new(admitted);
+        assert!(
+            root.matches_root_uri(&candidate),
+            "equivalent host-alias spelling must be the same admitted root"
+        );
+        assert!(
+            !root.matches_root_uri(&sibling_uri),
+            "a sibling root must stay outside the admitted identity"
+        );
+    }
+
     /// Root admission and document containment must not depend on whether the
     /// running host can convert the URI to one of its own filesystem paths.
     /// `Url::to_file_path` fails for a drive-less path on Windows and for a

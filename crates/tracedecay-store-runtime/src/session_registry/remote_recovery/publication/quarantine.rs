@@ -1,15 +1,17 @@
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use super::{RestorePublicationV1, Result, session_registry_error};
 use crate::session_registry::ProjectSessionTerminalVacancyAuthorityV1;
 use tracedecay_runtime_core::db::DatabaseAuthority;
 
 const REMOTE_RESTORE_QUARANTINE_VERSION: &str = "tracedecay.remote-restore.v3";
+const REMOTE_RESTORE_QUARANTINE_RECORD_NAME: &str = "remote restore quarantine fence";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,15 +131,37 @@ fn fence_path(destination: &Path) -> PathBuf {
     super::super::super::remote_restore_quarantine_fence_path(destination)
 }
 
+/// Publishes the durable journal through the same private record authority
+/// that [`read_remote_restore_quarantine`] reads it back with, so the fence
+/// is created with the exact owner-private mode/DACL the strict reader
+/// admits instead of whatever the destination directory would let a plain
+/// create inherit.
 fn write(destination: &Path, quarantine: &RemoteRestoreQuarantineV1) -> Result<()> {
     let payload = serde_json::to_vec(quarantine).map_err(|error| {
         session_registry_error("encode remote restore quarantine", error.to_string())
     })?;
     let fence = fence_path(destination);
     let staging = fence.with_extension("staging");
-    PrivateStoreIo::write_file_atomically_durable(&fence, &staging, &payload).map_err(|error| {
-        session_registry_error("write remote restore quarantine", error.to_string())
-    })
+    // A crash between the private create and the publishing rename leaves
+    // this attempt's own staging record behind; the record authority creates
+    // exclusively, so clear that leftover before publishing again.
+    match fs::remove_file(&staging) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(session_registry_error(
+                "clear remote restore quarantine staging",
+                error.to_string(),
+            ));
+        }
+    }
+    DatabaseAuthority::publish_record_atomically(
+        &staging,
+        &fence,
+        &payload,
+        REMOTE_RESTORE_QUARANTINE_RECORD_NAME,
+    )
+    .map_err(|error| session_registry_error("write remote restore quarantine", error.to_string()))
 }
 
 pub(super) fn read_remote_restore_quarantine(
@@ -145,9 +169,10 @@ pub(super) fn read_remote_restore_quarantine(
 ) -> Result<Option<RemoteRestoreQuarantineV1>> {
     let fence = fence_path(destination);
     let Some(payload) =
-        DatabaseAuthority::read_record_strict(&fence, "remote restore quarantine fence").map_err(
-            |error| session_registry_error("read remote restore quarantine", format!("{error:?}")),
-        )?
+        DatabaseAuthority::read_record_strict(&fence, REMOTE_RESTORE_QUARANTINE_RECORD_NAME)
+            .map_err(|error| {
+                session_registry_error("read remote restore quarantine", format!("{error:?}"))
+            })?
     else {
         return Ok(None);
     };
@@ -430,6 +455,43 @@ mod tests {
                 "phase {phase:?} must not infer a third physical outcome"
             );
         }
+    }
+
+    #[test]
+    fn install_replaces_a_stale_staging_record_left_by_an_interrupted_write() {
+        let temporary = tempfile::tempdir().expect("temporary restore directory");
+        let destination = temporary.path().join("sessions.sqlite");
+        Connection::open(&destination)
+            .expect("create destination")
+            .execute_batch("CREATE TABLE stale_staging (id INTEGER PRIMARY KEY);")
+            .expect("seed destination");
+        let rollback_identity =
+            tracedecay_runtime_core::db::sqlite_generation_identity(&destination)
+                .expect("destination identity");
+        // A crash between creating the staging record and publishing it leaves
+        // this attempt's own staging file behind, created however the previous
+        // process left it; the next write must clear it, then publish through
+        // the private record authority so the strict reader admits the fence.
+        let stale_staging = fence_path(&destination).with_extension("staging");
+        std::fs::write(&stale_staging, b"interrupted earlier attempt").expect("stale staging");
+
+        install_remote_restore_quarantine(
+            &destination,
+            &temporary.path().join("staging.sqlite"),
+            &temporary.path().join("rollback.sqlite"),
+            rollback_identity,
+            rollback_identity
+                .checked_add(1)
+                .expect("distinct published identity"),
+            terminal_vacancy(),
+        )
+        .expect("a stale staging record must not block the durable fence");
+
+        assert!(!stale_staging.exists());
+        let reopened = read_remote_restore_quarantine(&destination)
+            .expect("read fence through the strict private reader")
+            .expect("fence is durable");
+        assert_eq!(reopened.phase, RemoteRestoreQuarantinePhaseV1::Publishing);
     }
 
     #[test]

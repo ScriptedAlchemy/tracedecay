@@ -17,10 +17,12 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_runtime_core::branch_meta::BranchMeta;
+#[cfg(unix)]
+use tracedecay_runtime_core::storage::profile_sharded_data_root;
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
-    profile_sharded_layout, write_repository_identity_marker, write_store_manifest,
+    StoreKind, StoreManifest, default_profile_project_id, profile_sharded_layout,
+    write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -2382,6 +2384,11 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
     assert!(payload["next_after_apply_id"].is_null());
 }
 
+/// The daemon compiles the manual branch-activation journey only on Unix
+/// (`branch_add_response` answers `code_index_scheduler_unavailable` under
+/// `#[cfg(not(unix))]`), so this end-to-end journey is scoped the same way
+/// rather than asserting a success the product does not offer there.
+#[cfg(unix)]
 #[test]
 fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifacts() {
     let home = TempDir::new().unwrap();
