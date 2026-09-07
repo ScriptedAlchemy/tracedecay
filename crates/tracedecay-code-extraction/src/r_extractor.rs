@@ -2,6 +2,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{ComplexityMetrics, R_COMPLEXITY, count_complexity};
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
@@ -192,7 +193,13 @@ impl RExtractor {
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
 
         let metrics = if rhs.child_count() > 0 {
             count_complexity(rhs, &R_COMPLEXITY, state.source)

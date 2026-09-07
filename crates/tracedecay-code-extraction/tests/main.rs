@@ -63,6 +63,7 @@ mod quint;
 #[cfg(feature = "lang-ruby")]
 mod ruby;
 mod rust;
+mod same_line_identity;
 mod scala;
 mod svelte;
 mod swift;

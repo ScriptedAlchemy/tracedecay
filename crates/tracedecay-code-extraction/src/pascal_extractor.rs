@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::docstring_from_preceding_comments;
+use crate::common::{docstring_from_preceding_comments, local_node_id};
 use crate::complexity::{PASCAL_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -196,11 +196,12 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::PascalProgram,
             &name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -252,7 +253,13 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::PascalUnit, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::PascalUnit,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -336,7 +343,7 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -440,7 +447,13 @@ impl PascalExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            name,
+            decl_node,
+        );
 
         let mut sig = format!("{name} = class");
         if let Some(parent_ref) = find_direct_child_by_kind(class_node, "typeref") {
@@ -525,7 +538,13 @@ impl PascalExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::PascalRecord, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::PascalRecord,
+            name,
+            decl_node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -586,7 +605,13 @@ impl PascalExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Interface,
+            name,
+            decl_node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -643,7 +668,13 @@ impl PascalExtractor {
         let start_column = decl_node.start_position().column as u32;
         let end_column = decl_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::TypeAlias, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::TypeAlias,
+            name,
+            decl_node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -768,7 +799,13 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -817,7 +854,7 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &node_kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &node_kind, &name, node);
         let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -867,7 +904,7 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &node_kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &node_kind, &name, node);
         let metrics = count_complexity(node, &PASCAL_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -919,7 +956,13 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Property, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Property,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -986,7 +1029,13 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            &name,
+            node,
+        );
 
         let visibility = if state.in_implementation {
             Visibility::Private
@@ -1059,7 +1108,13 @@ impl PascalExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Static, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Static,
+            &name,
+            node,
+        );
 
         let visibility = if state.in_implementation {
             Visibility::Private
@@ -1139,7 +1194,13 @@ impl PascalExtractor {
             };
 
             let qualified_name = format!("{}::{}", state.qualified_prefix(), display_name);
-            let id = generate_node_id(&state.file_path, &actual_kind, &display_name, start_line);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &actual_kind,
+                &display_name,
+                node,
+            );
 
             let visibility = if state.in_implementation {
                 Visibility::Private

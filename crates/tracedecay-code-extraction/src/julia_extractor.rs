@@ -2,6 +2,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{ComplexityMetrics, JULIA_COMPLEXITY, count_complexity};
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
@@ -84,7 +85,7 @@ impl<'s> ExtractionState<'s> {
         metrics: ComplexityMetrics,
     ) -> String {
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&self.file_path, &kind, &name, start_line);
+        let id = local_node_id(&self.file_path, self.source, &kind, &name, node);
         let graph_node = Node {
             id: id.clone(),
             kind,
@@ -279,12 +280,7 @@ impl JuliaExtractor {
         let docstring = Self::extract_docstring(state, node);
         let sig = Self::first_line(state, node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
-            &state.file_path,
-            &NodeKind::Class,
-            name,
-            node.start_position().row as u32,
-        );
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Class, name, node);
 
         state.node_stack.push((name.to_string(), id.clone()));
         state.push_node(
@@ -344,7 +340,7 @@ impl JuliaExtractor {
         let name = text.split_whitespace().nth(1).unwrap_or("?").to_string();
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),

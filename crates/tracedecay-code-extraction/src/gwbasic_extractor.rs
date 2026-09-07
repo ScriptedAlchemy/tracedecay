@@ -12,6 +12,7 @@ use tree_sitter::{Node as TsNode, Tree};
 use crate::basic_common::{
     BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
 };
+use crate::common::local_node_id;
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
@@ -264,7 +265,13 @@ impl GwBasicExtractor {
             let start_column = basic_line.node.start_position().column as u32;
             let end_column = basic_line.node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), fn_name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Function, fn_name, start_line);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &NodeKind::Function,
+                fn_name,
+                basic_line.node,
+            );
             let text = state.node_text(basic_line.node);
 
             let graph_node = Node {
@@ -353,7 +360,13 @@ impl GwBasicExtractor {
         let start_column = basic_line.node.start_position().column as u32;
         let end_column = basic_line.node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            name,
+            basic_line.node,
+        );
         let text = state.node_text(basic_line.node);
 
         let graph_node = Node {
@@ -457,11 +470,12 @@ impl GwBasicExtractor {
                     let start_column = first_node.start_position().column as u32;
                     let end_column = last_node.end_position().column as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), fn_name);
-                    let fn_id = generate_node_id(
+                    let fn_id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::Function,
                         &fn_name,
-                        start_line,
+                        first_node,
                     );
 
                     // Count complexity by walking body lines' AST nodes.

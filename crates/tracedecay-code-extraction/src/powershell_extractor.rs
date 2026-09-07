@@ -5,6 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{POWERSHELL_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -197,7 +198,7 @@ impl PowerShellExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &POWERSHELL_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -267,7 +268,13 @@ impl PowerShellExtractor {
         let start_column = pipeline_node.start_position().column as u32;
         let end_column = pipeline_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            &name,
+            pipeline_node,
+        );
         let text = state.node_text(pipeline_node);
 
         let graph_node = Node {
@@ -340,7 +347,7 @@ impl PowerShellExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, name, node);
         let text = state.node_text(node);
 
         let graph_node = Node {

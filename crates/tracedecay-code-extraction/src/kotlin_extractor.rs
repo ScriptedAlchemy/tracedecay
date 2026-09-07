@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
@@ -94,6 +95,10 @@ impl<'s> AnnotationEmitterState for ExtractionState<'s> {
 
     fn file_path(&self) -> &str {
         &self.file_path
+    }
+
+    fn source(&self) -> &[u8] {
+        self.source
     }
 
     fn qualified_prefix(&self) -> String {
@@ -242,11 +247,12 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::KotlinPackage,
             &name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -328,7 +334,7 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &path, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -416,7 +422,7 @@ impl KotlinExtractor {
             NodeKind::Class
         };
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -477,7 +483,13 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::DataClass, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::DataClass,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -538,7 +550,13 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::SealedClass, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::SealedClass,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -598,7 +616,13 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Trait, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Trait,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -661,7 +685,7 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -741,7 +765,13 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -794,7 +824,13 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::KotlinObject, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::KotlinObject,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -855,11 +891,12 @@ impl KotlinExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::CompanionObject,
             &name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -948,7 +985,7 @@ impl KotlinExtractor {
             NodeKind::Function
         };
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &KOTLIN_COMPLEXITY, state.source);
 
         // For extension functions, build a richer signature including the receiver type.
@@ -1021,7 +1058,7 @@ impl KotlinExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
 
         let kind = NodeKind::Property;
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let sig_text = state.node_text(node);
         let sig = if is_var {
@@ -1089,7 +1126,13 @@ impl KotlinExtractor {
         let end_column = node.end_position().column as u32;
         let name = "constructor".to_string();
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Constructor,
+            &name,
+            node,
+        );
         let metrics = count_complexity(node, &KOTLIN_COMPLEXITY, state.source);
 
         let graph_node = Node {

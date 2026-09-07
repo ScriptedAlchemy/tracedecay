@@ -5,6 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{LUA_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -218,7 +219,7 @@ impl LuaExtractor {
         } else {
             format!("{}::{}", state.qualified_prefix(), name)
         };
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &LUA_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -331,7 +332,7 @@ impl LuaExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -379,7 +380,13 @@ impl LuaExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), mod_name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, mod_name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Use,
+            mod_name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),

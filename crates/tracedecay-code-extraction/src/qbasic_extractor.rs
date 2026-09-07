@@ -11,6 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{ComplexityMetrics, QBASIC_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -241,7 +242,7 @@ impl QBasicExtractor {
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, line);
         let text = state.node_text(line);
 
         let graph_node = Node {
@@ -307,7 +308,7 @@ impl QBasicExtractor {
         let start_column = line.start_position().column as u32;
         let end_column = line.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Field, name, line);
 
         let graph_node = Node {
             id: id.clone(),
@@ -363,7 +364,13 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let struct_id = generate_node_id(&state.file_path, &NodeKind::Struct, name, start_line);
+        let struct_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            name,
+            node,
+        );
         let text = state.node_text(node);
         let signature = text.lines().next().unwrap_or("").trim().to_string();
 
@@ -433,7 +440,13 @@ impl QBasicExtractor {
         let start_column = member.start_position().column as u32;
         let end_column = member.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            name,
+            member,
+        );
         let text = state.node_text(member);
 
         let graph_node = Node {
@@ -489,7 +502,13 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
+        let fn_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
 
         // Build signature from the first line of text.
         let text = state.node_text(node);
@@ -559,7 +578,13 @@ impl QBasicExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
+        let fn_id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
 
         let text = state.node_text(node);
         let signature = text.lines().next().unwrap_or("").trim().to_string();

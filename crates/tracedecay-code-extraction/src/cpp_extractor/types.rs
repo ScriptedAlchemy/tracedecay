@@ -2,8 +2,9 @@ use tree_sitter::Node as TsNode;
 
 use super::{CppExtractor, ExtractionState};
 use crate::{
+    common::local_node_id,
     traversal::{find_descendant_by_kind, find_direct_child_by_kind},
-    types::{Edge, EdgeKind, Node, NodeKind, Visibility, generate_node_id},
+    types::{Edge, EdgeKind, Node, NodeKind, Visibility},
 };
 
 impl CppExtractor {
@@ -39,7 +40,13 @@ impl CppExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_str(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Typedef, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Typedef,
+            &name,
+            node,
+        );
         state.nodes.push(Node {
             id: id.clone(),
             kind: NodeKind::Typedef,
@@ -222,7 +229,7 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
         state.nodes.push(Node {
             id: id.clone(),
             kind: NodeKind::Use,
@@ -269,7 +276,7 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Union, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Union, name, node);
         let signature = find_direct_child_by_kind(node, "field_declaration_list")
             .map(|body| state.signature_before_child(node, body));
         state.nodes.push(Node {
@@ -318,7 +325,7 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Enum, name, node);
         let signature = find_direct_child_by_kind(node, "enumerator_list")
             .map(|body| state.signature_before_child(node, body));
         state.nodes.push(Node {

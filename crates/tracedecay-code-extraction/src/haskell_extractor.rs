@@ -2,6 +2,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
@@ -52,7 +53,7 @@ impl<'s> ExtractionState<'s> {
         docstring: Option<String>,
     ) {
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&self.file_path, &kind, &name, start_line);
+        let id = local_node_id(&self.file_path, self.source, &kind, &name, node);
         let graph_node = Node {
             id: id.clone(),
             kind,
@@ -266,7 +267,7 @@ impl HaskellExtractor {
             .to_string();
 
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),

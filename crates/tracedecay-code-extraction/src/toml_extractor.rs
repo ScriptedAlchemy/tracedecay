@@ -8,6 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
@@ -147,7 +148,13 @@ impl TomlExtractor {
         let start_line = table_node.start_position().row as u32;
         let end_line = table_node.end_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            table_node,
+        );
 
         let module = Node {
             id: id.clone(),
@@ -229,7 +236,13 @@ impl TomlExtractor {
         let start_line = pair_node.start_position().row as u32;
         let end_line = pair_node.end_position().row as u32;
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            name,
+            pair_node,
+        );
 
         let pair = Node {
             id: id.clone(),

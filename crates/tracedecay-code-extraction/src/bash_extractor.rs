@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::docstring_from_hash_comments;
+use crate::common::{docstring_from_hash_comments, local_node_id};
 use crate::complexity::{BASH_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
@@ -175,7 +175,7 @@ impl BashExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &BASH_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -238,7 +238,7 @@ impl BashExtractor {
             let start_column = node.start_position().column as u32;
             let end_column = node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+            let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
             let graph_node = Node {
                 id: id.clone(),
@@ -295,7 +295,7 @@ impl BashExtractor {
                 let start_column = node.start_position().column as u32;
                 let end_column = node.end_position().column as u32;
                 let qualified_name = format!("{}::{}", state.qualified_prefix(), arg);
-                let id = generate_node_id(&state.file_path, &NodeKind::Use, &arg, start_line);
+                let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &arg, node);
                 let text = state.node_text(node);
 
                 let graph_node = Node {

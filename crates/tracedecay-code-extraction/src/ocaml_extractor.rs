@@ -2,6 +2,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{ComplexityMetrics, OCAML_COMPLEXITY, count_complexity};
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
@@ -202,7 +203,7 @@ impl OcamlExtractor {
         let sig = Self::first_line(state, node);
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let metrics = if is_fn && node.child_count() > 0 {
             count_complexity(node, &OCAML_COMPLEXITY, state.source)
@@ -263,7 +264,13 @@ impl OcamlExtractor {
                     let name = state.node_text(name_node);
                     let start_line = child.start_position().row as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                    let id = generate_node_id(&state.file_path, &NodeKind::Class, name, start_line);
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Class,
+                        name,
+                        child,
+                    );
                     let sig = Self::first_line(state, child);
 
                     let graph_node = Node {
@@ -321,8 +328,13 @@ impl OcamlExtractor {
                     let name = state.node_text(name_node);
                     let start_line = child.start_position().row as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                    let id =
-                        generate_node_id(&state.file_path, &NodeKind::Module, name, start_line);
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Module,
+                        name,
+                        child,
+                    );
 
                     let graph_node = Node {
                         id: id.clone(),
@@ -384,7 +396,13 @@ impl OcamlExtractor {
                     let name = state.node_text(name_node);
                     let start_line = child.start_position().row as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                    let id = generate_node_id(&state.file_path, &NodeKind::Class, name, start_line);
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Class,
+                        name,
+                        child,
+                    );
                     let sig = Self::first_line(state, child);
 
                     let graph_node = Node {
@@ -439,7 +457,7 @@ impl OcamlExtractor {
             .trim_end_matches(';')
             .to_string();
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),

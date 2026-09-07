@@ -17,6 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Range, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
@@ -345,12 +346,7 @@ impl MarkdownExtractor {
             .chain(std::iter::once(title.as_str()))
             .collect::<Vec<_>>()
             .join(HEADING_PATH_SEPARATOR);
-        let id = generate_node_id(
-            &state.file_path,
-            &kind,
-            &title,
-            node.start_position().row as u32,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &title, node);
 
         let node_obj = Node {
             id: id.clone(),

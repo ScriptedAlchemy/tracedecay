@@ -1,11 +1,12 @@
 use tracedecay_domain::SourceSpan;
 use tree_sitter::Node as TsNode;
 
+use crate::common::local_node_id;
 use crate::extraction_artifact::{
     ExtractedImportEvidenceV1, ImportModuleKindV1, ImportNamespaceV1,
 };
 use crate::traversal::find_direct_child_by_kind;
-use crate::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility};
 
 use super::ExtractionState;
 
@@ -23,13 +24,7 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
     let start_column = node.start_position().column as u32;
     let end_column = node.end_position().column as u32;
     let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-    let statement_identity = format!("{name}@{start_column}");
-    let id = generate_node_id(
-        &state.file_path,
-        &NodeKind::Use,
-        &statement_identity,
-        start_line,
-    );
+    let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
     state.nodes.push(Node {
         id: id.clone(),

@@ -5,6 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
@@ -202,7 +203,7 @@ impl DockerfileExtractor {
             // Named stage -> Module node.
             let kind = NodeKind::Module;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), alias_name);
-            let id = generate_node_id(&state.file_path, &kind, alias_name, start_line);
+            let id = local_node_id(&state.file_path, state.source, &kind, alias_name, node);
 
             let graph_node = Node {
                 id: id.clone(),
@@ -249,7 +250,7 @@ impl DockerfileExtractor {
             let stage_name = format!("stage{stage_index}");
             let kind = NodeKind::Module;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), stage_name);
-            let id = generate_node_id(&state.file_path, &kind, &stage_name, start_line);
+            let id = local_node_id(&state.file_path, state.source, &kind, &stage_name, node);
 
             let graph_node = Node {
                 id: id.clone(),
@@ -324,7 +325,7 @@ impl DockerfileExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -379,7 +380,7 @@ impl DockerfileExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -431,8 +432,13 @@ impl DockerfileExtractor {
                     let start_column = child.start_position().column as u32;
                     let end_column = child.end_position().column as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), port_text);
-                    let id =
-                        generate_node_id(&state.file_path, &NodeKind::Field, port_text, start_line);
+                    let id = local_node_id(
+                        &state.file_path,
+                        state.source,
+                        &NodeKind::Field,
+                        port_text,
+                        child,
+                    );
 
                     let graph_node = Node {
                         id: id.clone(),
@@ -499,7 +505,8 @@ impl DockerfileExtractor {
                     let end_column = child.end_position().column as u32;
                     let text = state.node_text(child);
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), key);
-                    let id = generate_node_id(&state.file_path, &NodeKind::Field, key, start_line);
+                    let id =
+                        local_node_id(&state.file_path, state.source, &NodeKind::Field, key, child);
 
                     let graph_node = Node {
                         id: id.clone(),
@@ -561,11 +568,12 @@ impl DockerfileExtractor {
                         let target = if let Some(target) = state.stage_target(stage_name) {
                             target
                         } else {
-                            let id = generate_node_id(
+                            let id = local_node_id(
                                 &state.file_path,
+                                state.source,
                                 &NodeKind::Use,
                                 stage_name,
-                                start_line,
+                                node,
                             );
                             let text = state.node_text(node);
                             state.nodes.push(Node {

@@ -767,12 +767,67 @@ pub struct GraphStats {
 /// Extracted names may be empty for anonymous source constructs; file, kind,
 /// and line keep those identities deterministic and distinct.
 pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32) -> String {
-    let input = format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line);
+    hash_node_id(
+        kind,
+        &format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line),
+    )
+}
+
+/// Generates the node ID for a construct that shares its line with preceding
+/// source text, so the start column also participates.
+///
+/// Extraction mints [`generate_node_id`] for constructs that begin their line
+/// (only blanks precede them) and this form otherwise. Two constructs of the
+/// same kind and name on one line — `impl A { fn run() {} } impl B { fn run()
+/// {} }` — therefore never share an ID, while indentation and one-construct
+/// lines leave the line-keyed ID unchanged.
+pub fn generate_node_id_at(
+    file_path: &str,
+    kind: &NodeKind,
+    name: &str,
+    line: u32,
+    column: u32,
+) -> String {
+    hash_node_id(
+        kind,
+        &format!(
+            "{}:{}:{}:{}:{}",
+            file_path,
+            kind.as_str(),
+            name,
+            line,
+            column
+        ),
+    )
+}
+
+fn hash_node_id(kind: &NodeKind, input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
     let hex_str = crate::canonical_text::encode_lowercase_hex(&hash);
     format!("{}:{}", kind.as_str(), &hex_str[..32])
+}
+
+#[cfg(test)]
+mod same_line_node_id_tests {
+    use super::{NodeKind, generate_node_id, generate_node_id_at};
+
+    #[test]
+    fn column_keyed_ids_are_deterministic_and_distinct_from_line_keyed_ids() {
+        let line_keyed = generate_node_id("src/lib.rs", &NodeKind::Method, "run", 3);
+        let first = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60);
+        let second = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 94);
+
+        assert_eq!(
+            first,
+            generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60)
+        );
+        assert_ne!(first, second, "same-line constructs must stay distinct");
+        assert_ne!(first, line_keyed);
+        assert_ne!(second, line_keyed);
+        assert!(first.starts_with("method:"), "unexpected id shape: {first}");
+    }
 }
 
 #[cfg(test)]

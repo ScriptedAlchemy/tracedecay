@@ -1,9 +1,10 @@
 use tree_sitter::Node as TsNode;
 
 use super::{ExtractionState, TypeScriptExtractor};
+use crate::common::local_node_id;
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use crate::types::{Edge, EdgeKind, Node, NodeKind, Visibility, generate_node_id};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, Visibility};
 
 /// Root callee names that mark a call as a test-framework construct whose
 /// callback argument should be attributed as an executable test node.
@@ -143,7 +144,13 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
     let start_column = call.start_position().column as u32;
     let end_column = call.end_position().column as u32;
     let qualified_name = format!("{}::{}", state.qualified_prefix(), title);
-    let id = generate_node_id(&state.file_path, &NodeKind::Function, &title, start_line);
+    let id = local_node_id(
+        &state.file_path,
+        state.source,
+        &NodeKind::Function,
+        &title,
+        call,
+    );
 
     let callback = test_call_callback(args);
     let is_async = callback.is_some_and(|cb| TypeScriptExtractor::has_child_kind(cb, "async"));

@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
@@ -223,7 +224,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
         let metrics = count_complexity(node, &C_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -341,7 +348,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -407,7 +420,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Static, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Static,
+            name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -521,11 +540,12 @@ impl CExtractor {
         let docstring = Self::extract_docstring(state, typedef_node);
 
         let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
-        let typedef_id = generate_node_id(
+        let typedef_id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::Typedef,
             &typedef_name,
-            start_line,
+            typedef_node,
         );
         let typedef_graph_node = Node {
             id: typedef_id.clone(),
@@ -588,11 +608,12 @@ impl CExtractor {
         let docstring = Self::extract_docstring(state, typedef_node);
 
         let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
-        let typedef_id = generate_node_id(
+        let typedef_id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::Typedef,
             &typedef_name,
-            start_line,
+            typedef_node,
         );
         let typedef_graph_node = Node {
             id: typedef_id.clone(),
@@ -655,11 +676,12 @@ impl CExtractor {
         let docstring = Self::extract_docstring(state, typedef_node);
 
         let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
-        let typedef_id = generate_node_id(
+        let typedef_id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::Typedef,
             &typedef_name,
-            start_line,
+            typedef_node,
         );
         let typedef_graph_node = Node {
             id: typedef_id.clone(),
@@ -721,7 +743,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Typedef, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Typedef,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -794,7 +822,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Typedef, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Typedef,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -921,7 +955,13 @@ impl CExtractor {
         let start_column = spec_node.start_position().column as u32;
         let end_column = spec_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Struct, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Struct,
+            name,
+            spec_node,
+        );
         let signature =
             find_direct_child_by_kind(spec_node, "field_declaration_list").map(|body| {
                 state
@@ -983,7 +1023,13 @@ impl CExtractor {
         let start_column = spec_node.start_position().column as u32;
         let end_column = spec_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Union, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Union,
+            name,
+            spec_node,
+        );
         let signature =
             find_direct_child_by_kind(spec_node, "field_declaration_list").map(|body| {
                 state
@@ -1045,7 +1091,13 @@ impl CExtractor {
         let start_column = spec_node.start_position().column as u32;
         let end_column = spec_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Enum,
+            name,
+            spec_node,
+        );
         let signature = find_direct_child_by_kind(spec_node, "enumerator_list").map(|body| {
             state
                 .text_before(spec_node, body.start_byte())
@@ -1107,11 +1159,12 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::PreprocessorDef,
             &name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -1172,7 +1225,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Include, &path, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Include,
+            &path,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1244,7 +1303,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1314,7 +1379,13 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),

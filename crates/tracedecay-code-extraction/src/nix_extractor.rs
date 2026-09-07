@@ -5,6 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::complexity::{ComplexityMetrics, NIX_COMPLEXITY, count_complexity};
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
@@ -240,7 +241,7 @@ impl NixExtractor {
             Some(BindingKind::Function) => {
                 let kind = NodeKind::Function;
                 let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+                let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
                 let signature = Self::extract_function_signature(state, node);
                 let metrics = if let Some(expr_node) = expr {
                     if expr_node.child_count() > 0 {
@@ -306,7 +307,7 @@ impl NixExtractor {
             Some(BindingKind::Module) => {
                 let kind = NodeKind::Module;
                 let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+                let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
                 let text = state.node_text(node);
                 let signature = text
@@ -371,7 +372,7 @@ impl NixExtractor {
                 // Const binding.
                 let kind = NodeKind::Const;
                 let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+                let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
                 let text = state.node_text(node);
                 let signature = Some(text.lines().next().unwrap_or("").trim().to_string())
@@ -487,11 +488,12 @@ impl NixExtractor {
                                 let kind = NodeKind::Use;
                                 let qualified_name =
                                     format!("{}::{}", state.qualified_prefix(), attr_name);
-                                let id = generate_node_id(
+                                let id = local_node_id(
                                     &state.file_path,
+                                    state.source,
                                     &kind,
                                     attr_name,
-                                    start_line,
+                                    node,
                                 );
                                 let attr_line = attr.start_position().row as u32;
 
@@ -701,11 +703,12 @@ impl NixExtractor {
                                 let kind = NodeKind::Field;
                                 let qualified_name =
                                     format!("{}::{}", state.qualified_prefix(), field_name);
-                                let id = generate_node_id(
+                                let id = local_node_id(
                                     &state.file_path,
+                                    state.source,
                                     &kind,
                                     &field_name,
-                                    start_line,
+                                    item,
                                 );
 
                                 let text = state.node_text(item);
@@ -922,7 +925,7 @@ impl NixExtractor {
         let end_column = apply_node.end_position().column as u32;
         let kind = NodeKind::Use;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &kind, path, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, path, apply_node);
 
         let graph_node = Node {
             id: id.clone(),
