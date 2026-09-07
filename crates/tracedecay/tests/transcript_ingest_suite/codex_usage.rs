@@ -254,6 +254,34 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
             total_tokens: Some(22),
         }
     );
+
+    assert_eq!(
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex))
+            .await
+            .messages_upserted,
+        0,
+        "exact replay must not emit conversational rows"
+    );
+    assert_eq!(
+        db.provider_usage_observations("codex").await.len(),
+        observations.len(),
+        "exact replay must not duplicate usage observations"
+    );
+    drop(db);
+
+    let reopened = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_global_sources_for_provider(&reopened, &project, Some(SessionProvider::Codex))
+            .await
+            .messages_upserted,
+        0,
+        "restart replay must not emit conversational rows"
+    );
+    assert_eq!(
+        reopened.provider_usage_observations("codex").await.len(),
+        observations.len(),
+        "restart replay must not duplicate usage observations"
+    );
 }
 
 /// A turn's tool loop emits one `token_count` per API call (most *before* the

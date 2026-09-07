@@ -138,6 +138,7 @@ done
     // (the canonical enrollment composition itself creates the project graph
     // database, so init must come first — as it does in a real install).
     crate::common::initialize_tracedecay_cli_project(&home, &project);
+    crate::common::stop_managed_daemon(&home);
     let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();

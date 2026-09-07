@@ -102,7 +102,7 @@ impl DaemonAuthority {
         let lock_path = authority_root.join(LOCK_FILE);
         let mut lock = open_private_lock(&lock_path)?;
         if let Err(error) = lock.try_lock_exclusive() {
-            if !is_lock_contended(&error) {
+            if !tracedecay_private_fs::is_lock_contended(&error) {
                 return Err(config_io("lock", &lock_path, &error));
             }
             let record = read_record_if_present(&authority_root.join(RECORD_FILE))
@@ -455,18 +455,6 @@ fn restrict_file(path: &Path) -> Result<()> {
 #[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
-}
-
-fn is_lock_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        error.raw_os_error() == Some(33)
-    }
-    #[cfg(not(windows))]
-    false
 }
 
 fn new_auth_token() -> Result<String> {

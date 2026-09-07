@@ -1,3 +1,5 @@
+use tracedecay_lsp::LspSemanticRequestAuthority;
+
 use super::*;
 
 #[tokio::test]
@@ -228,6 +230,17 @@ async fn broker_bounds_lsp_document_write_hangs() {
         temp.path(),
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            url::Url::from_directory_path(temp.path())
+                .unwrap()
+                .to_string(),
+            bounded_fake_lsp_timeouts(),
+        )
+        .unwrap()
+        .expect("fake analyzer is executable");
 
     let result = tokio::time::timeout(
         OUTER_ASYNC_TIMEOUT,
@@ -249,6 +262,14 @@ async fn broker_bounds_lsp_document_write_hangs() {
     assert!(err.to_string().contains("timed out"));
     let snapshot = broker.snapshot();
     assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Crashed);
+    let failed = authority.analyzer_readiness();
+    assert_eq!(failed.state(), AnalyzerState::RestartBackoff);
+    assert_eq!(failed.last_failure(), Some(AnalyzerEvent::TransportFailed));
+    assert_eq!(
+        failed.restart_attempts(),
+        1,
+        "a blocked diagnostics transport is an analyzer failure"
+    );
 
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
     broker
@@ -338,6 +359,17 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
         temp.path(),
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            url::Url::from_directory_path(temp.path())
+                .unwrap()
+                .to_string(),
+            bounded_fake_lsp_timeouts(),
+        )
+        .unwrap()
+        .expect("fake analyzer is executable");
 
     let err = broker
         .refresh_documents_with_timeouts(
@@ -350,6 +382,14 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
     assert!(err.to_string().contains("timed out"));
     let snapshot = broker.snapshot();
     assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Crashed);
+    let failed = authority.analyzer_readiness();
+    assert_eq!(failed.state(), AnalyzerState::RestartBackoff);
+    assert_eq!(failed.last_failure(), Some(AnalyzerEvent::InvalidResponse));
+    assert_eq!(
+        failed.restart_attempts(),
+        1,
+        "an incomplete protocol frame is an analyzer failure"
+    );
 
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
     broker
@@ -378,21 +418,31 @@ async fn stdio_client_fails_when_no_document_publishes_diagnostics() {
     )
     .unwrap();
 
-    let err = lsp::client::collect_document_diagnostics(
+    let timeouts = lsp::client::LspRefreshTimeouts::from_diagnostics_quiet_window(
+        std::time::Duration::from_millis(50),
+    );
+    let mut client = lsp::client::StdioLspClient::start_with_timeouts(
         python_command(),
         &[script_path.display().to_string()],
         temp.path(),
-        vec![
-            fake_document(FAKE_LANGUAGE, "src/first.fake", "let nope"),
-            fake_document(FAKE_LANGUAGE, "src/second.fake", "let clean"),
-        ],
-        std::time::Duration::from_millis(50),
+        timeouts,
     )
     .await
-    .expect_err("a batch with zero publishes should fail as a timeout");
+    .unwrap();
+    let err = client
+        .collect_document_diagnostics(
+            temp.path(),
+            vec![
+                fake_document(FAKE_LANGUAGE, "src/first.fake", "let nope"),
+                fake_document(FAKE_LANGUAGE, "src/second.fake", "let clean"),
+            ],
+            timeouts,
+        )
+        .await
+        .expect_err("a batch with zero publishes should fail as a timeout");
 
     assert!(
-        err.to_string().contains("timed out"),
+        matches!(err, lsp::client::LspRefreshError::NoPublication { .. }),
         "unexpected error: {err}"
     );
 }
@@ -447,29 +497,60 @@ async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
         temp.path(),
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );
-    let prepared = broker
-        .prepare_refresh(
+    let authority = broker
+        .semantic_authority_if_available(
             FAKE_LANGUAGE,
-            vec![fake_document(
-                FAKE_LANGUAGE,
-                "src/canceled.fake",
-                "let nope",
-            )],
+            temp.path().to_path_buf(),
+            url::Url::from_directory_path(temp.path())
+                .unwrap()
+                .to_string(),
+            loaded_runner_fake_lsp_timeouts(),
         )
         .unwrap()
-        .expect("refresh should prepare");
-    let handle = tokio::spawn(async move {
-        prepared
-            .collect_diagnostics(std::time::Duration::from_millis(500))
+        .expect("fake analyzer is executable");
+    let cancellations = usize::from(tracedecay_lsp::MAX_ANALYZER_RESTARTS) + 1;
+    let mut abandoned_attempt = 0;
+    for cancellation in 1..=cancellations {
+        let prepared = broker
+            .prepare_refresh(
+                FAKE_LANGUAGE,
+                vec![fake_document(
+                    FAKE_LANGUAGE,
+                    "src/canceled.fake",
+                    "let nope",
+                )],
+            )
+            .unwrap()
+            .expect("refresh should prepare");
+        let handle = tokio::spawn(async move {
+            prepared
+                .collect_diagnostics_with_timeouts(phase_gated_fake_lsp_timeouts())
+                .await
+        });
+        control
+            .wait_for("partial-frame-flushed")
             .await
-    });
-    control
-        .wait_for("partial-frame-flushed")
-        .await
-        .release()
-        .await;
-    handle.abort();
-    let _ = handle.await;
+            .release()
+            .await;
+        handle.abort();
+        let _ = handle.await;
+
+        // The aborted task drops a client whose stream is parked mid-frame.
+        // The shared slot must retire and reap it before the next iteration
+        // starts a successor, without charging a failure to the analyzer.
+        let retired = wait_for_analyzer_state(&authority, AnalyzerState::RestartBackoff).await;
+        assert_eq!(retired.last_failure(), Some(AnalyzerEvent::Retired));
+        assert_eq!(
+            retired.restart_attempts(),
+            0,
+            "cancellation {cancellation} must not spend the analyzer restart budget"
+        );
+        assert!(
+            retired.attempt() > abandoned_attempt,
+            "each cancelled refresh owns a new incarnation"
+        );
+        abandoned_attempt = retired.attempt();
+    }
 
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
     // The property under test is that aborting a partial refresh does not
@@ -486,6 +567,35 @@ async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
     let snapshot = broker.snapshot();
     assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Ready);
     assert_eq!(snapshot.summary.total_errors, 1);
+    let recovered = authority.analyzer_readiness();
+    assert_eq!(recovered.state(), AnalyzerState::Ready);
+    assert_eq!(
+        recovered.attempt(),
+        abandoned_attempt + 1,
+        "the clean client is a new incarnation, not the retired one"
+    );
+    assert_eq!(recovered.restart_attempts(), 0);
+}
+
+/// Polls the shared supervisor until it reports `expected`, bounded by the
+/// fake-server phase deadline. Abort settles on the runtime's schedule, so the
+/// evidence it leaves cannot be asserted synchronously.
+async fn wait_for_analyzer_state(
+    authority: &lsp::broker::StdioLspSemanticAuthority,
+    expected: AnalyzerState,
+) -> AnalyzerSupervisor {
+    let deadline = tokio::time::Instant::now() + FAKE_LSP_PHASE_TIMEOUT;
+    loop {
+        let readiness = authority.analyzer_readiness();
+        if readiness.state() == expected {
+            return readiness;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "analyzer never reached {expected:?}; last {readiness:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]
@@ -529,7 +639,7 @@ with open({counter_path:?}, "a", encoding="utf-8") as f:
 
     let first_refresh = tokio::spawn(async move {
         first
-            .collect_diagnostics(std::time::Duration::from_millis(500))
+            .collect_diagnostics_with_timeouts(phase_gated_fake_lsp_timeouts())
             .await
     });
     let write_acquired = control.wait_for("write-acquired").await;
@@ -895,4 +1005,295 @@ async fn broker_resolve_enclosing_nodes_attributes_diagnostic_to_smallest_span()
         unattributed.enclosing_node, None,
         "diagnostic outside every indexed span stays unattributed"
     );
+}
+
+/// A diagnostics quiet-window decision is not evidence that the analyzer
+/// crashed. Repeating it beyond the restart budget must remain restartable,
+/// and the next capability read plus diagnostic refresh must share one healthy
+/// incarnation.
+#[tokio::test]
+async fn refresh_quiet_window_stays_budget_neutral_and_reuses_live_client() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("never_publish_lsp.py");
+    let starts_path = temp.path().join("starts.txt");
+    let preamble = format!(
+        r#"
+with open({starts:?}, "a", encoding="utf-8") as f:
+    f.write("start\n")
+"#,
+        starts = starts_path.display().to_string(),
+    );
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble(&preamble, NEVER_PUBLISH),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            url::Url::from_directory_path(temp.path())
+                .unwrap()
+                .to_string(),
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .unwrap()
+        .expect("fake analyzer is executable");
+    assert_eq!(
+        authority.analyzer_readiness().state(),
+        AnalyzerState::AwaitingStart
+    );
+
+    let quiet_retirements = usize::from(tracedecay_lsp::MAX_ANALYZER_RESTARTS) + 1;
+    for attempt in 1..=quiet_retirements {
+        broker
+            .refresh_documents_with_timeouts(
+                FAKE_LANGUAGE,
+                vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+                loaded_runner_fake_lsp_timeouts(),
+            )
+            .await
+            .expect_err("a refresh with no publication times out");
+
+        let retired = authority.analyzer_readiness();
+        assert_eq!(retired.state(), AnalyzerState::RestartBackoff);
+        assert_eq!(retired.last_failure(), Some(AnalyzerEvent::Retired));
+        assert_eq!(
+            retired.restart_attempts(),
+            0,
+            "quiet-window retirement {attempt} must not spend the restart budget"
+        );
+        assert_eq!(retired.attempt(), u32::try_from(attempt).unwrap());
+    }
+    assert_engine_state(
+        &broker.snapshot(),
+        FAKE_LANGUAGE,
+        lsp::broker::EngineState::Available,
+    );
+
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble(&preamble, FAKE_DIAGNOSTIC_PUBLISH),
+    )
+    .unwrap();
+    assert!(
+        authority.upstream_capabilities().await.is_ok(),
+        "a quiet-window retirement remains restartable"
+    );
+    let capability_attempt = authority.analyzer_readiness().attempt();
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .expect("a fresh start runs the publishing script");
+    let served = authority.analyzer_readiness();
+    assert_eq!(served.state(), AnalyzerState::Ready);
+    assert_eq!(
+        served.attempt(),
+        capability_attempt,
+        "capability negotiation and diagnostics use the same live client"
+    );
+    assert_eq!(
+        served.served_requests(),
+        1,
+        "a refresh the analyzer answered counts as service by this incarnation"
+    );
+    assert_eq!(served.restart_attempts(), 0);
+    let starts = std::fs::read_to_string(starts_path).unwrap();
+    assert_eq!(starts.lines().count(), quiet_retirements + 1);
+}
+
+/// A process that initializes and then exits during diagnostics is a genuine
+/// analyzer failure. Refreshes alone must spend the shared budget and leave
+/// both semantic capability reads and diagnostics starts terminally refused.
+#[tokio::test]
+async fn refresh_only_post_initialize_crash_loop_exhausts_restart_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("exit_after_initialize_lsp.py");
+    let starts_path = temp.path().join("starts.txt");
+    let preamble = format!(
+        r#"
+with open({starts:?}, "a", encoding="utf-8") as f:
+    f.write("start\n")
+"#,
+        starts = starts_path.display().to_string(),
+    );
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble(&preamble, "        sys.exit(17)\n"),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            url::Url::from_directory_path(temp.path())
+                .unwrap()
+                .to_string(),
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .unwrap()
+        .expect("fake analyzer is executable");
+
+    for failure in 1..=tracedecay_lsp::MAX_ANALYZER_RESTARTS {
+        let error = broker
+            .refresh_documents_with_timeouts(
+                FAKE_LANGUAGE,
+                vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+                loaded_runner_fake_lsp_timeouts(),
+            )
+            .await
+            .expect_err("the post-initialize process exit must fail the refresh");
+        assert!(
+            error.to_string().contains("exited")
+                || error
+                    .to_string()
+                    .contains("closed its diagnostics transport"),
+            "unexpected error: {error}"
+        );
+
+        let readiness = authority.analyzer_readiness();
+        let expected = if failure == tracedecay_lsp::MAX_ANALYZER_RESTARTS {
+            AnalyzerState::Exhausted
+        } else {
+            AnalyzerState::RestartBackoff
+        };
+        assert_eq!(readiness.state(), expected);
+        assert!(matches!(
+            readiness.last_failure(),
+            Some(AnalyzerEvent::Crashed | AnalyzerEvent::TransportFailed)
+        ));
+        assert_eq!(readiness.restart_attempts(), failure);
+    }
+
+    assert!(matches!(
+        authority.upstream_capabilities().await,
+        Err(lsp::AnalyzerRuntimeError::Unavailable)
+    ));
+    let starts_before = std::fs::read_to_string(&starts_path).unwrap();
+    assert_eq!(
+        starts_before.lines().count(),
+        usize::from(tracedecay_lsp::MAX_ANALYZER_RESTARTS)
+    );
+    let error = broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .expect_err("an exhausted refresh-only loop must refuse another start");
+    assert!(error.to_string().contains("restart budget exhausted"));
+    assert_eq!(
+        std::fs::read_to_string(starts_path).unwrap(),
+        starts_before,
+        "terminal refusal must not start another process"
+    );
+    assert_engine_state(
+        &broker.snapshot(),
+        FAKE_LANGUAGE,
+        lsp::broker::EngineState::Crashed,
+    );
+}
+
+/// Restart exhaustion is a stable health state for the whole shared slot: once
+/// the semantic lane has spent the budget on consecutive start failures, the
+/// refresh lane does not spawn the analyzer behind its back, and a healthier
+/// script on disk changes nothing until the daemon decides otherwise.
+#[tokio::test]
+async fn an_exhausted_restart_budget_stops_the_refresh_lane_from_respawning() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("never_initialize_lsp.py");
+    let starts_path = temp.path().join("starts.txt");
+    std::fs::write(
+        &script_path,
+        format!(
+            r#"
+import time
+with open({starts:?}, "a", encoding="utf-8") as f:
+    f.write("start\n")
+time.sleep(60)
+"#,
+            starts = starts_path.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            bounded_fake_lsp_timeouts(),
+        )
+        .unwrap()
+        .expect("fake analyzer is executable");
+
+    for request in 1..=i64::from(tracedecay_lsp::MAX_ANALYZER_RESTARTS) {
+        let outcome = authority
+            .start(
+                AdmittedRoot::new(root_uri.clone()),
+                LspRequestId::Number(request),
+                tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+                    document_uri: format!("{root_uri}src/lib.fake"),
+                })
+                .unwrap(),
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
+                    if coverage == "analyzer-start-failed"
+            ),
+            "request {request}: {outcome:?}"
+        );
+    }
+    let exhausted = authority.analyzer_readiness();
+    assert_eq!(exhausted.state(), AnalyzerState::Exhausted);
+    // Every failed start waits for its child to exit before reporting, so this
+    // read races nothing. A starved runner can kill a start before python
+    // wrote its line, which is why only the upper bound is exact.
+    let starts_before = std::fs::read_to_string(&starts_path).unwrap();
+    assert!(starts_before.lines().count() <= usize::from(tracedecay_lsp::MAX_ANALYZER_RESTARTS));
+
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let error = broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .expect_err("the refresh lane must not respawn an exhausted analyzer");
+
+    assert!(
+        error.to_string().contains("restart budget exhausted"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&starts_path).unwrap(),
+        starts_before,
+        "no process was started"
+    );
+    assert_eq!(authority.analyzer_readiness(), exhausted);
+    let snapshot = broker.snapshot();
+    assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Crashed);
 }

@@ -166,7 +166,10 @@ fn acquire_quarantine_decision_lock(
         })?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(QuarantineDecisionLock { file }),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        // Windows LockFileEx reports ERROR_LOCK_VIOLATION (33) instead of
+        // WouldBlock. AccessDenied and sharing violations stay generic
+        // unavailable, not "another authority holds".
+        Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
             Err(GraphDbError::unavailable(format!(
                 "another authority holds the graph store corruption quarantine decision for {}; \
                  leaving the store untouched",
