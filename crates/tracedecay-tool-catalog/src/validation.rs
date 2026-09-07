@@ -146,6 +146,8 @@ pub enum CatalogValidationError {
         capability_id: CapabilityId,
         surface: BindingSurface,
     },
+    #[error("catalog digest document failed to serialize: {reason}")]
+    DigestSerialization { reason: String },
 }
 
 #[hotpath::measure(label = "tool_catalog.validate")]
