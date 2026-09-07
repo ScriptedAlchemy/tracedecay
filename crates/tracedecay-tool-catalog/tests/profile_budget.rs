@@ -6,8 +6,7 @@ use tracedecay_tool_catalog::{
     BindingId, BindingStatus, BindingSurface, CatalogContributionInputV1, CatalogContributionV1,
     CatalogSnapshotBuilderV1, CatalogValidationError, ContributionId, ProfileBudget,
     ProfileDefinition, ProfileDefinitionInputV1, ProfileKind, ProtocolRevisionRange,
-    RoutingFixtureExpectation, RoutingFixtureV1, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName,
+    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use common::{
@@ -58,16 +57,6 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
         enabled_surfaces: vec![BindingSurface::Cli],
         requires_cli_mcp_pairing: false,
         budget: ProfileBudget::new(1, 100_000).unwrap(),
-        routing_fixtures: vec![
-            RoutingFixtureV1::new(
-                "read source",
-                RoutingFixtureExpectation::Select {
-                    capability_id: capability_id.clone(),
-                },
-            )
-            .unwrap(),
-            RoutingFixtureV1::new("do nothing", RoutingFixtureExpectation::Reject).unwrap(),
-        ],
     })
     .unwrap();
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
@@ -123,7 +112,6 @@ fn profile_absence_is_explicit_in_snapshot_discovery() {
         enabled_surfaces: Vec::new(),
         requires_cli_mcp_pairing: false,
         budget: ample_budget(),
-        routing_fixtures: Vec::new(),
     })
     .unwrap();
     let mut builder = CatalogSnapshotBuilderV1::new();
@@ -172,16 +160,6 @@ fn paired_profiles_reject_capabilities_without_cli_and_mcp_bindings() {
         enabled_surfaces: vec![BindingSurface::Cli, BindingSurface::Mcp],
         requires_cli_mcp_pairing: true,
         budget: ample_budget(),
-        routing_fixtures: vec![
-            RoutingFixtureV1::new(
-                "outline source",
-                RoutingFixtureExpectation::Select {
-                    capability_id: capability_id.clone(),
-                },
-            )
-            .unwrap(),
-            RoutingFixtureV1::new("do nothing", RoutingFixtureExpectation::Reject).unwrap(),
-        ],
     })
     .unwrap();
     let mut builder = CatalogSnapshotBuilderV1::new();
