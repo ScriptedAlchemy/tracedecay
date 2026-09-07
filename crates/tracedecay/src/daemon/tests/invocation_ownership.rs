@@ -24,7 +24,7 @@ use crate::daemon::{
 use tracedecay_application::retrieval::PrimitiveRequest;
 use tracedecay_application::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
-use tracedecay_daemon_service::DaemonInvocationProblem;
+use tracedecay_daemon_service::{DaemonInvocationProblem, ProjectRuntimePublicationStateV1};
 use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn git(root: &Path, args: &[&str]) {
@@ -61,8 +61,10 @@ async fn committed_fixture(
     );
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "base"]);
+    let project_alias = temp.path().join("project-alias");
+    std::os::unix::fs::symlink(&project, &project_alias).expect("committed project alias");
     let handshake = DaemonHandshake {
-        project_path: Some(project),
+        project_path: Some(project_alias),
         client_identity,
         ..test_handshake_defaults()
     };
@@ -254,11 +256,25 @@ async fn assert_mounted_invocations(engine: &DaemonEngine, handshake: &DaemonHan
 }
 
 #[tokio::test]
-async fn committed_project_invocation_routes_mounted_operations() {
+async fn committed_project_alias_invokes_mounted_primitive_and_shuts_down_cleanly() {
     let (_temp, _database_scope, engine, handshake) =
         committed_fixture("committed-project-invocation-owners").await;
     assert_mounted_invocations(&engine, &handshake).await;
-    engine.shutdown_all().await;
+    let project_alias = handshake.project_path.as_deref().expect("project alias");
+    assert_eq!(
+        engine
+            .invocation
+            .service
+            .project_runtimes
+            .publication_state(project_alias),
+        Some(ProjectRuntimePublicationStateV1::Ready),
+        "a callable owner reached through the alias must be fully published"
+    );
+    let shutdown = engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "the alias-mounted callable owner must shut down cleanly: {shutdown:?}"
+    );
 }
 
 #[tokio::test]
