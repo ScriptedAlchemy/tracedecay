@@ -81,6 +81,8 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
 
     let backend = SequentialJsonBackend::new(vec![
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [
             {
                 "action": "merge",
@@ -100,6 +102,8 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             ]
         }),
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [{
                 "action": "merge",
                 "id": "automation-run-review",

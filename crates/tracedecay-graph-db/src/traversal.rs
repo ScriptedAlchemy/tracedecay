@@ -695,8 +695,10 @@ fn relation_projection_cached(
     relation_kinds: &BTreeSet<GraphRelationKind>,
     label_keys_cache: &LabelKeyCache,
 ) -> Result<GraphProjection, GraphDbError> {
-    let mut spec = ProjectionSpec::new()
-        .with_node_labels(label_keys_cache.keys(store.as_ref(), ENTITY_LABEL)?);
+    // The projection spec owns its label set, so each key crosses that
+    // boundary as one `String`; the shared cache slice itself is not copied.
+    let entity_keys = label_keys_cache.keys(store.as_ref(), ENTITY_LABEL)?;
+    let mut spec = ProjectionSpec::new().with_node_labels(entity_keys.iter().map(String::as_str));
     if !relation_kinds.is_empty() {
         spec = spec.with_edge_types(relation_kinds.iter().map(relation_type_for_kind));
     }

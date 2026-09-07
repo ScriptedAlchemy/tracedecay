@@ -65,46 +65,27 @@ fn host_admission_facade<'a>(
     authorities: SessionAuthorities<'a>,
 ) -> Result<HostAdmissionFacade<'a>> {
     let authority = match scope {
-        HostAdmissionScope::Project => match (
-            authorities.project,
-            authorities.profile_identity,
-            authorities.project_registered,
-        ) {
-            (Some(_), Some(identity), registered) => {
+        HostAdmissionScope::Project => match (authorities.project, authorities.profile_identity) {
+            (Some(registered), Some(identity)) => {
                 let project_id = project_observation_id(
                     cg.ok_or_else(|| config_error("project admission requires a project"))?,
                 )?;
-                match registered {
-                    Some(registered) => HostAdmissionAuthorities::for_project(
-                        identity.brain_id().clone(),
-                        identity.profile_id().clone(),
-                        project_id,
-                        registered,
-                    ),
-                    None => HostAdmissionAuthorities::unavailable_for_project(
-                        identity.brain_id().clone(),
-                        identity.profile_id().clone(),
-                        project_id,
-                    ),
-                }
+                HostAdmissionAuthorities::for_project(
+                    identity.brain_id().clone(),
+                    identity.profile_id().clone(),
+                    project_id,
+                    registered,
+                )
             }
-            (Some(_), None, _) | (None, _, _) => HostAdmissionAuthorities::default(),
+            (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
         },
-        HostAdmissionScope::Profile => match (
-            authorities.user,
-            authorities.profile_identity,
-            authorities.profile_registered,
-        ) {
-            (Some(_), Some(identity), Some(registered)) => HostAdmissionAuthorities::for_profile(
+        HostAdmissionScope::Profile => match (authorities.user, authorities.profile_identity) {
+            (Some(registered), Some(identity)) => HostAdmissionAuthorities::for_profile(
                 identity.brain_id().clone(),
                 identity.profile_id().clone(),
                 registered,
             ),
-            (Some(_), Some(identity), None) => HostAdmissionAuthorities::unavailable_for_profile(
-                identity.brain_id().clone(),
-                identity.profile_id().clone(),
-            ),
-            (Some(_), None, _) | (None, _, _) => HostAdmissionAuthorities::default(),
+            (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
         },
     };
     Ok(HostAdmissionFacade::new(authority))

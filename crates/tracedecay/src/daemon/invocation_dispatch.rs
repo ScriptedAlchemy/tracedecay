@@ -14,7 +14,7 @@ use std::future::Future;
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationService, Lease, SemanticInvocationControlV1, register,
+    DaemonInvocationService, Lease, SemanticInvocationControlV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
@@ -243,6 +243,7 @@ pub(super) async fn execute_portable_daemon_invocation(
         return response;
     }
     let request_id = request.request_id.clone();
+    let request_cancellations = invocation.service.request_cancellations();
     let semantic_control = SemanticInvocationControlV1::from_request(&request);
     if let Some(response) =
         semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
@@ -250,7 +251,7 @@ pub(super) async fn execute_portable_daemon_invocation(
         return response;
     }
     let semantic_cancellation_lease = if semantic_control.is_some() {
-        match register(&request_id) {
+        match request_cancellations.register(&request_id) {
             Some(lease) => Some(lease),
             None => {
                 return DaemonInvocationResponse::problem(
@@ -264,7 +265,7 @@ pub(super) async fn execute_portable_daemon_invocation(
     };
     let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
     let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match register(&request_id) {
+        match request_cancellations.register(&request_id) {
             Some(lease) => Some(lease),
             None => {
                 return DaemonInvocationResponse::problem(
@@ -592,6 +593,7 @@ pub(super) async fn execute_daemon_invocation(
         return response;
     }
     let request_id = request.request_id.clone();
+    let request_cancellations = engine.invocation.service.request_cancellations();
     let semantic_control = SemanticInvocationControlV1::from_request(&request);
     if let Some(response) =
         semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
@@ -599,7 +601,7 @@ pub(super) async fn execute_daemon_invocation(
         return response;
     }
     let semantic_cancellation_lease = if semantic_control.is_some() {
-        match register(&request_id) {
+        match request_cancellations.register(&request_id) {
             Some(lease) => Some(lease),
             None => {
                 return DaemonInvocationResponse::problem(
@@ -613,7 +615,7 @@ pub(super) async fn execute_daemon_invocation(
     };
     let semantic_cancellation = semantic_cancellation_lease.as_ref().map(Lease::token);
     let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match register(&request_id) {
+        match request_cancellations.register(&request_id) {
             Some(lease) => Some(lease),
             None => {
                 return DaemonInvocationResponse::problem(

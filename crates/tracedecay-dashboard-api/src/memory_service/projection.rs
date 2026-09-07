@@ -1,14 +1,14 @@
 //! Vector-point rows, fingerprints, and the cached PCA projection payload.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 
 use super::super::DashboardState;
 use super::super::memory_analysis::pca_scores;
 use super::facts::fact_summary_json;
-use crate::snapshot_cache::{DerivedSnapshotCache, DerivedSnapshotCacheState};
+use crate::snapshot_cache::DerivedSnapshotCacheState;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_store::{
     FactReadControl, ProjectMemoryDashboardVectorPointV1, ProjectMemoryFactProjectionV1,
@@ -70,7 +70,8 @@ pub(super) fn vector_rows(
     Ok(rows)
 }
 
-struct ProjectionComputation {
+/// One cached PCA projection of a store revision for a query/limit pair.
+pub(crate) struct ProjectionComputation {
     dim: usize,
     method: &'static str,
     error: &'static str,
@@ -80,11 +81,7 @@ struct ProjectionComputation {
     coverage_complete: bool,
 }
 
-type ProjectionCacheRevision = (ProjectMemoryStoreRevisionV1, String, i64);
-
-static PROJECTION_CACHE: OnceLock<
-    DerivedSnapshotCache<String, ProjectionCacheRevision, ProjectionComputation>,
-> = OnceLock::new();
+pub(crate) type ProjectionCacheRevision = (ProjectMemoryStoreRevisionV1, String, i64);
 
 fn projection_point(meta: &Value, x: f64, y: f64) -> Result<Value, String> {
     let mut point = meta.clone();
@@ -260,12 +257,13 @@ pub async fn projection_payload(
     };
     let normalized_query = query.trim().to_owned();
     let revision = (store_revision, normalized_query.clone(), limit);
-    let cache = PROJECTION_CACHE.get_or_init(DerivedSnapshotCache::new);
     // The loader is the only writer, so this is the exact row count read for
     // this response. A hit never polls the closure and therefore reports zero.
     let vector_rows_read = AtomicUsize::new(0);
-    let (computed, cache_state) = match cache
-        .get_or_compute(state.mem_db_path.clone(), revision, || async {
+    let (computed, cache_state) = match state
+        .derived_snapshots
+        .projection
+        .get_or_compute(revision, || async {
             let snapshot = application
                 .dashboard_vector_snapshot(
                     (!normalized_query.is_empty()).then(|| normalized_query.clone()),

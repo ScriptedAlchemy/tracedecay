@@ -96,6 +96,17 @@ pub(crate) async fn run_summary_convergence_page(
 async fn backfill_queue(
     database: &RegisteredGlobalDbLeaseV1,
 ) -> Result<tracedecay_lcm::summary_convergence::LcmSummaryQueueBackfillPage, LcmError> {
+    // An idle pass must not take the writer. The probe is only a hint: the
+    // page re-reads the authoritative frontier under the writer transaction.
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let has_work = tracedecay_lcm::summary_convergence::backfill_queue_has_work(&snapshot).await?;
+    drop(snapshot);
+    if !has_work {
+        return Ok(tracedecay_lcm::summary_convergence::LcmSummaryQueueBackfillPage::default());
+    }
     let transaction = database
         .begin_write_transaction()
         .await

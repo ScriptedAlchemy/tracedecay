@@ -407,8 +407,7 @@ async fn projectless_hook_runtime_response(
         session_runtime_registry,
         global_db.as_ref(),
         crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
-            .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone())))
-            .with_registered_databases(None, Some(&user_session_db)),
+            .with_profile_identity(Some(std::sync::Arc::new(profile_identity.clone()))),
         host_admission_broker,
     ))
     .await

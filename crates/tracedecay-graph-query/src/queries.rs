@@ -302,7 +302,10 @@ impl<'a> GraphQueryManager<'a> {
         )
         .await?;
         let mut cycles = hotpath::measure_block!("usecases.graph.circular.scc", {
-            super::scc::tarjan_scc(&adjacency)
+            super::scc::tarjan_scc_cancellable(&adjacency, self.cancellation.as_ref())
+                .map_err(|super::scc::SccCancelled| {
+                    super::map_code_graph_read_runtime_error(super::CodeGraphReadError::Cancelled)
+                })?
                 .into_iter()
                 .filter(|component| super::scc::is_cyclic_scc(component, &adjacency))
                 .collect::<Vec<_>>()

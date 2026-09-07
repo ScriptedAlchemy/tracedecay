@@ -66,12 +66,14 @@ pub const BACKEND_IDENTITY_SUPPRESSED: &str = "backend_identity_suppressed";
 /// re-admitted on the next tick, which is exactly the intended effect of
 /// shipping a transport fix.
 ///
-/// `v2` holds the client's stdin open for the whole turn. `v1` closed it
+/// `v3` sends the task's canonical response schema as `turn/start.outputSchema`
+/// and preserves failed turn terminals. `v2` held the client's stdin open for
+/// the whole turn. `v1` closed it
 /// immediately after `turn/start`, which `codex app-server` reads as a client
 /// disconnect: it shut the session down within 70ms, cancelled the in-flight
 /// turn, and exited 0, so every run failed as
 /// `codex app-server closed stdout before completing`.
-const AGENT_BACKEND_PROTOCOL_REVISION: &str = "codex-app-server.v2.stdin-held-through-turn";
+const AGENT_BACKEND_PROTOCOL_REVISION: &str = "codex-app-server.v3.output-schema-and-failed-turns";
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct ExecutableDigestCacheKey {

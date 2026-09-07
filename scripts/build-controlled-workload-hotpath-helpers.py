@@ -53,7 +53,7 @@ def executable_suffix(target: str | None) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=Path.cwd())
-    parser.add_argument("--profile", choices=("test", "release"), required=True)
+    parser.add_argument("--profile", choices=("test", "perf", "release"), required=True)
     parser.add_argument("--target")
     args = parser.parse_args()
 
@@ -61,7 +61,9 @@ def main() -> None:
     target_root = cargo_target_directory(source)
     if args.target is not None:
         target_root /= args.target
-    profile_directory = "debug" if args.profile == "test" else "release"
+    # Cargo places the built-in `test` profile under `debug`; custom profiles
+    # such as `perf` use their own name.
+    profile_directory = "debug" if args.profile == "test" else args.profile
     suffix = executable_suffix(args.target)
     example = target_root / profile_directory / "examples" / f"{EXAMPLE}{suffix}"
     helper_directory = target_root / "controlled-workload-hotpath"

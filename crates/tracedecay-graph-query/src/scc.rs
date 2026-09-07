@@ -13,7 +13,16 @@
 //! first, which is exactly the order needed for port ranking.
 
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::hash::{BuildHasher, Hash};
+
+use tracedecay_graph_db::GraphCancellation;
+
+/// The caller's cancellation authority fired while Tarjan was still
+/// traversing; no components are reported because the partial set would look
+/// like a complete cycle report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SccCancelled;
 
 /// Computes the strongly-connected components of the directed graph
 /// described by `adj`. Every node that appears as a key OR as a value
@@ -29,115 +38,166 @@ where
     S1: BuildHasher,
     S2: BuildHasher,
 {
+    match tarjan_scc_checked(adj, || Ok::<(), Infallible>(())) {
+        Ok(components) => components,
+        Err(never) => match never {},
+    }
+}
+
+/// [`tarjan_scc`] that consults `cancellation` once per discovered node and
+/// refuses with [`SccCancelled`] as soon as it has fired, so a cancelled
+/// request stops the CPU traversal instead of finishing the whole graph.
+#[hotpath::measure(label = "usecases.graph.tarjan_scc_cancellable")]
+pub fn tarjan_scc_cancellable<N, S1, S2>(
+    adj: &HashMap<N, HashSet<N, S2>, S1>,
+    cancellation: &dyn GraphCancellation,
+) -> Result<Vec<Vec<N>>, SccCancelled>
+where
+    N: Eq + Hash + Clone,
+    S1: BuildHasher,
+    S2: BuildHasher,
+{
+    tarjan_scc_checked(adj, || {
+        if cancellation.is_cancelled() {
+            Err(SccCancelled)
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// A node's position in the interned node list, or `UNVISITED` while Tarjan
+/// has not reached it yet.
+const UNVISITED: usize = usize::MAX;
+
+/// Iterative Tarjan over compact ordinals.
+///
+/// Node values stay borrowed from `adj` for the whole computation: every
+/// distinct node is interned once into `nodes`, edges become ordinal lists,
+/// and all traversal state (index, lowlink, stack membership, DFS frames) is
+/// indexed by ordinal. The only owned `N` values are the ones cloned into the
+/// returned components. `checkpoint` runs once per discovered node; its error
+/// aborts the traversal.
+fn tarjan_scc_checked<N, S1, S2, E>(
+    adj: &HashMap<N, HashSet<N, S2>, S1>,
+    mut checkpoint: impl FnMut() -> Result<(), E>,
+) -> Result<Vec<Vec<N>>, E>
+where
+    N: Eq + Hash + Clone,
+    S1: BuildHasher,
+    S2: BuildHasher,
+{
     // Gather every node mentioned, sources or targets, so unreachable
     // nodes still appear as singleton SCCs.
-    let mut all_nodes: Vec<N> = Vec::new();
-    let mut seen_nodes: HashSet<N> = HashSet::new();
-    for (src, targets) in adj {
-        if seen_nodes.insert(src.clone()) {
-            all_nodes.push(src.clone());
+    let mut nodes: Vec<&N> = Vec::with_capacity(adj.len());
+    let mut ordinal_of: HashMap<&N, usize> = HashMap::with_capacity(adj.len());
+    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(adj.len());
+    for (source, targets) in adj {
+        let source = intern(source, &mut nodes, &mut ordinal_of);
+        let targets = targets
+            .iter()
+            .map(|target| intern(target, &mut nodes, &mut ordinal_of))
+            .collect::<Vec<_>>();
+        if edges.len() <= source {
+            edges.resize_with(source + 1, Vec::new);
         }
-        for t in targets {
-            if seen_nodes.insert(t.clone()) {
-                all_nodes.push(t.clone());
-            }
-        }
+        edges[source] = targets;
     }
-    drop(seen_nodes);
+    edges.resize_with(nodes.len(), Vec::new);
+    drop(ordinal_of);
 
-    let mut index_of: HashMap<N, usize> = HashMap::with_capacity(all_nodes.len());
-    let mut lowlink: HashMap<N, usize> = HashMap::with_capacity(all_nodes.len());
-    let mut on_stack: HashSet<N> = HashSet::new();
-    let mut stack: Vec<N> = Vec::new();
+    let mut state = TarjanState::new(nodes.len());
     let mut sccs: Vec<Vec<N>> = Vec::new();
-    let mut next_index: usize = 0;
 
-    // Iterative DFS using an explicit call stack of (node, neighbor_iter, neighbor_index).
-    // After visiting each neighbor we may need to update lowlink, so each
-    // frame remembers its own progress through its neighbor list.
-    for root in &all_nodes {
-        if index_of.contains_key(root) {
+    for root in 0..nodes.len() {
+        if state.index[root] != UNVISITED {
             continue;
         }
-        // Frame: (node, neighbors snapshot, current neighbor index).
-        let mut work: Vec<(N, Vec<N>, usize)> = Vec::new();
-        let root_neighbors: Vec<N> = adj
-            .get(root)
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_default();
-        index_of.insert(root.clone(), next_index);
-        lowlink.insert(root.clone(), next_index);
-        next_index += 1;
-        stack.push(root.clone());
-        on_stack.insert(root.clone());
-        work.push((root.clone(), root_neighbors, 0));
+        checkpoint()?;
+        state.discover(root);
 
-        // Peek the top frame each iteration instead of cloning the whole
-        // tuple — earlier revisions used `work.last_mut().cloned()` which
-        // deep-copied the entire neighbor `Vec<N>` once per edge visited.
-        // The `while let` rewrite suggested by clippy doesn't apply: the
-        // body needs to `work.push(...)` while `frame` is still borrowed,
-        // which only works because NLL drops the `frame` reborrow early —
-        // a `while let` binding would keep it alive for the whole body.
-        #[allow(clippy::while_let_loop)]
-        loop {
-            let Some(frame) = work.last_mut() else { break };
-            let idx = frame.2;
-            if idx >= frame.1.len() {
+        while let Some(&(node, position)) = state.work.last() {
+            let Some(&next) = edges[node].get(position) else {
                 // Finished this node — pop frame, update parent's lowlink,
                 // and emit an SCC if this node is a Tarjan root.
-                let popped = work
-                    .pop()
-                    .unwrap_or_else(|| unreachable!("work stack non-empty"));
-                let node = popped.0;
-                let node_ll = *lowlink.get(&node).unwrap_or(&0);
-                let node_idx = *index_of.get(&node).unwrap_or(&0);
-                if node_ll == node_idx {
+                state.work.pop();
+                if state.lowlink[node] == state.index[node] {
                     let mut component: Vec<N> = Vec::new();
-                    while let Some(top) = stack.pop() {
-                        on_stack.remove(&top);
-                        let is_root = top == node;
-                        component.push(top);
-                        if is_root {
+                    while let Some(top) = state.stack.pop() {
+                        state.on_stack[top] = false;
+                        component.push(nodes[top].clone());
+                        if top == node {
                             break;
                         }
                     }
                     sccs.push(component);
                 }
-                if let Some(parent_frame) = work.last() {
-                    let parent_ll = *lowlink.get(&parent_frame.0).unwrap_or(&0);
-                    lowlink.insert(parent_frame.0.clone(), parent_ll.min(node_ll));
+                if let Some(&(parent, _)) = state.work.last() {
+                    state.lowlink[parent] = state.lowlink[parent].min(state.lowlink[node]);
                 }
                 continue;
+            };
+            if let Some(frame) = state.work.last_mut() {
+                frame.1 = position + 1;
             }
 
-            // Clone only the two values we actually need before mutating
-            // `work` (push invalidates `frame`).
-            let next = frame.1[idx].clone();
-            let node = frame.0.clone();
-            frame.2 += 1;
-
-            if let Some(&next_index_val) = index_of.get(&next) {
-                if on_stack.contains(&next) {
-                    let node_ll = *lowlink.get(&node).unwrap_or(&0);
-                    lowlink.insert(node, node_ll.min(next_index_val));
-                }
-            } else {
-                let child_neighbors: Vec<N> = adj
-                    .get(&next)
-                    .map(|s| s.iter().cloned().collect())
-                    .unwrap_or_default();
-                index_of.insert(next.clone(), next_index);
-                lowlink.insert(next.clone(), next_index);
-                next_index += 1;
-                stack.push(next.clone());
-                on_stack.insert(next.clone());
-                work.push((next, child_neighbors, 0));
+            if state.index[next] == UNVISITED {
+                checkpoint()?;
+                state.discover(next);
+            } else if state.on_stack[next] {
+                state.lowlink[node] = state.lowlink[node].min(state.index[next]);
             }
         }
     }
 
-    sccs
+    Ok(sccs)
+}
+
+/// Per-ordinal Tarjan bookkeeping plus the explicit DFS stack.
+struct TarjanState {
+    index: Vec<usize>,
+    lowlink: Vec<usize>,
+    on_stack: Vec<bool>,
+    stack: Vec<usize>,
+    /// Frame: (node ordinal, position in that node's edge list).
+    work: Vec<(usize, usize)>,
+    next_index: usize,
+}
+
+impl TarjanState {
+    fn new(node_count: usize) -> Self {
+        Self {
+            index: vec![UNVISITED; node_count],
+            lowlink: vec![0; node_count],
+            on_stack: vec![false; node_count],
+            stack: Vec::new(),
+            work: Vec::new(),
+            next_index: 0,
+        }
+    }
+
+    /// Assign `node` its DFS index, push it on the Tarjan stack, and open its
+    /// DFS frame.
+    fn discover(&mut self, node: usize) {
+        self.index[node] = self.next_index;
+        self.lowlink[node] = self.next_index;
+        self.next_index += 1;
+        self.stack.push(node);
+        self.on_stack[node] = true;
+        self.work.push((node, 0));
+    }
+}
+
+/// The ordinal of `node`, assigning the next one when it is first seen.
+fn intern<'a, N: Eq + Hash>(
+    node: &'a N,
+    nodes: &mut Vec<&'a N>,
+    ordinal_of: &mut HashMap<&'a N, usize>,
+) -> usize {
+    *ordinal_of.entry(node).or_insert_with(|| {
+        nodes.push(node);
+        nodes.len() - 1
+    })
 }
 
 /// True when an SCC represents a genuine cycle. A single-node component
@@ -166,9 +226,145 @@ mod tests {
     use super::*;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::BuildHasherDefault;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_graph_db::NeverCancelled;
 
     fn edge<N: Eq + Hash + Clone>(adj: &mut HashMap<N, HashSet<N>>, from: N, to: N) {
         adj.entry(from).or_default().insert(to);
+    }
+
+    /// The textbook recursive Tarjan, walking nodes and neighbours in the
+    /// same iteration order the iterative kernel uses, so its emission order
+    /// is the reference the production output must reproduce exactly.
+    fn reference_tarjan<N: Eq + Hash + Clone>(adj: &HashMap<N, HashSet<N>>) -> Vec<Vec<N>> {
+        struct Walk<'a, N> {
+            adj: &'a HashMap<N, HashSet<N>>,
+            index: HashMap<&'a N, usize>,
+            lowlink: HashMap<&'a N, usize>,
+            stack: Vec<&'a N>,
+            output: Vec<Vec<N>>,
+        }
+        fn visit<'a, N: Eq + Hash + Clone>(walk: &mut Walk<'a, N>, node: &'a N) {
+            let position = walk.index.len();
+            walk.index.insert(node, position);
+            walk.lowlink.insert(node, position);
+            walk.stack.push(node);
+            for next in walk.adj.get(node).into_iter().flatten() {
+                if !walk.index.contains_key(next) {
+                    visit(walk, next);
+                    let low = walk.lowlink[next].min(walk.lowlink[node]);
+                    walk.lowlink.insert(node, low);
+                } else if walk.stack.contains(&next) {
+                    let low = walk.index[next].min(walk.lowlink[node]);
+                    walk.lowlink.insert(node, low);
+                }
+            }
+            if walk.lowlink[node] == walk.index[node] {
+                let mut component = Vec::new();
+                while let Some(top) = walk.stack.pop() {
+                    component.push(top.clone());
+                    if top == node {
+                        break;
+                    }
+                }
+                walk.output.push(component);
+            }
+        }
+        let mut walk = Walk {
+            adj,
+            index: HashMap::new(),
+            lowlink: HashMap::new(),
+            stack: Vec::new(),
+            output: Vec::new(),
+        };
+        for (source, targets) in adj {
+            if !walk.index.contains_key(source) {
+                visit(&mut walk, source);
+            }
+            for target in targets {
+                if !walk.index.contains_key(target) {
+                    visit(&mut walk, target);
+                }
+            }
+        }
+        walk.output
+    }
+
+    /// Owned long path names with cycles, a target-only sink, a self loop,
+    /// and an isolated source, shaped like the file adjacency the query
+    /// builds.
+    fn path_fixture() -> HashMap<String, HashSet<String>> {
+        let path = |name: &str| format!("crates/tracedecay-graph-query/src/context/{name}.rs");
+        let mut adj = HashMap::new();
+        for (from, to) in [
+            ("read_modes", "source_read"),
+            ("source_read", "read_modes"),
+            ("source_read", "budget"),
+            ("budget", "budget"),
+            ("budget", "target_only"),
+            ("verified", "projection"),
+            ("projection", "queries"),
+            ("queries", "verified"),
+            ("queries", "budget"),
+        ] {
+            edge(&mut adj, path(from), path(to));
+        }
+        adj.insert(path("isolated"), HashSet::new());
+        adj
+    }
+
+    #[test]
+    fn iterative_kernel_matches_the_reference_emission_exactly() {
+        let adj = path_fixture();
+
+        let sccs = tarjan_scc(&adj);
+
+        assert_eq!(sccs, reference_tarjan(&adj));
+        assert_eq!(sccs.len(), 5, "{sccs:?}");
+        let cyclic = sccs
+            .iter()
+            .filter(|component| is_cyclic_scc(component, &adj))
+            .count();
+        assert_eq!(cyclic, 3, "two multi-file cycles plus the self loop");
+    }
+
+    /// Cancellation fires between node discoveries: the traversal stops with
+    /// the typed refusal rather than a plausible-looking partial cycle list.
+    #[test]
+    fn cancellation_mid_traversal_refuses_instead_of_reporting_partial_components() {
+        struct CancelAfter {
+            remaining: AtomicUsize,
+        }
+        impl GraphCancellation for CancelAfter {
+            fn is_cancelled(&self) -> bool {
+                self.remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    })
+                    .is_err()
+            }
+        }
+        let adj = path_fixture();
+
+        assert_eq!(
+            tarjan_scc_cancellable(&adj, &NeverCancelled),
+            Ok(tarjan_scc(&adj))
+        );
+        let cancel_after_three = CancelAfter {
+            remaining: AtomicUsize::new(3),
+        };
+        assert_eq!(
+            tarjan_scc_cancellable(&adj, &cancel_after_three),
+            Err(SccCancelled)
+        );
+        let already_cancelled = CancelAfter {
+            remaining: AtomicUsize::new(0),
+        };
+        assert_eq!(
+            tarjan_scc_cancellable(&adj, &already_cancelled),
+            Err(SccCancelled)
+        );
     }
 
     #[test]

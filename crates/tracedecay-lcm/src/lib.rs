@@ -94,7 +94,8 @@ pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
     text.split_whitespace().count().max(1) as i64
 }
 
-/// Visible text that feeds [`lcm_budget_tokens`] for a JSON message.
+/// Visible text of a JSON message: the text [`lcm_message_budget_tokens`]
+/// counts, materialized for consumers that need the string itself.
 ///
 /// The budget unit is words of user-visible content, not serialized JSON.
 /// String bodies stay strings; `{ "text": ... }` objects and arrays of
@@ -102,33 +103,66 @@ pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
 /// text parts fall through to `Value`'s compact Display so a count is still
 /// produced — never a silent empty from a failed stringify.
 pub(crate) fn lcm_message_visible_text(message: &Value) -> String {
-    let Some(content) = message.get("content") else {
-        return String::new();
-    };
-    match content {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        other => {
-            if let Some(text) = other.get("text").and_then(Value::as_str) {
-                return text.to_string();
-            }
-            if let Some(items) = other.as_array() {
-                let texts = items
-                    .iter()
-                    .filter_map(|item| item.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>();
-                if !texts.is_empty() {
-                    return texts.join("\n\n");
-                }
-            }
-            other.to_string()
-        }
+    match visible_content(message) {
+        VisibleContent::Empty => String::new(),
+        VisibleContent::Text(text) => text.to_string(),
+        VisibleContent::TextParts(items) => items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        VisibleContent::Structured(other) => other.to_string(),
     }
 }
 
-/// [`lcm_budget_tokens`] over [`lcm_message_visible_text`].
+/// [`lcm_budget_tokens`] over the same visible text as
+/// [`lcm_message_visible_text`], counted from the borrowed `Value` without
+/// materializing that text. The parts of a text array are joined by
+/// whitespace, so their word counts add; the global minimum of one still
+/// applies to the whole message, not to each part.
 pub(crate) fn lcm_message_budget_tokens(message: &Value) -> i64 {
-    lcm_budget_tokens(&lcm_message_visible_text(message))
+    match visible_content(message) {
+        VisibleContent::Empty => lcm_budget_tokens(""),
+        VisibleContent::Text(text) => lcm_budget_tokens(text),
+        VisibleContent::TextParts(items) => items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .map(|text| text.split_whitespace().count())
+            .sum::<usize>()
+            .max(1) as i64,
+        VisibleContent::Structured(other) => lcm_budget_tokens(&other.to_string()),
+    }
+}
+
+enum VisibleContent<'a> {
+    Empty,
+    Text(&'a str),
+    /// A content array with at least one `{ "text": ... }` part.
+    TextParts(&'a [Value]),
+    Structured(&'a Value),
+}
+
+fn visible_content(message: &Value) -> VisibleContent<'_> {
+    let Some(content) = message.get("content") else {
+        return VisibleContent::Empty;
+    };
+    match content {
+        Value::Null => VisibleContent::Empty,
+        Value::String(text) => VisibleContent::Text(text),
+        other => {
+            if let Some(text) = other.get("text").and_then(Value::as_str) {
+                return VisibleContent::Text(text);
+            }
+            if let Some(items) = other.as_array()
+                && items
+                    .iter()
+                    .any(|item| item.get("text").and_then(Value::as_str).is_some())
+            {
+                return VisibleContent::TextParts(items);
+            }
+            VisibleContent::Structured(other)
+        }
+    }
 }
 
 /// Return the storage representation used by LCM raw ingest for provider
@@ -254,5 +288,50 @@ mod budget_tests {
             lcm_budget_tokens("one\n\ntwo three")
         );
         assert_eq!(lcm_message_budget_tokens(&message), 3);
+    }
+
+    /// The borrowed counter must agree with counting the materialized visible
+    /// text for every content shape, including the minimum-of-one floor.
+    #[test]
+    fn borrowed_budget_count_matches_materialized_visible_text() {
+        let cases = [
+            (json!({ "role": "user" }), 1),
+            (json!({ "content": null }), 1),
+            (json!({ "content": "" }), 1),
+            (json!({ "content": "   \n\t " }), 1),
+            (json!({ "content": "alpha beta\ngamma" }), 3),
+            (json!({ "content": { "text": "" } }), 1),
+            (json!({ "content": { "text": "one two" } }), 2),
+            (json!({ "content": [] }), 1),
+            (json!({ "content": [{ "text": "" }] }), 1),
+            (json!({ "content": [{ "text": "" }, { "text": "   " }] }), 1),
+            (
+                json!({ "content": [{ "text": "" }, { "text": "one" }, { "kind": "image" }, { "text": "two three" }] }),
+                3,
+            ),
+            (
+                json!({ "content": [{ "text": "a b" }, { "text": "c" }] }),
+                3,
+            ),
+            (
+                json!({ "content": [{ "kind": "image", "url": "x y z" }] }),
+                3,
+            ),
+            (
+                json!({ "content": { "kind": "tool", "args": ["one two", 3] } }),
+                2,
+            ),
+            (json!({ "content": 42 }), 1),
+            (json!({ "content": true }), 1),
+        ];
+        for (message, expected) in cases {
+            let materialized = lcm_budget_tokens(&lcm_message_visible_text(&message));
+            assert_eq!(
+                lcm_message_budget_tokens(&message),
+                materialized,
+                "borrowed count diverged for {message}"
+            );
+            assert_eq!(materialized, expected, "budget unit changed for {message}");
+        }
     }
 }

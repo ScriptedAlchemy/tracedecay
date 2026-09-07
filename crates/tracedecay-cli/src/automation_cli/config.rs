@@ -62,7 +62,6 @@ pub(super) async fn handle_automation_config_command(
         AutomationConfigAction::Enable { .. } => AutomationConfigPatch {
             enabled: Some(true),
             backend: Some(AutomationBackend::CodexAppServer),
-            model_id: Some(Some("gpt-5.6-mini".to_owned())),
             ..AutomationConfigPatch::default()
         },
         AutomationConfigAction::Disable { .. } => AutomationConfigPatch {
@@ -104,9 +103,6 @@ pub(super) async fn handle_automation_config_command(
                     .as_deref()
                     .map(parse_automation_host_mode)
                     .transpose()?,
-                model_id: (backend == Some(AutomationBackend::CodexAppServer)
-                    && current.model_id.is_none())
-                .then(|| Some("gpt-5.6-mini".to_owned())),
                 timeout_secs,
                 scheduler_tick_secs,
                 memory_curator: automation_task_patch(
@@ -298,7 +294,7 @@ fn print_automation_config(
         }
         println!(
             "model_id: {}",
-            effective.model_id.as_deref().unwrap_or("disabled")
+            effective.model_id.as_deref().unwrap_or("host-default")
         );
         println!("timeout_secs: {}", effective.timeout_secs);
         println!("scheduler_tick_secs: {}", effective.scheduler_tick_secs);

@@ -143,7 +143,10 @@ async fn scheduler_skill_writer_respects_interval_gate() {
     )
     .await
     .unwrap();
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "The project is not idle enough for a managed skill mutation.",
+        "no_action",
+    ));
 
     let run = run_skill_writer_with_backend(
         &cg,
@@ -174,7 +177,10 @@ async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activi
     config.tasks.skill_writer.min_idle_secs = Some(3600);
     // A session message landed 60s ago: the project is not idle yet.
     seed_session_activity(&cg, current_timestamp() - 60).await;
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "Recent activity defers managed skill mutation.",
+        "no_action",
+    ));
 
     let run = run_skill_writer_with_backend(
         &cg,
@@ -216,7 +222,10 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
     )
     .await
     .unwrap();
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "No repeated evidence warrants a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
 
     let run = run_skill_writer_with_backend(
         &cg,

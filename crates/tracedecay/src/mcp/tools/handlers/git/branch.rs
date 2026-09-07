@@ -134,7 +134,7 @@ pub(crate) async fn handle_branch_list(
             after,
             deadline,
             cancellation,
-            tracedecay_application::branch_snapshots::local_branch_snapshots_controlled,
+            tracedecay_query::native_git::local_branch_snapshots_controlled,
         ),
         label = "mcp.git.branch_list.ref_read"
     )
@@ -303,7 +303,7 @@ pub(crate) async fn handle_branch_search(
             deadline.clone(),
             cancellation.clone(),
             move |root, control| {
-                tracedecay_application::branch_snapshots::local_branch_revision_controlled(
+                tracedecay_query::native_git::local_branch_revision_controlled(
                     root,
                     &revision_branch,
                     control,
@@ -567,18 +567,16 @@ pub(crate) async fn handle_branch_diff(
             deadline.clone(),
             cancellation.clone(),
             move |root, control| {
-                let base =
-                    tracedecay_application::branch_snapshots::local_branch_revision_controlled(
-                        root,
-                        &resolution_base,
-                        control,
-                    )?;
-                let head =
-                    tracedecay_application::branch_snapshots::local_branch_revision_controlled(
-                        root,
-                        &resolution_head,
-                        control,
-                    )?;
+                let base = tracedecay_query::native_git::local_branch_revision_controlled(
+                    root,
+                    &resolution_base,
+                    control,
+                )?;
+                let head = tracedecay_query::native_git::local_branch_revision_controlled(
+                    root,
+                    &resolution_head,
+                    control,
+                )?;
                 Ok((base, head))
             },
         ),

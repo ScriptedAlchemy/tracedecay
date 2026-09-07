@@ -284,14 +284,14 @@ pub struct McpServer {
     profile_retained_authority:
         Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
-    /// Authoritative project session store retained for startup recovery.
-    /// Recovery borrows this handle and never discovers or opens another DB.
-    session_db: Option<RegisteredGlobalDbLeaseV1>,
-    /// Daemon-owned user-scope session store. All project servers borrow this
-    /// shared authority instead of reopening `user-sessions.db` per tool call.
-    user_session_db: Option<RegisteredGlobalDbLeaseV1>,
-    registered_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
-    registered_user_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    /// Registered project session store. Startup recovery, ingestion,
+    /// retrieval, and host admission all borrow this one lease and never
+    /// discover or open another DB. Absent on core and direct servers.
+    project_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    /// Registered profile (user-scope) session store. Every project server
+    /// of the profile borrows this shared authority instead of reopening
+    /// `user-sessions.db` per tool call. Absent on core and direct servers.
+    profile_session_db: Option<RegisteredGlobalDbLeaseV1>,
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
     host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
@@ -619,9 +619,9 @@ impl McpServer {
         // span observations) run. Mount one on the runtime's project
         // sessions database, exactly like the daemon does in production.
         if context.host_admission_broker.is_none()
-            && let Some(session_db) = context.session_db.as_ref()
+            && let Some(project_session_db) = context.project_session_db.as_ref()
         {
-            let database_path = session_db.db_path().to_path_buf();
+            let database_path = project_session_db.db_path().to_path_buf();
             let admission_runtime = tokio::task::spawn_blocking(move || {
                 tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
             })
@@ -667,7 +667,7 @@ impl McpServer {
         // runtimes have no daemon refresh scheduler, so install the typed
         // worker-absent wake — every gate treats it exactly like an absent
         // wake, while the session read authorities still mount.
-        if context.project_session_refresh_wake.is_none() && context.session_db.is_some() {
+        if context.project_session_refresh_wake.is_none() && context.project_session_db.is_some() {
             context.project_session_refresh_wake = Some(Arc::new(
                 tracedecay_application::UnavailableSessionTemporalRefreshWake,
             ));
@@ -795,10 +795,8 @@ impl McpServer {
         global_db: Option<RegisteredGlobalDbLeaseV1>,
         registry_db: Option<RegisteredGlobalDbLeaseV1>,
     ) -> McpServerConstructionContext {
-        let user_session_db = None;
-        let session_db = None;
         let mut context = McpServerConstructionContext::direct(cg, scope_prefix)
-            .with_direct_databases(global_db, registry_db, session_db, user_session_db);
+            .with_direct_databases(global_db, registry_db, None, None);
         context.profile_root = profile_root;
         context
     }
@@ -813,10 +811,8 @@ impl McpServer {
             global_db,
             accounting_db,
             registry_db,
-            session_db,
-            user_session_db,
-            registered_session_db,
-            registered_user_session_db,
+            project_session_db,
+            profile_session_db,
             session_sync_service,
             host_admission_broker,
             project_session_refresh_wake,
@@ -937,7 +933,7 @@ impl McpServer {
         let project_session_retrieval_root = match (
             registry_db.as_deref(),
             profile_identity.as_deref(),
-            registered_session_db.as_ref(),
+            project_session_db.as_ref(),
             active_project_id.as_deref(),
         ) {
             (Some(registry), Some(profile), Some(registered), Some(project_id)) => {
@@ -966,7 +962,7 @@ impl McpServer {
             .map(|root| root.identity().root_id().clone());
         let profile_session_retrieval_root = profile_identity
             .as_deref()
-            .zip(registered_user_session_db.as_ref())
+            .zip(profile_session_db.as_ref())
             .and_then(|(profile, registered)| {
                 let serving =
                     crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
@@ -976,7 +972,7 @@ impl McpServer {
                     )?;
                 DaemonSessionRetrievalRoot::profile(serving)
             });
-        let project_session_refresh_service = session_db
+        let project_session_refresh_service = project_session_db
             .as_ref()
             .zip(project_session_refresh_wake.as_ref())
             .zip(active_project_id.clone())
@@ -991,26 +987,16 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(registry.clone()))
                 as Arc<dyn ProjectRegistryReadPort>
         });
-        let project_application_retrieval = session_db
+        let project_application_retrieval = project_session_db
             .as_ref()
             .zip(project_session_retrieval_root.clone())
             .and_then(|(database, root)| {
                 let identity = root.identity().clone();
-                let service = match registered_session_db.as_ref() {
-                    Some(registered) => {
-                        DaemonSessionRetrievalService::new_registered_with_serving_port(
-                            database.clone(),
-                            registered.clone(),
-                            root,
-                            project_session_refresh_serving.clone(),
-                        )
-                    }
-                    None => DaemonSessionRetrievalService::new_with_serving_port(
-                        database.clone(),
-                        root,
-                        project_session_refresh_serving.clone(),
-                    ),
-                }?;
+                let service = DaemonSessionRetrievalService::new_with_serving_port(
+                    database.clone(),
+                    root,
+                    project_session_refresh_serving.clone(),
+                )?;
                 Some(MountedProjectApplicationRetrievalV1 {
                     identity,
                     service: Arc::new(service) as Arc<dyn SessionApplicationRetrievalPortV1>,
@@ -1018,7 +1004,7 @@ impl McpServer {
             });
         let project_lcm_authority = project_session_retrieval_root
             .as_ref()
-            .zip(registered_session_db.as_ref())
+            .zip(project_session_db.as_ref())
             .and_then(|(root, database)| {
                 mount_registered_lcm_authority(
                     database.clone(),
@@ -1028,7 +1014,7 @@ impl McpServer {
             });
         let user_lcm_authority = profile_session_retrieval_root
             .as_ref()
-            .zip(registered_user_session_db.as_ref())
+            .zip(profile_session_db.as_ref())
             .and_then(|(root, database)| {
                 mount_registered_lcm_authority(
                     database.clone(),
@@ -1080,12 +1066,10 @@ impl McpServer {
             profile_root,
             profile_identity,
             profile_retained_authority,
-            session_db,
+            project_session_db,
             registry_db,
             project_registry_reads,
-            user_session_db,
-            registered_session_db,
-            registered_user_session_db,
+            profile_session_db,
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
@@ -1290,7 +1274,7 @@ impl McpServer {
     }
 
     pub(crate) fn project_session_db(&self) -> Option<RegisteredGlobalDbLeaseV1> {
-        self.session_db.clone()
+        self.project_session_db.clone()
     }
 
     #[cfg(feature = "test-transport")]
@@ -1344,7 +1328,7 @@ impl McpServer {
         project_id: tracedecay_domain::ProjectId,
         configuration_digest: tracedecay_domain::ManifestDigest,
     ) -> Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>> {
-        let project_workflow_index = self.registered_session_db.as_ref().map(|database| {
+        let project_workflow_index = self.project_session_db.as_ref().map(|database| {
             Arc::new(DaemonWorkflowIndexReadService::new(database.clone()))
                 as Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>
         });
@@ -1359,7 +1343,7 @@ impl McpServer {
                     .map(|identity| identity.profile_id().clone()),
                 mounted_session_store_id: self.project_session_store_id.clone(),
                 mounted_session_root_id: self.project_session_root_id.clone(),
-                registered_session_db: self.registered_session_db.clone(),
+                registered_session_db: self.project_session_db.clone(),
                 project_refresh: self.project_session_refresh_service.clone(),
                 project_retrieval: self
                     .project_application_retrieval
@@ -1432,8 +1416,8 @@ impl McpServer {
                 "database_authorities": {
                     "accounting": self.ledger_sink_is_mounted(),
                     "registry": self.registry_db.is_some(),
-                    "project_sessions": self.session_db.is_some(),
-                    "user_sessions": self.user_session_db.is_some(),
+                    "project_sessions": self.project_session_db.is_some(),
+                    "user_sessions": self.profile_session_db.is_some(),
                 },
             },
             "ratios": {

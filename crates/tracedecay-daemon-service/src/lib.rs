@@ -97,7 +97,7 @@ pub use project_runtime::{
     SemanticOwnerRegistrationSignalsV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
 };
-pub use request_cancellation::{Lease, cancel, register};
+pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
     DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
