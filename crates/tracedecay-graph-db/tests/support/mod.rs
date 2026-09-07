@@ -1,8 +1,7 @@
 #![allow(dead_code)] // shared test support: each contract target uses a subset
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -229,42 +228,13 @@ fn binding() -> StoreRuntimeBindingV1 {
     )
 }
 
-/// Windows CI exports this to the whole shard as a speed knob. No production
-/// graph or `SQLite` backend currently reads it; durability fixtures still
-/// unset it so a green run cannot be mistaken for production durability proof.
+/// No production graph or `SQLite` backend reads this variable. Crash children
+/// still drop it from their environment so a leftover export cannot be mistaken
+/// for a durability setting the fixture exercised.
 pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
 pub const GRAPH_CRASH_CHILD_ROOT_ENV: &str = "TRACEDECAY_GRAPH_CRASH_CHILD_ROOT";
 const GRAPH_CRASH_CHILD_READY: &str = "durable-phase.ready";
-
-/// Removes [`SQLITE_UNSAFE_FAST_ENV`] for the fixture's lifetime.
-pub struct UnsetSqliteUnsafeFast {
-    previous: Option<OsString>,
-}
-
-impl UnsetSqliteUnsafeFast {
-    pub fn new() -> Self {
-        let previous = std::env::var_os(SQLITE_UNSAFE_FAST_ENV);
-        unsafe {
-            std::env::remove_var(SQLITE_UNSAFE_FAST_ENV);
-        }
-        assert!(
-            std::env::var_os(SQLITE_UNSAFE_FAST_ENV).is_none(),
-            "durability fixtures must not credit {SQLITE_UNSAFE_FAST_ENV}"
-        );
-        Self { previous }
-    }
-}
-
-impl Drop for UnsetSqliteUnsafeFast {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(SQLITE_UNSAFE_FAST_ENV, value),
-                None => std::env::remove_var(SQLITE_UNSAFE_FAST_ENV),
-            }
-        }
-    }
-}
+const GRAPH_CRASH_CHILD_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub fn crash_child_root() -> Option<PathBuf> {
     std::env::var_os(GRAPH_CRASH_CHILD_ROOT_ENV).map(PathBuf::from)
@@ -276,15 +246,20 @@ pub fn mark_durable_phase(root: &Path) {
     });
 }
 
-/// Runs this test in a child that exits without closing the store, then copies
-/// the leftover container and WAL sidecar. The copy happens only after the
-/// child has been joined, so Windows is not asked to `fs::copy` a live store.
+/// Runs this test in a child that reaches the durable WAL phase and exits
+/// without closing the store, then copies the abandoned container and sidecar.
+///
+/// This is subprocess unclean-exit proof, not machine power-loss durability.
+/// The child is bounded and reaped on every path: a hang or a missing
+/// durable-phase marker fails the fixture instead of leaving locks behind.
+/// The copy happens only after that process is gone, so Windows is not asked
+/// to `fs::copy` a live store.
 pub fn capture_unclean_crash_image(destination: &Path) {
     let source = tempfile::TempDir::new().expect("crash source");
     run_unclean_crash_child(source.path());
     assert!(
         source.path().join(GRAPH_CRASH_CHILD_READY).is_file(),
-        "crash child must reach the durable phase before exiting"
+        "crash child must reach the durable phase before the parent copies"
     );
     copy_crash_image(source.path(), destination);
 }
@@ -298,20 +273,49 @@ fn current_test_name() -> String {
 
 fn run_unclean_crash_child(root: &Path) {
     let test_name = current_test_name();
-    let output = Command::new(std::env::current_exe().expect("test binary"))
+    let mut child = Command::new(std::env::current_exe().expect("test binary"))
         .args(["--exact", &test_name, "--nocapture"])
         .env(GRAPH_CRASH_CHILD_ROOT_ENV, root)
         .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
         .unwrap_or_else(|error| panic!("spawn crash child for {test_name}: {error}"));
+    let status = wait_crash_child(&mut child, GRAPH_CRASH_CHILD_TIMEOUT).unwrap_or_else(|error| {
+        reap_crash_child(&mut child);
+        panic!("crash child {test_name}: {error}");
+    });
     assert!(
-        output.status.success(),
-        "crash child {test_name} failed ({:?})\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        status.success(),
+        "crash child {test_name} failed ({status:?})"
     );
+}
+
+fn wait_crash_child(
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "exceeded {timeout:?} without exiting; reaped so locks cannot leak"
+                ));
+            }
+            Err(error) => return Err(format!("wait failed: {error}")),
+        }
+    }
+}
+
+fn reap_crash_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Recursively copies a *closed or abandoned* store's container and sidecar.
