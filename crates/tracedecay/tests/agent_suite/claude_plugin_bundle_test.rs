@@ -279,8 +279,8 @@ fn claude_agents_allow_only_live_read_only_mcp_tools() {
 fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
     let cursor_files = tracedecay::agents::plugin_bundle::cursor_files();
     let temp = tempfile::tempdir().unwrap();
-    tracedecay_agent_hosts::register_automation_host_io();
     tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
+        &tracedecay_agent_hosts::host_io(),
         temp.path(),
     )
     .unwrap();

@@ -211,6 +211,7 @@ impl AgentIntegration for ClaudeIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
                 &claude_md_path,
@@ -241,6 +242,7 @@ impl AgentIntegration for ClaudeIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
                 &claude_md_path,

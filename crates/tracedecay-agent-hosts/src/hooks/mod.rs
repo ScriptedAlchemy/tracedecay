@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use tracedecay_hooks::{DaemonHookEvent, HookRouteMetadata};
+use tracedecay_hooks::DaemonHookEvent;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
 
@@ -40,28 +40,21 @@ pub use dispatch::publish_daemon_bindings as publish_hook_bindings;
 
 pub use claude::{
     evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
-    hook_stop,
+    hook_claude_session_start, hook_stop,
 };
 pub use codex::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
     codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
     codex_workspace_status_from_event, evaluate_codex_subagent_start, hook_codex_post_compact,
-    hook_codex_post_tool_use, hook_codex_session_start, hook_codex_stop, hook_codex_subagent_start,
-    hook_codex_user_prompt_submit, record_codex_subagent_start,
+    hook_codex_post_tool_use, hook_codex_session_start, hook_codex_user_prompt_submit,
+    record_codex_subagent_start,
 };
 pub use cursor::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
-    evaluate_cursor_subagent_start, hook_cursor_after_file_edit, hook_cursor_after_shell,
-    hook_cursor_post_tool_use, hook_cursor_pre_compact, hook_cursor_session_end,
-    hook_cursor_session_start, hook_cursor_stop, hook_cursor_subagent_start,
-    hook_cursor_workspace_open,
+    evaluate_cursor_subagent_start, hook_cursor_post_tool_use, hook_cursor_session_start,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
-pub use kiro::{
-    evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
-    hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
-};
+pub use kiro::{evaluate_kiro_pre_tool_use, hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths};
 pub use steering::{
     CODEX_SESSION_CONTEXT_BUDGET, CURSOR_PLUGIN_SKILLS, CURSOR_SESSION_CONTEXT_BUDGET,
     HookWorkspaceStatus, build_codex_session_context, build_codex_session_context_for_workspace,
@@ -451,17 +444,6 @@ async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Opti
     runtime.resolve_project_root_with_identity(&start).await
 }
 
-pub(crate) async fn daemon_tool_json(
-    runtime: &HookRuntimeV1,
-    project_root: Option<&Path>,
-    tool_name: &str,
-    arguments: Value,
-) -> crate::errors::Result<Value> {
-    runtime
-        .daemon_tool_json(project_root, tool_name, arguments, false)
-        .await
-}
-
 #[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
 pub(crate) async fn daemon_hook_action(
     runtime: &HookRuntimeV1,
@@ -712,22 +694,6 @@ pub(crate) async fn notify_hook_event_with_telemetry(
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
     runtime.notify_hook_event(project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
-}
-
-pub(crate) async fn notify_hook_event_with_optional_telemetry(
-    runtime: &HookRuntimeV1,
-    project_root: &Path,
-    event: DaemonHookEvent,
-    telemetry: Option<&analytics::HookTimingSpan>,
-) {
-    match telemetry {
-        Some(telemetry) => {
-            notify_hook_event_with_telemetry(runtime, project_root, event, telemetry).await;
-        }
-        None => {
-            runtime.notify_hook_event(project_root, event).await;
-        }
-    }
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
@@ -993,32 +959,6 @@ fn take_test_daemon_hook_action(
                 message: "daemon hook test responder has no response".to_string(),
             }),
     )
-}
-
-pub(crate) fn hook_route_metadata_from_parsed(
-    parsed: &Value,
-    project_root: &Path,
-) -> HookRouteMetadata {
-    let cwd = event_cwd_from_parsed(parsed);
-    let route_root = cwd.as_deref().unwrap_or(project_root);
-    let worktree = tracedecay_runtime_core::worktree::git_worktree_root(route_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
-    let branch = tracedecay_runtime_core::branch::current_branch(&worktree);
-    HookRouteMetadata {
-        session_id: hook_route_session_id(parsed),
-        thread_id: text_field(
-            parsed,
-            &[
-                "thread_id",
-                "threadId",
-                "conversation_thread_id",
-                "conversationThreadId",
-            ],
-        ),
-        cwd,
-        worktree: Some(worktree),
-        branch,
-    }
 }
 
 const HOOK_SESSION_ID_KEYS: &[&str] = &[

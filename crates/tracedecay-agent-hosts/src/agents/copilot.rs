@@ -189,6 +189,7 @@ impl AgentIntegration for CopilotIntegration {
             .filter(|path| path.exists())
             .map(|path| {
                 tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                    &crate::host_io(),
                     profile_root,
                     tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
                     path,
@@ -209,6 +210,7 @@ impl AgentIntegration for CopilotIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
                 &instructions,
