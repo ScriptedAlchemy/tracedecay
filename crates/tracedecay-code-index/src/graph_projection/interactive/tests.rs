@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
-    RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1,
+    ContentDigest, EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId,
+    PolicyRevisionId, RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision,
+    SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
+    SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphGenerationManifest, GraphNamespace, GraphProjectorRevision,
@@ -147,6 +148,7 @@ fn symbol_metadata(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: 0,
         signature: None,

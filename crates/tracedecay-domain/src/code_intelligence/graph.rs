@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -227,12 +228,38 @@ pub struct Node {
     pub unchecked_calls: u32,
     /// Number of assertion calls (e.g. `assert!`, `assertEquals`, `expect`).
     pub assertions: u32,
+    /// Whether the bounded complexity walk covered the whole body. Omitted on
+    /// the wire when complete, so rows without it carry exact counters.
+    #[serde(default, skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    pub complexity_analysis: ComplexityAnalysisV1,
     pub updated_at: u64,
     /// `id` of the enclosing scope (module, impl, class, …). `None` for
     /// top-level nodes whose parent is the file itself. Populated from
     /// `Contains` edges at insert time; once written, callers should prefer
     /// `parent_id` over walking edges.
     pub parent_id: Option<String>,
+}
+
+/// Whether the bounded complexity walk over a symbol's body ran to the end.
+///
+/// The extractor stops walking a body once its traversal budget is spent. The
+/// counters accumulated by then are lower bounds over the visited prefix, not
+/// facts about the whole body, so every surface that prints, ranks, or
+/// aggregates complexity must render this state instead of treating those
+/// counters as exact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplexityAnalysisV1 {
+    #[default]
+    Complete,
+    /// The walk stopped when the traversal budget ran out.
+    TraversalBudgetExhausted,
+}
+
+impl ComplexityAnalysisV1 {
+    pub const fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,12 +388,122 @@ pub struct GraphStats {
 /// Extracted names may be empty for anonymous source constructs; file, kind,
 /// and line keep those identities deterministic and distinct.
 pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32) -> String {
-    let input = format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line);
+    hash_node_id(
+        kind,
+        &format!("{}:{}:{}:{}", file_path, kind.as_str(), name, line),
+    )
+}
+
+/// Generates the node ID for a construct that shares its line with preceding
+/// source text, so the start column also participates.
+///
+/// Extraction mints [`generate_node_id`] for constructs that begin their line
+/// (only blanks precede them) and this form otherwise. Two constructs of the
+/// same kind and name on one line — `impl A { fn run() {} } impl B { fn run()
+/// {} }` — therefore never share an ID, while indentation and one-construct
+/// lines leave the line-keyed ID unchanged.
+pub fn generate_node_id_at(
+    file_path: &str,
+    kind: &NodeKind,
+    name: &str,
+    line: u32,
+    column: u32,
+) -> String {
+    hash_node_id(
+        kind,
+        &format!(
+            "{}:{}:{}:{}:{}",
+            file_path,
+            kind.as_str(),
+            name,
+            line,
+            column
+        ),
+    )
+}
+
+fn hash_node_id(kind: &NodeKind, input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
     let hex_str = crate::canonical_text::encode_lowercase_hex(&hash);
     format!("{}:{}", kind.as_str(), &hex_str[..32])
+}
+
+#[cfg(test)]
+mod complexity_analysis_wire_tests {
+    use super::{ComplexityAnalysisV1, Node, NodeKind, Visibility};
+
+    fn node(complexity_analysis: ComplexityAnalysisV1) -> Node {
+        Node {
+            id: "function:0".to_owned(),
+            kind: NodeKind::Function,
+            name: "f".to_owned(),
+            qualified_name: "lib.rs::f".to_owned(),
+            file_path: "lib.rs".to_owned(),
+            start_line: 0,
+            attrs_start_line: 0,
+            end_line: 0,
+            start_column: 0,
+            end_column: 0,
+            signature: None,
+            docstring: None,
+            visibility: Visibility::Private,
+            is_async: false,
+            branches: 2,
+            loops: 0,
+            returns: 0,
+            max_nesting: 1,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis,
+            updated_at: 0,
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn complete_rows_omit_the_state_and_incomplete_rows_carry_it() {
+        let complete = serde_json::to_value(node(ComplexityAnalysisV1::Complete)).expect("row");
+        assert!(complete.get("complexity_analysis").is_none());
+
+        let incomplete = serde_json::to_value(node(ComplexityAnalysisV1::TraversalBudgetExhausted))
+            .expect("row");
+        assert_eq!(
+            incomplete["complexity_analysis"],
+            serde_json::json!("traversal_budget_exhausted")
+        );
+
+        let restored: Node = serde_json::from_value(complete).expect("row without the state");
+        assert_eq!(restored.complexity_analysis, ComplexityAnalysisV1::Complete);
+        let restored: Node = serde_json::from_value(incomplete).expect("row with the state");
+        assert_eq!(
+            restored.complexity_analysis,
+            ComplexityAnalysisV1::TraversalBudgetExhausted
+        );
+    }
+}
+
+#[cfg(test)]
+mod same_line_node_id_tests {
+    use super::{NodeKind, generate_node_id, generate_node_id_at};
+
+    #[test]
+    fn column_keyed_ids_are_deterministic_and_distinct_from_line_keyed_ids() {
+        let line_keyed = generate_node_id("src/lib.rs", &NodeKind::Method, "run", 3);
+        let first = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60);
+        let second = generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 94);
+
+        assert_eq!(
+            first,
+            generate_node_id_at("src/lib.rs", &NodeKind::Method, "run", 3, 60)
+        );
+        assert_ne!(first, second, "same-line constructs must stay distinct");
+        assert_ne!(first, line_keyed);
+        assert_ne!(second, line_keyed);
+        assert!(first.starts_with("method:"), "unexpected id shape: {first}");
+    }
 }
 
 #[cfg(test)]

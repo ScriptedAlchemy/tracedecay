@@ -12,10 +12,10 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, EdgeAuthorityV1,
-    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision, PolicyRevisionId,
-    RelationEdgeKindV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan,
-    SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1,
+    EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision,
+    PolicyRevisionId, RelationEdgeKindV1, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphEntityId, GraphNamespace, GraphProjectorRevision, GraphProperty, GraphPropertyName,
@@ -222,6 +222,7 @@ fn symbol(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: 0,
         signature: None,

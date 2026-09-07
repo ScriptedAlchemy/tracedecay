@@ -6,7 +6,7 @@ use tracedecay_application::{CallableCodeOperationKind, callable_code_operation}
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
-use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_graph_query::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadRequest,
@@ -44,6 +44,8 @@ pub(super) struct GraphNodeV1 {
     signature: Option<String>,
     visibility: Option<String>,
     is_async: Option<i64>,
+    /// Exact counters; `None` when `complexity_analysis` reports that the
+    /// bounded walk did not cover the body.
     branches: Option<i64>,
     loops: Option<i64>,
     returns: Option<i64>,
@@ -51,6 +53,8 @@ pub(super) struct GraphNodeV1 {
     unsafe_blocks: Option<i64>,
     unchecked_calls: Option<i64>,
     assertions: Option<i64>,
+    /// `None` only where this surface carries no extraction metadata at all.
+    complexity_analysis: Option<ComplexityAnalysisV1>,
     updated_at: Option<i64>,
     parent_id: Option<String>,
     degree: Option<i64>,
@@ -840,6 +844,7 @@ fn node_from_summary(
                 summary.occurrence
             ),
         })?;
+    let complexity = metadata.exact_complexity();
     let start_line = Some(i64::from(metadata.start_line));
     let end_line = Some({
         i64::from(
@@ -866,13 +871,14 @@ fn node_from_summary(
         signature: metadata.signature.clone(),
         visibility: Some(metadata.visibility.clone()),
         is_async: None,
-        branches: Some(i64::from(metadata.branches)),
-        loops: Some(i64::from(metadata.loops)),
+        branches: complexity.map(|complexity| i64::from(complexity.branches)),
+        loops: complexity.map(|complexity| i64::from(complexity.loops)),
         returns: None,
-        max_nesting: Some(i64::from(metadata.max_nesting)),
+        max_nesting: complexity.map(|complexity| i64::from(complexity.max_nesting)),
         unsafe_blocks: None,
         unchecked_calls: None,
         assertions: None,
+        complexity_analysis: Some(metadata.complexity_analysis),
         updated_at: None,
         parent_id: None,
         degree: degree.map(|value| value as i64),
@@ -906,5 +912,72 @@ fn edge_from_semantic(edge: &CodeGraphSemanticEdgeV1) -> GraphEdgeV1 {
         line: None,
         source_name: None,
         target_name: None,
+    }
+}
+
+#[cfg(test)]
+mod complexity_rendering_tests {
+    use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+    use tracedecay_domain::{
+        ComplexityAnalysisV1, ContentDigest, FileIdentityDigest, SymbolIdentityDigest,
+    };
+
+    use super::*;
+
+    fn summary(complexity_analysis: ComplexityAnalysisV1) -> CodeGraphSymbolSummaryV1 {
+        let occurrence = SymbolOccurrenceId::new("symbol.fixture").expect("occurrence");
+        CodeGraphSymbolSummaryV1 {
+            occurrence: occurrence.clone(),
+            binding: None,
+            metadata: Some(LineageSymbolRecordV1 {
+                occurrence,
+                identity: SymbolIdentityDigest::new(format!("sha256:{:064x}", 1))
+                    .expect("identity"),
+                qualified_name: "src/lib.rs::huge".to_owned(),
+                simple_name: "huge".to_owned(),
+                kind: "function".to_owned(),
+                visibility: "public".to_owned(),
+                branches: 7,
+                loops: 2,
+                max_nesting: 3,
+                complexity_analysis,
+                line_span: 40,
+                start_line: 4,
+                signature: None,
+                skip_test_coverage: false,
+                file_identity: FileIdentityDigest::new(format!("sha256:{:064x}", 2))
+                    .expect("file identity"),
+                content_digest: ContentDigest::new(format!("sha256:{:064x}", 3))
+                    .expect("content digest"),
+            }),
+        }
+    }
+
+    #[test]
+    fn incomplete_complexity_renders_its_state_instead_of_counters() {
+        let node = node_from_summary(
+            &summary(ComplexityAnalysisV1::TraversalBudgetExhausted),
+            None,
+        )
+        .expect("node");
+        assert_eq!(
+            node.complexity_analysis,
+            Some(ComplexityAnalysisV1::TraversalBudgetExhausted)
+        );
+        assert_eq!(
+            (node.branches, node.loops, node.max_nesting),
+            (None, None, None)
+        );
+
+        let exact =
+            node_from_summary(&summary(ComplexityAnalysisV1::Complete), None).expect("node");
+        assert_eq!(
+            exact.complexity_analysis,
+            Some(ComplexityAnalysisV1::Complete)
+        );
+        assert_eq!(
+            (exact.branches, exact.loops, exact.max_nesting),
+            (Some(7), Some(2), Some(3))
+        );
     }
 }
