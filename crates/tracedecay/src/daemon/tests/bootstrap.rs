@@ -3223,9 +3223,25 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     })
     .await
     .expect("initialize warmup did not start after the writer gate was released");
-    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
+    let mut shutdown = Box::pin(engine.shutdown_all());
+    if tokio::time::timeout(PHASE_TIMEOUT, &mut shutdown)
         .await
-        .expect("bootstrap-cache shutdown timed out");
+        .is_err()
+    {
+        match tokio::time::timeout(
+            tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+            &mut shutdown,
+        )
+        .await
+        {
+            Ok(receipt) => {
+                panic!("bootstrap-cache shutdown exceeded its phase bound: {receipt:#?}")
+            }
+            Err(error) => panic!(
+                "bootstrap-cache shutdown coordinator did not return after its global deadline: {error}"
+            ),
+        }
+    }
     assert_eq!(
         engine
             .project_open_attempts

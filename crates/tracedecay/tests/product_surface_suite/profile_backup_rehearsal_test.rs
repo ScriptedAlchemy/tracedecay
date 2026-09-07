@@ -132,6 +132,34 @@ fn read_bytes(root: &Path, relative: &str) -> Vec<u8> {
     fs::read(root.join(relative)).unwrap()
 }
 
+/// Runs one rehearsal with `fault` armed and proves it failed at that named
+/// boundary rather than at an earlier refusal (for example a private-file
+/// admission failure while copying the backup).
+fn rehearse_until_injected_fault(backup: &Path, restore: &Path, fault: &str) -> ProfileBackupError {
+    set_rehearsal_publication_fault_for_test(fault);
+    let error = rehearse_complete_profile_backup(backup, restore).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected rehearsal publication fault"),
+        "{fault}: rehearsal failed before the injected boundary: {error}"
+    );
+    error
+}
+
+/// Interrupts a rehearsal after publication but before its parent-directory
+/// sync, returning the marker bytes that the published root must retain.
+fn interrupt_published_rehearsal(backup: &Path, restore: &Path) -> Vec<u8> {
+    let fault = rehearse_until_injected_fault(backup, restore, "after_rename_before_parent_sync");
+    let marker = restore.join(".tracedecay-profile-rehearsal.json");
+    fs::read(&marker).unwrap_or_else(|error| {
+        panic!(
+            "published rehearsal marker '{}' is missing after the injected fault ({fault}): {error}",
+            marker.display()
+        )
+    })
+}
+
 #[test]
 fn released_copy_rehearsal_rebinds_store_and_preserves_identity() {
     let temp = TempDir::new().unwrap();
@@ -183,14 +211,8 @@ fn released_copy_rehearsal_recovers_owned_interrupted_staging() {
     let backup = create_backup(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let staging = temp.path().join(".rehearsed-profile.tracedecay-rehearsal");
-    set_rehearsal_publication_fault_for_test("before_rename");
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("injected rehearsal publication fault")
-    );
+    rehearse_until_injected_fault(&backup, &restore, "before_rename");
     assert!(staging.join(".tracedecay-profile-rehearsal.json").is_file());
 
     rehearse_complete_profile_backup(&backup, &restore).unwrap();
@@ -241,15 +263,8 @@ fn released_copy_rehearsal_resumes_after_rename_before_marker_removal() {
     let fixture = seed_released_profile(&temp);
     let backup = create_backup(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
-    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("injected rehearsal publication fault")
-    );
-    assert!(restore.join(".tracedecay-profile-rehearsal.json").is_file());
+    interrupt_published_rehearsal(&backup, &restore);
 
     set_rehearsal_publication_fault_for_test("");
     rehearse_complete_profile_backup(&backup, &restore).unwrap();
@@ -264,9 +279,7 @@ fn marked_publication_recovery_rejects_tampered_durable_bytes() {
     let backup = create_backup(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
-    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
-    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-    let expected_marker = fs::read(&marker).unwrap();
+    let expected_marker = interrupt_published_rehearsal(&backup, &restore);
     fs::write(
         restore.join("user-memory.db"),
         b"tampered after publication",
@@ -294,9 +307,7 @@ fn marked_publication_recovery_rejects_partially_durable_restore() {
     let backup = create_backup(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
-    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
-    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-    let expected_marker = fs::read(&marker).unwrap();
+    let expected_marker = interrupt_published_rehearsal(&backup, &restore);
     fs::remove_file(restore.join("user-sessions.db")).unwrap();
 
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
@@ -317,9 +328,7 @@ fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
     let backup = create_backup(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
-    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
-    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-    let expected_marker = fs::read(&marker).unwrap();
+    let expected_marker = interrupt_published_rehearsal(&backup, &restore);
     let manifest_path = restore
         .join("projects")
         .join(fixture.project_id)
@@ -350,10 +359,8 @@ fn released_copy_rehearsal_rejects_same_id_from_another_backup_root() {
     let restore = original_temp.path().join("rehearsed-profile");
     let marker_path = restore.join(".tracedecay-profile-rehearsal.json");
     let expected_identity = read_bytes(&original_fixture.profile, "profile-identity.json");
-    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
 
-    rehearse_complete_profile_backup(&original_backup, &restore).unwrap_err();
-    let expected_marker = fs::read(&marker_path).unwrap();
+    let expected_marker = interrupt_published_rehearsal(&original_backup, &restore);
 
     let foreign_temp = TempDir::new().unwrap();
     let foreign_fixture = seed_released_profile(&foreign_temp);
