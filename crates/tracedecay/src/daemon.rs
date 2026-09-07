@@ -84,7 +84,7 @@ impl AuthenticatedFirstRequest {
         hotpath::gauge!("daemon.engine.first_request.decode").inc(1_u64);
         #[cfg(test)]
         FIRST_REQUEST_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
-        let parsed = serde_json::from_str(raw.trim()).ok();
+        let parsed = JsonRpcRequest::decode(raw.trim()).ok();
         Self { raw, parsed }
     }
 

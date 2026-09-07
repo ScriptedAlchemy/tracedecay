@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
 use crate::mcp::server::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
-use tracedecay_mcp::{JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{JsonRpcDecodeError, JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
 use super::*;
@@ -489,31 +489,22 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     return None;
                 }
             };
-            match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(value) => {
-                    self.observe_incoming_message(&value).await;
-                    match serde_json::from_value(value) {
-                        Ok(message) => return Some(message),
-                        Err(error) => {
-                            let response = JsonRpcResponse::error(
-                                serde_json::Value::Null,
-                                ErrorCode::ParseError,
-                                format!("failed to parse JSON-RPC request: {error}"),
-                            );
-                            if let Ok(line) = serde_json::to_string(&response) {
-                                let _ = self.write_line(&format!("{line}\n")).await;
-                                let _ = self.flush().await;
-                            }
-                        }
+            // The envelope rule runs before cancellation matching so a frame
+            // with a foreign protocol version is never treated as work.
+            let decoded = match serde_json::from_str::<serde_json::Value>(&line) {
+                Ok(value) => match tracedecay_mcp::jsonrpc::validate_envelope(&value) {
+                    Ok(()) => {
+                        self.observe_incoming_message(&value).await;
+                        tracedecay_mcp::jsonrpc::decode_envelope(value)
                     }
-                }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(JsonRpcDecodeError::Parse(error)),
+            };
+            match decoded {
+                Ok(message) => return Some(message),
                 Err(error) => {
-                    let response = JsonRpcResponse::error(
-                        serde_json::Value::Null,
-                        ErrorCode::ParseError,
-                        format!("failed to parse JSON-RPC request: {error}"),
-                    );
-                    if let Ok(line) = serde_json::to_string(&response) {
+                    if let Ok(line) = serde_json::to_string(&error.into_response()) {
                         let _ = self.write_line(&format!("{line}\n")).await;
                         let _ = self.flush().await;
                     }

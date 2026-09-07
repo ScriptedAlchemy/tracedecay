@@ -264,7 +264,7 @@ pub async fn run_cargo_tests(
     control: TestRunControl,
 ) -> Result<TestRunOutput, TestRunFailure> {
     tokio::task::spawn_blocking(move || {
-        run_selected_cargo_tests(&project_root, profile, &test_names, timeout, control)
+        run_selected_cargo_tests(&project_root, profile, &test_names, timeout, &control)
     })
     .await
     .map_err(|_| TestRunFailure::Spawn("cargo test runner task ended unexpectedly".to_owned()))?
@@ -304,7 +304,7 @@ fn run_selected_cargo_tests(
     profile: TestProfile,
     test_names: &[String],
     timeout: Duration,
-    control: TestRunControl,
+    control: &TestRunControl,
 ) -> Result<TestRunOutput, TestRunFailure> {
     if test_names.is_empty() {
         return Err(TestRunFailure::NoMatch {
@@ -349,7 +349,7 @@ fn run_selected_cargo_tests(
             });
         };
         let mut command = cargo_test_command(project_root, profile, test_identity);
-        let output = match run_bounded_test_command(&mut command, remaining, control.clone()) {
+        let output = match run_bounded_test_command(&mut command, remaining, control) {
             Ok(output) => output,
             Err(failure) => {
                 return Err(failure.with_partial_output(stdout, stderr, control.output_bytes()));
@@ -426,7 +426,7 @@ fn configure_command(command: &mut Command) {
 fn run_bounded_test_command(
     command: &mut Command,
     timeout: Duration,
-    control: TestRunControl,
+    control: &TestRunControl,
 ) -> Result<TestRunOutput, TestRunFailure> {
     if timeout.is_zero() {
         return Err(TestRunFailure::Timeout {
@@ -449,19 +449,14 @@ fn run_bounded_test_command(
     let stderr = child.stderr.take();
     let stdout_reader = stdout.map(|stdout| {
         let control = control.clone();
-        thread::spawn(move || read_bounded(stdout, TestRunStream::Stdout, control))
+        thread::spawn(move || read_bounded(stdout, TestRunStream::Stdout, &control))
     });
     let stderr_reader = stderr.map(|stderr| {
         let control = control.clone();
-        thread::spawn(move || read_bounded(stderr, TestRunStream::Stderr, control))
+        thread::spawn(move || read_bounded(stderr, TestRunStream::Stderr, &control))
     });
 
-    let outcome = wait_for_process(
-        &mut child,
-        process_group,
-        Instant::now() + timeout,
-        &control,
-    );
+    let outcome = wait_for_process(&mut child, process_group, Instant::now() + timeout, control);
     control.unregister(process_group);
     let stdout = join_reader(stdout_reader);
     let stderr = join_reader(stderr_reader);
@@ -603,7 +598,7 @@ impl StreamCapture {
 fn read_bounded(
     mut reader: impl Read,
     stream: TestRunStream,
-    control: TestRunControl,
+    control: &TestRunControl,
 ) -> StreamCapture {
     let mut output = Vec::with_capacity(8 * 1024);
     let mut chunk = [0_u8; 8 * 1024];
@@ -827,7 +822,7 @@ mod tests {
         let result = run_bounded_test_command(
             &mut command,
             FIXTURE_PROVISION_BUDGET,
-            TestRunControl::default(),
+            &TestRunControl::default(),
         );
         let elapsed = started.elapsed();
         match result {
@@ -1115,7 +1110,7 @@ mod tests {
         let result = run_bounded_test_command(
             &mut command,
             Duration::from_secs(5),
-            TestRunControl::default(),
+            &TestRunControl::default(),
         );
         let Err(TestRunFailure::OutputLimit {
             stream: TestRunStream::Stdout,
@@ -1137,12 +1132,12 @@ mod tests {
         let marker = temp.path().join("child.pid");
         let control = TestRunControl::default();
         let mut first = fixture_command(&marker, "parent_limited_output");
-        let first = run_bounded_test_command(&mut first, Duration::from_secs(5), control.clone())
+        let first = run_bounded_test_command(&mut first, Duration::from_secs(5), &control)
             .expect("first command stays inside the shared output budget");
         assert!(first.output_bytes >= LIMITED_OUTPUT_BYTES as u64);
 
         let mut second = fixture_command(&marker, "parent_limited_output");
-        let second = run_bounded_test_command(&mut second, Duration::from_secs(5), control);
+        let second = run_bounded_test_command(&mut second, Duration::from_secs(5), &control);
         assert!(matches!(second, Err(TestRunFailure::OutputLimit { .. })));
     }
 
@@ -1164,7 +1159,7 @@ mod tests {
                 control.cancel();
             })
         };
-        let result = run_bounded_test_command(&mut command, Duration::from_secs(5), control);
+        let result = run_bounded_test_command(&mut command, Duration::from_secs(5), &control);
         canceller.join().expect("canceller");
         assert!(matches!(result, Err(TestRunFailure::Cancelled { .. })));
         assert_reaped(&marker);
@@ -1179,7 +1174,7 @@ mod tests {
         let result = run_bounded_test_command(
             &mut command,
             Duration::from_millis(50),
-            TestRunControl::default(),
+            &TestRunControl::default(),
         );
         assert!(matches!(result, Err(TestRunFailure::Timeout { .. })));
         assert_reaped(&marker);

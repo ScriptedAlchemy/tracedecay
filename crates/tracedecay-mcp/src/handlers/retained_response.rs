@@ -8,7 +8,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 fn retained_contract_error(
     context: &'static str,
-    error: tracedecay_application::ApplicationContractError,
+    error: &tracedecay_application::ApplicationContractError,
 ) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("{context}: {error}"),
@@ -20,7 +20,7 @@ pub fn retained_safe_diagnostic(
     message: &'static str,
 ) -> Result<SafeDiagnostic> {
     SafeDiagnostic::new(code, message)
-        .map_err(|error| retained_contract_error("invalid retained application diagnostic", error))
+        .map_err(|error| retained_contract_error("invalid retained application diagnostic", &error))
 }
 
 pub fn retained_problem_envelope(
@@ -29,7 +29,7 @@ pub fn retained_problem_envelope(
     problem: ApplicationProblem,
 ) -> Result<ApplicationProblemEnvelope> {
     ApplicationProblemEnvelope::new(contract, request_id, problem).map_err(|error| {
-        retained_contract_error("invalid retained application problem envelope", error)
+        retained_contract_error("invalid retained application problem envelope", &error)
     })
 }
 

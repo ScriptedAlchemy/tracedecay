@@ -1,5 +1,3 @@
-use serde_json::Value;
-
 use crate::mcp::server::McpServer;
 use crate::mcp::server::routing::SelectedProjectResponseLease;
 use tracedecay_domain::errors::Result;
@@ -16,8 +14,8 @@ impl McpServer {
         line: &str,
         transport: &mut impl McpTransport,
     ) -> Result<()> {
-        let parsed: std::result::Result<JsonRpcRequest, _> =
-            hotpath::measure_block!("mcp.server.connection.decode", serde_json::from_str(line));
+        let parsed =
+            hotpath::measure_block!("mcp.server.connection.decode", JsonRpcRequest::decode(line));
         let project_tool_call = parsed
             .as_ref()
             .is_ok_and(|request| request.method == "tools/call")
@@ -54,11 +52,7 @@ impl McpServer {
                     ))
                     .await
                 }
-                Err(error) => Some(JsonRpcResponse::error(
-                    Value::Null,
-                    ErrorCode::ParseError,
-                    format!("failed to parse JSON-RPC request: {error}"),
-                )),
+                Err(error) => Some(error.into_response()),
             }
         };
         let selected_response_lease = connection.take_selected_response_lease();

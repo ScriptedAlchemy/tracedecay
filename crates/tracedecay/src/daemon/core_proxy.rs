@@ -213,7 +213,7 @@ impl<'a> DaemonProxyRequest<'a> {
     fn new(raw: &'a str) -> Self {
         Self {
             raw,
-            parsed: serde_json::from_str(raw.trim()).ok(),
+            parsed: JsonRpcRequest::decode(raw.trim()).ok(),
         }
     }
 }
