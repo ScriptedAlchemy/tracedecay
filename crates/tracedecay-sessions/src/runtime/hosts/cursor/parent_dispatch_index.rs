@@ -337,6 +337,13 @@ impl ParentDispatchIndex {
             self.forget(scan.parent_path);
             return (None, receipt);
         };
+        // The digest covers only `[0, verified_cursor)`. A model parsed from
+        // the unterminated tail past it is trustworthy only while the native
+        // revision did not move during the scan; otherwise that tail may have
+        // been rewritten and the next lookup must re-read it.
+        if final_revision != scan.revision {
+            delta.transient_model = None;
+        }
         let Some(entry) = self.entries.get_mut(scan.parent_path) else {
             return (delta.transient_model, receipt);
         };
@@ -1349,6 +1356,36 @@ mod tests {
             second.records_parsed, 1,
             "the trailing partial must be re-evaluated until it is a complete frame"
         );
+    }
+
+    #[test]
+    fn transient_tail_rewritten_after_scan_is_refused() {
+        let layout = layout();
+        let complete = ordinary_record("complete");
+        let partial_a = dispatch_record("agent_id", "tail-agent", "model-a");
+        let partial_b = dispatch_record("agent_id", "tail-agent", "model-b");
+        assert_eq!(partial_a.len(), partial_b.len());
+        fs::write(&layout.candidate_two, format!("{complete}\n{partial_a}")).unwrap();
+        let mut index = super::ParentDispatchIndex::new();
+        let (commit, parsed) = parsed_scan(&mut index, &layout.candidate_two, "tail-agent");
+        assert_eq!(parsed.transient_model.as_deref(), Some("model-a"));
+
+        fs::write(&layout.candidate_two, format!("{complete}\n{partial_b}")).unwrap();
+        let scanned = commit.revision;
+        assert!(
+            scanned != revision_of(&layout.candidate_two),
+            "the native revision must witness the tail rewrite"
+        );
+
+        let (model, receipt) = index.commit_scanned_delta(parsed, commit);
+        assert!(
+            model.is_none(),
+            "a transient model parsed from an unverified, rewritten tail must be refused"
+        );
+        assert_eq!(receipt.prefix_digest_bytes, complete.len() as u64 + 1);
+
+        let (again, _) = index.lookup(&layout.candidate_two, "tail-agent");
+        assert_eq!(again.as_deref(), Some("model-b"));
     }
 
     #[test]
