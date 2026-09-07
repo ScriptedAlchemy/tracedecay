@@ -1,13 +1,17 @@
+use std::path::Path;
+
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
 };
+use tracedecay_store::TranscriptStoreError;
 
 use crate::common::{global_message as sample_message, global_session as sample_session};
 
@@ -646,6 +650,168 @@ async fn upsert_session_round_trips_and_updates() {
     assert_eq!(
         fetched.metadata_json.as_deref(),
         Some(r#"{"source":"test","updated":true}"#)
+    );
+}
+
+#[tokio::test]
+async fn parse_offset_writes_canonicalize_only_proven_windows_paths() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let drive_offset = tracedecay_global_db::ParseOffset {
+        byte_offset: 17,
+        mtime: 23,
+        file_id: 29,
+    };
+    db.set_parse_offset(r"\\?\C:\Repo\Case\transcript.jsonl", drive_offset)
+        .await;
+    assert_eq!(
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            r"c:/Repo/Case/transcript.jsonl",
+        )
+        .await
+        .unwrap(),
+        Some(drive_offset)
+    );
+
+    let store = db
+        .transcript_store_for_test(HostAdmissionScope::Profile)
+        .unwrap();
+    let conflicting = tracedecay_global_db::ParseOffset {
+        byte_offset: 31,
+        mtime: 37,
+        file_id: 41,
+    };
+    let error = store
+        .replace_parse_offset(
+            Path::new(r"C:\Repo\Case\transcript.jsonl"),
+            tracedecay_global_db::ParseOffset::default(),
+            conflicting,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TranscriptStoreError::Conflict {
+            expected,
+            actual,
+            ..
+        } if expected == tracedecay_global_db::ParseOffset::default()
+            && actual == drive_offset
+    ));
+
+    let unc_offset = tracedecay_global_db::ParseOffset {
+        byte_offset: 43,
+        mtime: 47,
+        file_id: 53,
+    };
+    db.set_parse_offset(r"\\?\UNC\server\Share\transcript.jsonl", unc_offset)
+        .await;
+    assert_eq!(
+        db.parse_offset_for_test(
+            HostAdmissionScope::Profile,
+            r"\\server\Share\transcript.jsonl",
+        )
+        .await
+        .unwrap(),
+        Some(unc_offset)
+    );
+
+    let unix_literal = tracedecay_global_db::ParseOffset {
+        byte_offset: 59,
+        mtime: 61,
+        file_id: 67,
+    };
+    db.set_parse_offset(r"/repo/a\b", unix_literal).await;
+    assert_eq!(
+        db.parse_offset_for_test(HostAdmissionScope::Profile, r"/repo/a\b")
+            .await
+            .unwrap(),
+        Some(unix_literal)
+    );
+    assert_eq!(
+        db.parse_offset_for_test(HostAdmissionScope::Profile, "/repo/a/b")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn project_scope_keeps_opaque_keys_and_distinct_path_case_isolated() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let mut selected = sample_session("cursor", "selected", r"opaque\project-key");
+    selected.project_path = r"\\?\C:\Repo\Case".to_owned();
+    let mut foreign = sample_session("cursor", "foreign", "foreign-project");
+    foreign.project_path = r"C:\Repo\case".to_owned();
+    assert!(db.upsert_session(&selected).await);
+    assert!(db.upsert_session(&foreign).await);
+    assert!(
+        db.upsert_session_message(&sample_message(
+            "cursor",
+            "selected-message",
+            "selected",
+            "Canonical project identity evidence.",
+        ))
+        .await
+    );
+    assert!(
+        db.upsert_session_message(&sample_message(
+            "cursor",
+            "foreign-message",
+            "foreign",
+            "Canonical project identity evidence.",
+        ))
+        .await
+    );
+
+    let stored = db.get_session("cursor", "selected").await.unwrap();
+    assert_eq!(stored.project_key, r"opaque\project-key");
+    assert_eq!(stored.project_path, "c:/Repo/Case");
+
+    let selected_results = db
+        .search_session_messages(
+            "cursor",
+            Some(r"\\?\C:\Repo\Case"),
+            "canonical project identity",
+            10,
+        )
+        .await;
+    assert_eq!(selected_results.len(), 1);
+    assert_eq!(selected_results[0].session.session_id, "selected");
+
+    let foreign_results = db
+        .search_session_messages(
+            "cursor",
+            Some(r"c:/Repo/case"),
+            "canonical project identity",
+            10,
+        )
+        .await;
+    assert_eq!(foreign_results.len(), 1);
+    assert_eq!(foreign_results[0].session.session_id, "foreign");
+
+    assert_eq!(
+        db.search_session_messages(
+            "cursor",
+            Some(r"opaque\project-key"),
+            "canonical project identity",
+            10,
+        )
+        .await
+        .len(),
+        1
+    );
+    assert!(
+        db.search_session_messages(
+            "cursor",
+            Some("opaque/project-key"),
+            "canonical project identity",
+            10,
+        )
+        .await
+        .is_empty()
     );
 }
 
