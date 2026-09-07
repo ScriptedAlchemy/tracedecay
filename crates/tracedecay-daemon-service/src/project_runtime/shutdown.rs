@@ -302,6 +302,9 @@ async fn shut_down_semantic(
 ) -> bool {
     let mut clean = true;
     for runtime in runtimes.values_mut() {
+        if let Some(owner_task) = runtime.semantic_owner_task.take() {
+            clean &= owner_task.cancel_and_join().await;
+        }
         if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
             reconciler.reconciler.cancel_and_join().await;
         }
@@ -400,10 +403,8 @@ fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
     }
 
     for (project_root, runtime) in runtimes {
+        tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(&project_root);
         if let Some(semantic) = runtime.semantic {
-            tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(
-                &project_root,
-            );
             semantic.cancel();
         }
     }

@@ -1,6 +1,6 @@
 ---
 name: assessing-impact
-description: 'Estimate the blast radius or select verification for a changed symbol, signature, or group of files. Use tracing-functions for call relationships alone.'
+description: 'What breaks if a symbol, signature, or set of files changes, and which tests to re-run. Covers dependents versus executed coverage, when a passing affected-test selection counts as evidence, and diff-scoped versus symbol-scoped impact. Call relationships alone are tracing-functions; diff review is reviewing-changes.'
 ---
 
 # Assessing impact
