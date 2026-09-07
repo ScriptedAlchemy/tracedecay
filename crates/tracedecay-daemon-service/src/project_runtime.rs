@@ -22,12 +22,14 @@ use crate::invocation::{
 
 mod observability;
 mod request_snapshot;
+mod semantic_owner;
 mod shutdown;
 
 pub use observability::{
     RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
 };
+pub use semantic_owner::{RegisteredSemanticOwnerTaskV1, SemanticOwnerRegistrationSignalsV1};
 pub use shutdown::ProjectRuntimeRootQuiescenceV1;
 use shutdown::ShutdownState;
 
@@ -154,6 +156,7 @@ pub struct ProjectRuntime {
     #[cfg(any(test, feature = "test-helpers"))]
     test_marker: Option<Arc<dyn Any + Send + Sync>>,
     semantic: Option<tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
+    semantic_owner_task: Option<RegisteredSemanticOwnerTaskV1>,
     semantic_activation_reconciler: Option<RegisteredSemanticActivationOwnerV1>,
     observability: Option<RegisteredObservabilityProducerV1>,
     reservations: Vec<TypeId>,
@@ -183,6 +186,12 @@ pub(crate) struct RegisteredSemanticActivationOwnerV1 {
     >,
 }
 
+pub(crate) enum SemanticActivationOwnerWithdrawalV1 {
+    Removed(RegisteredSemanticActivationOwnerV1),
+    Absent,
+    DifferentOwner,
+}
+
 impl ProjectRuntime {
     /// Stop this project's retained background recovery owners from starting
     /// another cycle, without awaiting anything.
@@ -192,6 +201,9 @@ impl ProjectRuntime {
     fn cancel_background_recovery(&self) {
         if let Some(work) = self.work.as_ref() {
             work.cancel_background_recovery();
+        }
+        if let Some(semantic_owner_task) = self.semantic_owner_task.as_ref() {
+            semantic_owner_task.cancel();
         }
         #[cfg(test)]
         if let Some(probe) = self.recovery_cancel_probe.as_ref() {
@@ -213,6 +225,7 @@ impl ProjectRuntime {
             || self.retained.is_some()
             || self.lsp_owner.is_some()
             || self.semantic.is_some()
+            || self.semantic_owner_task.is_some()
             || self.semantic_activation_reconciler.is_some()
             || self.observability.is_some()
             || {
@@ -283,6 +296,7 @@ project_runtime_components!(
     RegisteredRetainedRuntime => retained,
     DaemonLspInvocationOwner => lsp_owner,
     tracedecay_semantic::DaemonSemanticRuntimeHandleV1 => semantic,
+    RegisteredSemanticOwnerTaskV1 => semantic_owner_task,
     RegisteredSemanticActivationOwnerV1 => semantic_activation_reconciler,
     RegisteredObservabilityProducerV1 => observability,
 );
@@ -1230,6 +1244,29 @@ impl ProjectRuntimeRegistryV1 {
             if reservation_changed.changed().await.is_err() {
                 return None;
             }
+        }
+    }
+
+    pub(crate) fn take_semantic_activation_owner_if_current(
+        &self,
+        project_root: &Path,
+        expected: &Arc<
+            tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+        >,
+    ) -> SemanticActivationOwnerWithdrawalV1 {
+        let mut runtimes = self.lock_runtimes();
+        let Some(runtime) = runtimes.get_mut(project_root) else {
+            return SemanticActivationOwnerWithdrawalV1::Absent;
+        };
+        match runtime.semantic_activation_reconciler.as_ref() {
+            Some(current) if Arc::ptr_eq(&current.coordinator, expected) => {
+                runtime.semantic_activation_reconciler.take().map_or(
+                    SemanticActivationOwnerWithdrawalV1::Absent,
+                    SemanticActivationOwnerWithdrawalV1::Removed,
+                )
+            }
+            Some(_) => SemanticActivationOwnerWithdrawalV1::DifferentOwner,
+            None => SemanticActivationOwnerWithdrawalV1::Absent,
         }
     }
 

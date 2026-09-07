@@ -6,7 +6,7 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::ExactTechnicalTermV1;
+use tracedecay_domain::{CodeGenerationSourceCommitmentsV1, ExactTechnicalTermV1};
 
 use crate::{capabilities::expected_seal_digest, intake::INTAKE_DIGEST_SEPARATOR};
 
@@ -941,6 +941,9 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         manifest: CodeGenerationManifestV1,
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
+        if manifest.source_commitments.is_none() {
+            return Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable);
+        }
         snapshot
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -960,6 +963,15 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 
     pub fn manifest(&self) -> &CodeGenerationManifestV1 {
         &self.manifest
+    }
+
+    pub fn source_commitments(
+        &self,
+    ) -> Result<&CodeGenerationSourceCommitmentsV1, CodeIndexProductionErrorV1> {
+        self.manifest
+            .source_commitments
+            .as_ref()
+            .ok_or(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
     }
 
     pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
@@ -2791,6 +2803,9 @@ fn read_verified_text_metadata<R: Read + Seek>(
             control,
         )
     )?;
+    if manifest.source_commitments.is_none() {
+        return Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable);
+    }
     let snapshot: SanitizedCodeSnapshotV1 = hotpath::measure_block!(
         "code_index.restore.metadata.snapshot_decode",
         decode_range(
