@@ -4,7 +4,7 @@ use std::path::Path;
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
+    ObservationSourceRangeV1, RetentionClass,
 };
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
@@ -327,19 +327,32 @@ impl SnapshotAdmissionRunner {
                                 });
                             }
                         };
-                        if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
-                            self.stats.messages_upserted =
-                                self.stats.messages_upserted.saturating_add(1);
-                            cursors.insert(
-                                source_identity.clone(),
-                                Some(outcome.receipt().committed_cursor().clone()),
-                            );
-                        } else {
-                            // A duplicate answers with the retained receipt,
-                            // whose cursor is the one the original commit wrote
-                            // rather than where the source now stands. Re-read
-                            // it instead of caching a stale chain link.
-                            cursors.remove(source_identity);
+                        match outcome.as_ref() {
+                            ObservationPersistOutcome::Committed(_) => {
+                                self.stats.messages_upserted =
+                                    self.stats.messages_upserted.saturating_add(1);
+                                cursors.insert(
+                                    source_identity.clone(),
+                                    Some(outcome.receipt().committed_cursor().clone()),
+                                );
+                            }
+                            ObservationPersistOutcome::CoveredDuplicate(_) => {
+                                // Covered duplicates keep exactly-once derived
+                                // effects but still advance the stream cursor
+                                // to the candidate frontier the write named.
+                                cursors.insert(
+                                    source_identity.clone(),
+                                    Some(outcome.receipt().committed_cursor().clone()),
+                                );
+                            }
+                            _ => {
+                                // Exact duplicates answer with the retained
+                                // receipt, whose cursor is the one the original
+                                // commit wrote rather than where the source now
+                                // stands. Re-read it instead of caching a stale
+                                // chain link.
+                                cursors.remove(source_identity);
+                            }
                         }
                         self.sessions.insert(record.session_id().to_owned());
                     }
@@ -437,14 +450,24 @@ impl SnapshotAdmissionRunner {
         match outcome {
             CaptureObservationOutcome::Persisted { outcome, .. }
             | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
-                if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
-                    self.stats.messages_upserted = self.stats.messages_upserted.saturating_add(1);
-                    cursors.insert(
-                        source_identity.clone(),
-                        Some(outcome.receipt().committed_cursor().clone()),
-                    );
-                } else {
-                    cursors.remove(source_identity);
+                match outcome.as_ref() {
+                    ObservationPersistOutcome::Committed(_) => {
+                        self.stats.messages_upserted =
+                            self.stats.messages_upserted.saturating_add(1);
+                        cursors.insert(
+                            source_identity.clone(),
+                            Some(outcome.receipt().committed_cursor().clone()),
+                        );
+                    }
+                    ObservationPersistOutcome::CoveredDuplicate(_) => {
+                        cursors.insert(
+                            source_identity.clone(),
+                            Some(outcome.receipt().committed_cursor().clone()),
+                        );
+                    }
+                    _ => {
+                        cursors.remove(source_identity);
+                    }
                 }
                 self.sessions.insert(record.session_id().to_owned());
             }
@@ -552,16 +575,7 @@ pub fn snapshot_source_identity_for(
     session_id: &str,
     source_key: Option<&str>,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    let provider = ProviderId::new(provider)?;
-    let session_id = SessionId::new(session_id.to_string())?;
-    Ok(match source_key {
-        Some(source_key) => ObservationSourceIdentityV1::for_provider_source(
-            provider,
-            session_id,
-            SessionId::new(source_key.to_string())?,
-        )?,
-        None => ObservationSourceIdentityV1::for_provider(provider, session_id)?,
-    })
+    crate::runtime::native_ingest_source_identity(provider, session_id, source_key)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -946,6 +960,61 @@ mod tests {
             .unwrap()
             .expect("windowed source cursor");
         assert_eq!(cursor.generation(), generation);
+        assert_eq!(cursor.position(), 65);
+    }
+
+    /// Pins the contract the in-batch cursor cache depends on: a covered
+    /// duplicate's receipt names the *candidate* frontier the coverage
+    /// reached, not the cursor the retained commit wrote. Re-offering a whole
+    /// committed window under a later generation makes every record a covered
+    /// duplicate, so each one chains the next from a cached receipt cursor. A
+    /// receipt carrying the retained frontier would leave the second record
+    /// expecting a cursor the store has already moved past and fail the sweep
+    /// with a cursor conflict.
+    #[tokio::test]
+    async fn covered_duplicates_chain_the_next_record_from_the_candidate_frontier() {
+        let admission = MemoryHostAdmission::default();
+        let records = (0..65).map(test_record_at).collect::<Vec<_>>();
+        let sweep = |generation: ObservationSourceGenerationV1| {
+            let admission = &admission;
+            let records = records.clone();
+            async move {
+                capture_snapshot_observations(
+                    admission,
+                    "test",
+                    ObservationScopeV1::Profile,
+                    &ObservationCancellation::default(),
+                    None,
+                    || discovery(vec![PathBuf::from("session-window.snapshot")]),
+                    |_| Ok(1),
+                    |_| Ok(Some((generation, records.clone()))),
+                )
+                .await
+            }
+        };
+
+        let committed = sweep(ObservationSourceGenerationV1::new(7).unwrap())
+            .await
+            .expect("first snapshot capture");
+        assert_eq!(committed.stats.messages_upserted, 65);
+
+        let later = ObservationSourceGenerationV1::new(8).unwrap();
+        let recovered = sweep(later)
+            .await
+            .expect("re-offering the committed window under a later generation must not conflict");
+
+        assert_eq!(
+            recovered.stats.messages_upserted, 0,
+            "covered duplicates write no new rows"
+        );
+        assert_eq!(admission.observations().len(), 65);
+        let source = snapshot_source_identity("test", "session-window").unwrap();
+        let cursor = admission
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .expect("windowed source cursor");
+        assert_eq!(cursor.generation(), later);
         assert_eq!(cursor.position(), 65);
     }
 
