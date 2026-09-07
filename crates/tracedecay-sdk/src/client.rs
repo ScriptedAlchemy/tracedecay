@@ -165,11 +165,10 @@ impl ClientBuilder {
             .timeout(self.timeout)
             .build()
             .map_err(ClientError::transport)?;
-        let application_root = format!(
-            "{}/projects/{}/application",
-            base.as_str().trim_end_matches('/'),
-            settings.project_id
-        );
+        let application_root = with_path_segments(
+            base,
+            ["projects", settings.project_id.as_str(), "application"],
+        )?;
         Ok(Client {
             http,
             application_root,
@@ -184,7 +183,7 @@ impl ClientBuilder {
 #[derive(Clone, Debug)]
 pub struct Client {
     http: HttpClient,
-    application_root: String,
+    application_root: reqwest::Url,
     authorization: HeaderValue,
     origin: HeaderValue,
     mcp_transport: Option<Arc<dyn McpToolTransport>>,
@@ -483,8 +482,10 @@ impl Client {
             )
         })?;
         crate::observe::finish((|| {
-            let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
-                .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+            let url = with_path_segments(
+                self.application_root.clone(),
+                route.split('/').filter(|segment| !segment.is_empty()),
+            )?;
             let mut headers = self.headers("application/json");
             crate::request_control::apply_http_headers(&mut headers, options)?;
             let response = crate::observe::headers(|| {
@@ -587,11 +588,10 @@ impl Client {
     }
 
     fn lifecycle_url(&self, operation_id: &str, suffix: &str) -> Result<reqwest::Url, ClientError> {
-        reqwest::Url::parse(&format!(
-            "{}/operations/{operation_id}/{suffix}",
-            self.application_root
-        ))
-        .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))
+        with_path_segments(
+            self.application_root.clone(),
+            ["operations", operation_id, suffix],
+        )
     }
 
     fn headers(&self, accept: &'static str) -> HeaderMap {
@@ -1789,12 +1789,31 @@ impl fmt::Display for ClientError {
 
 impl Error for ClientError {}
 
+/// Appends each segment as one percent-encoded path segment, so an identifier
+/// containing `/`, `?`, `#`, or `%` can never add, split, or rewrite a route.
+fn with_path_segments<'a>(
+    mut url: reqwest::Url,
+    segments: impl IntoIterator<Item = &'a str>,
+) -> Result<reqwest::Url, ClientError> {
+    url.path_segments_mut()
+        .map_err(|()| {
+            ClientError::InvalidConfiguration("base URL cannot carry path segments".into())
+        })?
+        .extend(segments);
+    Ok(url)
+}
+
+/// `.` and `..` are excluded because they are dot segments, which the URL
+/// path builder drops rather than encodes, so they could never round-trip as
+/// identifiers.
 fn validate_opaque(value: &str, maximum: usize, field: &str) -> Result<(), ClientError> {
     let valid = !value.is_empty()
         && value.trim() == value
         && value.len() <= maximum
         && !value.chars().any(char::is_control)
-        && !value.contains('/');
+        && !value.contains('/')
+        && value != "."
+        && value != "..";
     if valid {
         Ok(())
     } else {

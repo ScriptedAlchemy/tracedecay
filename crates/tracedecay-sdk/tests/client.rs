@@ -369,6 +369,49 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
 }
 
 #[test]
+fn hostile_identifiers_are_percent_encoded_into_single_path_segments() {
+    const PROJECT_ID: &str = "proj?x=1#frag%2e..";
+    const OPERATION_ID: &str = "op?cancel=no#x%2Fadmin";
+    let cancellation = json_response("202 Accepted", json!({"status": "requested"}));
+    let (base_url, server) = serve(vec![cancellation, json_response("200 OK", json!({}))]);
+    let client = Client::builder(ConnectionMode::local(
+        format!("{base_url}/prefix/"),
+        PROJECT_ID,
+        "sdk-token",
+    ))
+    .build()
+    .unwrap();
+
+    client.cancel_operation(OPERATION_ID).unwrap();
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
+    let _ = client.execute::<WorkflowListDefinitions>(&request);
+    for dot_segment in [".", ".."] {
+        assert!(matches!(
+            client.cancel_operation(dot_segment).unwrap_err(),
+            ClientError::InvalidRequest(_)
+        ));
+        assert!(matches!(
+            Client::builder(ConnectionMode::local(&base_url, dot_segment, "sdk-token"))
+                .build()
+                .unwrap_err(),
+            ClientError::InvalidRequest(_)
+        ));
+    }
+
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests[0].lines().next().unwrap(),
+        "POST /prefix/projects/proj%3Fx=1%23frag%252e../application/operations/op%3Fcancel=no%23x%252Fadmin/cancel HTTP/1.1"
+    );
+    assert_eq!(
+        requests[1].lines().next().unwrap(),
+        "POST /prefix/projects/proj%3Fx=1%23frag%252e../application/workflow/list-definitions HTTP/1.1"
+    );
+}
+
+#[test]
 fn typed_workflow_descriptors_retain_canonical_contract_identity() {
     fn assert_typed_contract<Operation: TypedOperation>() {}
 
