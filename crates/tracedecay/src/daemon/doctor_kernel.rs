@@ -23,8 +23,8 @@ use tracedecay_application::doctor::{
     DoctorStorageIncompleteReasonV1, HostConformanceV1, HostIntegrationReadV1,
     IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1, OperationalAuditReadV1, ProfileAuthorityReadV1,
-    RemoteOperationalReadV1, advisory_feedback_read_from_publication, compose_doctor_report,
-    merge_storage_reads, runtime_health_read, storage_family_read,
+    RemoteOperationalReadV1, SemanticOwnerReadV1, advisory_feedback_read_from_publication,
+    compose_doctor_report, merge_storage_reads, runtime_health_read, storage_family_read,
 };
 use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_application::{
@@ -34,7 +34,9 @@ use tracedecay_application::{
 use tracedecay_usecases::semantic_runtime::ProjectSemanticActivationExt;
 
 use super::maintenance::GuardedStoreTelemetryPort;
-use tracedecay_daemon_service::DaemonFeedbackRuntimeRegistrar;
+use tracedecay_daemon_service::{
+    DaemonFeedbackRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
+};
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
@@ -870,6 +872,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     schedulers: tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
+    semantic_owner_runtime: DaemonSemanticOwnerRuntimeRegistrar,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 ) -> tracedecay_dashboard_api::DoctorReportReader {
@@ -888,6 +891,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
         let feedback_runtimes = feedback_runtimes.clone();
+        let semantic_owner_runtime = semantic_owner_runtime.clone();
         let store_telemetry_sampling = store_telemetry_sampling.clone();
         let configuration_runtime = Arc::clone(&configuration_runtime);
         Box::pin(async move {
@@ -1033,6 +1037,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 advisory_feedback,
                 host_read,
                 code_index,
+                semantic_owner,
             ) =
                 hotpath::future!(
                     async {
@@ -1064,6 +1069,17 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     advisory_feedback_read,
                     host_scan,
                     code_index_read_from_registry(&schedulers, &project_root),
+                    async {
+                        semantic_owner_runtime
+                            .state(&project_root)
+                            .await
+                            .map_or(SemanticOwnerReadV1::Absent, |state| {
+                                SemanticOwnerReadV1::Observed {
+                                    state,
+                                    coverage: DoctorCoverageCompletenessV1::Complete,
+                                }
+                            })
+                    },
                 )
                     },
                     label = "daemon.doctor.collect"
@@ -1141,6 +1157,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 advisory_feedback,
                 language_server,
                 code_index,
+                semantic_owner,
                 observability,
                 ingest_refusals,
                 storage,
