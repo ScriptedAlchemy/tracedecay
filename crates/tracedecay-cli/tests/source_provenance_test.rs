@@ -309,25 +309,50 @@ fn probing_identity_does_not_rewrite_the_index_it_watches() {
 // Cargo rerun semantics, exercised through a real nested cargo build
 // ---------------------------------------------------------------------------
 
-const SOURCE_PROVENANCE_CARGO_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/source-provenance-cargo"
-);
+const SOURCE_PROVENANCE_CARGO_FIXTURE: &str = "tests/fixtures/source-provenance-cargo";
 
-fn source_provenance_cargo_fixture() -> &'static std::path::Path {
-    std::path::Path::new(SOURCE_PROVENANCE_CARGO_FIXTURE)
+fn package_manifest_directory() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("runtime package manifest directory"),
+    )
+}
+
+fn source_provenance_cargo_fixture() -> std::path::PathBuf {
+    package_manifest_directory().join(SOURCE_PROVENANCE_CARGO_FIXTURE)
+}
+
+fn copy_directory(source: &std::path::Path, destination: &std::path::Path) {
+    std::fs::create_dir_all(destination).expect("copy destination");
+    for entry in std::fs::read_dir(source).expect("copy source") {
+        let entry = entry.expect("copy source entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("copy source type").is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy source file");
+        }
+    }
 }
 
 fn cargo_config_directory(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    toml::Value::String(path.to_string_lossy().into_owned()).to_string()
+}
+
+#[test]
+fn cargo_config_directory_is_a_toml_string_for_quotes_and_backslashes() {
+    let path = std::path::Path::new(r#"C:\fixture\"quoted"\vendor"#);
+    let document = format!("directory = {}\n", cargo_config_directory(path));
+    let parsed = toml::from_str::<toml::Value>(&document)
+        .unwrap_or_else(|error| panic!("invalid Cargo config {document:?}: {error}"));
+
+    assert_eq!(parsed["directory"].as_str(), path.to_str());
 }
 
 fn workspace_rustup_toolchain() -> Option<String> {
     if let Ok(existing) = std::env::var("RUSTUP_TOOLCHAIN") {
         return Some(existing);
     }
-    let toolchain_file =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rust-toolchain.toml");
+    let toolchain_file = package_manifest_directory().join("../../rust-toolchain.toml");
     let contents = std::fs::read_to_string(toolchain_file).ok()?;
     for line in contents.lines() {
         let line = line.trim();
@@ -351,6 +376,10 @@ struct CargoFixture {
 
 impl CargoFixture {
     fn new() -> Self {
+        Self::with_vendor(&source_provenance_cargo_fixture().join("vendor"))
+    }
+
+    fn with_vendor(vendor: &std::path::Path) -> Self {
         let fixture = source_provenance_cargo_fixture();
         let directory = tempfile::tempdir().expect("fixture directory");
         let root = directory.path().join("repository");
@@ -366,13 +395,13 @@ impl CargoFixture {
         std::fs::copy(fixture.join("src/main.rs"), root.join("src/main.rs"))
             .expect("copy checked-in fixture src/main.rs");
 
-        let vendor_directory = cargo_config_directory(&fixture.join("vendor"));
+        let vendor_directory = cargo_config_directory(vendor);
         std::fs::write(
             cargo_home.join("config.toml"),
             format!(
                 "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
                  [source.vendored-sources]\n\
-                 directory = \"{vendor_directory}\"\n"
+                 directory = {vendor_directory}\n"
             ),
         )
         .expect("fixture cargo home config");
@@ -415,7 +444,8 @@ impl CargoFixture {
     }
 
     fn commit_sources(&self) {
-        self.dependency_preflight();
+        self.dependency_preflight()
+            .unwrap_or_else(|error| panic!("{error}"));
         git(&self.root, &["init", "--quiet"]);
         for path in [
             "Cargo.toml",
@@ -443,12 +473,12 @@ impl CargoFixture {
         self.cargo(&["build", "--locked", "--offline", "--quiet"]);
     }
 
-    fn dependency_preflight(&self) {
+    fn dependency_preflight(&self) -> Result<(), String> {
         let output = self.cargo_output(&["fetch", "--locked", "--offline"]);
         if output.status.success() {
-            return;
+            return Ok(());
         }
-        panic!(
+        Err(format!(
             "source-provenance dependency preflight failed\n\
              command: cargo fetch --locked --offline\n\
              status: {}\n\
@@ -457,7 +487,7 @@ impl CargoFixture {
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
-        );
+        ))
     }
 
     fn reported_identity(&self) -> String {
@@ -523,6 +553,34 @@ impl CargoFixture {
         }
         command.output().expect("fixture cargo should run")
     }
+}
+
+#[test]
+fn a_missing_vendored_checksum_fails_the_named_dependency_preflight() {
+    let damaged_vendor = tempfile::tempdir().expect("damaged vendor directory");
+    copy_directory(
+        &source_provenance_cargo_fixture().join("vendor"),
+        damaged_vendor.path(),
+    );
+    std::fs::remove_file(
+        damaged_vendor
+            .path()
+            .join("serde_json/.cargo-checksum.json"),
+    )
+    .expect("remove serde_json checksum");
+    let fixture = CargoFixture::with_vendor(damaged_vendor.path());
+
+    let error = fixture
+        .dependency_preflight()
+        .expect_err("missing vendored checksum must fail before provenance setup");
+
+    assert!(error.contains("source-provenance dependency preflight failed"));
+    assert!(error.contains("serde_json"), "{error}");
+    assert!(error.contains(".cargo-checksum.json"), "{error}");
+    assert!(
+        !fixture.root().join(".git").exists(),
+        "dependency failure must precede provenance repository setup"
+    );
 }
 
 #[test]

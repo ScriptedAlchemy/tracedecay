@@ -1,12 +1,13 @@
 clean
 
-Regenerate the pinned `serde_json` vendor snapshot from this directory:
+Regenerate the vendor snapshot from the checked-in lockfile:
 
 ```sh
 cd crates/tracedecay-cli/tests/fixtures/source-provenance-cargo
-cargo generate-lockfile
-cargo vendor vendor
+cargo vendor --locked vendor
 ```
 
-Keep `Cargo.toml` pinned to `serde_json = "=1.0.151"` with the standalone `[workspace]` table.
+`Cargo.lock` is the exact dependency authority; update it deliberately before
+running the command when bumping the fixture. Keep `Cargo.toml` pinned to
+`serde_json = "=1.0.151"` with the standalone `[workspace]` table.
 Restore the first line of this file to `clean` after regeneration.
