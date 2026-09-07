@@ -292,20 +292,20 @@ fn execute_cancels_held_pool_acquire_before_any_exposure() {
 fn checked_acquire_returns_busy_when_the_carried_deadline_has_elapsed() {
     let (_root, pool) = isolated_pool();
     let publisher = hold_replay_pool(&pool);
-    let started = Instant::now();
+    reset_graph_replay_pool_acquire_observation();
     let error = match acquire_graph_replay_pool_lock_checked(&pool, Instant::now(), &|| false) {
         Ok(_) => panic!("an elapsed deadline must defer a held pool"),
         Err(error) => error,
     };
-    let elapsed = started.elapsed();
 
     assert!(matches!(
         error,
         CodeGenerationRetentionErrorV1::GraphReplayPoolBusy
     ));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "an expired deadline must not poll, took {elapsed:?}"
+    assert_eq!(
+        graph_replay_pool_acquire_observation(),
+        (1, 0),
+        "an expired held acquire must make one non-blocking try and skip the poll loop"
     );
     drop(publisher);
 }
