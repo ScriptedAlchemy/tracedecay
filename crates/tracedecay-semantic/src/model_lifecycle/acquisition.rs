@@ -4,27 +4,30 @@ fn current_unix_seconds() -> Result<u64, ModelLifecycleErrorV1> {
         .map(|duration| duration.as_secs())
         .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)
 }
+/// The model one acquisition run installs and the root it installs into.
+#[derive(Clone, Copy)]
+struct AcquisitionTargetV1<'a> {
+    root: &'a Path,
+    catalog: &'a FastEmbedModelCatalogV1,
+    source: &'a dyn ModelMemberSourceV1,
+    model_id: &'a str,
+}
+
 #[hotpath::measure(label = "semantic.model_lifecycle.acquire")]
 fn run_acquisition(
-    root: &Path,
-    catalog: &FastEmbedModelCatalogV1,
-    source: &dyn ModelMemberSourceV1,
-    model_id: &str,
+    target: AcquisitionTargetV1<'_>,
     epoch: &AcquisitionEpochV1,
     inner: &LifecyclePublicationGateV1,
     verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
     shared_store: Option<(&ModelArtifactStore, &str, &str)>,
 ) -> Result<(), ModelLifecycleErrorV1> {
-    let result = run_acquisition_inner(
+    let AcquisitionTargetV1 {
         root,
         catalog,
-        source,
         model_id,
-        epoch,
-        inner,
-        verified_ready,
-        shared_store,
-    );
+        ..
+    } = target;
+    let result = run_acquisition_inner(target, epoch, inner, verified_ready, shared_store);
     match &result {
         Ok(()) => crate::hotpath_observe::record_model_state("installed"),
         Err(error) => {
@@ -68,15 +71,18 @@ fn run_acquisition(
     result
 }
 fn run_acquisition_inner(
-    root: &Path,
-    catalog: &FastEmbedModelCatalogV1,
-    source: &dyn ModelMemberSourceV1,
-    model_id: &str,
+    target: AcquisitionTargetV1<'_>,
     epoch: &AcquisitionEpochV1,
     inner: &LifecyclePublicationGateV1,
     verified_ready: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
     shared_store: Option<(&ModelArtifactStore, &str, &str)>,
 ) -> Result<(), ModelLifecycleErrorV1> {
+    let AcquisitionTargetV1 {
+        root,
+        catalog,
+        source,
+        model_id,
+    } = target;
     let model = catalog
         .get(model_id)
         .ok_or(CatalogErrorV1::UnknownModel)?

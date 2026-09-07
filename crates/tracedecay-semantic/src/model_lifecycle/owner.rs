@@ -1248,10 +1248,12 @@ impl SemanticModelLifecycleOwnerV1 {
             .name("tracedecay-fastembed-acquire".to_owned())
             .spawn(move || {
                 run_acquisition(
-                    &worker_root,
-                    &worker_catalog,
-                    source.as_ref(),
-                    &worker_model_id,
+                    AcquisitionTargetV1 {
+                        root: &worker_root,
+                        catalog: &worker_catalog,
+                        source: source.as_ref(),
+                        model_id: &worker_model_id,
+                    },
                     &epoch,
                     &worker_inner,
                     &verified_ready,
@@ -1289,10 +1291,12 @@ impl SemanticModelLifecycleOwnerV1 {
             .ok_or(ModelLifecycleErrorV1::Rejected)?;
         let epoch = self.acquisition.begin_epoch();
         run_acquisition(
-            &self.root,
-            &self.catalog,
-            self.source.as_ref(),
-            &model_id,
+            AcquisitionTargetV1 {
+                root: &self.root,
+                catalog: &self.catalog,
+                source: self.source.as_ref(),
+                model_id: &model_id,
+            },
             &epoch,
             &self.inner,
             &self.verified_ready,
