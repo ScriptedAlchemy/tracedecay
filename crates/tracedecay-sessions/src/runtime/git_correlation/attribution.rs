@@ -253,6 +253,30 @@ impl GitEvidenceProjectionStore {
             cancelled,
         )
     }
+
+    /// Shapes raw transcript observations and publishes their complete
+    /// recovery/merge/verified-head transaction through an authorized runtime.
+    pub fn publish_transcript_graph_evidence_with_runtime(
+        runtime: &dyn VerifiedGraphRuntimePortV1,
+        publication_lock: &Mutex<()>,
+        publication_prefix: &str,
+        observations: &[SpanObservation],
+        new_commits: &[CommitSessionRecord],
+        merge_gap_secs: i64,
+    ) -> Result<(usize, usize), GitCorrelationError> {
+        let _publication = publication_lock.lock().map_err(|_| {
+            GitCorrelationError::Unavailable(
+                "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
+            )
+        })?;
+        publish_transcript_graph_evidence_locked(
+            runtime,
+            publication_prefix,
+            observations,
+            new_commits,
+            merge_gap_secs,
+        )
+    }
 }
 
 /// Shapes raw transcript observations and publishes them while holding the
@@ -266,12 +290,24 @@ pub fn publish_transcript_graph_evidence<S: GitCorrelationSessionStore>(
 ) -> Result<(usize, usize), GitCorrelationError> {
     session_store.require_project_sessions_authority()?;
     let publication_lock = session_store.git_evidence_publication_lock()?;
-    let _publication = publication_lock.lock().map_err(|_| {
-        GitCorrelationError::Unavailable(
-            "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
-        )
-    })?;
     let runtime = session_store.graph_runtime()?;
+    GitEvidenceProjectionStore::publish_transcript_graph_evidence_with_runtime(
+        runtime,
+        publication_lock.as_ref(),
+        publication_prefix,
+        observations,
+        new_commits,
+        merge_gap_secs,
+    )
+}
+
+fn publish_transcript_graph_evidence_locked(
+    runtime: &dyn VerifiedGraphRuntimePortV1,
+    publication_prefix: &str,
+    observations: &[SpanObservation],
+    new_commits: &[CommitSessionRecord],
+    merge_gap_secs: i64,
+) -> Result<(usize, usize), GitCorrelationError> {
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));

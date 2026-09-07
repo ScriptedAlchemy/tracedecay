@@ -292,6 +292,9 @@ jobs:
       - name: Build workspace binaries for the test lane
         run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
 
+      - name: Build host-CLI test fixture
+        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --features tracedecay/test-helpers
+
       # This parity test must execute separate feature-off/on binaries. Copy
       # each result immediately so the second Cargo resolution cannot replace
       # the first executable in target/debug/examples.
@@ -440,6 +443,10 @@ jobs:
       - name: Build workspace binaries for the Windows test lane
         shell: pwsh
         run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+
+      - name: Build Windows host-CLI test fixture
+        shell: pwsh
+        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --features tracedecay/test-helpers
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified on the Linux test lane only. Building them here would put a

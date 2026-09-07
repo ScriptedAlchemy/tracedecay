@@ -4,7 +4,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::{
     CommitSessionRecord, GitCorrelationError, GitCorrelationSessionStore, GitCorrelationWriteTxn,
-    SpanObservation, publish_transcript_graph_evidence,
+    SpanObservation,
 };
 
 /// Maximum exact receipts replayed by one startup or host-admission pass.
@@ -192,13 +192,25 @@ pub async fn replay_pending_git_evidence_publications_outcome<S: GitCorrelationS
     drop(snapshot);
     let mut replayed = 0_usize;
     for receipt in pending {
-        if let Err(error) = publish_transcript_graph_evidence(
-            session_store,
-            &receipt.publication_prefix,
-            &receipt.payload.span_observations,
-            &receipt.payload.commit_records,
-            super::DEFAULT_SPAN_MERGE_GAP_SECS,
-        ) {
+        let PendingGitEvidencePublicationV1 {
+            receipt_id,
+            publication_prefix,
+            payload:
+                GitEvidencePublicationPayloadV1 {
+                    commit_records,
+                    span_observations,
+                },
+            evidence_json,
+        } = receipt;
+        if let Err(error) = session_store
+            .publish_transcript_graph_evidence_owned(
+                publication_prefix.clone(),
+                span_observations,
+                commit_records,
+                super::DEFAULT_SPAN_MERGE_GAP_SECS,
+            )
+            .await
+        {
             return Ok(GitEvidencePublicationReplayOutcome {
                 replayed_publications: replayed,
                 later_failure: Some(error),
@@ -212,9 +224,9 @@ pub async fn replay_pending_git_evidence_publications_outcome<S: GitCorrelationS
                 "DELETE FROM git_evidence_publication_outbox
                  WHERE receipt_id = ?1 AND publication_prefix = ?2 AND evidence_json = ?3",
                 params![
-                    receipt.receipt_id.as_str(),
-                    receipt.publication_prefix.as_str(),
-                    receipt.evidence_json.as_str()
+                    receipt_id.as_str(),
+                    publication_prefix.as_str(),
+                    evidence_json.as_str()
                 ],
                 )
                 .await?;
@@ -223,7 +235,7 @@ pub async fn replay_pending_git_evidence_publications_outcome<S: GitCorrelationS
                     .query(
                     "SELECT publication_prefix, evidence_json
                      FROM git_evidence_publication_outbox WHERE receipt_id = ?1",
-                    params![receipt.receipt_id.as_str()],
+                        params![receipt_id.as_str()],
                     )
                     .await?;
                 if let Some(row) = rows.next().await? {
@@ -231,8 +243,8 @@ pub async fn replay_pending_git_evidence_publications_outcome<S: GitCorrelationS
                     let stored_json = row.get::<String>(1)?;
                     return Err(GitCorrelationError::Corrupt(format!(
                         "Git evidence publication receipt changed before settlement: prefix_match={}, payload_match={}",
-                        stored_prefix == receipt.publication_prefix,
-                        stored_json == receipt.evidence_json,
+                        stored_prefix == publication_prefix,
+                        stored_json == evidence_json,
                     )));
                 }
             } else if deleted != 1 {
