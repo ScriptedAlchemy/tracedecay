@@ -136,9 +136,7 @@ tracing = "0.1"
 url = "2"
 walkdir = "2"
 
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = [
-    "native-git",
-] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{
@@ -11,9 +11,18 @@ use tracedecay_domain::{
 
 pub const MODEL_ARTIFACT_MANIFEST_SCHEMA_V1: &str = "tracedecay.model-artifact-manifest.v1";
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+/// Lowercase 64-hex SHA-256 digest. Deserialization validates through
+/// [`TryFrom<String>`]; serialization borrows the validated text, so writing a
+/// manifest never clones a digest.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+#[serde(try_from = "String")]
 pub struct Sha256DigestHex(String);
+
+impl Serialize for Sha256DigestHex {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
 
 impl Sha256DigestHex {
     pub fn new(value: impl Into<String>) -> Result<Self, ManifestValidationErrorV1> {
@@ -41,12 +50,6 @@ impl TryFrom<String> for Sha256DigestHex {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::new(value)
-    }
-}
-
-impl From<Sha256DigestHex> for String {
-    fn from(value: Sha256DigestHex) -> Self {
-        value.0
     }
 }
 

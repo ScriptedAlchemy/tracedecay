@@ -112,41 +112,43 @@ enum SourcePartitionKey<'a> {
 }
 
 impl<'a> SourcePartitionKey<'a> {
-    fn from_candidate(candidate: &'a RankingCandidate) -> Self {
-        match candidate.source.as_deref() {
+    fn new(stable_id: &'a str, source: Option<&'a str>) -> Self {
+        match source {
             Some(source) => Self::Present(source),
-            None => Self::Absent {
-                stable_id: candidate.stable_id.as_str(),
-            },
+            None => Self::Absent { stable_id },
         }
     }
 }
 
 #[hotpath::measure(label = "temporal.rank")]
 pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits) -> RankedResult {
-    let candidates = prepare_candidates(candidates)?;
     let mut by_channel_and_source: BTreeMap<
         (CandidateChannel, SourcePartitionKey<'_>),
-        Vec<&RankingCandidate>,
+        Vec<PreparedCandidate<'_>>,
     > = BTreeMap::new();
-    for candidate in &candidates {
+    for candidate in prepare_candidates(candidates)? {
         by_channel_and_source
             .entry((
                 candidate.channel,
-                SourcePartitionKey::from_candidate(candidate),
+                SourcePartitionKey::new(candidate.stable_id, candidate.metadata.source()),
             ))
             .or_default()
             .push(candidate);
     }
 
-    let mut best_by_id: BTreeMap<String, ScoredFusion> = BTreeMap::new();
+    let mut best_by_id: BTreeMap<&str, ScoredFusion> = BTreeMap::new();
     for ((channel, _source), mut channel_candidates) in by_channel_and_source {
         channel_candidates.sort_by(|left, right| {
             right
                 .raw_score
                 .cmp(&left.raw_score)
-                .then_with(|| right.knowledge_at_micros.cmp(&left.knowledge_at_micros))
-                .then_with(|| left.stable_id.cmp(&right.stable_id))
+                .then_with(|| {
+                    right
+                        .metadata
+                        .knowledge_at_micros()
+                        .cmp(&left.metadata.knowledge_at_micros())
+                })
+                .then_with(|| left.stable_id.cmp(right.stable_id))
         });
         let count = channel_candidates.len() as u64;
         let tier = rank_tier(channel);
@@ -157,35 +159,24 @@ pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits)
             let contribution = encode_score(tier, within_channel);
             let provenance = RetrieverContribution {
                 channel,
-                source: candidate.source.clone(),
-                retriever_record_id: candidate.retriever_record_id.clone(),
+                source: candidate.metadata.source().map(str::to_owned),
+                retriever_record_id: candidate.retriever_record_id.to_owned(),
                 retriever_ordinal: u64::try_from(index).unwrap_or(u64::MAX),
                 raw_score: candidate.raw_score,
                 calibrated_score_micros: contribution,
-                exact_ranges: candidate.exact_ranges.clone(),
+                exact_ranges: candidate.exact_ranges,
             };
-            match best_by_id.get_mut(&candidate.stable_id) {
+            match best_by_id.get_mut(candidate.stable_id) {
                 Some(existing) => {
                     merge_contribution(existing, tier, contribution, provenance);
                 }
                 None => {
                     best_by_id.insert(
-                        candidate.stable_id.clone(),
+                        candidate.stable_id,
                         ScoredFusion {
                             tier,
                             within_tier_score: contribution,
-                            ranked: RankedCandidate {
-                                stable_id: candidate.stable_id.clone(),
-                                anchor_id: candidate.anchor_id.clone(),
-                                normalized_score_micros: contribution,
-                                knowledge_at_micros: candidate.knowledge_at_micros,
-                                logical_message: candidate.logical_message.clone(),
-                                turn: candidate.turn.clone(),
-                                session: candidate.session.clone(),
-                                source: candidate.source.clone(),
-                                evidence_role: candidate.evidence_role.clone(),
-                                contributions: vec![provenance],
-                            },
+                            ranked: candidate.metadata.into_ranked(contribution, provenance),
                         },
                     );
                 }
@@ -218,6 +209,11 @@ pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits)
     Ok(apply_diversity(ranked, limits))
 }
 
+/// Metadata shared by every candidate row of one `stable_id`: identity fields
+/// come from the first row seen, optional fields from the first row that
+/// supplied them. Borrows the input slice; owned strings are produced once,
+/// when the ranked output is built.
+#[derive(Clone, Copy)]
 struct MergedMetadata<'a> {
     first: &'a RankingCandidate,
     logical_message: Option<&'a str>,
@@ -226,9 +222,46 @@ struct MergedMetadata<'a> {
     evidence_role: Option<&'a str>,
 }
 
+impl<'a> MergedMetadata<'a> {
+    fn source(&self) -> Option<&'a str> {
+        self.first.source.as_deref()
+    }
+
+    fn knowledge_at_micros(&self) -> i64 {
+        self.first.knowledge_at_micros
+    }
+
+    fn into_ranked(self, score: u64, provenance: RetrieverContribution) -> RankedCandidate {
+        RankedCandidate {
+            stable_id: self.first.stable_id.clone(),
+            anchor_id: self.first.anchor_id.clone(),
+            normalized_score_micros: score,
+            knowledge_at_micros: self.first.knowledge_at_micros,
+            logical_message: self.logical_message.map(str::to_owned),
+            turn: self.turn.map(str::to_owned),
+            session: self.session.map(str::to_owned),
+            source: self.first.source.clone(),
+            evidence_role: self.evidence_role.map(str::to_owned),
+            contributions: vec![provenance],
+        }
+    }
+}
+
+/// One collapsed `(stable_id, channel, retriever_record_id)` evidence row:
+/// the winning raw score, the merged exact ranges (the only owned scratch),
+/// and the stable_id's merged metadata.
+struct PreparedCandidate<'a> {
+    stable_id: &'a str,
+    channel: CandidateChannel,
+    retriever_record_id: &'a str,
+    raw_score: i64,
+    exact_ranges: Vec<ByteRangeV1>,
+    metadata: MergedMetadata<'a>,
+}
+
 fn prepare_candidates(
     candidates: &[RankingCandidate],
-) -> Result<Vec<RankingCandidate>, RankingError> {
+) -> Result<Vec<PreparedCandidate<'_>>, RankingError> {
     let mut metadata_by_id = BTreeMap::<&str, MergedMetadata<'_>>::new();
     for candidate in candidates {
         match metadata_by_id.get_mut(candidate.stable_id.as_str()) {
@@ -307,19 +340,23 @@ fn prepare_candidates(
     }
 
     let mut prepared = Vec::with_capacity(unique_by_id_channel_and_record.len());
-    for entry in unique_by_id_channel_and_record.into_values() {
-        let mut candidate = candidates[entry.best_index].clone();
+    for ((stable_id, channel, retriever_record_id), entry) in unique_by_id_channel_and_record {
         let mut exact_ranges = entry.exact_ranges;
         exact_ranges.sort_by_key(|range| (range.start(), range.end()));
         exact_ranges.dedup();
-        candidate.exact_ranges = exact_ranges;
-        let Some(metadata) = metadata_by_id.get(candidate.stable_id.as_str()) else {
+        let Some(metadata) = metadata_by_id.get(stable_id).copied() else {
             return Err(RankingError::ConflictingDuplicateMetadata {
-                stable_id: candidate.stable_id.clone(),
+                stable_id: stable_id.to_owned(),
             });
         };
-        apply_merged_metadata(&mut candidate, metadata);
-        prepared.push(candidate);
+        prepared.push(PreparedCandidate {
+            stable_id,
+            channel,
+            retriever_record_id,
+            raw_score: candidates[entry.best_index].raw_score,
+            exact_ranges,
+            metadata,
+        });
     }
     Ok(prepared)
 }
@@ -340,16 +377,6 @@ fn merged_metadata_conflicts(existing: &MergedMetadata<'_>, candidate: &RankingC
             existing.evidence_role,
             candidate.evidence_role.as_deref(),
         )
-}
-
-fn apply_merged_metadata(candidate: &mut RankingCandidate, metadata: &MergedMetadata<'_>) {
-    candidate.anchor_id = metadata.first.anchor_id.clone();
-    candidate.knowledge_at_micros = metadata.first.knowledge_at_micros;
-    candidate.logical_message = metadata.logical_message.map(str::to_owned);
-    candidate.turn = metadata.turn.map(str::to_owned);
-    candidate.session = metadata.session.map(str::to_owned);
-    candidate.source.clone_from(&metadata.first.source);
-    candidate.evidence_role = metadata.evidence_role.map(str::to_owned);
 }
 
 struct ScoredFusion {

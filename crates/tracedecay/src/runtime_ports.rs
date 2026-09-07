@@ -140,24 +140,35 @@ fn run_codex_app_server_prompt(
     prompt: &str,
     config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
     thread_source: &str,
+    response_schema: Option<&Value>,
 ) -> std::result::Result<tracedecay_automation_runtime::ports::codex_app_server::Summary, String> {
     let config = tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig {
         codex_bin: config.codex_bin.clone(),
         model: config.model.clone(),
         timeout: config.timeout,
     };
-    tracedecay_sessions::runtime::codex_app_server::run_prompt_with_codex_app_server(
-        prompt,
-        &config,
-        thread_source,
-    )
-    .map(
-        |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
-            text: summary.text,
-            model: summary.model,
-        },
-    )
-    .map_err(|error| error.to_string())
+    let result = if let Some(response_schema) = response_schema {
+        tracedecay_sessions::runtime::codex_app_server::run_prompt_with_codex_app_server_response_schema(
+            prompt,
+            &config,
+            thread_source,
+            response_schema,
+        )
+    } else {
+        tracedecay_sessions::runtime::codex_app_server::run_prompt_with_codex_app_server(
+            prompt,
+            &config,
+            thread_source,
+        )
+    };
+    result
+        .map(
+            |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
+                text: summary.text,
+                model: summary.model,
+            },
+        )
+        .map_err(|error| error.to_string())
 }
 
 /// Fn-pointer shim over the root's async daemon tool call.

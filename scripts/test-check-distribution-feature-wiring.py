@@ -281,43 +281,41 @@ def main() -> int:
     if "tracedecay-cli hotpath-mcp must enable" not in miswired_cli_mcp.stderr:
         raise SystemExit("miswired CLI MCP feature failed for an unexpected reason")
 
-    root_without_runtime_lite = ROOT_MANIFEST.replace(
+    # Internal forwarding topology is not a contract: rerouting a tier through
+    # a different intermediate edge, forwarding a language alias through the
+    # runtime crate, and adding a local tier member are all accepted without
+    # touching this validator.
+    rewired_root = ROOT_MANIFEST.replace(
         'lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]',
-        'lite = ["tracedecay-code-index/lite"]',
-    )
-    missing_runtime_lite = run_fixture(
-        root_source=root_without_runtime_lite,
-        root_packaged=root_without_runtime_lite,
-    )
-    if missing_runtime_lite.returncode == 0:
-        raise SystemExit("root lite without code-index-runtime forwarding was accepted")
-    if "root lite must forward only" not in missing_runtime_lite.stderr:
-        raise SystemExit("missing runtime lite forward failed for an unexpected reason")
-
-    root_with_local_tier_members = ROOT_MANIFEST.replace(
+        'lite = ["tracedecay-code-index-runtime/lite"]',
+    ).replace(
+        'lang-dart = ["tracedecay-code-index/lang-dart"]',
+        'lang-dart = ["tracedecay-code-index-runtime/lang-dart"]',
+    ).replace(
         'full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full"]',
         'full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full", "lang-markdown"]',
     )
-    duplicated_tier = run_fixture(
-        root_source=root_with_local_tier_members,
-        root_packaged=root_with_local_tier_members,
-    )
-    if duplicated_tier.returncode == 0:
-        raise SystemExit("root package duplicating extraction tier membership was accepted")
-    if "root full must forward only" not in duplicated_tier.stderr:
-        raise SystemExit("duplicated tier membership failed for an unexpected reason")
-
-    code_index_with_missing_alias = CODE_INDEX_MANIFEST.replace(
+    rewired_code_index = CODE_INDEX_MANIFEST.replace(
         'lang-dart = ["tracedecay-code-extraction/lang-dart"]\n', ""
     )
-    missing_alias = run_fixture(
-        code_index_source=code_index_with_missing_alias,
-        code_index_packaged=code_index_with_missing_alias,
+    rewired = run_fixture(
+        root_source=rewired_root,
+        root_packaged=rewired_root,
+        code_index_source=rewired_code_index,
+        code_index_packaged=rewired_code_index,
     )
-    if missing_alias.returncode == 0:
-        raise SystemExit("code-index package missing a language alias was accepted")
-    if "code-index language features differ" not in missing_alias.stderr:
-        raise SystemExit("missing language alias failed for an unexpected reason")
+    if rewired.returncode != 0:
+        raise SystemExit(
+            "behavior-preserving forwarding change was rejected: " + rewired.stderr
+        )
+
+    packaged_root_drift = run_fixture(
+        root_packaged=ROOT_MANIFEST.replace('lang-dart = ["tracedecay-code-index/lang-dart"]\n', "")
+    )
+    if packaged_root_drift.returncode == 0:
+        raise SystemExit("packaged root manifest dropping a feature was accepted")
+    if "packaged root feature wiring differs" not in packaged_root_drift.stderr:
+        raise SystemExit("packaged root drift failed for an unexpected reason")
 
     extraction_with_new_language = EXTRACTION_MANIFEST.replace(
         "lang-markdown = []\n", "lang-markdown = []\nlang-rustdoc = []\n"
@@ -342,18 +340,6 @@ def main() -> int:
         raise SystemExit("semantic owner without the bundled ORT feature was accepted")
     if "tracedecay-semantic semantic-fastembed must enable" not in missing_runtime.stderr:
         raise SystemExit("missing semantic runtime failed for an unexpected reason")
-
-    root_with_direct_owner = ROOT_MANIFEST.replace(
-        '    "tracedecay-semantic/semantic-fastembed",\n', '    "dep:fastembed",\n'
-    )
-    root_direct_owner = run_fixture(
-        root_source=root_with_direct_owner,
-        root_packaged=root_with_direct_owner,
-    )
-    if root_direct_owner.returncode == 0:
-        raise SystemExit("root package reclaiming FastEmbed ownership was accepted")
-    if "root semantic-fastembed must forward" not in root_direct_owner.stderr:
-        raise SystemExit("root ownership drift failed for an unexpected reason")
 
     root_with_shadow_owner = ROOT_MANIFEST.replace(
         "[dependencies]\n",

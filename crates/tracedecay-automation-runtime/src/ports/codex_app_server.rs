@@ -19,6 +19,8 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use serde_json::Value;
+
 /// How to invoke `codex app-server` for one prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryConfig {
@@ -83,7 +85,7 @@ pub struct Summary {
 /// Runs one prompt to completion. Arguments are `(prompt, config,
 /// thread_source)`; the error is already rendered for an automation port
 /// failure.
-pub type RunPrompt = fn(&str, &SummaryConfig, &str) -> Result<Summary, String>;
+pub type RunPrompt = fn(&str, &SummaryConfig, &str, Option<&Value>) -> Result<Summary, String>;
 
 static RUN_PROMPT: OnceLock<RunPrompt> = OnceLock::new();
 
@@ -100,11 +102,12 @@ pub fn run_prompt(
     prompt: &str,
     config: &SummaryConfig,
     thread_source: &str,
+    response_schema: Option<&Value>,
 ) -> Result<Summary, String> {
     let Some(run) = RUN_PROMPT.get() else {
         return Err(
             "codex app-server backend is unavailable: no prompt runner is registered".to_string(),
         );
     };
-    run(prompt, config, thread_source)
+    run(prompt, config, thread_source, response_schema)
 }

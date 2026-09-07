@@ -56,7 +56,7 @@ mod tests {
             run_id: "run-combined.skill",
             task: AgentTaskKind::SkillWriter,
             task_key: "skill_writer",
-            prompt_version: "combined_review:v1",
+            prompt_version: "combined_review:v2",
             policy: artifact_policy(AgentTaskKind::SkillWriter),
             request: &request,
             response: &response,

@@ -28,6 +28,7 @@ import {
 } from '../../contracts/generated.ts';
 import { readOnlyScopeRefusal, scopedQueryKey, useScope } from '../scope/store.ts';
 import type { RegistryReading } from '../scope/store.ts';
+import { decodeJsonBody, UNDECODABLE } from './responseBody.ts';
 import type { WireSchema } from './wireSchema.ts';
 
 /** The prefix every registry query key starts with, and the one the daemon's
@@ -59,16 +60,6 @@ export type ProjectRegistryResult<T> =
   | { outcome: 'envelope'; envelope: DashboardEnvelopeV1<T> }
   | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string };
 
-const undecodable = Symbol('undecodable');
-
-async function decodedBody(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return undecodable;
-  }
-}
-
 /**
  * `GET /api/projects` or `GET /api/projects/{id}` — envelope-only.
  *
@@ -90,7 +81,7 @@ export async function fetchProjectRegistry<T>(
     return { outcome: 'transport', state: 'offline' };
   }
   if (response.status === 405) {
-    const refusal = readOnlyScopeRefusal(await decodedBody(response));
+    const refusal = readOnlyScopeRefusal(await decodeJsonBody(response, init?.signal));
     if (refusal) {
       return { outcome: 'transport', state: 'locked', detail: refusal.detail };
     }
@@ -99,8 +90,8 @@ export async function fetchProjectRegistry<T>(
   if (response.status === 401) return { outcome: 'transport', state: 'unauthorized' };
   if (response.status === 403) return { outcome: 'transport', state: 'denied' };
 
-  const body = await decodedBody(response);
-  if (body === undecodable) {
+  const body = await decodeJsonBody(response, init?.signal);
+  if (body === UNDECODABLE) {
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
   const parsed = DashboardEnvelopeV1Schema(payloadSchema).safeParse(body);

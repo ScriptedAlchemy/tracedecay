@@ -32,7 +32,17 @@ const MESSAGE_WORKTREE_KEYS: [&str; 9] = [
 /// Receipt schema version. This schema owns only convergence receipts and
 /// watermarks; Git evidence itself remains in the verified graph authority.
 pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 5;
-pub const GIT_EVIDENCE_PROJECTOR_REVISION_V1: &str = "session-git-evidence-projector.v1";
+/// Projector revision this build publishes. It is part of the generation
+/// identity, so a graph-shape change (index entities, relation keys,
+/// projection metadata) re-publishes an unchanged projection under a distinct
+/// generation instead of colliding with the previous shape's rows.
+pub const GIT_EVIDENCE_PROJECTOR_REVISION: &str = "session-git-evidence-projector.v2";
+/// The pre-index projector revision. A verified head that records no projector
+/// revision was published under it. Its span and commit rows are identical to
+/// the current shape, so full recovery still verifies and merges it, but it
+/// carries no query index and answers bounded reads as unavailable until the
+/// next publication re-projects it.
+pub const GIT_EVIDENCE_LEGACY_PROJECTOR_REVISION_V1: &str = "session-git-evidence-projector.v1";
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
@@ -244,21 +254,30 @@ impl GitEvidenceProjectionV1 {
         &self.commit_sessions
     }
 
+    /// Evaluates the query over the complete in-memory projection. Bounded
+    /// production reads go through the indexed graph view
+    /// ([`GitEvidenceGraphView`]), which feeds the same aggregation
+    /// helpers only the rows that can contribute to the result.
     #[hotpath::measure(label = "sessions.git_correlation.sessions_for")]
     pub fn sessions_for(
         &self,
         query: &SessionsForQuery,
         relation: CommitRelationFilter,
     ) -> Vec<SessionGitCorrelationHit> {
-        let limit = query.limit.clamp(1, MAX_SESSIONS_FOR_LIMIT);
+        let limit = sessions_for_limit(query);
         match &query.git_ref {
-            GitRefFilter::Branch(branch) => {
-                self.span_hits(|span| span.branch.as_deref() == Some(branch), query, limit)
-            }
-            GitRefFilter::Worktree(worktree) => {
-                self.span_hits(|span| &span.worktree == worktree, query, limit)
-            }
-            GitRefFilter::Commit(commit) => self.commit_hits(commit, query, relation, limit),
+            GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => span_hits(
+                self.spans
+                    .iter()
+                    .filter(|span| span_matches_query(span, query)),
+                limit,
+            ),
+            GitRefFilter::Commit(commit) => commit_hits(
+                self.commit_sessions
+                    .iter()
+                    .filter(|record| commit_record_matches_query(record, commit, relation, query)),
+                limit,
+            ),
         }
     }
 
@@ -271,138 +290,170 @@ impl GitEvidenceProjectionV1 {
         if let Some(branch) = &filter.branch {
             selected = Some(intersect_id_maps(
                 selected,
-                self.span_identities(|span| span.branch.as_deref() == Some(branch)),
+                span_identities(
+                    self.spans
+                        .iter()
+                        .filter(|span| span.branch.as_deref() == Some(branch.as_str())),
+                ),
             ));
         }
         if let Some(worktree) = &filter.worktree {
             selected = Some(intersect_id_maps(
                 selected,
-                self.span_identities(|span| &span.worktree == worktree),
+                span_identities(self.spans.iter().filter(|span| &span.worktree == worktree)),
             ));
         }
         if let Some(commit) = &filter.commit {
             selected = Some(intersect_id_maps(
                 selected,
-                self.commit_identities_with_producer_fallback(commit),
+                commit_identities_with_producer_fallback(
+                    self.commit_sessions
+                        .iter()
+                        .filter(|record| record.commit_sha.starts_with(commit.as_str())),
+                ),
             ));
         }
-        Some(
-            selected
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(session_id, provider)| (provider, session_id))
-                .collect(),
-        )
+        Some(scope_session_ids(selected))
     }
+}
 
-    fn span_hits(
-        &self,
-        predicate: impl Fn(&SessionGitSpan) -> bool,
-        query: &SessionsForQuery,
-        limit: usize,
-    ) -> Vec<SessionGitCorrelationHit> {
-        let mut grouped = BTreeMap::<String, Vec<&SessionGitSpan>>::new();
-        for span in self.spans.iter().filter(|span| {
-            predicate(span)
-                && query.since.is_none_or(|since| span.last_ts >= since)
-                && query.until.is_none_or(|until| span.first_ts <= until)
-        }) {
-            grouped
-                .entry(span.session_id.clone())
-                .or_default()
-                .push(span);
-        }
-        let mut hits = grouped
-            .into_values()
-            .map(|spans| span_hit(&spans))
-            .collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .last_ts
-                .cmp(&left.last_ts)
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
-        hits.truncate(limit);
-        hits
+fn sessions_for_limit(query: &SessionsForQuery) -> usize {
+    query.limit.clamp(1, MAX_SESSIONS_FOR_LIMIT)
+}
+
+/// Whether `span` carries the queried branch or worktree. A commit query never
+/// matches a span.
+fn span_matches_ref(span: &SessionGitSpan, git_ref: &GitRefFilter) -> bool {
+    match git_ref {
+        GitRefFilter::Branch(branch) => span.branch.as_deref() == Some(branch.as_str()),
+        GitRefFilter::Worktree(worktree) => &span.worktree == worktree,
+        GitRefFilter::Commit(_) => false,
     }
+}
 
-    fn commit_hits(
-        &self,
-        sha: &str,
-        query: &SessionsForQuery,
-        relation: CommitRelationFilter,
-        limit: usize,
-    ) -> Vec<SessionGitCorrelationHit> {
-        let mut by_session = HashMap::<String, SessionGitCorrelationHit>::new();
-        for record in self.commit_sessions.iter().filter(|record| {
-            record.commit_sha.starts_with(sha)
-                && relation.matches(record.relation)
-                && query.since.is_none_or(|since| record.committed_at >= since)
-                && query.until.is_none_or(|until| record.committed_at <= until)
-        }) {
-            let candidate = commit_hit(record);
-            match by_session.get_mut(&record.session_id) {
-                Some(existing)
-                    if commit_hit_strength(&candidate) > commit_hit_strength(existing) =>
-                {
-                    *existing = candidate;
-                }
-                Some(existing)
-                    if existing.provider.is_empty() && !candidate.provider.is_empty() =>
-                {
-                    existing.provider = candidate.provider;
-                }
-                Some(_) => {}
-                None => {
-                    by_session.insert(record.session_id.clone(), candidate);
-                }
+/// Whether `span` overlaps the query's activity window: it must end at or
+/// after `since` and start at or before `until`.
+fn span_in_query_window(span: &SessionGitSpan, query: &SessionsForQuery) -> bool {
+    query.since.is_none_or(|since| span.last_ts >= since)
+        && query.until.is_none_or(|until| span.first_ts <= until)
+}
+
+fn span_matches_query(span: &SessionGitSpan, query: &SessionsForQuery) -> bool {
+    span_matches_ref(span, &query.git_ref) && span_in_query_window(span, query)
+}
+
+fn commit_record_matches_query(
+    record: &CommitSessionRecord,
+    sha: &str,
+    relation: CommitRelationFilter,
+    query: &SessionsForQuery,
+) -> bool {
+    record.commit_sha.starts_with(sha)
+        && relation.matches(record.relation)
+        && query.since.is_none_or(|since| record.committed_at >= since)
+        && query.until.is_none_or(|until| record.committed_at <= until)
+}
+
+/// Groups already-matching spans per session, orders the sessions by their
+/// latest activity, and keeps the first `limit`.
+fn span_hits<'a>(
+    spans: impl IntoIterator<Item = &'a SessionGitSpan>,
+    limit: usize,
+) -> Vec<SessionGitCorrelationHit> {
+    let mut grouped = BTreeMap::<&str, Vec<&SessionGitSpan>>::new();
+    for span in spans {
+        grouped
+            .entry(span.session_id.as_str())
+            .or_default()
+            .push(span);
+    }
+    let mut hits = grouped
+        .into_values()
+        .map(|spans| span_hit(&spans))
+        .collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .last_ts
+            .cmp(&left.last_ts)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    hits.truncate(limit);
+    hits
+}
+
+/// Keeps the strongest already-matching record per session. Records must
+/// arrive in canonical projection order ([`commit_record_order`]) so equal
+/// strengths resolve to the same record on every read path.
+fn commit_hits<'a>(
+    records: impl IntoIterator<Item = &'a CommitSessionRecord>,
+    limit: usize,
+) -> Vec<SessionGitCorrelationHit> {
+    let mut by_session = HashMap::<&str, SessionGitCorrelationHit>::new();
+    for record in records {
+        let candidate = commit_hit(record);
+        match by_session.get_mut(record.session_id.as_str()) {
+            Some(existing) if commit_hit_strength(&candidate) > commit_hit_strength(existing) => {
+                *existing = candidate;
+            }
+            Some(existing) if existing.provider.is_empty() && !candidate.provider.is_empty() => {
+                existing.provider = candidate.provider;
+            }
+            Some(_) => {}
+            None => {
+                by_session.insert(record.session_id.as_str(), candidate);
             }
         }
-        let mut hits = by_session.into_values().collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .committed_at
-                .cmp(&left.committed_at)
-                .then_with(|| left.session_id.cmp(&right.session_id))
-        });
-        hits.truncate(limit);
-        hits
     }
+    let mut hits = by_session.into_values().collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .committed_at
+            .cmp(&left.committed_at)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    hits.truncate(limit);
+    hits
+}
 
-    fn span_identities(
-        &self,
-        predicate: impl Fn(&SessionGitSpan) -> bool,
-    ) -> BTreeMap<String, String> {
-        self.spans
-            .iter()
-            .filter(|span| predicate(span))
-            .fold(BTreeMap::new(), |mut ids, span| {
-                ids.entry(span.session_id.clone())
-                    .and_modify(|provider| {
-                        if provider.is_empty() {
-                            provider.clone_from(&span.provider);
-                        }
-                    })
-                    .or_insert_with(|| span.provider.clone());
-                ids
+/// Session identities named by already-matching spans, keyed by session and
+/// carrying the first non-empty provider.
+fn span_identities<'a>(
+    spans: impl IntoIterator<Item = &'a SessionGitSpan>,
+) -> BTreeMap<String, String> {
+    spans.into_iter().fold(BTreeMap::new(), |mut ids, span| {
+        ids.entry(span.session_id.clone())
+            .and_modify(|provider| {
+                if provider.is_empty() {
+                    provider.clone_from(&span.provider);
+                }
             })
-    }
+            .or_insert_with(|| span.provider.clone());
+        ids
+    })
+}
 
-    fn commit_identities_with_producer_fallback(&self, sha: &str) -> BTreeMap<String, String> {
-        let matching = self
-            .commit_sessions
-            .iter()
-            .filter(|record| record.commit_sha.starts_with(sha))
-            .collect::<Vec<_>>();
-        let has_producer = matching
-            .iter()
-            .any(|record| record.relation == CommitRelation::Produced);
-        matching
-            .into_iter()
-            .filter(|record| !has_producer || record.relation == CommitRelation::Produced)
-            .map(|record| (record.session_id.clone(), record.provider.clone()))
-            .collect()
-    }
+/// Session identities named by already prefix-matching commit records. When
+/// any producer relation exists only producers count; otherwise observers do.
+fn commit_identities_with_producer_fallback<'a>(
+    records: impl IntoIterator<Item = &'a CommitSessionRecord>,
+) -> BTreeMap<String, String> {
+    let matching = records.into_iter().collect::<Vec<_>>();
+    let has_producer = matching
+        .iter()
+        .any(|record| record.relation == CommitRelation::Produced);
+    matching
+        .into_iter()
+        .filter(|record| !has_producer || record.relation == CommitRelation::Produced)
+        .map(|record| (record.session_id.clone(), record.provider.clone()))
+        .collect()
+}
+
+fn scope_session_ids(selected: Option<BTreeMap<String, String>>) -> Vec<(String, String)> {
+    selected
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(session_id, provider)| (provider, session_id))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1052,13 +1103,19 @@ pub use publication_outbox::{
     enqueue_git_evidence_publication, pending_git_evidence_publication_count,
     replay_pending_git_evidence_publications, replay_pending_git_evidence_publications_outcome,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+pub use store::legacy_git_evidence_manifest_for_test;
 pub use store::{
     AnalyticsSessionTimestamp, AnalyticsSessionTimestampSource, GitCorrelationSessionStore,
-    GitCorrelationWriteTxn, GitEvidenceProjectionStore, build_git_evidence_manifest_checked,
-    git_evidence_generation_id, git_evidence_projection_identity, publish_git_evidence_projection,
-    recover_git_evidence_projection,
+    GitCorrelationWriteTxn, GitEvidenceGraphHead, GitEvidenceGraphView, GitEvidenceProjectionStore,
+    GitEvidenceProjectorRevision, build_git_evidence_manifest_checked, git_evidence_generation_id,
+    git_evidence_projection_identity, open_git_evidence_graph_view,
+    publish_git_evidence_projection, recover_git_evidence_projection,
 };
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod graph_view_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]

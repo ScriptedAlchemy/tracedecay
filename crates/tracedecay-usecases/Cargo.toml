@@ -150,7 +150,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 url = "2"
 zeroize = "1.9.0"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 # Grammar-free entry only: `markdown_structure` compiles with no language
 # feature enabled, so section structure reaches retrieval without linking a

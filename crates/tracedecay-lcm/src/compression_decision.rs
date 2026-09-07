@@ -37,9 +37,14 @@ pub struct CompressionPlanInput<'a> {
     pub backlog: &'a [LcmRawMessage],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Pure policy decisions over a backlog the caller keeps owning.
+///
+/// `selected_len` is the validated prefix length of the input backlog that
+/// this compression pass summarizes; consumers slice the owning backlog
+/// (`&backlog[..selected_len]`) instead of receiving a copy of those records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionPlan {
-    pub selected_backlog: Vec<LcmRawMessage>,
+    pub selected_len: usize,
     pub forced_overflow_recovery: bool,
     pub leaf_chunk_tokens: Option<i64>,
 }
@@ -168,7 +173,7 @@ pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
         input.request.max_source_messages,
     );
     CompressionPlan {
-        selected_backlog: input.backlog[..selected_len].to_vec(),
+        selected_len,
         forced_overflow_recovery,
         leaf_chunk_tokens,
     }

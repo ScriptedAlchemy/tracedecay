@@ -178,6 +178,12 @@ impl MemoryEvidenceGraphRuntime {
     pub(crate) fn gated_snapshot_readers_entered(&self) -> usize {
         self.read_gate.readers_entered()
     }
+
+    /// Installs an already-verified snapshot as the served head, bypassing
+    /// publication so tests can present shapes the projector never emits.
+    pub(crate) fn install_snapshot(&self, snapshot: VerifiedGraphSnapshot) {
+        *self.snapshot.lock().unwrap() = Some(snapshot);
+    }
 }
 
 impl VerifiedGraphRuntimePortV1 for MemoryEvidenceGraphRuntime {

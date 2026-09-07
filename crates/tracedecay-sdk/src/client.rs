@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -24,6 +24,16 @@ pub use crate::request_control::OperationRequestOptions;
 
 const MAX_OPAQUE_BYTES: usize = 4_096;
 const MAX_REQUEST_ID_BYTES: usize = 512;
+/// Bound on one raw SSE line and on the event/id/data bytes retained for one
+/// frame before JSON decoding. Every canonical frame is a single JSON object of
+/// bounded metadata — request and operation identifiers (≤ 512 bytes), a
+/// sequence, a frontier with a 32-byte resume key, or a terminal receipt — so
+/// 64 KiB leaves wide headroom while capping what a peer can make the client
+/// retain.
+const MAX_SSE_FRAME_BYTES: usize = 64 * 1024;
+/// One byte of lookahead past the limit tells an over-limit line apart from one
+/// that ends exactly at it.
+const SSE_LINE_LOOKAHEAD_BYTES: u64 = MAX_SSE_FRAME_BYTES as u64 + 1;
 /// Selects loopback or remote HTTP policy without changing operation semantics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionMode {
@@ -32,11 +42,32 @@ pub enum ConnectionMode {
 }
 
 /// Shared authority settings for either connection mode.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConnectionSettings {
     base_url: String,
     project_id: String,
     token: String,
+}
+
+/// Diagnostics keep the endpoint and project but never the bearer token, and
+/// URL userinfo is stripped so an accepted `user:secret@host` cannot leak.
+impl fmt::Debug for ConnectionSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let base_url = reqwest::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|mut url| {
+                url.set_username("").ok()?;
+                url.set_password(None).ok()?;
+                Some(url.to_string())
+            })
+            .unwrap_or_else(|| "[invalid URL]".to_owned());
+        formatter
+            .debug_struct("ConnectionSettings")
+            .field("base_url", &base_url)
+            .field("project_id", &self.project_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Caller-owned bridge used by generated MCP-backed SDK operations.
@@ -127,17 +158,17 @@ impl ClientBuilder {
         let origin = self.origin.unwrap_or(default_origin);
         let origin_value = HeaderValue::from_str(&origin)
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
-        let authorization = HeaderValue::from_str(&format!("Bearer {}", settings.token))
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", settings.token))
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+        authorization.set_sensitive(true);
         let http = HttpClient::builder()
             .timeout(self.timeout)
             .build()
             .map_err(ClientError::transport)?;
-        let application_root = format!(
-            "{}/projects/{}/application",
-            base.as_str().trim_end_matches('/'),
-            settings.project_id
-        );
+        let application_root = with_path_segments(
+            base,
+            ["projects", settings.project_id.as_str(), "application"],
+        )?;
         Ok(Client {
             http,
             application_root,
@@ -152,7 +183,7 @@ impl ClientBuilder {
 #[derive(Clone, Debug)]
 pub struct Client {
     http: HttpClient,
-    application_root: String,
+    application_root: reqwest::Url,
     authorization: HeaderValue,
     origin: HeaderValue,
     mcp_transport: Option<Arc<dyn McpToolTransport>>,
@@ -451,8 +482,10 @@ impl Client {
             )
         })?;
         crate::observe::finish((|| {
-            let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
-                .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+            let url = with_path_segments(
+                self.application_root.clone(),
+                route.split('/').filter(|segment| !segment.is_empty()),
+            )?;
             let mut headers = self.headers("application/json");
             crate::request_control::apply_http_headers(&mut headers, options)?;
             let response = crate::observe::headers(|| {
@@ -543,7 +576,7 @@ impl Client {
                 terminal: false,
                 pending_event: None,
                 pending_id: None,
-                pending_data: Vec::new(),
+                pending_data: None,
             };
             if let Some(resume) = &stream.options.resume {
                 stream.next_sequence = Some(resume.next_sequence);
@@ -555,11 +588,10 @@ impl Client {
     }
 
     fn lifecycle_url(&self, operation_id: &str, suffix: &str) -> Result<reqwest::Url, ClientError> {
-        reqwest::Url::parse(&format!(
-            "{}/operations/{operation_id}/{suffix}",
-            self.application_root
-        ))
-        .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))
+        with_path_segments(
+            self.application_root.clone(),
+            ["operations", operation_id, suffix],
+        )
     }
 
     fn headers(&self, accept: &'static str) -> HeaderMap {
@@ -1009,7 +1041,7 @@ impl StreamEvent {
     }
 }
 
-/// Blocking SSE iterator with bounded, opt-in resume.
+/// Blocking SSE iterator with bounded frames and bounded, opt-in resume.
 pub struct OperationStream {
     client: Client,
     operation_id: String,
@@ -1021,7 +1053,8 @@ pub struct OperationStream {
     terminal: bool,
     pending_event: Option<String>,
     pending_id: Option<String>,
-    pending_data: Vec<String>,
+    /// Data lines of the open frame, already joined with `\n`.
+    pending_data: Option<String>,
 }
 
 impl OperationStream {
@@ -1078,17 +1111,39 @@ impl OperationStream {
         Ok(())
     }
 
+    /// Bytes currently retained for the open frame.
+    fn pending_frame_bytes(&self) -> usize {
+        self.pending_event.as_deref().map_or(0, str::len)
+            + self.pending_id.as_deref().map_or(0, str::len)
+            + self.pending_data.as_deref().map_or(0, str::len)
+    }
+
+    /// Closes the stream without delivering the frame or touching the resume
+    /// frontier; the remainder of an oversized frame is never drained.
+    fn refuse_oversized_frame(&mut self) -> ClientError {
+        self.reader = None;
+        self.terminal = true;
+        self.pending_event = None;
+        self.pending_id = None;
+        self.pending_data = None;
+        ClientError::StreamFrameTooLarge {
+            limit_bytes: MAX_SSE_FRAME_BYTES,
+        }
+    }
+
     fn read_event(&mut self) -> Result<Option<StreamEvent>, ClientError> {
         loop {
+            let reader = self.reader.as_mut().ok_or_else(|| {
+                ClientError::Transport("event stream reader is not connected".into())
+            })?;
             let mut line = String::new();
-            let read = self
-                .reader
-                .as_mut()
-                .expect("stream reader is connected")
+            let read = reader
+                .by_ref()
+                .take(SSE_LINE_LOOKAHEAD_BYTES)
                 .read_line(&mut line)
                 .map_err(|error| ClientError::Transport(error.to_string()))?;
             if read == 0 {
-                if self.pending_event.is_some() || !self.pending_data.is_empty() {
+                if self.pending_event.is_some() || self.pending_data.is_some() {
                     return Err(ClientError::Protocol {
                         status: None,
                         message: "event stream ended inside an SSE frame".into(),
@@ -1096,18 +1151,19 @@ impl OperationStream {
                 }
                 return Ok(None);
             }
+            if read > MAX_SSE_FRAME_BYTES {
+                return Err(self.refuse_oversized_frame());
+            }
             let line = line.trim_end_matches(['\r', '\n']);
             if line.is_empty() {
-                if self.pending_data.is_empty() {
+                let Some(data_text) = self.pending_data.take() else {
                     self.pending_event = None;
                     continue;
-                }
+                };
                 let event_name = self
                     .pending_event
                     .take()
                     .unwrap_or_else(|| "message".into());
-                let data_text = self.pending_data.join("\n");
-                self.pending_data.clear();
                 let data: Value =
                     serde_json::from_str(&data_text).map_err(|error| ClientError::Protocol {
                         status: None,
@@ -1273,9 +1329,21 @@ impl OperationStream {
                 (field, value.strip_prefix(' ').unwrap_or(value))
             });
             match field {
+                // Account before extending: the joining `\n` counts too.
+                "event" | "id" | "data"
+                    if self.pending_frame_bytes() + value.len() + 1 > MAX_SSE_FRAME_BYTES =>
+                {
+                    return Err(self.refuse_oversized_frame());
+                }
                 "event" => self.pending_event = Some(value.to_owned()),
                 "id" if !value.contains('\0') => self.pending_id = Some(value.to_owned()),
-                "data" => self.pending_data.push(value.to_owned()),
+                "data" => match &mut self.pending_data {
+                    Some(data) => {
+                        data.push('\n');
+                        data.push_str(value);
+                    }
+                    None => self.pending_data = Some(value.to_owned()),
+                },
                 _ => {}
             }
         }
@@ -1674,6 +1742,11 @@ pub enum ClientError {
         status: Option<u16>,
         message: String,
     },
+    /// The peer sent an SSE line or frame larger than the SDK retains before
+    /// decoding; the stream is closed without delivery or frontier advance.
+    StreamFrameTooLarge {
+        limit_bytes: usize,
+    },
     Problem(Box<ProblemError>),
 }
 
@@ -1705,6 +1778,10 @@ impl fmt::Display for ClientError {
                 write!(formatter, "daemon authentication failed with HTTP {status}")
             }
             Self::Protocol { message, .. } => write!(formatter, "protocol failure: {message}"),
+            Self::StreamFrameTooLarge { limit_bytes } => write!(
+                formatter,
+                "event stream frame exceeded the {limit_bytes}-byte limit"
+            ),
             Self::Problem(problem) => problem.fmt(formatter),
         }
     }
@@ -1712,12 +1789,31 @@ impl fmt::Display for ClientError {
 
 impl Error for ClientError {}
 
+/// Appends each segment as one percent-encoded path segment, so an identifier
+/// containing `/`, `?`, `#`, or `%` can never add, split, or rewrite a route.
+fn with_path_segments<'a>(
+    mut url: reqwest::Url,
+    segments: impl IntoIterator<Item = &'a str>,
+) -> Result<reqwest::Url, ClientError> {
+    url.path_segments_mut()
+        .map_err(|()| {
+            ClientError::InvalidConfiguration("base URL cannot carry path segments".into())
+        })?
+        .extend(segments);
+    Ok(url)
+}
+
+/// `.` and `..` are excluded because they are dot segments, which the URL
+/// path builder drops rather than encodes, so they could never round-trip as
+/// identifiers.
 fn validate_opaque(value: &str, maximum: usize, field: &str) -> Result<(), ClientError> {
     let valid = !value.is_empty()
         && value.trim() == value
         && value.len() <= maximum
         && !value.chars().any(char::is_control)
-        && !value.contains('/');
+        && !value.contains('/')
+        && value != "."
+        && value != "..";
     if valid {
         Ok(())
     } else {

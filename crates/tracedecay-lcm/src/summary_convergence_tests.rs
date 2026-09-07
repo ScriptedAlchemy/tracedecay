@@ -1,6 +1,269 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+use std::cell::Cell;
+
+use tracedecay_runtime_core::db::engine::{
+    Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
+};
 
 use crate::{LCM_SCAN_PAGE_ROWS, schema, summary_convergence};
+
+/// Executor adapter that counts the statements a code path issues and the rows
+/// those statements change, so write amplification is measured rather than
+/// inferred.
+struct CountingExecutor<'a> {
+    inner: &'a TestConnection,
+    queries: Cell<usize>,
+    executes: Cell<usize>,
+    rows_changed: Cell<u64>,
+}
+
+impl<'a> CountingExecutor<'a> {
+    fn new(inner: &'a TestConnection) -> Self {
+        Self {
+            inner,
+            queries: Cell::new(0),
+            executes: Cell::new(0),
+            rows_changed: Cell::new(0),
+        }
+    }
+}
+
+impl QueryExecutor for CountingExecutor<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
+    where
+        P: IntoParams,
+    {
+        self.queries.set(self.queries.get() + 1);
+        self.inner.query(sql, params).await
+    }
+}
+
+impl Executor for CountingExecutor<'_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
+    where
+        P: IntoParams,
+    {
+        self.executes.set(self.executes.get() + 1);
+        let changed = self.inner.execute(sql, params).await?;
+        self.rows_changed.set(self.rows_changed.get() + changed);
+        Ok(changed)
+    }
+
+    async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
+        self.executes.set(self.executes.get() + 1);
+        self.inner.execute_batch(sql).await
+    }
+}
+
+async fn fetch_i64(conn: &TestConnection, sql: &str, params: impl IntoParams) -> i64 {
+    let mut rows = conn.query(sql, params).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+#[tokio::test]
+async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
+    const ROWS: i64 = 300;
+    let temp = tempfile::tempdir().unwrap();
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         CREATE TABLE session_messages (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            timestamp INTEGER,
+            ordinal INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            metadata_json TEXT,
+            PRIMARY KEY(provider, message_id)
+         );
+         INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES ('cursor', 'session-a', 'project', '/p'),
+                ('cursor', 'session-b', 'project', '/p'),
+                ('cursor', 'session-c', 'project', '/p');",
+    )
+    .await
+    .unwrap();
+    schema::ensure_lcm_schema(&conn).await.unwrap();
+    // Interleave three sessions so first-seen order (b, a, c) differs from
+    // both lexical order and the order of the sessions table.
+    let session_for = |ordinal: i64| match ordinal % 3 {
+        1 => "session-b",
+        2 => "session-a",
+        _ => "session-c",
+    };
+    for ordinal in 1..=ROWS {
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, content,
+                content_hash, storage_kind, snippet_text, index_text, metadata_json
+             ) VALUES ('cursor', ?1, ?2, 'assistant', ?3, 'body',
+                       ?1, 'inline', 'body', 'body', '{}')",
+            params![format!("message-{ordinal}"), session_for(ordinal), ordinal],
+        )
+        .await
+        .unwrap();
+    }
+    // The insert trigger already queued every session. Model a store whose
+    // rows predate the queue: drop two queue rows so the backfill must create
+    // them, and give the third retry evidence the backfill must not erase.
+    conn.execute_batch(
+        "DELETE FROM lcm_summary_convergence_queue
+         WHERE session_id IN ('session-a', 'session-b');
+         UPDATE lcm_summary_convergence_queue
+         SET state = 'retryable', failure_code = 'storage_unavailable',
+             failure_count = 2, next_attempt_at_ms = 999
+         WHERE session_id = 'session-c';",
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        summary_convergence::backfill_queue_has_work(&*conn)
+            .await
+            .unwrap()
+    );
+
+    let counting = CountingExecutor::new(&conn);
+    let page = summary_convergence::backfill_queue_page(&counting, LCM_SCAN_PAGE_ROWS as usize)
+        .await
+        .unwrap();
+    assert_eq!(page.rows_scanned, ROWS as usize);
+    assert!(!page.has_more);
+    assert!(
+        counting.executes.get() < page.rows_scanned,
+        "a {}-row page issued {} write statements (one per row again?)",
+        page.rows_scanned,
+        counting.executes.get()
+    );
+
+    // Queue rows: one per session, newest store id per session, and queue_id
+    // (fair-scheduling order) in first-seen order for the rows the page
+    // created, after the pre-existing row.
+    let mut rows = conn
+        .query(
+            "SELECT session_id, newest_raw_store_id, state, failure_code, failure_count,
+                    next_attempt_at_ms
+             FROM lcm_summary_convergence_queue
+             ORDER BY queue_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut queue = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        queue.push((
+            row.get::<String>(0).unwrap(),
+            row.get::<i64>(1).unwrap(),
+            row.get::<String>(2).unwrap(),
+            row.get::<Option<String>>(3).unwrap(),
+            row.get::<i64>(4).unwrap(),
+            row.get::<i64>(5).unwrap(),
+        ));
+    }
+    drop(rows);
+    assert_eq!(
+        queue,
+        vec![
+            (
+                "session-c".to_string(),
+                300,
+                "retryable".to_string(),
+                Some("storage_unavailable".to_string()),
+                2,
+                999,
+            ),
+            (
+                "session-b".to_string(),
+                298,
+                "pending".to_string(),
+                None,
+                0,
+                0
+            ),
+            (
+                "session-a".to_string(),
+                299,
+                "pending".to_string(),
+                None,
+                0,
+                0
+            ),
+        ]
+    );
+
+    // Predecessor ranges: every message except each session's first keeps
+    // its own exact predecessor interval.
+    assert_eq!(
+        fetch_i64(&conn, "SELECT COUNT(*) FROM lcm_raw_predecessor_ranges", ()).await,
+        ROWS - 3
+    );
+    let mut range = conn
+        .query(
+            "SELECT session_id, from_store_id, to_store_id
+             FROM lcm_raw_predecessor_ranges
+             WHERE provider = 'cursor' AND message_id = 'message-7'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = range.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "session-b");
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
+    assert_eq!(row.get::<i64>(2).unwrap(), 4);
+    drop(range);
+    assert_eq!(
+        fetch_i64(
+            &conn,
+            "SELECT COUNT(*) FROM lcm_raw_predecessor_ranges WHERE message_id = 'message-1'",
+            (),
+        )
+        .await,
+        0,
+        "a session's first message has no predecessor range"
+    );
+
+    // Everything is behind the frontier now: the read probe reports idle and
+    // a page under the writer changes nothing.
+    assert!(
+        !summary_convergence::backfill_queue_has_work(&*conn)
+            .await
+            .unwrap()
+    );
+    let idle = CountingExecutor::new(&conn);
+    let empty = summary_convergence::backfill_queue_page(&idle, LCM_SCAN_PAGE_ROWS as usize)
+        .await
+        .unwrap();
+    assert_eq!(
+        empty,
+        summary_convergence::LcmSummaryQueueBackfillPage::default()
+    );
+    assert_eq!(idle.executes.get(), 0);
+    assert_eq!(idle.rows_changed.get(), 0);
+
+    // A new raw row past the frontier makes the probe report work again.
+    conn.execute(
+        "INSERT INTO lcm_raw_messages (
+            provider, message_id, session_id, role, ordinal, content,
+            content_hash, storage_kind, snippet_text, index_text, metadata_json
+         ) VALUES ('cursor', 'message-301', 'session-a', 'assistant', 301, 'body',
+                   'message-301', 'inline', 'body', 'body', '{}')",
+        (),
+    )
+    .await
+    .unwrap();
+    assert!(
+        summary_convergence::backfill_queue_has_work(&*conn)
+            .await
+            .unwrap()
+    );
+}
 
 #[tokio::test]
 async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_corpus() {
