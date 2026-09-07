@@ -285,7 +285,7 @@ pub async fn overview_payload(
     let mut edges_by_kind = BTreeMap::<String, i64>::new();
     for edge in &edges {
         *edges_by_kind
-            .entry(relation_kind_str(edge.edge.kind).to_owned())
+            .entry(edge.edge.kind.as_str().to_owned())
             .or_default() += 1;
     }
     let mut files_by_language = BTreeMap::<String, i64>::new();
@@ -491,7 +491,7 @@ pub async fn neighbors_payload(
                         &edge.neighbor,
                         degrees.get(&edge.neighbor.occurrence).copied(),
                     )?;
-                    node.edge_kind = Some(relation_kind_str(edge.edge.kind).to_owned());
+                    node.edge_kind = Some(edge.edge.kind.as_str().to_owned());
                     Ok(node)
                 })
                 .collect::<Result<Vec<_>, CodeGraphReadError>>()?;
@@ -525,7 +525,7 @@ pub async fn neighbors_payload(
             edges_by_kind: merged
                 .into_iter()
                 .map(|(kind, count)| GraphKindCountV1 {
-                    kind: relation_kind_str(kind).to_owned(),
+                    kind: kind.as_str().to_owned(),
                     count: count as i64,
                 })
                 .collect(),
@@ -720,7 +720,7 @@ pub async fn path_payload(
                 .map(|edge| GraphEdgeV1 {
                     source: edge.from_occurrence.as_str().to_owned(),
                     target: edge.to_occurrence.as_str().to_owned(),
-                    kind: relation_kind_str(edge.kind).to_owned(),
+                    kind: edge.kind.as_str().to_owned(),
                     line: None,
                     source_name: None,
                     target_name: None,
@@ -902,23 +902,9 @@ fn edge_from_semantic(edge: &CodeGraphSemanticEdgeV1) -> GraphEdgeV1 {
     GraphEdgeV1 {
         source: source.as_str().to_owned(),
         target: target.as_str().to_owned(),
-        kind: relation_kind_str(edge.edge.kind).to_owned(),
+        kind: edge.edge.kind.as_str().to_owned(),
         line: None,
         source_name: None,
         target_name: None,
-    }
-}
-
-fn relation_kind_str(kind: RelationEdgeKindV1) -> &'static str {
-    match kind {
-        RelationEdgeKindV1::Calls => "calls",
-        RelationEdgeKindV1::Uses => "uses",
-        RelationEdgeKindV1::TypeOf => "type_of",
-        RelationEdgeKindV1::Contains => "contains",
-        RelationEdgeKindV1::Implements => "implements",
-        RelationEdgeKindV1::Extends => "extends",
-        RelationEdgeKindV1::Annotates => "annotates",
-        RelationEdgeKindV1::Returns => "returns",
-        RelationEdgeKindV1::Receives => "receives",
     }
 }

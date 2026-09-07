@@ -18,12 +18,12 @@ use crate::{
 };
 
 use super::{
-    GRAPH_RELATION_READ_LIMIT, canonical_relation_kind, canonical_relation_kind_name,
-    cost_to_expand_verified, graph_name_matches, graph_occurrence_id, graph_symbol_corrupt,
-    graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths, node_not_found,
-    nodes_addressed_by_args, require_positive_depth, required_graph_file_path,
-    required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors, user_line,
-    verified_neighbor_value, verified_trait_dispatch_targets,
+    GRAPH_RELATION_READ_LIMIT, canonical_relation_kind, cost_to_expand_verified,
+    graph_name_matches, graph_occurrence_id, graph_symbol_corrupt, graph_symbol_end_line,
+    graph_symbol_location_value, graph_symbol_paths, node_not_found, nodes_addressed_by_args,
+    require_positive_depth, required_graph_file_path, required_graph_metadata,
+    single_graph_adjacency_batch, traverse_verified_neighbors, user_line, verified_neighbor_value,
+    verified_trait_dispatch_targets,
 };
 
 #[hotpath::measure(label = "mcp.graph.callers.total")]
@@ -107,7 +107,7 @@ pub async fn handle_callees(graph: &VerifiedGraphQuery, args: Value) -> Result<T
                 kind: metadata.kind.clone(),
                 file: required_graph_file_path(&result.symbol)?.to_owned(),
                 line: user_line(metadata.start_line),
-                edge_kind: canonical_relation_kind_name(result.edge_kind).to_owned(),
+                edge_kind: result.edge_kind.as_str().to_owned(),
                 dispatch_via_trait: false,
                 depth: Some(u32::try_from(result.depth).map_err(|_| {
                     graph_symbol_corrupt("callee traversal depth exceeds u32".to_owned())
