@@ -1100,6 +1100,85 @@ async fn get_and_read_resolve_an_owner_registered_under_a_windows_verbatim_spell
 }
 
 #[tokio::test]
+async fn ambiguous_registered_spellings_refuse_instead_of_selecting_an_owner() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let ordinary = PathBuf::from(r"C:\Users\test\ambiguous");
+    let verbatim = PathBuf::from(r"\\?\C:\Users\test\ambiguous");
+    registry
+        .publish(ordinary.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    registry.publish(verbatim, TestFirst(2)).await.unwrap();
+
+    assert!(
+        registry.get::<TestFirst>(&ordinary).await.is_none(),
+        "two registered spellings that could name different authorities must not select the first map entry"
+    );
+    assert!(
+        !registry
+            .request_runtimes(Some(&ordinary), None)
+            .await
+            .is_admitted(),
+        "an ambiguous root is a lookup miss, not a warming admitted runtime"
+    );
+}
+
+#[tokio::test]
+async fn stale_publication_failure_cannot_poison_a_newer_ready_attempt() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("publication-attempt-fence");
+    registry
+        .publish(project.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    let stale = registry
+        .begin_publication(&project)
+        .expect("first publication attempt");
+    let current = registry
+        .begin_publication(&project)
+        .expect("replacement publication attempt");
+
+    assert!(!registry.mark_publication_failed(&stale));
+    assert!(registry.mark_publication_ready(&current));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Ready)
+    );
+}
+
+#[tokio::test]
+async fn failed_publication_can_reopen_and_reach_ready() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("publication-reopen");
+    registry
+        .publish(project.clone(), TestFirst(1))
+        .await
+        .unwrap();
+    let failed = registry
+        .begin_publication(&project)
+        .expect("failed publication attempt");
+
+    assert!(registry.mark_publication_failed(&failed));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Failed)
+    );
+
+    let reopened = registry
+        .begin_publication(&project)
+        .expect("fresh publication attempt");
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Warming)
+    );
+    assert!(registry.mark_publication_ready(&reopened));
+    assert_eq!(
+        registry.publication_state(&project),
+        Some(ProjectRuntimePublicationStateV1::Ready)
+    );
+}
+
+#[tokio::test]
 async fn get_does_not_treat_a_different_project_as_an_equivalent_root() {
     let registry = ProjectRuntimeRegistryV1::default();
     registry.publish(root("alpha"), TestFirst(1)).await.unwrap();

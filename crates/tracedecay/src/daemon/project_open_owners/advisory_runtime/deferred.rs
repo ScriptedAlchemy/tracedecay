@@ -15,7 +15,8 @@ use tracedecay_application::doctor::{
     SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
 };
 use tracedecay_application::now_micros;
-use tracedecay_domain::errors::Result;
+use tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// The deferred advisory owner is a detached background task: when it gives up
@@ -62,11 +63,18 @@ pub(in crate::daemon) async fn spawn_semantic_owner_registration(
     mut production_runtime_ready: tokio::sync::watch::Receiver<bool>,
     route_registered: Arc<AtomicBool>,
     route_cancellation: CancellationToken,
-) -> Result<()> {
+) -> Result<ProjectRuntimePublicationAttemptV1> {
     let registration = invocation
         .semantic_owner_runtime_registrar()
         .register(&project_root)
         .await?;
+    let publication = invocation
+        .service
+        .project_runtimes
+        .begin_publication(&project_root)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "semantic owner disappeared before project publication began".to_owned(),
+        })?;
     let task_signals = registration.signals();
     let mut configuration_ready = task_signals.subscribe_configuration_ready();
     let task_cancellation = task_signals.cancellation();
@@ -185,7 +193,7 @@ pub(in crate::daemon) async fn spawn_semantic_owner_registration(
             ],
         );
     }
-    Ok(())
+    Ok(publication)
 }
 
 pub(super) fn spawn(

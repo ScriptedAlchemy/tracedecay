@@ -57,27 +57,28 @@ pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationRe
 /// Permanent owner-publication failure. This is not warming: retrying the
 /// same request against this server cannot grow the missing owner.
 pub(super) fn runtime_publication_failed_problem(request_id: String) -> DaemonInvocationResponse {
-    let Ok(problem) = ApplicationProblem::execution_failed(
+    let problem = ApplicationProblem::execution_failed(
         tracedecay_application::ApplicationExecutionFailureClassV1::Permanent,
         SafeDiagnostic {
             code: "application.runtime.owner_failed".to_owned(),
             message: "The project runtime for this operation failed to publish; reopen the project"
                 .to_owned(),
         },
-    ) else {
-        return runtime_mounting_problem(request_id);
-    };
-    application_problem(request_id, problem)
+    );
+    match problem {
+        Ok(problem) => application_problem(request_id, problem),
+        Err(_) => DaemonInvocationResponse::problem(
+            request_id,
+            DaemonInvocationProblem::ApplicationContractViolation,
+        ),
+    }
 }
 
 pub(super) fn missing_registered_owner_problem(
-    registry: &crate::project_runtime::ProjectRuntimeRegistryV1,
-    project_root: &Path,
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
     request_id: String,
 ) -> DaemonInvocationResponse {
-    if registry.publication_state(project_root)
-        == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Failed)
-    {
+    if publication == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Failed) {
         return runtime_publication_failed_problem(request_id);
     }
     runtime_mounting_problem(request_id)

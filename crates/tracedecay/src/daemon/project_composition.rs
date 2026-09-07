@@ -738,7 +738,7 @@ async fn production_project_server_inner(
                 message: "code-index activation scope does not match the project route".to_owned(),
             });
         }
-        Box::pin(project_open_owners::spawn_semantic_owner_registration(
+        let publication_attempt = Box::pin(project_open_owners::spawn_semantic_owner_registration(
             invocation.clone(),
             canonical_project_path.to_path_buf(),
             Arc::clone(cg.configuration_runtime()),
@@ -1241,6 +1241,15 @@ async fn production_project_server_inner(
                     message: "project changed branch during full capability admission".to_owned(),
                 });
             }
+            if !invocation
+                .service
+                .project_runtimes
+                .mark_publication_ready(&publication_attempt)
+            {
+                return Err(TraceDecayError::Config {
+                    message: "project runtime publication attempt was superseded".to_owned(),
+                });
+            }
             // The registry cutover prevents new core leases. Existing core
             // requests may finish while dependent owners warm, then the
             // displaced server is drained without closing the shared graph.
@@ -1313,11 +1322,11 @@ async fn production_project_server_inner(
                 if let Some(mutation) = &core_source_edit_mutation {
                     mutation.mark_failed();
                 }
-                invocation
-                    .service
-                    .project_runtimes
-                    .mark_publication_failed(canonical_project_path);
                 if core_retained {
+                    invocation
+                        .service
+                        .project_runtimes
+                        .mark_publication_failed(&publication_attempt);
                     if let Some(failed_full_server) = failed_full_server {
                         failed_full_server.revoke_project_server_responses();
                         schedule_project_server_retirement(

@@ -90,11 +90,12 @@ pub use invocation::{
 };
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
-    ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
-    ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
-    RegisteredDeliveryReadAuthorityV1, RegisteredObservabilityProducerV1,
-    RegisteredSemanticOwnerTaskV1, SemanticOwnerRegistrationSignalsV1,
-    StoreObservabilityMountErrorV1, StoreObservabilityMountV1, StoreObservabilityRegistryV1,
+    ProjectRuntimePublicationAttemptV1, ProjectRuntimePublicationStateV1,
+    ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1, ProjectRuntimeRequestLeaseV1,
+    ProjectRuntimeRootQuiescenceV1, RegisteredDeliveryReadAuthorityV1,
+    RegisteredObservabilityProducerV1, RegisteredSemanticOwnerTaskV1,
+    SemanticOwnerRegistrationSignalsV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
+    StoreObservabilityRegistryV1,
 };
 pub use request_cancellation::{Lease, cancel, register};
 pub use tracedecay_daemon_protocol::{

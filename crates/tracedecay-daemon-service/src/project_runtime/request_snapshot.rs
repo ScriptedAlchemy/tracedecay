@@ -1,6 +1,5 @@
 //! One-lock snapshot of the project runtimes used by invocation dispatch.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -41,7 +40,7 @@ impl ProjectRuntimeRegistryV1 {
         project_root: &Path,
         canonical_root: Option<&Path>,
     ) -> Option<ProjectRuntimeRequestLeaseV1> {
-        let candidate_roots = candidate_roots(project_root, canonical_root);
+        let candidate_roots = super::candidate_request_roots(project_root, canonical_root);
         let mut fences = self.lock_root_fences();
         if self.closed.load(Ordering::Acquire) {
             hotpath::gauge!("daemon.service.request_admission.closed_total").inc(1_u64);
@@ -64,18 +63,32 @@ impl ProjectRuntimeRegistryV1 {
             return None;
         }
         let runtimes = self.lock_runtimes();
-        let Some(resolved_root) =
-            super::resolved_runtime_key(&runtimes, project_root, canonical_root)
-        else {
-            hotpath::gauge!("daemon.service.request_admission.runtime_missing_total").inc(1_u64);
-            tracing::warn!(
-                event = "project_request_admission",
-                outcome = "unavailable",
-                reason = "runtime_missing",
-                "project request runtime is not registered"
-            );
-            return None;
-        };
+        let resolved_root =
+            match super::resolve_runtime_key(&runtimes, project_root, canonical_root) {
+                super::ProjectRuntimeKeyResolutionV1::Unique(root) => root,
+                super::ProjectRuntimeKeyResolutionV1::Missing => {
+                    hotpath::gauge!("daemon.service.request_admission.runtime_missing_total")
+                        .inc(1_u64);
+                    tracing::warn!(
+                        event = "project_request_admission",
+                        outcome = "unavailable",
+                        reason = "runtime_missing",
+                        "project request runtime is not registered"
+                    );
+                    return None;
+                }
+                super::ProjectRuntimeKeyResolutionV1::Ambiguous => {
+                    hotpath::gauge!("daemon.service.request_admission.runtime_ambiguous_total")
+                        .inc(1_u64);
+                    tracing::warn!(
+                        event = "project_request_admission",
+                        outcome = "unavailable",
+                        reason = "runtime_ambiguous",
+                        "project request root matches more than one registered runtime"
+                    );
+                    return None;
+                }
+            };
         if fences.contains(&resolved_root) {
             hotpath::gauge!("daemon.service.request_admission.fenced_total").inc(1_u64);
             tracing::warn!(
@@ -102,7 +115,7 @@ impl ProjectRuntimeRegistryV1 {
             return None;
         }
         let mut lease_roots = candidate_roots;
-        lease_roots.insert(resolved_root);
+        lease_roots.insert(resolved_root.clone());
         for root in &lease_roots {
             *fences.request_leases.entry(root.clone()).or_default() += 1;
         }
@@ -113,7 +126,7 @@ impl ProjectRuntimeRegistryV1 {
             inner: Arc::new(super::ProjectRuntimeRequestLeaseInnerV1 {
                 registry: self.clone(),
                 roots: lease_roots,
-                canonical_root: canonical_root.map(Path::to_path_buf),
+                registered_root: resolved_root,
             }),
         })
     }
@@ -135,59 +148,45 @@ impl ProjectRuntimeRegistryV1 {
         let Some(request_lease) = self.admit_request(project_root, canonical_root) else {
             return ProjectRequestRuntimesV1::default();
         };
-        self.snapshot_request_runtimes(project_root, canonical_root, Some(request_lease))
+        let registered_root = request_lease.registered_root().to_path_buf();
+        self.snapshot_request_runtimes(&registered_root, Some(request_lease))
     }
 
     pub fn request_runtimes_with_admission(
         &self,
         project_root: &Path,
-        canonical_root: Option<&Path>,
         admission: &ProjectRuntimeRequestLeaseV1,
     ) -> ProjectRequestRuntimesV1 {
         if !admission.covers(self, project_root) {
             return ProjectRequestRuntimesV1::default();
         }
-        self.snapshot_request_runtimes(project_root, canonical_root, None)
+        self.snapshot_request_runtimes(admission.registered_root(), None)
     }
 
     fn snapshot_request_runtimes(
         &self,
-        project_root: &Path,
-        canonical_root: Option<&Path>,
+        registered_root: &Path,
         request_lease: Option<ProjectRuntimeRequestLeaseV1>,
     ) -> ProjectRequestRuntimesV1 {
         let runtimes = self.lock_runtimes();
-        let resolved_root = super::resolved_runtime_key(&runtimes, project_root, canonical_root);
-        let runtime = resolved_root.as_ref().and_then(|root| runtimes.get(root));
-        let feedback = runtime.and_then(|runtime| runtime.feedback.as_ref());
-        let publication = runtime.map(|runtime| runtime.publication);
-        let lsp_owner = Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(
-            &runtimes,
-            project_root,
-            canonical_root,
-        );
+        let Some(runtime) = runtimes.get(registered_root) else {
+            return ProjectRequestRuntimesV1::default();
+        };
+        let feedback = runtime.feedback.as_ref();
         ProjectRequestRuntimesV1 {
             _request_lease: request_lease,
             admitted: true,
-            resolved_root,
-            publication,
+            resolved_root: Some(registered_root.to_path_buf()),
+            publication: Some(runtime.publication),
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
-            advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
-            configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
-            work: runtime.and_then(|runtime| runtime.work.clone()),
-            retained: runtime.and_then(|runtime| runtime.retained.clone()),
-            lsp_owner,
+            advisory_cycle: runtime.advisory_cycle.clone(),
+            configuration: runtime.configuration.clone(),
+            work: runtime.work.clone(),
+            retained: runtime.retained.clone(),
+            lsp_owner: runtime.lsp_owner.clone(),
         }
     }
-}
-
-fn candidate_roots(project_root: &Path, canonical_root: Option<&Path>) -> BTreeSet<PathBuf> {
-    let mut roots = BTreeSet::from([project_root.to_path_buf()]);
-    if let Some(canonical_root) = canonical_root {
-        roots.insert(canonical_root.to_path_buf());
-    }
-    roots
 }
 
 impl ProjectRequestRuntimesV1 {
@@ -280,5 +279,63 @@ mod tests {
             "an owner registered under the admitted canonical root must be callable through the request spelling",
         );
         assert_eq!(mounted.project_id, project_id);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn captured_admission_does_not_follow_a_retargeted_alias() {
+        let registry = ProjectRuntimeRegistryV1::default();
+        let fixture = tempfile::tempdir().expect("retargeted alias fixture");
+        let alias = fixture.path().join("alias");
+        let original = fixture.path().join("original");
+        let replacement = fixture.path().join("replacement");
+        std::fs::create_dir(&original).expect("original root");
+        std::fs::create_dir(&replacement).expect("replacement root");
+        std::os::unix::fs::symlink(&original, &alias).expect("original alias");
+        let original = original.canonicalize().expect("canonical original root");
+        let replacement = replacement
+            .canonicalize()
+            .expect("canonical replacement root");
+        let original_project = ProjectId::new("project.original-target").expect("project id");
+        let replacement_project = ProjectId::new("project.replacement-target").expect("project id");
+        registry
+            .register(
+                original.clone(),
+                DaemonAdvisoryCycleInvocationOwner::new(
+                    original_project.clone(),
+                    Arc::new(UnavailableAdvisoryCycle),
+                ),
+            )
+            .await
+            .expect("original owner registration");
+        registry
+            .register(
+                replacement.clone(),
+                DaemonAdvisoryCycleInvocationOwner::new(
+                    replacement_project,
+                    Arc::new(UnavailableAdvisoryCycle),
+                ),
+            )
+            .await
+            .expect("replacement owner registration");
+        let admitted_root = alias.canonicalize().expect("admitted alias target");
+        let admission = registry
+            .admit_request(&alias, Some(&admitted_root))
+            .expect("capture original alias admission");
+        std::fs::remove_file(&alias).expect("remove original alias");
+        std::os::unix::fs::symlink(&replacement, &alias).expect("retarget alias");
+        assert_eq!(
+            alias.canonicalize().expect("retargeted alias target"),
+            replacement
+        );
+
+        let snapshot = registry.request_runtimes_with_admission(&alias, &admission);
+
+        assert_eq!(snapshot.resolved_root.as_deref(), Some(original.as_path()));
+        assert_eq!(
+            snapshot.advisory_cycle.expect("captured owner").project_id,
+            original_project,
+            "an alias retarget after admission must not switch the callable owner"
+        );
     }
 }

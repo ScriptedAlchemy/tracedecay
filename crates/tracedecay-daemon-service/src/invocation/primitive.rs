@@ -24,6 +24,7 @@ pub use context_scout_registry::{
 pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
     wire_request_id: String,
     surface_operation: ApplicationSurfaceOperation,
     request: PrimitiveRequest,
@@ -44,22 +45,14 @@ pub(super) async fn execute_primitive(
         .read(project_root, PrimitiveProjectRuntime::dispatch)
         .await;
     let Some(dispatch) = dispatch else {
-        return missing_registered_owner_problem(
-            &service.project_runtimes,
-            project_root,
-            wire_request_id,
-        );
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let registered = service
         .project_runtimes
         .get::<RegisteredCallableCodeRuntime>(project_root)
         .await;
     let Some(registered) = registered else {
-        return missing_registered_owner_problem(
-            &service.project_runtimes,
-            project_root,
-            wire_request_id,
-        );
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) if access.scope == registered.scope => access,
@@ -155,6 +148,7 @@ pub(super) async fn execute_primitive(
 pub(super) async fn execute_callable_code(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
     wire_request_id: String,
     surface_operation: ApplicationSurfaceOperation,
     request: CallableCodeSurfaceRequest,
@@ -173,11 +167,7 @@ pub(super) async fn execute_callable_code(
     let Some(registered) = registered else {
         // Same admitted-route contract as `execute_primitive`: a miss is
         // warming unless project-open already recorded a terminal failure.
-        return missing_registered_owner_problem(
-            &service.project_runtimes,
-            project_root,
-            wire_request_id,
-        );
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) => access,

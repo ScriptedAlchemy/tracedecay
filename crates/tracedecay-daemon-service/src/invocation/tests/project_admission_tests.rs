@@ -134,6 +134,10 @@ async fn admitted_storage_status_stays_retryable_while_owners_are_warming() {
         )
         .await
         .expect("register warming project runtime");
+    let _publication = service
+        .project_runtimes
+        .begin_publication(&project_root)
+        .expect("begin warming publication");
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
 
     let problem = application_problem_from(
@@ -172,9 +176,15 @@ async fn admitted_storage_status_is_terminal_after_publication_failure() {
         )
         .await
         .expect("register project runtime before publication failure");
-    service
+    let publication = service
         .project_runtimes
-        .mark_publication_failed(&project_root);
+        .begin_publication(&project_root)
+        .expect("begin failed publication");
+    assert!(
+        service
+            .project_runtimes
+            .mark_publication_failed(&publication)
+    );
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
 
     let problem = application_problem_from(

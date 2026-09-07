@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
-use tracedecay_runtime_core::path_safety::{plain_host_path, same_canonical_path};
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tracedecay_usecases::feedback::FeedbackCycleRuntime;
@@ -156,12 +156,24 @@ pub enum ProjectRuntimePublicationStateV1 {
     Failed,
 }
 
+/// Exact project-open publication attempt.
+///
+/// The root is the registry key admitted when the attempt began. The private
+/// identity makes completion a compare-and-swap: an older attempt cannot
+/// publish failure over a newer reopen of the same root.
+#[derive(Clone)]
+pub struct ProjectRuntimePublicationAttemptV1 {
+    registered_root: PathBuf,
+    identity: Arc<()>,
+}
+
 /// Everything one canonical project's daemon runtime owns.
 ///
 /// A slot is `None` until that component is registered.
 #[derive(Default)]
 pub struct ProjectRuntime {
     publication: ProjectRuntimePublicationStateV1,
+    publication_attempt: Option<Arc<()>>,
     callable_code: Option<RegisteredCallableCodeRuntime>,
     feedback: Option<RegisteredFeedbackRuntime>,
     advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
@@ -746,7 +758,7 @@ pub struct ProjectRuntimeRequestLeaseV1 {
 struct ProjectRuntimeRequestLeaseInnerV1 {
     registry: ProjectRuntimeRegistryV1,
     roots: BTreeSet<PathBuf>,
-    canonical_root: Option<PathBuf>,
+    registered_root: PathBuf,
 }
 
 impl Clone for ProjectRuntimeRequestLeaseV1 {
@@ -760,17 +772,13 @@ impl Clone for ProjectRuntimeRequestLeaseV1 {
 impl ProjectRuntimeRequestLeaseV1 {
     pub fn covers(&self, registry: &ProjectRuntimeRegistryV1, project_root: &Path) -> bool {
         Arc::ptr_eq(&self.inner.registry.root_fences, &registry.root_fences)
-            && self.inner.roots.iter().any(|root| {
-                request_root_matches(root, project_root, self.inner.canonical_root.as_deref())
-            })
+            && candidate_request_roots(project_root, None)
+                .iter()
+                .any(|root| self.inner.roots.contains(root))
     }
 
-    /// Prefer the canonicalize result stored when this lease was admitted.
-    pub fn admitted_canonical_root(&self) -> Option<&Path> {
-        self.inner
-            .canonical_root
-            .as_deref()
-            .or_else(|| self.inner.roots.iter().next().map(PathBuf::as_path))
+    pub fn registered_root(&self) -> &Path {
+        &self.inner.registered_root
     }
 }
 
@@ -1343,26 +1351,51 @@ impl ProjectRuntimeRegistryV1 {
             .map(|runtime| runtime.publication)
     }
 
-    /// Record that mandatory owner publication failed for this project.
-    ///
-    /// Creates the registry entry when project-open failed before any owner
-    /// registered, so a later admitted request can report a terminal failure
-    /// instead of "still mounting".
-    pub fn mark_publication_failed(&self, project_root: &Path) {
-        let canonical = project_root.canonicalize().ok();
+    /// Begin mandatory owner publication for an exact registered root.
+    pub fn begin_publication(
+        &self,
+        registered_root: &Path,
+    ) -> Option<ProjectRuntimePublicationAttemptV1> {
         let mut runtimes = self.lock_runtimes();
-        let key = resolved_runtime_key(&runtimes, project_root, canonical.as_deref())
-            .unwrap_or_else(|| project_root.to_path_buf());
-        runtimes.entry(key).or_default().publication = ProjectRuntimePublicationStateV1::Failed;
+        let runtime = runtimes.get_mut(registered_root)?;
+        let identity = Arc::new(());
+        runtime.publication = ProjectRuntimePublicationStateV1::Warming;
+        runtime.publication_attempt = Some(Arc::clone(&identity));
+        Some(ProjectRuntimePublicationAttemptV1 {
+            registered_root: registered_root.to_path_buf(),
+            identity,
+        })
     }
 
-    /// Record that mandatory owners published for this project.
-    pub fn mark_publication_ready(&self, project_root: &Path) {
-        let canonical = project_root.canonicalize().ok();
+    fn finish_publication(
+        &self,
+        attempt: &ProjectRuntimePublicationAttemptV1,
+        state: ProjectRuntimePublicationStateV1,
+    ) -> bool {
         let mut runtimes = self.lock_runtimes();
-        if let Some(key) = resolved_runtime_key(&runtimes, project_root, canonical.as_deref()) {
-            runtimes.entry(key).or_default().publication = ProjectRuntimePublicationStateV1::Ready;
+        let Some(runtime) = runtimes.get_mut(&attempt.registered_root) else {
+            return false;
+        };
+        if !runtime
+            .publication_attempt
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &attempt.identity))
+        {
+            return false;
         }
+        runtime.publication = state;
+        runtime.publication_attempt = None;
+        true
+    }
+
+    /// Record terminal owner failure only for the attempt that is still current.
+    pub fn mark_publication_failed(&self, attempt: &ProjectRuntimePublicationAttemptV1) -> bool {
+        self.finish_publication(attempt, ProjectRuntimePublicationStateV1::Failed)
+    }
+
+    /// Record successful mandatory owner publication for the current attempt.
+    pub fn mark_publication_ready(&self, attempt: &ProjectRuntimePublicationAttemptV1) -> bool {
+        self.finish_publication(attempt, ProjectRuntimePublicationStateV1::Ready)
     }
 
     /// Project equivalent authorities from linked roots onto one result.
@@ -1494,7 +1527,7 @@ impl ProjectRuntimeRegistryV1 {
 /// This set is lexical only. Callers that have a canonicalize result pass it
 /// as `canonical_root` so matching does not touch the filesystem while the
 /// registry lock is held.
-fn candidate_request_roots(
+pub(super) fn candidate_request_roots(
     project_root: &Path,
     canonical_root: Option<&Path>,
 ) -> BTreeSet<PathBuf> {
@@ -1506,35 +1539,29 @@ fn candidate_request_roots(
     roots
 }
 
-fn request_root_matches(
-    registered: &Path,
-    project_root: &Path,
-    canonical_root: Option<&Path>,
-) -> bool {
-    let candidates = candidate_request_roots(project_root, canonical_root);
-    if candidates.contains(registered) || candidates.contains(&plain_host_path(registered)) {
-        return true;
-    }
-    same_canonical_path(registered, project_root)
-        || canonical_root
-            .is_some_and(|canonical_root| same_canonical_path(registered, canonical_root))
+pub(super) enum ProjectRuntimeKeyResolutionV1 {
+    Missing,
+    Unique(PathBuf),
+    Ambiguous,
 }
 
-fn resolved_runtime_key(
+pub(super) fn resolve_runtime_key(
     runtimes: &BTreeMap<PathBuf, ProjectRuntime>,
     project_root: &Path,
     canonical_root: Option<&Path>,
-) -> Option<PathBuf> {
+) -> ProjectRuntimeKeyResolutionV1 {
     let candidates = candidate_request_roots(project_root, canonical_root);
-    for key in &candidates {
-        if runtimes.contains_key(key) {
-            return Some(key.clone());
-        }
-    }
-    runtimes
+    let mut matches = runtimes
         .keys()
-        .find(|key| candidates.contains(*key) || candidates.contains(&plain_host_path(key)))
-        .cloned()
+        .filter(|key| candidates.contains(*key) || candidates.contains(&plain_host_path(key)));
+    let Some(first) = matches.next() else {
+        return ProjectRuntimeKeyResolutionV1::Missing;
+    };
+    if matches.next().is_some() {
+        ProjectRuntimeKeyResolutionV1::Ambiguous
+    } else {
+        ProjectRuntimeKeyResolutionV1::Unique(first.clone())
+    }
 }
 
 fn runtime_for_lookup<'a>(
@@ -1542,10 +1569,16 @@ fn runtime_for_lookup<'a>(
     project_root: &Path,
     canonical_root: Option<&Path>,
 ) -> Option<&'a ProjectRuntime> {
-    resolved_runtime_key(runtimes, project_root, canonical_root).and_then(|key| runtimes.get(&key))
+    let ProjectRuntimeKeyResolutionV1::Unique(key) =
+        resolve_runtime_key(runtimes, project_root, canonical_root)
+    else {
+        return None;
+    };
+    runtimes.get(&key)
 }
 
 impl ProjectRuntimeRegistryV1 {
+    #[cfg(test)]
     fn component_with_canonical_fallback<C>(
         runtimes: &BTreeMap<PathBuf, ProjectRuntime>,
         project_root: &Path,
