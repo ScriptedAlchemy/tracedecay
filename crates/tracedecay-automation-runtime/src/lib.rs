@@ -72,25 +72,3 @@ pub(crate) mod tracedecay {
     pub(crate) use crate::ports::project_runtime::TraceDecay;
     pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
 }
-
-/// Host-install surface historically reached as `crate::agents`.
-///
-/// The functions that used to live on `tracedecay-agent-hosts::agents` and
-/// that automation still calls are either implemented here (pure helpers) or
-/// registered through [`automation::host_io`].
-#[allow(unused_imports)]
-pub(crate) mod agents {
-    pub use crate::automation::host_io::{
-        ManagedSkillExportReport, export_managed_skills_to_agent_hosts,
-        export_managed_skills_to_agents, home_dir, safe_remove_host_file, safe_write_json_file,
-        safe_write_text_file, uses_default_user_profile, with_host_config_write_intents,
-    };
-
-    pub(crate) mod plugin_bundle {
-        pub use crate::automation::host_io::{PluginFile, codex_agent_files};
-    }
-
-    pub(crate) mod prompt_rules {
-        pub const SKILL_INDEX_START: &str = crate::automation::host_io::SKILL_INDEX_START;
-    }
-}

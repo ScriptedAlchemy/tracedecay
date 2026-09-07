@@ -106,7 +106,6 @@ fn unregistered_admission(
 fn register_agent_host_ports() {
     use tracedecay_automation_runtime::ports as automation_ports;
 
-    tracedecay_agent_hosts::register_automation_host_io();
     automation_ports::codex_app_server::register(run_codex_app_server_prompt);
     automation_ports::session_store::register_canonical_project_key(
         tracedecay_global_db::RegisteredGlobalDb::canonical_project_key,
@@ -326,20 +325,6 @@ mod tests {
                 .expect("canonical checkout")
         );
         assert!(layout.identity.project_id.is_some());
-    }
-
-    /// The automation host-I/O bundle is still a process-global slot the
-    /// root fills whole; this pins that registration installs every callback
-    /// of the bundle rather than a partial one.
-    #[test]
-    fn the_automation_host_io_bundle_is_registered_after_registration() {
-        let _pinned = registered();
-        let io = tracedecay_automation_runtime::automation::host_io::registered()
-            .expect("register_runtime_ports must install the automation host-I/O bundle");
-        assert!(
-            !(io.codex_agent_files)().is_empty(),
-            "the registered bundle must serve the embedded Codex agent files"
-        );
     }
 
     /// The tool catalog is no longer wired here at all: host installers read

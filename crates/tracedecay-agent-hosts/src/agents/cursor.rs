@@ -83,6 +83,7 @@ impl AgentIntegration for CursorIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Cursor,
                 &cursor_plugin_install_dir(home),
@@ -377,6 +378,7 @@ fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Resu
         tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     super::retired_memory_digest::remove_state(&profile_root)?;
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+        &crate::host_io(),
         &profile_root,
         tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Cursor,
         install_dir,
