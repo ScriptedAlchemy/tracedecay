@@ -149,7 +149,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             configuration_digest.clone(),
             tracedecay_domain::configuration::safe_work_topology_policy_v1(),
             proposal_routing,
-            denied_work_evidence_retrieval(),
+            denied_work_evidence_retrieval(scope.clone()),
         )
         .await
         .expect("registered Work runtime");
@@ -563,7 +563,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
             configuration_digest,
             tracedecay_domain::configuration::safe_work_topology_policy_v1(),
             proposal_routing,
-            denied_work_evidence_retrieval(),
+            denied_work_evidence_retrieval(scope.clone()),
         )
         .await
         .expect("registered Work runtime");

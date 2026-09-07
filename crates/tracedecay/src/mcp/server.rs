@@ -522,6 +522,9 @@ impl MountedProjectApplicationRetrievalV1 {
         Ok(
             crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
                 self.retrieval_for_scope(expected_scope)?,
+                crate::daemon::work_evidence_retrieval::WorkEvidenceRetrievalAuthorityV1::mounted_session(
+                    &self.identity,
+                ),
             )
             .with_federated_authority(federated_authority),
         )
@@ -1312,6 +1315,9 @@ impl McpServer {
             None => Ok(
                 crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
                     self.project_session_retrieval_for_scope(expected_scope)?,
+                    crate::daemon::work_evidence_retrieval::WorkEvidenceRetrievalAuthorityV1::Unavailable {
+                        scope: expected_scope.clone(),
+                    },
                 )
                 .with_federated_authority(federated_authority),
             ),

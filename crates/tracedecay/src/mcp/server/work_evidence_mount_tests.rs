@@ -83,6 +83,47 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
     );
 }
 
+/// A reopen mounts a fresh retrieval service over the same session store and
+/// root; that is the same Work evidence authority. A mount over a different
+/// store under the same project scope is not.
+#[test]
+fn work_evidence_authority_is_the_mounted_store_not_the_service_object() {
+    let federated = Arc::new(MissingFederatedAuthority);
+    let (first_mount, scope) = mounted_scope("project.work-evidence-mount");
+    let (reopened_mount, _) = mounted_scope("project.work-evidence-mount");
+    assert!(!Arc::ptr_eq(&first_mount.service, &reopened_mount.service));
+    let first = first_mount
+        .work_evidence_retrieval(&scope, federated.clone())
+        .expect("first open binds the adapter");
+    let reopened = reopened_mount
+        .work_evidence_retrieval(&scope, federated.clone())
+        .expect("reopen binds a fresh adapter");
+    assert!(
+        first.same_authority(&reopened),
+        "a fresh service over the same store and root is the same authority"
+    );
+
+    let mut foreign_identity_mount = reopened_mount.clone();
+    foreign_identity_mount.identity = ResolvedSessionIdentity::for_project(
+        ProfileId::new("profile.work-evidence-mount").unwrap(),
+        ProjectId::new("project.work-evidence-mount").unwrap(),
+        SessionStoreId::new("store.work-evidence-foreign").unwrap(),
+        SessionRootId::new("root.work-evidence-mount").unwrap(),
+        ResolvedGitRoute::new(
+            RepositoryId::new("repository.work-evidence-mount").unwrap(),
+            WorktreeId::new("worktree.work-evidence-mount").unwrap(),
+            BranchId::new("branch.work-evidence-mount").unwrap(),
+        ),
+    );
+    let foreign = foreign_identity_mount
+        .work_evidence_retrieval(&scope, federated)
+        .expect("the foreign store still identifies the same checkout scope");
+    assert!(
+        !first.same_authority(&foreign),
+        "a different session store under the same project scope is a different authority"
+    );
+}
+
 /// The mounted identity carries the branch the graph scope was *registered*
 /// under, while a live request carries whatever branch HEAD is on now. The
 /// branch label is not checkout identity: a checkout that switched branches

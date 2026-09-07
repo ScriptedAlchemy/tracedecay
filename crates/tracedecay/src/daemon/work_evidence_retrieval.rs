@@ -61,17 +61,58 @@ pub(crate) trait WorkFederatedQueryAuthorityPortV1: Send + Sync {
     ) -> WorkFederatedQueryAuthorityFutureV1<'a>;
 }
 
+/// The canonical authority a Work evidence adapter retrieves from.
+///
+/// Every project open constructs a fresh retrieval service, so the adapter's
+/// identity is what that service is bound to — never the service object. Two
+/// adapters over one mounted session store and root under one owner are the
+/// same authority; a reopen of the same route therefore reconciles with the
+/// registered Work runtime instead of degrading it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkEvidenceRetrievalAuthorityV1 {
+    /// The mounted project session retrieval: one exact store and root under
+    /// one owner. The branch reference is deliberately absent; it is a label,
+    /// not checkout identity.
+    MountedSession {
+        owner: tracedecay_session_memory::context::SessionOwner,
+        store_id: tracedecay_session_memory::context::SessionStoreId,
+        root_id: tracedecay_session_memory::context::SessionRootId,
+    },
+    /// No project session retrieval is mounted; the adapter answers
+    /// unavailable for exactly this scope.
+    Unavailable { scope: ResolvedScope },
+}
+
+impl WorkEvidenceRetrievalAuthorityV1 {
+    pub(crate) fn mounted_session(
+        identity: &tracedecay_session_memory::context::ResolvedSessionIdentity,
+    ) -> Self {
+        Self::MountedSession {
+            owner: identity.owner().clone(),
+            store_id: identity.store_id().clone(),
+            root_id: identity.root_id().clone(),
+        }
+    }
+}
+
 /// Adapter for the canonical project session retrieval authority.
 #[derive(Clone)]
 pub(crate) struct DaemonWorkEvidenceRetrievalV1 {
     retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+    authority: WorkEvidenceRetrievalAuthorityV1,
     federated_authority: Option<Arc<dyn WorkFederatedQueryAuthorityPortV1>>,
 }
 
 impl DaemonWorkEvidenceRetrievalV1 {
-    pub(crate) fn new(retrieval: Arc<dyn SessionApplicationRetrievalPortV1>) -> Self {
+    /// `authority` names what `retrieval` is bound to; the caller that mounted
+    /// the retrieval service is the only party that knows it.
+    pub(crate) fn new(
+        retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+        authority: WorkEvidenceRetrievalAuthorityV1,
+    ) -> Self {
         Self {
             retrieval,
+            authority,
             federated_authority: None,
         }
     }
@@ -84,8 +125,11 @@ impl DaemonWorkEvidenceRetrievalV1 {
         self
     }
 
+    /// Same retrieval authority and the same daemon-wide federated query
+    /// authority. The federated authority is one process-lifetime owner shared
+    /// by every project open, so its identity is the shared object itself.
     pub(crate) fn same_authority(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.retrieval, &other.retrieval)
+        self.authority == other.authority
             && match (&self.federated_authority, &other.federated_authority) {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 (None, None) => true,
@@ -951,13 +995,14 @@ pub(crate) mod tests {
             .identity()
             .session_request_scope()
             .expect("resolved Work scope");
+        let authority = WorkEvidenceRetrievalAuthorityV1::mounted_session(root.identity());
         let retrieval =
             tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
                 database, root, None,
             )
             .expect("mounted project retrieval service");
         let privacy_domain = id::<PrivacyDomainId>("privacy.work-task-session");
-        let adapter = DaemonWorkEvidenceRetrievalV1::new(Arc::new(retrieval))
+        let adapter = DaemonWorkEvidenceRetrievalV1::new(Arc::new(retrieval), authority)
             .with_federated_authority(Arc::new(StaticFederatedAuthority(Arc::new(
                 federated_authority(privacy_domain),
             ))));

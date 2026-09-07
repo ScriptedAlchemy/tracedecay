@@ -325,6 +325,10 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .identity()
         .session_request_scope()
         .expect("Work scope");
+    let retrieval_authority =
+        crate::daemon::work_evidence_retrieval::WorkEvidenceRetrievalAuthorityV1::mounted_session(
+            retrieval_root.identity(),
+        );
     let retrieval =
         tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
             database.clone(),
@@ -333,9 +337,10 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         )
         .expect("mounted session retrieval");
     let evidence_retrieval =
-        crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
-            retrieval,
-        ))
+        crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
+            Arc::new(retrieval),
+            retrieval_authority,
+        )
         .with_federated_authority(Arc::new(
             crate::daemon::work_evidence_retrieval::tests::StaticFederatedAuthority(Arc::new(
                 crate::daemon::work_evidence_retrieval::tests::federated_authority(id::<

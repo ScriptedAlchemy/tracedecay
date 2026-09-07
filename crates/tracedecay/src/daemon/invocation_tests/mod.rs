@@ -41,11 +41,15 @@ impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalP
     }
 }
 
-pub(super) fn denied_work_evidence_retrieval()
--> crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1 {
-    crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
-        DeniedWorkEvidenceRetrieval,
-    ))
+pub(super) fn denied_work_evidence_retrieval(
+    scope: ResolvedScope,
+) -> crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1 {
+    crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
+        Arc::new(DeniedWorkEvidenceRetrieval),
+        crate::daemon::work_evidence_retrieval::WorkEvidenceRetrievalAuthorityV1::Unavailable {
+            scope,
+        },
+    )
 }
 
 pub(super) fn empty_work_proposal_routing(
