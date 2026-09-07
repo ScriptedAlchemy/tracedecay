@@ -67,25 +67,9 @@ jobs:
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-pr-dogfood
+          shared-key: ci-dev-${{ runner.os }}
           cache-on-failure: true
 
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build checked-out TraceDecay CLI
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
@@ -121,26 +105,20 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
+      # `ci-dev-*` is shared with every other dev-profile build job in this
+      # workflow (`pr-dogfood`, `dashboard`). rust-cache stores dependency
+      # artifacts only, and those are identical for the same lockfile whichever
+      # job compiles them, so one entry serves all three; the first job to
+      # finish saves it and the others see the key already present. The
+      # repository cache is capped at 10 GB and was full of per-job copies of
+      # the same dependencies, which evicted the test lanes' caches between
+      # runs and made every test run a cold build.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-debug-cli-${{ runner.os }}
+          shared-key: ci-dev-${{ runner.os }}
           cache-on-failure: true
 
-      - name: kache compiler cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build tracedecay binary
         run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
@@ -307,22 +285,6 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       # Every `crates/tracedecay` integration target declares
       # `required-features = ["test-helpers"]`, because the fixture surface it
       # gates is used by `tests/common/mod.rs`. Those targets are selected here
@@ -354,25 +316,20 @@ jobs:
       # `cargo test-ci` (the test step below) compiles the suites with; see
       # [profile.perf] in Cargo.toml. A default-profile build here would be a
       # second, unshared dependency graph.
+      #
+      # Every cargo invocation in this lane also selects `--workspace` with
+      # the same root feature. Package selection drives feature unification,
+      # so `-p tracedecay-cli` resolves `tracedecay-code-index` without its
+      # grammar tier and `-p tracedecay-search-eval` resolves 52 dependencies
+      # differently from the workspace: each such invocation compiled its own
+      # copy of the heaviest crates (run 34138693824, cold cache, Linux:
+      # 20 min for the fixture example, 20 min for the parity helpers, 7 min
+      # for one isolated unit test) before the suites themselves compiled.
       - name: Build workspace binaries for the test lane
         run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
 
       - name: Build host-CLI test fixture
-        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
-
-      # This parity test must execute separate feature-off/on binaries. Copy
-      # each result immediately so the second Cargo resolution cannot replace
-      # the first executable in target/perf/examples.
-      - name: Build controlled-workload hotpath parity executables
-        shell: bash
-        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile perf
-
-      - name: Verify controlled-workload hotpath parity
-        run: |
-          cargo nextest run -p tracedecay-search-eval --locked --cargo-profile perf \
-            --run-ignored only \
-            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
-            --no-tests=fail
+        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
 
       # `nested_chunk_fanout_admits_stolen_workers_without_exceeding_width`
       # installs the process-global background CPU authority at width 2, and
@@ -380,21 +337,51 @@ jobs:
       # shared `tracedecay-code-index` lib binary every later test that nests
       # `with_background_cpu_permit` then queues behind a width-2 gate, which
       # deadlocked the binary under libtest fan-out. It is therefore `#[ignore]`d
-      # and run here on its own, single-threaded, so the coverage is kept
-      # without letting one test's process-global install decide the width for
-      # every sibling.
-      - name: Run isolated background-CPU width test
-        run: |
-          cargo test -p tracedecay-code-index --locked --profile perf --lib \
-            nested_chunk_fanout_admits_stolen_workers_without_exceeding_width \
-            -- --ignored --test-threads=1
-
+      # so `cargo test` never runs it alongside its siblings. nextest executes
+      # every test in its own process, so selecting it through the same alias
+      # (below, after the full suite) keeps the coverage without letting the
+      # install leak and without a second compile.
+      #
       # The `test-ci` alias (.cargo/config.toml) is the one maintained
       # definition of the hosted selection — workspace, nextest `ci` policy,
       # root fixture feature, perf cargo profile — so a local `cargo test-ci`
-      # reproduces exactly this run.
+      # reproduces exactly this run. It compiles the whole test graph, so it
+      # runs first: on a cold cache the suite's verdict is the evidence this
+      # lane exists for and must land before anything optional can exhaust the
+      # budget. Every later nextest run rewrites the `ci` profile's junit.xml,
+      # so the report is uploaded immediately after this step.
       - name: Run tests
         run: cargo test-ci --locked
+
+      - name: Upload ${{ matrix.name }} nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.name }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Run isolated background-CPU width test
+        run: |
+          cargo test-ci --locked --run-ignored only \
+            -E 'binary_id(tracedecay-code-index) & test(=chunks::tests::nested_chunk_fanout_admits_stolen_workers_without_exceeding_width)' \
+            --no-tests=fail
+
+      # This parity test must execute separate feature-off/on binaries. Copy
+      # each result immediately so the second Cargo resolution cannot replace
+      # the first executable in target/perf/examples. Under the workspace
+      # selection the feature-off build is a cache hit and the feature-on
+      # build recompiles only the crates whose features change.
+      - name: Build controlled-workload hotpath parity executables
+        shell: bash
+        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile perf --workspace --features tracedecay/test-helpers
+
+      - name: Verify controlled-workload hotpath parity
+        run: |
+          cargo test-ci --locked --run-ignored only \
+            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
+            --no-tests=fail
 
       # Compile-only gate for the features this lane does not enable. Both are
       # otherwise built for the first time at release (`--all-features`), so
@@ -409,19 +396,17 @@ jobs:
       # spawn daemons, so running them here would change this lane's cost and
       # flakiness profile. Enable them as a real test lane separately once
       # they are confirmed green.
+      #
+      # These are dev-profile check builds, a graph this lane shares with
+      # nothing else, and feature wiring does not vary by host, so one OS
+      # carries the gate. The macOS runner compiles at roughly half the Linux
+      # speed (run 34138693824: 62 min vs 33 min for the same binaries build)
+      # and is the lane closest to its budget.
       - name: Check feature-gated surfaces compile
+        if: runner.os == 'Linux'
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
-
-      - name: Upload ${{ matrix.name }} nextest report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nextest-junit-${{ matrix.name }}
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: ignore
-          retention-days: 7
 
   windows-build:
     name: Build Windows tests
@@ -477,23 +462,6 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
-
       # Compile this portable historical-artifact journey before the large
       # root test binaries monopolize the hosted runner. The workspace,
       # feature and cargo-profile selection match the archive, so Cargo
@@ -515,9 +483,12 @@ jobs:
         shell: pwsh
         run: cargo build --workspace --bins --locked --profile perf --features tracedecay/test-helpers
 
+      # `--workspace`, not `-p tracedecay-cli`: the package selection decides
+      # feature unification, and the narrower one recompiles the code-index
+      # and extraction crates in a second configuration (see the Linux lane).
       - name: Build Windows host-CLI test fixture
         shell: pwsh
-        run: cargo build -p tracedecay-cli --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified on the Linux test lane only. Building them here would put a
@@ -689,22 +660,6 @@ jobs:
         with:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -737,22 +692,6 @@ jobs:
           cache-workspace-crates: "false"
           cache-on-failure: true
 
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         run: rustup toolchain install 1.97.1
 
@@ -860,25 +799,9 @@ jobs:
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-dashboard-full-${{ runner.os }}
+          shared-key: ci-dev-${{ runner.os }}
           cache-on-failure: true
 
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Run dashboard integration tests
         run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
 

@@ -7,6 +7,15 @@
 # runs that can never be acted on ahead of the integration branch's own run.
 # A run whose head can no longer be merged has no verdict anyone will read,
 # so it is cancelled rather than left to consume runner time.
+#
+# The same event drops the pull request's Actions caches. A cache entry is
+# restorable only from the ref that saved it or from the default branch, so
+# the `refs/pull/N/merge` entries a closed PR leaves behind (about 0.8 GB per
+# Rust test lane, four lanes per run) can never be read again, yet they count
+# against the repository's 10 GB cache budget and evict the integration
+# branch's own entries — measured 2026-09-07: 4.6 GB of the budget held
+# entries from seven merged child PRs while the Linux test lane's cache had
+# been evicted, so every one of its runs was a cold build.
 name: Cancel runs for closed pull requests
 
 on:
@@ -47,3 +56,19 @@ jobs:
             done
           done
           echo "cancelled $cancelled run(s) for closed head $HEAD_REF"
+
+      - name: Delete the closed pull request's Actions caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MERGE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          deleted=0
+          for cache in $(gh api "repos/$REPO/actions/caches?ref=$MERGE_REF&per_page=100" \
+                           --jq '.actions_caches[].id'); do
+            if gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null 2>&1; then
+              deleted=$((deleted + 1))
+            fi
+          done
+          echo "deleted $deleted cache entry(ies) for $MERGE_REF"
