@@ -15,7 +15,7 @@ use tracedecay_domain::{
     RankingDecisionKind, SourceOccurrenceId,
 };
 
-use super::ordering::compare_fused;
+use super::ordering::{OrderedFusedCandidates, decision_cmp};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DedupeStageError {
@@ -106,115 +106,148 @@ impl DeterministicDedupe {
         Ok((candidates, decisions))
     }
 
+    /// Select one representative per evidence-backed logical-copy cluster.
+    ///
+    /// The input is already in fused order, so a cluster's representative is
+    /// simply its first member and the survivors keep that order without
+    /// another sort. Collapsed copies move into the decision that excluded
+    /// them, keeping the comparator provenance they already carry.
     #[hotpath::measure(label = "query.dedupe.select")]
-    pub fn select_representatives_with_decisions(
+    pub(super) fn select_representatives_with_decisions(
         &self,
-        mut candidates: Vec<FusedCandidate>,
+        candidates: OrderedFusedCandidates,
     ) -> Result<(Vec<FusedCandidate>, Vec<DedupeDecisionV1>), DedupeStageError> {
-        candidates.sort_by(compare_fused);
-        let mut independent = Vec::new();
-        let mut clusters = BTreeMap::<LogicalCopyClusterId, Vec<FusedCandidate>>::new();
-
-        for mut candidate in candidates {
-            if candidate.occurrences.iter().any(|occurrence| {
-                occurrence.logical_copy_cluster_id.is_some()
-                    && occurrence.logical_copy_evidence_anchor.is_none()
-            }) {
-                return Err(DedupeStageError::CopyRelationWithoutEvidence);
-            }
-            let cluster_ids = candidate
-                .occurrences
-                .iter()
-                .filter_map(|occurrence| occurrence.logical_copy_cluster_id.clone())
-                .collect::<BTreeSet<_>>();
-            if cluster_ids.len() > 1 {
-                return Err(DedupeStageError::Contract(
-                    "one fused candidate spans multiple logical-copy clusters".to_owned(),
-                ));
-            }
-            let contradiction = candidate
-                .occurrences
-                .iter()
-                .any(|occurrence| occurrence.evidence_role == EvidenceRole::Contradiction);
-            if contradiction {
-                let evidence_anchor = candidate
-                    .occurrences
-                    .first()
-                    .map(|occurrence| occurrence.retriever_evidence_anchor.clone())
-                    .ok_or(DedupeStageError::CopyRelationWithoutEvidence)?;
-                candidate.decisions.push(RankingDecision {
-                    kind: RankingDecisionKind::ContradictionPreservation,
-                    retriever: None,
-                    policy_anchor: None,
-                    evidence_anchor: Some(evidence_anchor),
-                    detail: "preserved admitted contradiction".to_owned(),
-                });
-                independent.push(candidate);
-            } else if candidate
-                .occurrences
-                .iter()
-                .any(|occurrence| occurrence.evidence_role == EvidenceRole::Corroboration)
-            {
-                // Corroboration is independent evidence, never a redundant
-                // copy selected away merely because it shares a copy cluster.
-                independent.push(candidate);
-            } else if let Some(cluster) = cluster_ids.into_iter().next() {
-                if candidate.occurrences.is_empty() {
-                    return Err(DedupeStageError::CopyRelationWithoutEvidence);
-                }
-                clusters.entry(cluster).or_default().push(candidate);
-            } else {
-                independent.push(candidate);
+        let mut candidates = candidates.into_vec();
+        // cluster -> (representative index, collapsed copy indices), all in
+        // fused order because the input is.
+        let mut clusters = BTreeMap::<LogicalCopyClusterId, (usize, Vec<usize>)>::new();
+        for (index, candidate) in candidates.iter_mut().enumerate() {
+            if let Some(cluster) = copy_cluster_member(candidate)? {
+                clusters
+                    .entry(cluster)
+                    .and_modify(|(_, copies)| copies.push(index))
+                    .or_insert((index, Vec::new()));
             }
         }
 
         let mut decisions = Vec::new();
-        for (cluster, mut copies) in clusters {
-            copies.sort_by(compare_fused);
-            let mut representative = copies.remove(0);
-            if !copies.is_empty() {
-                let evidence_anchor = representative
-                    .occurrences
-                    .iter()
-                    .find_map(|occurrence| occurrence.logical_copy_evidence_anchor.clone())
-                    .ok_or(DedupeStageError::CopyRelationWithoutEvidence)?;
-                let decision = RankingDecision {
-                    kind: RankingDecisionKind::LogicalCopyRepresentativeSelection,
-                    retriever: None,
-                    policy_anchor: None,
-                    evidence_anchor: Some(evidence_anchor),
-                    detail: format!(
-                        "selected {} from logical-copy cluster {}; collapsed [{}]",
-                        representative.anchor_id,
-                        cluster,
-                        copies
-                            .iter()
-                            .map(|candidate| candidate.anchor_id.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    ),
-                };
-                representative.decisions.push(decision.clone());
-                decisions.push(DedupeDecisionV1 {
-                    kept_occurrence: representative.occurrences[0].source_occurrence_id.clone(),
-                    collapsed_occurrences: copies
-                        .iter()
-                        .flat_map(|candidate| {
-                            candidate
-                                .occurrences
-                                .iter()
-                                .map(|occurrence| occurrence.source_occurrence_id.clone())
-                        })
-                        .collect(),
-                    collapsed_candidates: copies.clone(),
-                    copy_cluster: Some(cluster),
-                    decision,
-                });
+        // For every collapsed copy, the decision that takes ownership of it.
+        let mut collapsed_into = vec![None; candidates.len()];
+        for (cluster, (representative, copies)) in clusters {
+            if copies.is_empty() {
+                continue;
             }
-            independent.push(representative);
+            let collapsed_anchors = copies
+                .iter()
+                .map(|&copy| candidates[copy].anchor_id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let collapsed_occurrences = copies
+                .iter()
+                .flat_map(|&copy| {
+                    candidates[copy]
+                        .occurrences
+                        .iter()
+                        .map(|occurrence| occurrence.source_occurrence_id.clone())
+                })
+                .collect();
+            let representative = &mut candidates[representative];
+            let evidence_anchor = representative
+                .occurrences
+                .iter()
+                .find_map(|occurrence| occurrence.logical_copy_evidence_anchor.clone())
+                .ok_or(DedupeStageError::CopyRelationWithoutEvidence)?;
+            let kept_occurrence = representative
+                .occurrences
+                .first()
+                .map(|occurrence| occurrence.source_occurrence_id.clone())
+                .ok_or(DedupeStageError::CopyRelationWithoutEvidence)?;
+            let decision = RankingDecision {
+                kind: RankingDecisionKind::LogicalCopyRepresentativeSelection,
+                retriever: None,
+                policy_anchor: None,
+                evidence_anchor: Some(evidence_anchor),
+                detail: format!(
+                    "selected {} from logical-copy cluster {}; collapsed [{}]",
+                    representative.anchor_id, cluster, collapsed_anchors
+                ),
+            };
+            representative.decisions.push(decision.clone());
+            representative.decisions.sort_by(decision_cmp);
+            for &copy in &copies {
+                collapsed_into[copy] = Some(decisions.len());
+            }
+            decisions.push(DedupeDecisionV1 {
+                kept_occurrence,
+                collapsed_occurrences,
+                collapsed_candidates: Vec::with_capacity(copies.len()),
+                copy_cluster: Some(cluster),
+                decision,
+            });
         }
-        independent.sort_by(compare_fused);
-        hotpath::gauge!("query.dedupe.candidates").set(independent.len());
-        Ok((independent, decisions))
+
+        let mut survivors = Vec::with_capacity(candidates.len());
+        for (candidate, owner) in candidates.into_iter().zip(collapsed_into) {
+            match owner {
+                Some(decision) => decisions[decision].collapsed_candidates.push(candidate),
+                None => survivors.push(candidate),
+            }
+        }
+        hotpath::gauge!("query.dedupe.candidates").set(survivors.len());
+        Ok((survivors, decisions))
     }
+}
+
+/// Validate one candidate's copy relation and classify it for representative
+/// selection. Contradictions are recorded in place and, like corroboration,
+/// stay independent; the cluster of a plain copy member is returned.
+fn copy_cluster_member(
+    candidate: &mut FusedCandidate,
+) -> Result<Option<LogicalCopyClusterId>, DedupeStageError> {
+    if candidate.occurrences.iter().any(|occurrence| {
+        occurrence.logical_copy_cluster_id.is_some()
+            && occurrence.logical_copy_evidence_anchor.is_none()
+    }) {
+        return Err(DedupeStageError::CopyRelationWithoutEvidence);
+    }
+    let cluster_ids = candidate
+        .occurrences
+        .iter()
+        .filter_map(|occurrence| occurrence.logical_copy_cluster_id.clone())
+        .collect::<BTreeSet<_>>();
+    if cluster_ids.len() > 1 {
+        return Err(DedupeStageError::Contract(
+            "one fused candidate spans multiple logical-copy clusters".to_owned(),
+        ));
+    }
+    if candidate
+        .occurrences
+        .iter()
+        .any(|occurrence| occurrence.evidence_role == EvidenceRole::Contradiction)
+    {
+        let evidence_anchor = candidate
+            .occurrences
+            .first()
+            .map(|occurrence| occurrence.retriever_evidence_anchor.clone())
+            .ok_or(DedupeStageError::CopyRelationWithoutEvidence)?;
+        candidate.decisions.push(RankingDecision {
+            kind: RankingDecisionKind::ContradictionPreservation,
+            retriever: None,
+            policy_anchor: None,
+            evidence_anchor: Some(evidence_anchor),
+            detail: "preserved admitted contradiction".to_owned(),
+        });
+        candidate.decisions.sort_by(decision_cmp);
+        return Ok(None);
+    }
+    if candidate
+        .occurrences
+        .iter()
+        .any(|occurrence| occurrence.evidence_role == EvidenceRole::Corroboration)
+    {
+        // Corroboration is independent evidence, never a redundant copy
+        // selected away merely because it shares a copy cluster.
+        return Ok(None);
+    }
+    Ok(cluster_ids.into_iter().next())
 }

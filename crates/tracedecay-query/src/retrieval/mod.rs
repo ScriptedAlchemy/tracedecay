@@ -29,6 +29,7 @@ pub mod query_authority;
 pub mod request;
 pub mod rerank;
 pub mod semantic;
+mod stage_counters;
 pub mod task_session;
 
 pub use self::execution::{
