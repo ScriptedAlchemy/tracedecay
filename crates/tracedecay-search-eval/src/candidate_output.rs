@@ -1252,41 +1252,54 @@ enum PeakRssObservation {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Each target constructs only its own platform-specific variants.
 enum PeakRssPendingReason {
+    #[cfg(any(target_os = "linux", test))]
     LinuxStatusReadFailure(String),
+    #[cfg(any(target_os = "linux", test))]
     LinuxMissingNonzeroVmHwm,
+    #[cfg(any(target_os = "macos", test))]
     MacOsGetrusageFailure(String),
+    #[cfg(any(target_os = "macos", test))]
     MacOsNonPositiveMaxRss,
+    #[cfg(any(windows, test))]
     WindowsK32GetProcessMemoryInfoFailure(String),
+    #[cfg(any(windows, test))]
     WindowsZeroPeakWorkingSetSize,
+    #[cfg(any(not(any(target_os = "linux", target_os = "macos", windows)), test))]
     UnsupportedPlatform(&'static str),
 }
 
 impl std::fmt::Display for PeakRssPendingReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(any(target_os = "linux", test))]
             Self::LinuxStatusReadFailure(error) => write!(
                 formatter,
                 "Linux peak_rss_bytes is unavailable because /proc/self/status could not be read: {error}"
             ),
+            #[cfg(any(target_os = "linux", test))]
             Self::LinuxMissingNonzeroVmHwm => formatter.write_str(
                 "Linux peak_rss_bytes is unavailable because /proc/self/status has no nonzero VmHWM value",
             ),
+            #[cfg(any(target_os = "macos", test))]
             Self::MacOsGetrusageFailure(error) => write!(
                 formatter,
                 "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) failed: {error}"
             ),
+            #[cfg(any(target_os = "macos", test))]
             Self::MacOsNonPositiveMaxRss => formatter.write_str(
                 "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) returned a non-positive ru_maxrss",
             ),
+            #[cfg(any(windows, test))]
             Self::WindowsK32GetProcessMemoryInfoFailure(error) => write!(
                 formatter,
                 "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo failed before PeakWorkingSetSize could be read: {error}"
             ),
+            #[cfg(any(windows, test))]
             Self::WindowsZeroPeakWorkingSetSize => formatter.write_str(
                 "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned zero PeakWorkingSetSize",
             ),
+            #[cfg(any(not(any(target_os = "linux", target_os = "macos", windows)), test))]
             Self::UnsupportedPlatform(platform) => write!(
                 formatter,
                 "{platform} peak_rss_bytes is unavailable because the platform is unsupported"
@@ -2659,14 +2672,21 @@ fn peak_rss_bytes() -> PeakRssObservation {
     // points to a writable value whose exact size is supplied to the API.
     let succeeded =
         unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counter_size) };
-    if succeeded == 0 {
+    let api_error = (succeeded == 0).then(|| std::io::Error::last_os_error().to_string());
+    windows_peak_rss_observation(counters.PeakWorkingSetSize, api_error)
+}
+
+#[cfg(any(windows, test))]
+fn windows_peak_rss_observation(
+    peak_working_set_size: usize,
+    api_error: Option<String>,
+) -> PeakRssObservation {
+    if let Some(error) = api_error {
         return PeakRssObservation::Pending(
-            PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(
-                std::io::Error::last_os_error().to_string(),
-            ),
+            PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(error),
         );
     }
-    match u64::try_from(counters.PeakWorkingSetSize)
+    match u64::try_from(peak_working_set_size)
         .ok()
         .filter(|bytes| *bytes > 0)
     {
@@ -3412,6 +3432,9 @@ pub(crate) mod tests {
         let report =
             crate::evaluate_generated_outputs(fixture_root, &workload, &result).expect("evaluate");
 
+        #[cfg(windows)]
+        let expected_status = crate::DirectEvaluationStatusV1::Pass;
+        #[cfg(not(windows))]
         let expected_status = if peak_rss_bytes().is_measured() {
             crate::DirectEvaluationStatusV1::Pass
         } else {
@@ -3431,6 +3454,38 @@ pub(crate) mod tests {
                 .profiles
                 .iter()
                 .all(|profile| { profile.resource_status == expected_status })
+        );
+
+        let mut quality_failure = result.clone();
+        for output in &mut quality_failure.outputs {
+            for sample in output.resources.values_mut() {
+                sample.status = ResourceMeasurementStatusV1::Measured;
+                sample.peak_rss_bytes = Some(4096);
+                sample.pending_reason = None;
+            }
+            for query in &mut output.queries {
+                query.ranked.clear();
+                query.abstained = true;
+            }
+        }
+        let failed_report =
+            crate::evaluate_generated_outputs(fixture_root, &workload, &quality_failure)
+                .expect("evaluate known quality failure with measured resources");
+        assert_eq!(
+            failed_report.status,
+            crate::DirectEvaluationStatusV1::Fail,
+            "measured resource evidence must not promote a quality failure"
+        );
+        assert!(
+            failed_report.profiles.iter().all(|profile| {
+                profile.resource_status == crate::DirectEvaluationStatusV1::Pass
+            })
+        );
+        assert!(
+            failed_report
+                .profiles
+                .iter()
+                .any(|profile| profile.failed_queries > 0)
         );
 
         let current = publish_corpus(fixture_root, &workload, fixture_admitted_scope)
@@ -3529,23 +3584,63 @@ pub(crate) mod tests {
         assert_eq!(measured.peak_rss_bytes, Some(4096));
         assert_eq!(measured.pending_reason, None);
 
-        let pending = completed_resource_sample(
-            12,
-            PeakRssObservation::Pending(
+        for (reason, expected) in [
+            (
+                PeakRssPendingReason::LinuxStatusReadFailure("denied".to_owned()),
+                "Linux peak_rss_bytes is unavailable because /proc/self/status could not be read: denied",
+            ),
+            (
+                PeakRssPendingReason::LinuxMissingNonzeroVmHwm,
+                "Linux peak_rss_bytes is unavailable because /proc/self/status has no nonzero VmHWM value",
+            ),
+            (
+                PeakRssPendingReason::MacOsGetrusageFailure("denied".to_owned()),
+                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) failed: denied",
+            ),
+            (
+                PeakRssPendingReason::MacOsNonPositiveMaxRss,
+                "macOS peak_rss_bytes is unavailable because getrusage(RUSAGE_SELF) returned a non-positive ru_maxrss",
+            ),
+            (
                 PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(
                     "access denied".to_owned(),
                 ),
+                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo failed before PeakWorkingSetSize could be read: access denied",
             ),
-            vec![7],
-            1,
-        );
-        assert_eq!(pending.status, ResourceMeasurementStatusV1::Pending);
-        assert_eq!(pending.peak_rss_bytes, None);
+            (
+                PeakRssPendingReason::WindowsZeroPeakWorkingSetSize,
+                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned zero PeakWorkingSetSize",
+            ),
+            (
+                PeakRssPendingReason::UnsupportedPlatform("other"),
+                "other peak_rss_bytes is unavailable because the platform is unsupported",
+            ),
+        ] {
+            let pending =
+                completed_resource_sample(12, PeakRssObservation::Pending(reason), vec![7], 1);
+            assert_eq!(pending.status, ResourceMeasurementStatusV1::Pending);
+            assert_eq!(pending.peak_rss_bytes, None);
+            assert_eq!(pending.pending_reason.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn windows_peak_rss_observation_rejects_api_failure_and_zero() {
         assert_eq!(
-            pending.pending_reason.as_deref(),
-            Some(
-                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo failed before PeakWorkingSetSize could be read: access denied"
+            windows_peak_rss_observation(4096, Some("access denied".to_owned())),
+            PeakRssObservation::Pending(
+                PeakRssPendingReason::WindowsK32GetProcessMemoryInfoFailure(
+                    "access denied".to_owned(),
+                )
             )
+        );
+        assert_eq!(
+            windows_peak_rss_observation(0, None),
+            PeakRssObservation::Pending(PeakRssPendingReason::WindowsZeroPeakWorkingSetSize)
+        );
+        assert_eq!(
+            windows_peak_rss_observation(4096, None),
+            PeakRssObservation::Measured(4096)
         );
     }
 
