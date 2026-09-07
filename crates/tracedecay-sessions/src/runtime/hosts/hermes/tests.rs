@@ -24,6 +24,14 @@ use super::coverage::{admit_rows_with_admission_and_cancellation, sqlite_incarna
 use super::ingest::HermesProfileSource;
 use super::*;
 
+/// A state database name carrying URI-special characters, so the opener is
+/// proven to take it as a path and never as a `file:` URI. `?` is not a legal
+/// Windows filename character; `#` and `%` still cover the URI grammar there.
+#[cfg(not(windows))]
+const URI_SPECIAL_STATE_DB: &str = "state #?%.db";
+#[cfg(windows)]
+const URI_SPECIAL_STATE_DB: &str = "state #%.db";
+
 static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
     tokio::sync::OnceCell::const_new();
 static OBSERVED_HERMES_READ_QUERIES: AtomicUsize = AtomicUsize::new(0);
@@ -1375,7 +1383,7 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(open_read_only_strict(&missing).await.is_err());
     assert!(!missing.exists());
 
-    let path = dir.path().join("state #?%.db");
+    let path = dir.path().join(URI_SPECIAL_STATE_DB);
     write_minimal_legacy_state_db(&path, 1);
     let before = std::fs::read(&path).unwrap();
     let wal = sqlite_sidecar(&path, "-wal");

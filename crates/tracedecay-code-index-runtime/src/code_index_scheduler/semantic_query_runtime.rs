@@ -517,7 +517,35 @@ impl CodeIndexSchedulerRegistryV1 {
             code_generation: code_generation.manifest().generation_id.clone(),
             budget: authority.execution.profile().retrieval_budget,
         };
-        if request.validate().is_err() {
+        if let Err(refusal) = request.validate() {
+            // Every predicate collapses into one public abstention, so the
+            // named predicate and its non-secret privacy tuple are the only
+            // way an operator can tell a budget bug from a privacy split.
+            let manifest = code_generation.manifest();
+            tracing::warn!(
+                event = "semantic_query_request_refused",
+                predicate = refusal.predicate.as_str(),
+                error = %refusal.error,
+                scope_privacy_domain = %request.base.scope.privacy_domain,
+                serving_privacy_domain = %manifest.privacy_domain,
+                serving_privacy_key_epoch = manifest.privacy_key_epoch,
+                projection_privacy_domain = %pins.projection.privacy_domain(),
+                projection_privacy_key_epoch = pins.projection.privacy_key_epoch(),
+                query_digest_privacy_domain = %authorized_query.query_digest.privacy_domain,
+                query_digest_key_epoch = authorized_query.query_digest.key_epoch,
+                cursor_key_id = ?authorized_query
+                    .request_cursor
+                    .as_ref()
+                    .map(|cursor| cursor.key_id.as_str()),
+                cursor_key_epoch = ?authorized_query
+                    .request_cursor
+                    .as_ref()
+                    .map(|cursor| cursor.key_epoch),
+                code_generation = %manifest.generation_id,
+                vector_generation = ?pins.vector_generation_id,
+                "the semantic lane request failed its own contract, so the query abstained \
+                 as generation-incompatible"
+            );
             return semantic_abstention(
                 mode,
                 SemanticAbstentionV1::IndexIncompatible,

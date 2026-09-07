@@ -404,10 +404,14 @@ mod tests {
         );
     }
 
+    /// Builds the root URI the way an MCP host does (`file:///D:/...` on
+    /// Windows, `file:///tmp/...` elsewhere); a hand-formatted `file://` +
+    /// native path is not a URI on Windows and parses to no root at all.
     fn initialize_params(root: &Path) -> serde_json::Value {
+        let uri = url::Url::from_file_path(root).expect("absolute fixture root");
         json!({
             "roots": [{
-                "uri": format!("file://{}", root.display()),
+                "uri": uri.as_str(),
                 "name": "workspace"
             }]
         })

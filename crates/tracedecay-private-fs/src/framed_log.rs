@@ -79,19 +79,25 @@ pub fn validate_regular_or_missing(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Restrict an existing file to owner read/write (`0o600` on unix).
+/// Restrict an existing file to owner read/write (`0o600` on unix, the
+/// protected single-ACE current-user DACL on Windows).
 ///
 /// Call this on a path you just created. Prefer [`tighten_existing_file`]
 /// when the file may be missing (that helper no-ops on `NotFound`).
+///
+/// The Windows arm must do real work: a file created under an ordinary
+/// directory inherits that directory's ACEs, and the private readers
+/// (`open_private_file`) refuse exactly that shape, so a writer that only
+/// tightened on Unix published records Windows could never read back.
 #[cfg(unix)]
 pub fn set_owner_private_file_mode(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
-#[cfg(not(unix))]
-pub fn set_owner_private_file_mode(_path: &Path) -> io::Result<()> {
-    Ok(())
+#[cfg(windows)]
+pub fn set_owner_private_file_mode(path: &Path) -> io::Result<()> {
+    crate::windows::make_private_file(path).map(drop)
 }
 
 pub fn tighten_existing_file(path: &Path) -> io::Result<()> {

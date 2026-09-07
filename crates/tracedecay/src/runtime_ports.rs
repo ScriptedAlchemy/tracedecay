@@ -106,7 +106,6 @@ fn unregistered_admission(
 fn register_agent_host_ports() {
     use tracedecay_automation_runtime::ports as automation_ports;
 
-    tracedecay_agent_hosts::register_automation_host_io();
     automation_ports::codex_app_server::register(run_codex_app_server_prompt);
     automation_ports::session_store::register_canonical_project_key(
         tracedecay_global_db::RegisteredGlobalDb::canonical_project_key,
@@ -252,18 +251,26 @@ mod tests {
         pinned
     }
 
+    /// YAML double-quoted scalars treat `\t`/`\U` as escapes. A Windows
+    /// native path must be written so those separators survive as separators.
+    fn hermes_project_root_yaml(project_root: &str) -> String {
+        format!(
+            "plugins:\n  tracedecay:\n    project_root: '{}'\n",
+            project_root.replace('\'', "''")
+        )
+    }
+
     #[test]
     fn hermes_profile_pin_resolves_a_pinned_root_after_registration() {
         let _pinned = registered();
         let temp = tempfile::tempdir().expect("tempdir");
         let config = temp.path().join("config.yaml");
         let pinned = temp.path().join("pinned-project");
+        // Single-quoted so a Windows path's backslashes are not read as YAML
+        // escapes (`\a` -> BEL, `\t` -> TAB).
         std::fs::write(
             &config,
-            format!(
-                "plugins:\n  tracedecay:\n    project_root: \"{}\"\n",
-                pinned.display()
-            ),
+            hermes_project_root_yaml(&pinned.display().to_string()),
         )
         .expect("write hermes profile config");
 
@@ -273,6 +280,22 @@ mod tests {
             tracedecay_sessions::host_ports::hermes_profile_pin::resolve(&config),
             Some(pinned.display().to_string()),
             "registered resolver must back the hermes profile pin port"
+        );
+    }
+
+    #[test]
+    fn hermes_profile_pin_preserves_windows_escape_prone_separators() {
+        let _pinned = registered();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config.yaml");
+        let windows_root = r"C:\Users\temp\pinned-project";
+        std::fs::write(&config, hermes_project_root_yaml(windows_root))
+            .expect("write hermes profile config");
+
+        assert_eq!(
+            tracedecay_sessions::host_ports::hermes_profile_pin::resolve(&config),
+            Some(windows_root.to_string()),
+            "a Windows native path must round-trip through YAML without bell/tab escapes"
         );
     }
 
@@ -326,20 +349,6 @@ mod tests {
                 .expect("canonical checkout")
         );
         assert!(layout.identity.project_id.is_some());
-    }
-
-    /// The automation host-I/O bundle is still a process-global slot the
-    /// root fills whole; this pins that registration installs every callback
-    /// of the bundle rather than a partial one.
-    #[test]
-    fn the_automation_host_io_bundle_is_registered_after_registration() {
-        let _pinned = registered();
-        let io = tracedecay_automation_runtime::automation::host_io::registered()
-            .expect("register_runtime_ports must install the automation host-I/O bundle");
-        assert!(
-            !(io.codex_agent_files)().is_empty(),
-            "the registered bundle must serve the embedded Codex agent files"
-        );
     }
 
     /// The tool catalog is no longer wired here at all: host installers read

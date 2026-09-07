@@ -715,6 +715,12 @@ impl RegisteredWorkRuntime {
     }
 }
 
+/// One project's retained application runtime, shared by every route that
+/// answers to the same store authority.
+///
+/// A linked worktree of the same project, and a reopen of a route whose ports
+/// were rebuilt, join this runtime instead of registering a second one. It is
+/// released with the whole root (`retire_roots`), never per route.
 #[derive(Clone)]
 pub struct RegisteredRetainedRuntime {
     pub(super) scope: ResolvedScope,

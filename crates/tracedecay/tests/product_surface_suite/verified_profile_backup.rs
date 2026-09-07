@@ -216,6 +216,10 @@ fn seed_profile(temp: &TempDir) -> (PathBuf, PathBuf) {
 
         fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600)).unwrap();
     }
+    // Windows analogue of the mode above: the identity record reader refuses
+    // a file that merely inherited the temporary directory's ACEs.
+    #[cfg(windows)]
+    drop(tracedecay_private_fs::windows::make_private_file(&identity_path).unwrap());
     for (name, value) in [("enrollment.json", "{}"), ("config.toml", "[profile]\n")] {
         fs::write(profile.join(name), value).unwrap();
     }
