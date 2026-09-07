@@ -179,6 +179,7 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
             assert!(
                 admit_native_context_scout_lifecycle(
                     &sessions,
+                    Some(&runtime.background_cpu()),
                     ProviderId::new(provider).unwrap(),
                     &identity,
                     range,
@@ -188,6 +189,7 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
             assert!(
                 admit_native_context_scout_lifecycle(
                     &sessions,
+                    Some(&runtime.background_cpu()),
                     ProviderId::new(provider).unwrap(),
                     &identity,
                     range,

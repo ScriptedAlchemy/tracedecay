@@ -565,9 +565,10 @@ impl StoreAdministration {
     pub(super) fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
+        background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
     ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<()> {
         self.session_temporal_refresh_schedulers
-            .configure_codex_preparation_resources(memory)
+            .configure_codex_preparation_resources(memory, background_cpu)
     }
 
     pub(super) fn store_telemetry_sampling(

@@ -34,9 +34,7 @@ use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
     try_stream_new_jsonl_raw_strict_with_resume,
 };
-#[cfg(test)]
-use tracedecay_private_fs::background_cpu::install_process_background_cpu;
-use tracedecay_private_fs::background_cpu::{ProcessBackgroundCpuV1, process_background_cpu};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
     prepare_observation_record_v1,
@@ -328,10 +326,15 @@ pub(crate) const SHARED_JSONL_PAGE_MAX_NEW_BYTES: u64 = MAX_JSONL_RECORD_BYTES a
 // shrunk to the structural meter once transient parser allocations are gone.
 const SHARED_JSONL_WORKER_RESERVATION_BYTES: u64 = 544 * 1024 * 1024;
 
+/// The process resources JSONL page preparation meters against: the
+/// resident-memory authority its page reservations charge and the background
+/// CPU authority its parse workers are admitted through. Both are injected by
+/// the composition root once the process worker plan is installed.
 #[derive(Clone)]
 struct SharedJsonlPreparationAuthority {
     memory: Arc<ProcessResidentMemoryV1>,
     component: ResidentMemoryComponentIdV1,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
 }
 
 static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthority> =
@@ -340,27 +343,32 @@ static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthor
 /// Mount the process-wide JSONL page-preparation authority.
 ///
 /// The first successful install wins. Later calls — including concurrent
-/// `OnceLock::set` losers and fixtures that carry a distinct
-/// [`ProcessResidentMemoryV1`] Arc — are no-ops. `InvalidFrameState` is a
-/// frame-parse failure, not "another caller already mounted preparation".
-/// Treating a second installer as a frame error poisons every later
-/// host-admission fixture in the same process (the `mcp_suite` cascade).
+/// `OnceLock::set` losers and fixtures that carry distinct
+/// [`ProcessResidentMemoryV1`] / [`ProcessBackgroundCpuV1`] Arcs — are no-ops.
+/// `InvalidFrameState` is a frame-parse failure, not "another caller already
+/// mounted preparation". Treating a second installer as a frame error poisons
+/// every later host-admission fixture in the same process (the `mcp_suite`
+/// cascade).
 pub(crate) fn install_shared_jsonl_preparation_authority(
     memory: Arc<ProcessResidentMemoryV1>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
 ) -> TranscriptIngestResult<()> {
     let authority = SharedJsonlPreparationAuthority {
         memory,
         component: ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages")
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?,
+        background_cpu,
     };
     let _ = SHARED_JSONL_PREPARATION_AUTHORITY.set(authority);
     Ok(())
 }
 
 pub(crate) fn shared_jsonl_preparation_workers() -> usize {
-    process_background_cpu().map_or(1, |authority| {
-        shared_jsonl_preparation_workers_from(authority.width().get())
-    })
+    SHARED_JSONL_PREPARATION_AUTHORITY
+        .get()
+        .map_or(1, |authority| {
+            shared_jsonl_preparation_workers_from(authority.background_cpu.width().get())
+        })
 }
 
 const fn shared_jsonl_preparation_workers_from(installed_width: usize) -> usize {
@@ -415,10 +423,13 @@ const fn shared_jsonl_speculative_capacity_from(total_capacity: usize) -> usize 
 
 pub(in crate::runtime) fn shared_jsonl_background_cpu()
 -> TranscriptIngestResult<Arc<ProcessBackgroundCpuV1>> {
-    process_background_cpu().ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
-        provider: "codex",
-        resource: "process background CPU authority",
-    })
+    SHARED_JSONL_PREPARATION_AUTHORITY
+        .get()
+        .map(|authority| Arc::clone(&authority.background_cpu))
+        .ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: "codex",
+            resource: "process background CPU authority",
+        })
 }
 
 pub(in crate::runtime) fn reserve_shared_jsonl_page()
@@ -466,8 +477,8 @@ pub(in crate::runtime) fn install_test_shared_jsonl_preparation_authority() {
             NonZeroU64::new(32 * 1024 * 1024 * 1024).unwrap(),
         ))
     }));
-    install_process_background_cpu(NonZeroUsize::new(48).unwrap()).unwrap();
-    install_shared_jsonl_preparation_authority(memory).unwrap();
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(48).unwrap()));
+    install_shared_jsonl_preparation_authority(memory, background_cpu).unwrap();
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

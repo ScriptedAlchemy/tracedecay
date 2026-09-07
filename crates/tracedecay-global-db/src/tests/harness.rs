@@ -15,6 +15,10 @@ static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 static HOST_ADMISSION_TEST_RESIDENT_MEMORY: OnceLock<
     Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
 > = OnceLock::new();
+#[cfg(test)]
+static HOST_ADMISSION_TEST_BACKGROUND_CPU: OnceLock<
+    Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+> = OnceLock::new();
 
 #[cfg(test)]
 static TRACING_CALLSITE_KEEPALIVE: OnceLock<[tracing::Dispatch; 2]> = OnceLock::new();
@@ -587,15 +591,15 @@ pub struct HostAdmissionTestRuntimeV1 {
 impl HostAdmissionTestRuntimeV1 {
     /// Opens the registered host-admission fixture after mounting the same
     /// process-scoped CPU and resident-memory authorities required by the
-    /// production JSONL capture composition.
+    /// production JSONL capture composition. Both are test-binary statics so
+    /// every fixture in the binary configures preparation with the same pair;
+    /// the sessions preparation authority keeps whichever pair mounted first.
     #[cfg(test)]
     pub(crate) async fn profile_with_session_capture_resources(
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_domain::errors::Result<Self> {
         use std::num::NonZeroUsize;
-        use tracedecay_private_fs::background_cpu::{
-            install_process_background_cpu, process_background_cpu,
-        };
+        use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
         use tracedecay_runtime_core::resident_memory::{
             DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
         };
@@ -605,24 +609,12 @@ impl HostAdmissionTestRuntimeV1 {
                 DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
             ))
         }));
-        let _cpu = if let Some(installed) = process_background_cpu() {
-            installed
-        } else {
-            match install_process_background_cpu(NonZeroUsize::MIN) {
-                Ok(installed) => installed,
-                // Another fixture can win the process-wide installation race
-                // at a different canonical width. Reuse that authority instead
-                // of making test success depend on execution order.
-                Err(error) => process_background_cpu().ok_or_else(|| {
-                    tracedecay_domain::errors::TraceDecayError::Database {
-                        operation: "mount host-admission test background CPU authority".to_owned(),
-                        message: error.to_string(),
-                    }
-                })?,
-            }
-        };
+        let background_cpu = Arc::clone(
+            HOST_ADMISSION_TEST_BACKGROUND_CPU
+                .get_or_init(|| Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN))),
+        );
         tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()
-            .configure_preparation_resources(memory)
+            .configure_preparation_resources(memory, background_cpu)
             .map_err(
                 |error| tracedecay_domain::errors::TraceDecayError::Database {
                     operation: "mount host-admission test resident-memory authority".to_owned(),

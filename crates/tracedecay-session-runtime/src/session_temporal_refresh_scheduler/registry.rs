@@ -18,6 +18,7 @@ use super::wake::{
 use super::worker::run_session_temporal_refresh_scheduler;
 use crate::StoreOwnerKey;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::session_ingest_disabled;
 
 macro_rules! define_pass_report {
@@ -142,6 +143,11 @@ pub struct SessionTemporalRefreshSchedulerRegistry {
     project_lifecycle: tokio::sync::Mutex<()>,
     retired_project_owners: std::sync::Mutex<HashSet<StoreOwnerKey>>,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    /// The process background CPU authority mounted by
+    /// [`Self::configure_codex_preparation_resources`]; retained so historical
+    /// ingest compositions built through this registry inject the same
+    /// authority Codex page preparation meters against.
+    background_cpu: std::sync::OnceLock<Arc<ProcessBackgroundCpuV1>>,
     historical_ingest_admission: Arc<tokio::sync::Semaphore>,
 }
 
@@ -159,6 +165,7 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
             codex_discovery: Arc::new(
                 tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default(),
             ),
+            background_cpu: std::sync::OnceLock::new(),
             historical_ingest_admission: Arc::new(tokio::sync::Semaphore::new(
                 bounded_historical_ingest_permits(),
             )),
@@ -217,11 +224,25 @@ impl SessionTemporalRefreshSchedulerRegistry {
         Arc::clone(&self.historical_ingest_admission)
     }
 
+    /// Mount the process resources session preparation meters against. The
+    /// first mount wins, matching the process-wide Codex preparation authority
+    /// it configures, so a later fixture reopen rejoins the retained CPU
+    /// authority instead of shadowing it.
     pub fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
+        background_cpu: Arc<ProcessBackgroundCpuV1>,
     ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<()> {
-        self.codex_discovery.configure_preparation_resources(memory)
+        self.codex_discovery
+            .configure_preparation_resources(memory, Arc::clone(&background_cpu))?;
+        let _ = self.background_cpu.set(background_cpu);
+        Ok(())
+    }
+
+    /// The retained process background CPU authority, or `None` before
+    /// [`Self::configure_codex_preparation_resources`] ran.
+    pub fn background_cpu(&self) -> Option<Arc<ProcessBackgroundCpuV1>> {
+        self.background_cpu.get().map(Arc::clone)
     }
 
     pub fn codex_discovery(&self) -> Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub> {

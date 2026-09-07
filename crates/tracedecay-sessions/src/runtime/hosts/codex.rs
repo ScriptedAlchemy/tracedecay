@@ -69,6 +69,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1,
 };
@@ -339,11 +340,16 @@ pub(crate) enum CodexDiscoveryDelivery {
 }
 
 impl CodexDiscoveryHub {
+    /// Mount the process resources shared JSONL preparation meters against:
+    /// the resident-memory authority page reservations charge and the
+    /// background CPU authority parse workers are admitted through. The
+    /// composition root calls this once the process worker plan exists.
     pub fn configure_preparation_resources(
         &self,
         memory: std::sync::Arc<ProcessResidentMemoryV1>,
+        background_cpu: std::sync::Arc<ProcessBackgroundCpuV1>,
     ) -> TranscriptIngestResult<()> {
-        install_shared_jsonl_preparation_authority(memory)
+        install_shared_jsonl_preparation_authority(memory, background_cpu)
     }
 
     pub fn register(&self, consumer: &str, source_home: Option<&Path>) {

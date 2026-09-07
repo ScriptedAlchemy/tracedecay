@@ -278,6 +278,7 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     engine
         .invocation
         .install_worker_selection(
+            &engine.store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install test daemon profile worker plan");

@@ -2,6 +2,7 @@
 
 use std::borrow::Borrow;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tracedecay_sessions::admission::HostAdmission;
 use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngestAuthority};
@@ -9,6 +10,7 @@ use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngest
 use tracedecay_global_db::{
     GlobalDbGitCorrelationStore, GlobalDbWorkflowStore, RegisteredGlobalDb,
 };
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_session_memory::transcript::GlobalDbTranscriptStore;
 
 use crate::{HostAdmissionAuthorities, HostAdmissionFacade};
@@ -28,6 +30,11 @@ use crate::{HostAdmissionAuthorities, HostAdmissionFacade};
 /// sites that never cross such a boundary.
 pub struct GlobalDbSessionIngestAuthority<D> {
     db: D,
+    /// The process background CPU authority every admission this authority
+    /// issues prepares captures under. Ingest composition injects the one
+    /// authority the daemon worker plan installed; read-only callers that only
+    /// resolve registered roots leave it unset.
+    background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
 }
 
 impl<D> GlobalDbSessionIngestAuthority<D>
@@ -35,7 +42,18 @@ where
     D: Borrow<RegisteredGlobalDb>,
 {
     pub const fn new(db: D) -> Self {
-        Self { db }
+        Self {
+            db,
+            background_cpu: None,
+        }
+    }
+
+    /// Mounts the process background CPU authority observation capture is
+    /// admitted through.
+    #[must_use]
+    pub fn with_background_cpu(mut self, background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
+        self.background_cpu = Some(background_cpu);
+        self
     }
 
     fn db(&self) -> &RegisteredGlobalDb {
@@ -97,6 +115,10 @@ where
                 profile_id.clone(),
                 self.db(),
             ),
+        };
+        let authorities = match &self.background_cpu {
+            Some(background_cpu) => authorities.with_background_cpu(Arc::clone(background_cpu)),
+            None => authorities,
         };
         Box::new(HostAdmissionFacade::new(authorities))
     }

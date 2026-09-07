@@ -15,6 +15,7 @@ use tracedecay_application::{
 };
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
 
 use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
@@ -137,6 +138,11 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
+    /// The process background CPU authority hook-driven observation capture
+    /// prepares under. Daemon-owned servers carry the one authority the
+    /// bootstrap worker plan installed; direct servers leave it absent and
+    /// capture fails closed as `background_cpu_unavailable`.
+    pub(crate) background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
     pub(crate) project_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
     pub(crate) user_session_refresh_wake: Option<Arc<dyn SessionTemporalRefreshWakePort>>,
     pub(crate) project_session_refresh_serving: Option<Arc<dyn SessionProjectionServingStatusPort>>,
@@ -208,6 +214,7 @@ pub(crate) struct McpServerDaemonAuthority {
     pub(crate) profile_identity: LocalProfileIdentityAuthorityV1,
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
+    pub(crate) background_cpu: Arc<ProcessBackgroundCpuV1>,
     pub(crate) project_session_refresh_wake:
         tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) user_session_refresh_wake:
@@ -259,6 +266,7 @@ impl McpServerConstructionContext {
             profile_session_db: None,
             session_sync_service: None,
             host_admission_broker: None,
+            background_cpu: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
             project_session_refresh_serving: None,
@@ -335,6 +343,7 @@ impl McpServerConstructionContext {
             profile_identity,
             databases,
             host_admission_broker,
+            background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
             session_sync_service,
@@ -362,6 +371,7 @@ impl McpServerConstructionContext {
             profile_session_db: Some(databases.profile_sessions),
             session_sync_service: Some(session_sync_service),
             host_admission_broker,
+            background_cpu: Some(background_cpu),
             project_session_refresh_wake: Some(project_session_refresh_wake),
             user_session_refresh_wake: Some(user_session_refresh_wake),
             project_session_refresh_serving: Some(project_session_refresh_serving),
@@ -427,6 +437,7 @@ impl McpServerConstructionContext {
             profile_session_db: None,
             session_sync_service: None,
             host_admission_broker: None,
+            background_cpu: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
             project_session_refresh_serving: None,

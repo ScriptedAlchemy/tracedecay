@@ -1,5 +1,6 @@
 use tracedecay_application::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or
@@ -16,6 +17,9 @@ pub struct SessionAuthorities<'a> {
     /// Registered profile (user-scope) session store.
     pub(crate) user: Option<&'a RegisteredGlobalDbLeaseV1>,
     pub(crate) profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
+    /// The process background CPU authority host observation capture prepares
+    /// under; absent on direct servers, where capture fails closed.
+    pub(crate) background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
     pub(crate) profile_retained_authority:
         Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     pub(crate) project_lcm:
@@ -34,6 +38,7 @@ impl<'a> SessionAuthorities<'a> {
             project,
             user,
             profile_identity: None,
+            background_cpu: None,
             profile_retained_authority: None,
             project_lcm: None,
             profile_lcm: None,
@@ -45,6 +50,14 @@ impl<'a> SessionAuthorities<'a> {
         profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
     ) -> Self {
         self.profile_identity = profile_identity;
+        self
+    }
+
+    pub(crate) fn with_background_cpu(
+        mut self,
+        background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
+    ) -> Self {
+        self.background_cpu = background_cpu;
         self
     }
 

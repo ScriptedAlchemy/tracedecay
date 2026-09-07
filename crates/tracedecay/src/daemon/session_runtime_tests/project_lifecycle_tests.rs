@@ -70,6 +70,8 @@ async fn register(
             project_sessions: project_sessions.clone(),
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions,
+            background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
+                .expect("install fixture worker plan authority"),
             startup_import: false,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
             user_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -456,6 +458,8 @@ async fn registration_recovery_fences_concurrent_execute() {
                 project_sessions,
                 user_sessions: profile_sessions.clone(),
                 registry: profile_sessions,
+                background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
+                    .expect("install fixture worker plan authority"),
                 startup_import: false,
                 project_refresh: SessionTemporalRefreshWake::unavailable(),
                 user_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -563,6 +567,8 @@ async fn terminal_recovered_alias_does_not_suppress_startup_import() {
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
+            background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
+                .expect("install fixture worker plan authority"),
             startup_import: true,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
             user_refresh: SessionTemporalRefreshWake::unavailable(),
@@ -656,6 +662,8 @@ async fn recovery_upgrades_a_journal_whose_frontiers_exceed_one_query() {
             project_sessions,
             user_sessions: profile_sessions.clone(),
             registry: profile_sessions.clone(),
+            background_cpu: crate::host_admission::ensure_process_background_cpu_authority()
+                .expect("install fixture worker plan authority"),
             startup_import: false,
             project_refresh: SessionTemporalRefreshWake::unavailable(),
             user_refresh: SessionTemporalRefreshWake::unavailable(),

@@ -168,6 +168,338 @@ fn durable_index_counts_text_bytes_and_never_evicts_the_active_text_head() {
     assert!(entries.contains(&text_head));
 }
 
+/// The retention rule as the imperative remove/recompute loop it replaced:
+/// recompute the whole vector's deduped bytes, evict the oldest removable
+/// entry, repeat. Kept only as the equivalence and cost oracle for the
+/// single-pass sweep.
+fn reference_retain_bounded_generation_index(
+    entries: &mut Vec<DurableGenerationIndexEntryV1>,
+    active_generation_id: &str,
+    active_text_head_generation_id: Option<&str>,
+) -> GenerationIndexRetentionSweepV1 {
+    fn deduped_bytes(entries: &[DurableGenerationIndexEntryV1], visits: &mut usize) -> u64 {
+        *visits += entries.len();
+        let generation_bytes = entries.iter().fold(0_u64, |total, entry| {
+            total
+                .saturating_add(entry.size_bytes)
+                .saturating_add(entry.segment_bytes)
+        });
+        let mut artifacts = BTreeSet::new();
+        entries.iter().fold(generation_bytes, |total, entry| {
+            let Some(artifact) = entry.text_artifact.as_ref() else {
+                return total;
+            };
+            if artifacts.insert(artifact.artifact_file.as_str()) {
+                total.saturating_add(artifact.artifact_size_bytes)
+            } else {
+                total
+            }
+        })
+    }
+
+    entries.sort_by(|left, right| {
+        (left.sealed_at_micros, left.generation_id.as_str())
+            .cmp(&(right.sealed_at_micros, right.generation_id.as_str()))
+    });
+    let original_len = entries.len();
+    let active_sealed_at = entries
+        .iter()
+        .find(|entry| entry.generation_id == active_generation_id)
+        .map_or(i64::MIN, |entry| entry.sealed_at_micros);
+    let oldest_retained =
+        active_sealed_at.saturating_sub(MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1);
+    entries.retain(|entry| {
+        entry.generation_id == active_generation_id
+            || active_text_head_generation_id == Some(entry.generation_id.as_str())
+            || entry.sealed_at_micros >= oldest_retained
+    });
+    let mut accounting_visits = 0usize;
+    loop {
+        let total_bytes = deduped_bytes(entries, &mut accounting_visits);
+        if entries.len() <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1
+            && total_bytes <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
+        {
+            break;
+        }
+        let Some(index) = entries.iter().position(|entry| {
+            entry.generation_id != active_generation_id
+                && active_text_head_generation_id != Some(entry.generation_id.as_str())
+        }) else {
+            break;
+        };
+        entries.remove(index);
+    }
+    GenerationIndexRetentionSweepV1 {
+        removed: original_len.saturating_sub(entries.len()),
+        accounting_visits,
+    }
+}
+
+/// Deterministic uneven history: an interleaved active generation and text
+/// head, TTL-expired entries, a byte-heavy segment, a text artifact shared by
+/// the three oldest live generations and one shared with the protected text
+/// head, plus enough small entries to overflow the count bound. The retained
+/// sequence is pinned exactly, in canonical order.
+fn uneven_generation_history() -> (
+    Vec<DurableGenerationIndexEntryV1>,
+    DurableGenerationIndexEntryV1,
+    DurableGenerationIndexEntryV1,
+) {
+    let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 3;
+    let active = indexed_generation(500, now, 64, true);
+    let mut text_head = indexed_generation(400, now - 50, 64, true);
+    let text_head_id =
+        CodeGenerationId::new(text_head.generation_id.clone()).expect("text-head generation id");
+    let head_artifact = text_artifact(&text_head_id, 1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 4);
+    text_head.text_artifact = Some(head_artifact.clone());
+    let mut entries = vec![
+        indexed_generation(
+            1,
+            now - MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 - 5,
+            1,
+            false,
+        ),
+        indexed_generation(
+            2,
+            now - MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 - 1,
+            1,
+            true,
+        ),
+        text_head.clone(),
+        active.clone(),
+    ];
+    // The three oldest live generations share one half-budget artifact:
+    // evicting the first two must not release its bytes, evicting the third
+    // must. Together with the head artifact and the segment-heavy entry the
+    // history starts exactly one artifact over the byte bound.
+    let shared_id =
+        CodeGenerationId::new(indexed_generation(20, 0, 0, false).generation_id).expect("id");
+    let shared_artifact = text_artifact(&shared_id, 2, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2);
+    for sequence in 20..23 {
+        let mut entry = indexed_generation(
+            sequence,
+            now - 90 + i64::try_from(sequence - 20).expect("offset"),
+            8,
+            sequence % 2 == 0,
+        );
+        entry.text_artifact = Some(shared_artifact.clone());
+        entries.push(entry);
+    }
+    let mut segment_heavy = indexed_generation(10, now - 70, 1, true);
+    segment_heavy.segment_bytes = MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 4;
+    entries.push(segment_heavy);
+    // One removable generation shares the protected head's artifact, so its
+    // eviction never releases those bytes.
+    let mut head_sharer = indexed_generation(30, now - 60, 8, false);
+    head_sharer.text_artifact = Some(head_artifact);
+    entries.push(head_sharer);
+    for sequence in 100..(100 + MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 + 4) {
+        entries.push(indexed_generation(
+            sequence,
+            now - 40 + i64::try_from(sequence - 100).expect("offset"),
+            u64::try_from(sequence % 7 + 1).expect("size"),
+            sequence % 3 == 0,
+        ));
+    }
+    // Scramble the input order so the canonical sort is exercised.
+    entries.rotate_left(5);
+    entries.swap(0, 7);
+    (entries, active, text_head)
+}
+
+#[test]
+fn single_pass_sweep_pins_the_retained_sequence_of_an_uneven_history() {
+    let (mut entries, active, text_head) = uneven_generation_history();
+    let mut reference = entries.clone();
+
+    let sweep = retain_bounded_generation_index_accounted(
+        &mut entries,
+        &active.generation_id,
+        Some(&text_head.generation_id),
+    );
+    let reference_sweep = reference_retain_bounded_generation_index(
+        &mut reference,
+        &active.generation_id,
+        Some(&text_head.generation_id),
+    );
+
+    let retained: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.generation_id.as_str())
+        .collect();
+    // TTL evicts 1 and 2. The byte bound then takes all three sharers of the
+    // half-budget artifact (its bytes only drop once the last sharer goes),
+    // and the count bound takes the segment-heavy 10, the head sharer 30, and
+    // the six oldest small entries. Both protected heads stay in canonical
+    // order among the newest survivors.
+    let mut expected: Vec<String> = (106..136)
+        .map(|sequence| format!("generation.v1.retention.{sequence:08}"))
+        .collect();
+    expected.insert(0, text_head.generation_id.clone());
+    expected.push(active.generation_id.clone());
+    assert_eq!(
+        retained, expected,
+        "retained sequence must be pinned exactly"
+    );
+    assert_eq!(entries.len(), MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1);
+    assert_eq!(sweep.removed, 13);
+    assert_eq!(
+        entries, reference,
+        "single pass must match the remove/recompute loop"
+    );
+    assert_eq!(sweep.removed, reference_sweep.removed);
+    assert!(
+        sweep.accounting_visits <= 2 * (entries.len() + sweep.removed),
+        "single pass visits every entry at most twice (protected + suffix), saw {}",
+        sweep.accounting_visits
+    );
+    assert!(
+        reference_sweep.accounting_visits > sweep.accounting_visits,
+        "the remove/recompute loop revisits the vector per eviction ({} visits) while the single pass does not ({} visits)",
+        reference_sweep.accounting_visits,
+        sweep.accounting_visits
+    );
+}
+
+#[test]
+fn single_pass_sweep_matches_the_remove_recompute_loop_on_randomized_histories() {
+    // Small xorshift so the fixture is reproducible without a dependency.
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = move |bound: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % bound
+    };
+    let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 3;
+    for round in 0..200 {
+        let count = usize::try_from(next(70)).expect("count") + 1;
+        let mut entries: Vec<DurableGenerationIndexEntryV1> = (0..count)
+            .map(|sequence| {
+                let age = i64::try_from(next(
+                    u64::try_from(MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1).expect("ttl") * 2,
+                ))
+                .expect("age");
+                let mut entry = indexed_generation(
+                    sequence + round * 1000,
+                    now - age,
+                    match next(4) {
+                        0 => MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 3,
+                        1 => MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 16,
+                        _ => next(1024),
+                    },
+                    next(2) == 0,
+                );
+                if next(3) == 0 {
+                    entry.segment_bytes = MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 5;
+                }
+                if next(2) == 0 {
+                    // A valid index names one size per artifact file, so the
+                    // shared ordinal decides the size as well as the file.
+                    let shared = usize::try_from(next(6)).expect("artifact ordinal");
+                    let artifact_owner =
+                        CodeGenerationId::new(entry.generation_id.clone()).expect("generation id");
+                    let artifact_size = match shared {
+                        0 => MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2,
+                        1 => MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 3,
+                        other => u64::try_from(other).expect("ordinal") * 1_000,
+                    };
+                    entry.text_artifact =
+                        Some(text_artifact(&artifact_owner, shared, artifact_size));
+                }
+                entry
+            })
+            .collect();
+        let active_index = usize::try_from(next(u64::try_from(count).expect("count"))).expect("i");
+        let active = entries[active_index].generation_id.clone();
+        let text_head = if next(3) == 0 {
+            None
+        } else {
+            let index = usize::try_from(next(u64::try_from(count).expect("count"))).expect("i");
+            Some(entries[index].generation_id.clone())
+        };
+        // Duplicate sealed-at values are legal; the id breaks the tie.
+        if count > 3 {
+            let first = entries[1].sealed_at_micros;
+            entries[2].sealed_at_micros = first;
+        }
+        let mut reference = entries.clone();
+
+        let sweep =
+            retain_bounded_generation_index_accounted(&mut entries, &active, text_head.as_deref());
+        let reference_sweep = reference_retain_bounded_generation_index(
+            &mut reference,
+            &active,
+            text_head.as_deref(),
+        );
+
+        assert_eq!(
+            entries, reference,
+            "round {round}: retained entries diverged"
+        );
+        assert_eq!(
+            sweep.removed, reference_sweep.removed,
+            "round {round}: removed count"
+        );
+    }
+}
+
+#[test]
+fn single_pass_sweep_accounting_is_linear_on_thousands_of_shared_artifact_entries() {
+    let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 3;
+    let active = indexed_generation(0, now, 1, true);
+    let entry_count = 4_096usize;
+    let mut entries = Vec::with_capacity(entry_count + 1);
+    entries.push(active.clone());
+    // Every entry is within TTL and small, but the text artifacts are shared
+    // in groups of eight and large enough that the byte bound forces evictions
+    // one entry at a time until only the newest handful remain: the shape that
+    // made the remove/recompute loop quadratic.
+    for sequence in 1..=entry_count {
+        let mut entry = indexed_generation(sequence, now - 1_000 + sequence as i64, 1, false);
+        let owner = CodeGenerationId::new(entry.generation_id.clone()).expect("generation id");
+        entry.text_artifact = Some(text_artifact(
+            &owner,
+            sequence / 8,
+            MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2,
+        ));
+        entries.push(entry);
+    }
+    let mut reference = entries.clone();
+
+    let sweep =
+        retain_bounded_generation_index_accounted(&mut entries, &active.generation_id, None);
+    let reference_sweep =
+        reference_retain_bounded_generation_index(&mut reference, &active.generation_id, None);
+
+    assert_eq!(entries, reference);
+    assert_eq!(sweep.removed, reference_sweep.removed);
+    assert!(
+        entries.len() <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
+        "count bound must hold"
+    );
+    // Linear: one visit per protected entry plus one per removable entry.
+    assert_eq!(
+        sweep.accounting_visits,
+        entry_count + 1,
+        "single pass must account each entry exactly once"
+    );
+    // The old shape recomputed the whole (shrinking) vector once per eviction,
+    // so its visits grow with evictions × entries; this fixture evicts nearly
+    // everything, so it must be at least three orders of magnitude worse.
+    assert!(
+        reference_sweep.accounting_visits >= sweep.removed * (entry_count / 2),
+        "reference loop visits {} must scale with evictions × entries",
+        reference_sweep.accounting_visits
+    );
+    assert!(
+        reference_sweep.accounting_visits >= 1_000 * sweep.accounting_visits,
+        "single pass ({} visits) must be at least 1000x cheaper than the remove/recompute loop ({} visits)",
+        sweep.accounting_visits,
+        reference_sweep.accounting_visits
+    );
+}
+
 #[derive(Clone)]
 struct FixtureGeneration {
     id: CodeGenerationId,
