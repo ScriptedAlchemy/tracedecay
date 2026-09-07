@@ -373,12 +373,22 @@ mod tests {
         }
     }
 
+    /// Host-absolute fixture path: `artifact_path` validation requires
+    /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+    fn absolute_fixture_path(posix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+        } else {
+            PathBuf::from(posix)
+        }
+    }
+
     fn selection(profile_id: &str, seed: char) -> SemanticProfileSelection {
         SemanticProfileSelection {
             profile_id: profile_id.to_owned(),
             accepted_profile_digest: digest(seed),
             artifact_digest: "a".repeat(64),
-            artifact_path: PathBuf::from("/models/jina"),
+            artifact_path: absolute_fixture_path("/models/jina"),
         }
     }
 
