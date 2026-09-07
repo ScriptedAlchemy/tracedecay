@@ -18,8 +18,6 @@ use super::{
     SpoolError, SpoolIntegrity, SpoolOpenReport, SpoolRecord, TerminalReason,
 };
 
-pub(crate) const DEFAULT_MAX_REPLAY_RECORDS_PER_PASS: usize = 64;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurableHostAdmission {
     pub seq: u64,
@@ -33,8 +31,6 @@ pub struct HostAdmissionRuntime {
     queued: BTreeSet<u64>,
     leased: BTreeSet<u64>,
     completed: BTreeSet<u64>,
-    #[cfg(test)]
-    max_replay_records_per_pass: usize,
 }
 
 impl HostAdmissionRuntime {
@@ -58,17 +54,6 @@ impl HostAdmissionRuntime {
         dir: impl Into<PathBuf>,
         bounds: SpoolBounds,
     ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
-        Self::open_with_replay_limit(dir, bounds, DEFAULT_MAX_REPLAY_RECORDS_PER_PASS)
-    }
-
-    fn open_with_replay_limit(
-        dir: impl Into<PathBuf>,
-        bounds: SpoolBounds,
-        max_replay_records_per_pass: usize,
-    ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
-        if max_replay_records_per_pass == 0 {
-            return Err(SpoolError::MetadataCorrupted.to_open_error());
-        }
         let (spool, report) = hotpath::measure_block!("usecases.admission.open", {
             HostAdmissionSpool::open(dir, bounds)
         })
@@ -82,8 +67,6 @@ impl HostAdmissionRuntime {
             queued: BTreeSet::new(),
             leased: BTreeSet::new(),
             completed: BTreeSet::new(),
-            #[cfg(test)]
-            max_replay_records_per_pass,
         };
         runtime.schedule_missing().map_err(open_outcome_error)?;
         Ok((runtime, report))
@@ -216,58 +199,6 @@ impl HostAdmissionRuntime {
         self.queued.retain(|candidate| *candidate > through);
         self.leased.retain(|candidate| *candidate > through);
         Ok(committed)
-    }
-
-    /// Produces one bounded, deterministic round-robin replay pass.
-    ///
-    /// The spool remains authoritative: scheduler pops select work but never
-    /// remove durable records. A failed source therefore cannot prevent another
-    /// source from making canonical progress, while acknowledgement still
-    /// respects the spool's global commit watermark.
-    #[cfg(test)]
-    pub(crate) fn fair_replay_batch(&self) -> Result<Vec<SpoolRecord>, HostAdmissionOutcome> {
-        self.spool
-            .ensure_replay_allowed()
-            .map_err(|error| error.to_outcome())?;
-        let pending = self.spool.pending_records();
-        if pending.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let total = pending.len();
-        let bounds = self.spool.bounds();
-        let mut scheduler = FairSourceScheduler::new(FairScheduleBounds::with_byte_bounds(
-            total,
-            bounds.max_records_per_source,
-            bounds.max_record_bytes,
-            bounds.max_source_bytes,
-            bounds.max_spool_bytes,
-            bounds.max_spool_bytes_per_source,
-        ));
-        for record in pending {
-            match scheduler.try_enqueue_reference(&record.source, record.seq, record.payload.len())
-            {
-                FairEnqueueOutcome::Accepted { .. } => {}
-                FairEnqueueOutcome::RecordTooLarge | FairEnqueueOutcome::SourceTooLarge => {
-                    return Err(HostAdmissionOutcome::spool_corrupted());
-                }
-                FairEnqueueOutcome::Backpressured => {
-                    return Err(HostAdmissionOutcome::spool_overflow());
-                }
-            }
-        }
-
-        let mut selected = Vec::with_capacity(total.min(self.max_replay_records_per_pass));
-        while selected.len() < self.max_replay_records_per_pass {
-            let Some(next) = scheduler.pop_next() else {
-                break;
-            };
-            let Some(record) = pending.iter().find(|record| record.seq == next.seq) else {
-                return Err(HostAdmissionOutcome::spool_corrupted());
-            };
-            selected.push(record.clone());
-        }
-        Ok(selected)
     }
 
     fn schedule_missing(&mut self) -> Result<(), HostAdmissionOutcome> {
@@ -416,16 +347,14 @@ mod tests {
         assert_eq!(runtime.pending_count(), 1);
         assert!(temp.path().join("records.bin").metadata().unwrap().len() > 0);
 
-        let attempted = runtime.fair_replay_batch().unwrap();
-        assert_eq!(attempted.len(), 1);
-        assert_eq!(attempted[0].seq, admitted.seq);
+        let leased = runtime.lease_next().unwrap();
+        assert_eq!(leased.seq, admitted.seq);
         assert_eq!(
-            runtime.acknowledge(
-                admitted.seq,
-                HostAdmissionOutcome::replay_completed(true, false),
-            ),
-            HostAdmissionOutcome::replay_completed(true, false),
+            leased.payload, b"event-one",
+            "the lease carries the real spool payload"
         );
+        assert!(runtime.lease_next().is_none());
+        assert_eq!(runtime.commit(admitted.seq).unwrap(), 1);
         assert_eq!(runtime.pending_count(), 0);
         assert_eq!(
             HostAdmissionRuntime::open(temp.path(), bounds())
@@ -446,15 +375,9 @@ mod tests {
 
         assert_ne!(first.seq, second.seq);
         assert_eq!(runtime.pending_count(), 2);
-        assert_eq!(
-            runtime
-                .fair_replay_batch()
-                .unwrap()
-                .iter()
-                .map(|record| record.seq)
-                .collect::<Vec<_>>(),
-            [first.seq, second.seq]
-        );
+        assert_eq!(runtime.lease_next().unwrap().seq, first.seq);
+        assert_eq!(runtime.lease_next().unwrap().seq, second.seq);
+        assert!(runtime.lease_next().is_none());
     }
 
     #[test]
@@ -473,9 +396,9 @@ mod tests {
         }
 
         drop(runtime);
-        let reopened = open(&temp);
+        let mut reopened = open(&temp);
         assert_eq!(reopened.pending_count(), 1);
-        assert_eq!(reopened.fair_replay_batch().unwrap()[0].seq, admitted.seq);
+        assert_eq!(reopened.lease_next().unwrap().seq, admitted.seq);
     }
 
     #[test]
@@ -487,28 +410,20 @@ mod tests {
         };
 
         let mut restarted = open(&temp);
-        let recovered = restarted.fair_replay_batch().unwrap();
-        assert_eq!(
-            recovered
-                .iter()
-                .map(|record| record.seq)
-                .collect::<Vec<_>>(),
-            [seq]
-        );
+        assert_eq!(restarted.lease_next().unwrap().seq, seq);
+        assert!(restarted.lease_next().is_none());
         assert_eq!(
             restarted.acknowledge(seq, HostAdmissionOutcome::replay_completed(false, true),),
             HostAdmissionOutcome::replay_completed(false, true),
         );
         assert_eq!(restarted.pending_count(), 0);
-        assert!(open(&temp).fair_replay_batch().unwrap().is_empty());
+        assert!(open(&temp).lease_next().is_none());
     }
 
     #[test]
-    fn fair_replay_is_bounded_and_rotates_sources() {
+    fn leases_rotate_sources_and_carry_the_spool_payload() {
         let temp = TempDir::new().unwrap();
-        let mut runtime = HostAdmissionRuntime::open_with_replay_limit(temp.path(), bounds(), 3)
-            .unwrap()
-            .0;
+        let mut runtime = open(&temp);
         for (source, payload) in [
             ("a", b"a1".as_slice()),
             ("b", b"b1".as_slice()),
@@ -518,17 +433,17 @@ mod tests {
             runtime.admit(source, payload).unwrap();
         }
 
-        let batch = runtime.fair_replay_batch().unwrap();
-        assert_eq!(batch.len(), 3);
+        let leased: Vec<SpoolRecord> = std::iter::from_fn(|| runtime.lease_next()).collect();
         assert_eq!(
-            batch
+            leased
                 .iter()
                 .map(|record| (record.source.as_str(), record.payload.as_slice()))
                 .collect::<Vec<_>>(),
             [
                 ("a", b"a1".as_slice()),
                 ("b", b"b1".as_slice()),
-                ("a", b"a2".as_slice())
+                ("a", b"a2".as_slice()),
+                ("b", b"b2".as_slice()),
             ]
         );
     }

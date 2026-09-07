@@ -48,12 +48,7 @@ pub(crate) fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
 }
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use tracedecay_automation_runtime::automation::host_io::{
-    HostIo, ManagedSkillExportReport, PluginFile,
-};
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 
 pub mod agents;
 pub mod hooks;
@@ -79,55 +74,16 @@ pub(crate) use tracedecay_runtime_core::{config, db, storage};
 /// One `Copy` bundle of the managed-skill export sweeps, host-config writes,
 /// and plugin-bundle files that `tracedecay-automation-runtime` cannot depend
 /// on directly. Installers pass it to every automation entry point that
-/// writes host-owned files; nothing is registered process-wide.
+/// writes host-owned files; nothing is registered process-wide. The report
+/// and plugin-file types are the runtime's own, so the production functions
+/// are handed over directly.
 pub fn host_io() -> HostIo {
-    fn export_to_agents(home: &Path, profile_root: &Path) -> Vec<ManagedSkillExportReport> {
-        crate::agents::export_managed_skills_to_agents(home, profile_root)
-            .into_iter()
-            .map(|report| ManagedSkillExportReport {
-                agent: report.agent,
-                exports: report.exports,
-                error: report.error,
-            })
-            .collect()
-    }
-
-    fn export_to_agent_hosts(
-        home: &Path,
-        project_root: &Path,
-        profile_root: &Path,
-    ) -> Vec<ManagedSkillExportReport> {
-        crate::agents::export_managed_skills_to_agent_hosts(home, project_root, profile_root)
-            .into_iter()
-            .map(|report| ManagedSkillExportReport {
-                agent: report.agent,
-                exports: report.exports,
-                error: report.error,
-            })
-            .collect()
-    }
-
-    fn codex_agent_files() -> &'static [PluginFile] {
-        static FILES: OnceLock<Vec<PluginFile>> = OnceLock::new();
-        FILES
-            .get_or_init(|| {
-                crate::agents::plugin_bundle::codex_agent_files()
-                    .iter()
-                    .map(|file| PluginFile {
-                        relative: file.relative,
-                        contents: file.contents,
-                    })
-                    .collect()
-            })
-            .as_slice()
-    }
-
     HostIo {
-        export_to_agents,
-        export_to_agent_hosts,
+        export_to_agents: crate::agents::export_managed_skills_to_agents,
+        export_to_agent_hosts: crate::agents::export_managed_skills_to_agent_hosts,
         write_text: crate::agents::safe_write_text_file,
         write_json: crate::agents::safe_write_json_file,
         remove_host_file: crate::agents::safe_remove_host_file,
-        codex_agent_files,
+        codex_agent_files: crate::agents::plugin_bundle::codex_agent_files,
     }
 }

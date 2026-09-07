@@ -494,6 +494,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "reserved-doctor-test");
+    prewarm_test_profile_runtime(&store_administration).await;
 
     let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
     let general = match admission.try_admit() {
@@ -614,6 +615,7 @@ async fn tools_list_answers_under_general_saturation() {
     let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "tools-list-saturation");
+    prewarm_test_profile_runtime(&store_administration).await;
 
     let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
     let general = match admission.try_admit() {

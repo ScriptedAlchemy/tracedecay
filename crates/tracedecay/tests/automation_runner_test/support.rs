@@ -526,8 +526,12 @@ impl AgentTaskBackend for SkillJsonBackend {
     {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
-        assert!(request.prompt.contains("managed skill creates or updates"));
+        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
+        assert!(
+            request
+                .prompt
+                .contains("skills array, an explicit outcome, and decision")
+        );
         assert_eq!(request.context["apply"], json!(true));
         assert_eq!(
             request.context["activation_policy"],
@@ -605,7 +609,7 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
         let summaries = request.context["skill_writer_evidence"]["skill_usage_summaries"]
             .as_array()
             .expect("skill usage summaries should be present");
@@ -630,11 +634,19 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
         assert_eq!(code_search["relevant_events"], json!(1));
         assert_eq!(code_search["usage_events"], json!(0));
         assert_eq!(code_search["underused"], json!(true));
+        let output = json!({
+            "skills": [],
+            "outcome": "no_skill_needed",
+            "decision": {
+                "reason": "Usage evidence does not justify a managed skill mutation.",
+                "remedy": "insufficient_repeated_evidence"
+            }
+        });
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
-            output_text: json!({"skills": []}).to_string(),
-            output_json: Some(json!({"skills": []})),
+            output_text: output.to_string(),
+            output_json: Some(output),
             model: Some("fixture-model".to_string()),
             provider: Some("fixture".to_string()),
             input_tokens: Some(10),
@@ -650,7 +662,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
         let families = request.context["skill_writer_evidence"]["underused_tool_families"]
             .as_array()
             .expect("underused tool family evidence should be present");
@@ -671,11 +683,19 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
                 && recommendation["recommendation"] == "diagnose_routing_or_tooling_gap"
                 && recommendation["source"] == "session_tool_usage"
         }));
+        let output = json!({
+            "skills": [],
+            "outcome": "no_skill_needed",
+            "decision": {
+                "reason": "Tool underuse requires hint routing work, not a managed skill mutation.",
+                "remedy": "improve_hint_routing"
+            }
+        });
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
-            output_text: json!({"skills": []}).to_string(),
-            output_json: Some(json!({"skills": []})),
+            output_text: output.to_string(),
+            output_json: Some(output),
             model: Some("fixture-model".to_string()),
             provider: Some("fixture".to_string()),
             input_tokens: Some(10),
@@ -766,8 +786,8 @@ impl AgentTaskBackend for MalformedTextBackend {
             AgentTaskKind::SessionReflector => {
                 ("session_reflector", "session_reflector:v2", "facts")
             }
-            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v2", "skills"),
-            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v1", "facts"),
+            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v3", "skills"),
+            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v2", "facts"),
             AgentTaskKind::UserJob => unreachable!("user jobs are not strict-JSON tasks"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
@@ -863,18 +883,25 @@ impl AgentTaskBackend for CombinedJsonBackend {
         request: &AgentTaskRequest,
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::CombinedReview);
         assert_eq!(request.contract.task_key, "combined_review");
-        assert_eq!(request.contract.prompt_version, "combined_review:v1");
+        assert_eq!(request.contract.prompt_version, "combined_review:v2");
         assert!(request.contract.strict_json);
         assert_eq!(
             request.contract.response_schema["required"],
-            json!(["facts", "skills"])
+            json!(["facts", "skills", "outcome", "decision"])
         );
-        // The combined prompt must compose both per-task prompts.
-        assert!(request.prompt.contains("durable memory facts"));
-        assert!(request.prompt.contains("managed skill creates or updates"));
+        if call == 0 {
+            // The initial combined prompt must compose both per-task prompts;
+            // bounded repair prompts describe only the rejected output.
+            assert!(request.prompt.contains("durable memory facts"));
+            assert!(
+                request
+                    .prompt
+                    .contains("managed skill create, patch/update")
+            );
+        }
         // The agentic curation cutover removed the human-approval gate:
         // combined review dispatches with apply=true and terminal effects
         // commit automatically (e76d8c237, 17dbee838, ed3775692).
@@ -1052,7 +1079,7 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
-        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        assert_request_contract(request, "skill_writer", "skill_writer:v3", "skills");
         let evidence = &request.context["skill_writer_evidence"];
         assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
         assert_eq!(
@@ -1069,11 +1096,19 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
                 .any(|session| session["session_id"] == json!(self.expected_session_id)),
             "replay slices should include the recently active session"
         );
+        let output = json!({
+            "skills": [],
+            "outcome": "no_skill_needed",
+            "decision": {
+                "reason": "The replayed evidence does not establish a reusable skill mutation.",
+                "remedy": "insufficient_repeated_evidence"
+            }
+        });
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
-            output_text: json!({"skills": []}).to_string(),
-            output_json: Some(json!({"skills": []})),
+            output_text: output.to_string(),
+            output_json: Some(output),
             model: Some("fixture-model".to_string()),
             provider: Some("fixture".to_string()),
             input_tokens: Some(10),
@@ -1277,8 +1312,8 @@ pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator:v1",
         AgentTaskKind::SessionReflector => "session_reflector:v2",
-        AgentTaskKind::SkillWriter => "skill_writer:v2",
-        AgentTaskKind::CombinedReview => "combined_review:v1",
+        AgentTaskKind::SkillWriter => "skill_writer:v3",
+        AgentTaskKind::CombinedReview => "combined_review:v2",
         AgentTaskKind::UserJob => "user_job:v1",
     }
 }
@@ -1320,4 +1355,24 @@ pub(crate) fn skill_routing_validation(skill_id: &str) -> Value {
             "allowed_skills": []
         }
     ])
+}
+
+pub(crate) fn no_skill_needed_output(reason: &str, remedy: &str) -> Value {
+    json!({
+        "skills": [],
+        "outcome": "no_skill_needed",
+        "decision": {
+            "reason": reason,
+            "remedy": remedy
+        }
+    })
+}
+
+pub(crate) fn combined_no_skill_needed_output() -> Value {
+    let mut output = no_skill_needed_output(
+        "The combined review found no reusable managed skill mutation.",
+        "insufficient_repeated_evidence",
+    );
+    output["facts"] = json!([]);
+    output
 }

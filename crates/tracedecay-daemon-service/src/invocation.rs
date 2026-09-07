@@ -333,6 +333,10 @@ pub struct DaemonInvocationService {
     /// Every per-project component, published together under one lock. See
     /// [`ProjectRuntimeRegistryV1`] for why these are not twelve maps.
     pub project_runtimes: ProjectRuntimeRegistryV1,
+    /// The request cancellation table this service generation owns. Socket
+    /// and in-process adapters register and cancel through this exact table,
+    /// so another composition in the same process cannot reach its requests.
+    request_cancellations: crate::request_cancellation::RequestCancellationRegistryV1,
     /// Observability owners keyed by exact registered-store authority.
     /// Project roots registered in [`Self::project_runtimes`] hold aliases
     /// onto these, so linked worktrees share one producer and one
@@ -393,6 +397,8 @@ impl DaemonInvocationService {
             authorized_lsp_workspaces: Arc::new(Mutex::new(BTreeMap::new())),
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             project_runtimes: ProjectRuntimeRegistryV1::default(),
+            request_cancellations:
+                crate::request_cancellation::RequestCancellationRegistryV1::default(),
             store_observability: StoreObservabilityRegistryV1::default(),
             operation_events: daemon_operation_event_authority(),
             github_stack_coordinator: Arc::new(

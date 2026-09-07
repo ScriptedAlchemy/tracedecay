@@ -22,22 +22,20 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ContentDigest, ObservationScopeV1, RelationEdgeKindV1,
     SourceSpan, SymbolOccurrenceId, UtcMicros,
 };
-use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
-use tracedecay_store::{
-    FactReadControl, ObservationProjectionStore, ObservationReplayRequest, ObservationStore,
-};
+use tracedecay_graph_db::GraphNamespace;
+use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
 
 use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
     CanonicalProximityEvidenceV1,
 };
-use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    GitEvidenceProjectionStore, GitRefFilter, SessionsForQuery, git_evidence_projection_identity,
-    normalize_worktree,
+    CommitRelationFilter, GitEvidenceGraphHead, GitRefFilter, SessionsForQuery,
+    git_evidence_projection_identity, normalize_worktree, open_git_evidence_graph_view,
 };
 
 const MAX_ACTIVE_SESSIONS_V1: usize = 32;
@@ -160,25 +158,29 @@ impl ProductionProximityEvidenceAuthorityV1 {
         // saved-generation content is rechecked before publication.
         let projection =
             git_evidence_projection_identity(GraphNamespace::new("project").ok()?).ok()?;
-        let graph_read_cancellation = Arc::clone(&cancellation);
-        let snapshot = self
-            .sessions
-            .project_graph_runtime()?
-            .verified_snapshot(
-                &projection,
-                FactReadControl::new(Arc::new(move || graph_read_cancellation.is_cancelled())),
+        // A never-published, legacy, or unreadable head yields no proximity
+        // evidence, the same as before; the bounded view hydrates only the
+        // sessions active on this worktree instead of the whole projection.
+        let GitEvidenceGraphHead::Indexed(view) = open_git_evidence_graph_view(
+            self.sessions.project_graph_runtime()?,
+            &projection,
+            Arc::clone(&cancellation),
+        )
+        .ok()?
+        else {
+            return None;
+        };
+        let hits = view
+            .sessions_for(
+                &SessionsForQuery {
+                    git_ref: GitRefFilter::Worktree(self.normalized_worktree.clone()),
+                    since: Some(since),
+                    until: Some(observed_seconds),
+                    limit: MAX_ACTIVE_SESSIONS_V1,
+                },
+                CommitRelationFilter::Produced,
             )
-            .ok()
-            .flatten()?;
-        let store =
-            GitEvidenceProjectionStore::from_verified_snapshot(snapshot, Arc::new(NeverCancelled))
-                .ok()?;
-        let hits = store.sessions_for(&SessionsForQuery {
-            git_ref: GitRefFilter::Worktree(self.normalized_worktree.clone()),
-            since: Some(since),
-            until: Some(observed_seconds),
-            limit: MAX_ACTIVE_SESSIONS_V1,
-        });
+            .ok()?;
         let mut partial = hits.len() == MAX_ACTIVE_SESSIONS_V1;
         let mut active = BTreeMap::new();
         for hit in hits {

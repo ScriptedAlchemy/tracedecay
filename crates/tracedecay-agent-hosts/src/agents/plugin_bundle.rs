@@ -133,12 +133,10 @@ pub(crate) fn reject_unresolved_placeholders(rendered: &str, host: &str) -> Resu
 }
 
 /// One embedded plugin file: `relative` is its deploy path; `contents` may come
-/// from a different source path in the shared `plugin/` tree.
-#[derive(Clone, Copy)]
-pub struct PluginFile {
-    pub relative: &'static str,
-    pub contents: &'static str,
-}
+/// from a different source path in the shared `plugin/` tree. The type is owned
+/// by the automation runtime so its `HostIo` bundle can hand these slices
+/// through without a per-crate copy.
+pub use tracedecay_automation_runtime::automation::host_io::PluginFile;
 
 macro_rules! plugin_file {
     ($relative:literal, $source:literal) => {

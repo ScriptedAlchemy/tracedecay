@@ -65,6 +65,14 @@ impl DaemonInvocationService {
         self.operation_events.clone()
     }
 
+    /// The cancellation table of this service generation. Every transport
+    /// and executor path registers and cancels requests through it.
+    pub fn request_cancellations(
+        &self,
+    ) -> &crate::request_cancellation::RequestCancellationRegistryV1 {
+        &self.request_cancellations
+    }
+
     pub fn admit_project_request(
         &self,
         project_root: &Path,
@@ -182,7 +190,7 @@ impl DaemonInvocationService {
         let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
-            let Some(lease) = crate::request_cancellation::register(&request_id) else {
+            let Some(lease) = self.request_cancellations.register(&request_id) else {
                 observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,

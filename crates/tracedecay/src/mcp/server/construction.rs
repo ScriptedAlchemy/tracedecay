@@ -128,10 +128,12 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) global_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) accounting_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) registry_db: Option<RegisteredGlobalDbLeaseV1>,
-    pub(crate) session_db: Option<RegisteredGlobalDbLeaseV1>,
-    pub(crate) user_session_db: Option<RegisteredGlobalDbLeaseV1>,
-    pub(crate) registered_session_db: Option<RegisteredGlobalDbLeaseV1>,
-    pub(crate) registered_user_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    /// Registered project session store. Absent on core and direct servers;
+    /// the full server mounts every project-session view from this lease.
+    pub(crate) project_session_db: Option<RegisteredGlobalDbLeaseV1>,
+    /// Registered profile (user-scope) session store, shared by every project
+    /// server of the profile. Absent on core and direct servers.
+    pub(crate) profile_session_db: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     pub(crate) host_admission_broker: Option<tracedecay_host_admission::SharedHostAdmissionBroker>,
@@ -199,9 +201,7 @@ pub(crate) struct McpServerDaemonDatabases {
     pub(crate) accounting: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) registry: RegisteredGlobalDbLeaseV1,
     pub(crate) project_sessions: RegisteredGlobalDbLeaseV1,
-    pub(crate) user_sessions: RegisteredGlobalDbLeaseV1,
-    pub(crate) registered_project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    pub(crate) registered_user_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    pub(crate) profile_sessions: RegisteredGlobalDbLeaseV1,
 }
 
 pub(crate) struct McpServerDaemonAuthority {
@@ -255,10 +255,8 @@ impl McpServerConstructionContext {
             global_db: None,
             accounting_db: None,
             registry_db: None,
-            session_db: None,
-            user_session_db: None,
-            registered_session_db: None,
-            registered_user_session_db: None,
+            project_session_db: None,
+            profile_session_db: None,
             session_sync_service: None,
             host_admission_broker: None,
             project_session_refresh_wake: None,
@@ -306,16 +304,14 @@ impl McpServerConstructionContext {
         mut self,
         global_db: Option<RegisteredGlobalDbLeaseV1>,
         registry_db: Option<RegisteredGlobalDbLeaseV1>,
-        session_db: Option<RegisteredGlobalDbLeaseV1>,
-        user_session_db: Option<RegisteredGlobalDbLeaseV1>,
+        project_session_db: Option<RegisteredGlobalDbLeaseV1>,
+        profile_session_db: Option<RegisteredGlobalDbLeaseV1>,
     ) -> Self {
         self.global_db = global_db;
         self.accounting_db = self.global_db.clone();
         self.registry_db = registry_db;
-        self.session_db.clone_from(&session_db);
-        self.user_session_db.clone_from(&user_session_db);
-        self.registered_session_db = session_db;
-        self.registered_user_session_db = user_session_db;
+        self.project_session_db = project_session_db;
+        self.profile_session_db = profile_session_db;
         self
     }
 
@@ -362,10 +358,8 @@ impl McpServerConstructionContext {
             global_db: Some(registry.clone()),
             accounting_db: databases.accounting,
             registry_db: Some(registry),
-            session_db: Some(databases.project_sessions),
-            user_session_db: Some(databases.user_sessions),
-            registered_session_db: Some(databases.registered_project_sessions),
-            registered_user_session_db: Some(databases.registered_user_sessions),
+            project_session_db: Some(databases.project_sessions),
+            profile_session_db: Some(databases.profile_sessions),
             session_sync_service: Some(session_sync_service),
             host_admission_broker,
             project_session_refresh_wake: Some(project_session_refresh_wake),
@@ -429,10 +423,8 @@ impl McpServerConstructionContext {
             global_db: Some(registry.clone()),
             accounting_db: accounting,
             registry_db: Some(registry),
-            session_db: None,
-            user_session_db: None,
-            registered_session_db: None,
-            registered_user_session_db: None,
+            project_session_db: None,
+            profile_session_db: None,
             session_sync_service: None,
             host_admission_broker: None,
             project_session_refresh_wake: None,

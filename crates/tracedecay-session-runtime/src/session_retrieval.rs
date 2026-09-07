@@ -520,30 +520,6 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    pub fn new_registered_with_serving_port(
-        database: RegisteredGlobalDbLeaseV1,
-        registered_database: RegisteredGlobalDbLeaseV1,
-        mut root: DaemonSessionRetrievalRoot,
-        refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
-    ) -> Option<Self> {
-        if !root.bind_runtime_shard(&registered_database.binding().shard_id) {
-            return None;
-        }
-        if database.binding() != registered_database.binding() {
-            return None;
-        }
-        Some(Self {
-            database: registered_database,
-            root,
-            configuration: SessionRetrievalConfiguration::new(
-                MESSAGE_SEARCH_SCHEMA_VERSION,
-                MESSAGE_SEARCH_RANKING_VERSION,
-            )
-            .ok()?,
-            refresh_status,
-        })
-    }
-
     fn refresh_not_current(&self) -> Option<SessionRetrievalUnavailable> {
         serving_status::not_current_unavailable(self.refresh_status.as_deref()?)
     }

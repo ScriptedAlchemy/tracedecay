@@ -110,3 +110,7 @@ harness = false
 [[bench]]
 name = "cursor_dispatch_model"
 harness = false
+
+[[bench]]
+name = "git_evidence_bounded_reads"
+harness = false
