@@ -1,7 +1,13 @@
 # Force LF line endings for test fixtures — tree-sitter grammars
 # expect Unix line endings and produce wrong parse trees with CRLF.
 tests/fixtures/** text eol=lf
-crates/*/tests/fixtures/** text eol=lf
+# The search-quality candidate workload pins each corpus document against the
+# blob in the pinned source tree, and the packaged evaluator assets are pulled
+# into the binary with include_bytes! under a pinned digest. One corpus
+# document lives outside tests/fixtures, and the packaged mirror is a separate
+# tree; a CRLF checkout rewrites either and fails both byte-exact contracts.
+evals/agent_adoption/fixture/** text eol=lf
+crates/tracedecay-query/assets/runtime-root/** text eol=lf
 # Force LF for bundled plugin skill docs; the skill hygiene tests assert the
 # canonical source files are LF-only, and Windows checkout otherwise rewrites
 # them before the lint runs.
@@ -14,4 +20,21 @@ src/agents/claude_agents/** text eol=lf
 # the binary via include_str! and the generated-plugin snapshot test asserts
 # their exact bytes.
 src/agents/hermes/templates/** text eol=lf
-crates/tracedecay-agent-hosts/src/agents/hermes/templates/** text eol=lf
+# Claude-observation benchmark evidence attests the embedded harness and manifest byte-for-byte.
+# Keep those bytes identical when Git checks the repository out on Windows.
+src/sessions/claude_observation_benchmark.rs text eol=lf
+src/sessions/claude_observation_benchmark/** text eol=lf
+benchmark_data/claude-observation/** text eol=lf
+# Vendored, patched tree-sitter grammars: generated parser sources are
+# reviewed upstream-of-generation (grammar.js + patches), not line-by-line.
+# Collapse them out of PR diffs and language stats.
+vendor/** linguist-generated=true
+crates/tracedecay-code-extraction/vendor/** linguist-generated=true
+# Generated wire-contract and embedded-extension artifacts: the authoritative
+# sources are Rust schemars output (contracts) and the extension TS sources;
+# CI verifies the committed copies byte-for-byte (`contracts:check`, the
+# extension staleness check). Collapse them out of PR diffs and stats.
+dashboard/src/contracts/generated.ts linguist-generated=true
+dashboard/src/contracts/index.ts linguist-generated=true
+dashboard/codegen/schemas/dashboard-contracts.schema.json linguist-generated=true
+plugin/cursor-native-extension/embedded/extension.js linguist-generated=true

@@ -4,11 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_bash_extract_functions() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.sh"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -34,11 +30,7 @@ fn test_bash_extract_functions() {
 
 #[test]
 fn test_bash_extract_readonly_consts() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.sh"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -61,11 +53,7 @@ fn test_bash_extract_readonly_consts() {
 
 #[test]
 fn test_bash_extract_source_import() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.sh"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -81,11 +69,7 @@ fn test_bash_extract_source_import() {
 
 #[test]
 fn test_bash_call_sites() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.sh"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -96,22 +80,18 @@ fn test_bash_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(!call_refs.is_empty(), "should have call refs");
-    // The log function calls echo and date
     assert!(
         call_refs.iter().any(|r| r.reference_name == "echo"),
         "should find echo call"
     );
-    // validate_config calls log
     assert!(
         call_refs.iter().any(|r| r.reference_name == "log"),
         "should find log call"
     );
-    // connect calls curl
     assert!(
         call_refs.iter().any(|r| r.reference_name == "curl"),
         "should find curl call"
     );
-    // main calls validate_config
     assert!(
         call_refs
             .iter()
@@ -122,11 +102,7 @@ fn test_bash_call_sites() {
 
 #[test]
 fn test_bash_docstrings() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.sh"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -179,11 +155,7 @@ fn test_bash_docstrings() {
 
 #[test]
 fn test_bash_file_node() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.sh"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     let files: Vec<_> = result
@@ -197,11 +169,7 @@ fn test_bash_file_node() {
 
 #[test]
 fn test_bash_contains_edges() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.sh"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     let contains: Vec<_> = result
@@ -209,7 +177,6 @@ fn test_bash_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 5 functions + 2 consts + 1 Use = 8 Contains edges
     assert!(
         contains.len() >= 8,
         "should have >= 8 Contains edges, got {}",

@@ -1,0 +1,71 @@
+[package]
+name = "tracedecay-host-admission"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Host-event admission broker, spool, and observation capture"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-domain/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-session-memory/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+]
+# Forwards the sessions fixture surface for this crate's own tests.
+test-helpers = ["tracedecay-sessions/test-helpers"]
+# Forwards the kernel test-transport seam for consumers that publish test
+# runtimes through this crate's feature graph.
+test-transport = ["test-helpers", "tracedecay-runtime-core/test-transport"]
+
+[dependencies]
+hotpath.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tracing = "0.1"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }

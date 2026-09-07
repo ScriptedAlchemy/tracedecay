@@ -1,26 +1,112 @@
 [package]
 name = "tracedecay-sessions"
 version = "0.1.0"
-edition = "2024"
 publish = false
+edition.workspace = true
 license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 description = "TraceDecay session parsing and retrieval primitives"
+include = ["/src/**", "/tests/**"]
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-capture/hotpath",
+    "tracedecay-framing/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-lcm/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
+# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
+# surfaces to dependent crates' test builds only. Never gates production code.
+test-helpers = []
 
 [dependencies]
+base64 = "0.22"
 dirs = "6"
-gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1"] }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
-libsql = "0.9.30"
-regex = "1.12.3"
+hotpath.workspace = true
+md-5 = "0.10.6"
 rayon = "1"
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracing = "0.1"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+url = "2"
+getrandom = "0.2"
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+# `runtime::vibe` and `runtime::workflow_ingest` tests backdate file mtimes.
 filetime = "0.2"
 tempfile = "3"
-tokio = { version = "1", features = ["full", "test-util"] }
+# This crate's own test target needs the kernel's `db::engine::TestConnection`.
+# Declaring the same path dependency with the feature keeps it out of the lib
+# build while feature unification supplies it to every test target here.
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+# Isolated background CPU authorities for the JSONL admission tests.
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0", features = ["test-helpers"] }
+# The live git-attribution test publishes evidence through the hermetic
+# in-memory verified snapshot (`VerifiedGraphSnapshot::memory`).
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+
+[[bench]]
+name = "host_transcript_io"
+harness = false
+
+[[bench]]
+name = "cursor_dispatch_model"
+harness = false

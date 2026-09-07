@@ -18,15 +18,13 @@ Only the current major release line is supported. All minor and patch versions w
 | 6.x (current) | Yes — all minor and patch releases |
 | < 6 | No |
 
-**No vulnerabilities have been reported or discovered to date.**
-
 When a vulnerability is found, the fix is shipped as a new release — there are no backports to older major versions. Fixes are not applied in place to existing binaries. **If you run tracedecay in production automation (CI pipelines, scheduled agents, server-side MCP deployments), keep it updated to the latest release** so any future fix reaches you immediately via `tracedecay upgrade`.
 
 ## Security Model
 
 ### What tracedecay stores
 
-tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tracedecay/` data directories are still honored. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
+tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
 
 - Symbol names, signatures, and docstrings
 - File paths, sizes, and content hashes
@@ -37,26 +35,56 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The active project store is local-only — there is no cloud sync, remote database, or server-side storage.
 
-The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate tracedecayd counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
+The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-savings counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
 
 ### Network access
 
-tracedecay makes **no inbound network connections**. It never binds a port or listens for traffic. The MCP server communicates exclusively over stdio.
+The MCP process communicates with its host over stdio, but TraceDecay also has
+explicitly local listeners:
+
+- `tracedecay dashboard` and the `tracedecay_dashboard` MCP tool can start an
+  HTTP dashboard on `127.0.0.1`, `localhost`, or `[::1]`. Requests must carry
+  a loopback `Host` naming the bound port. Browser requests that include an
+  `Origin` must use the same dashboard origin. The dashboard has no remote-user
+  authentication and is intended only for a trusted, single-user local
+  environment. HTTP clients cannot enable automation pre-run shell commands;
+  `allow_job_commands` requires explicit local operator configuration.
+- The daemon uses an owner-only Unix socket where supported. Its TCP fallback
+  is restricted to a loopback address and requires the daemon authentication
+  preface. The daemon's application HTTP adapter binds an ephemeral
+  `127.0.0.1` port and requires both its bearer token and exact local origin.
+
+These controls limit network reachability; they do not isolate TraceDecay from
+other processes running as the same operating-system user.
 
 Outbound connections are limited to:
 
 | Destination | Purpose | Auth | Failure mode |
 |-------------|---------|------|-------------|
-| `api.github.com` | Check for new releases | None (public API) | Silently ignored |
+| `api.github.com` | Check for releases and, for explicitly configured review sources, verify and perform repository reads | Public requests by default; optional read-only credential from the OS keyring | Public checks are best effort; configured private access fails closed when credentials or permissions cannot be verified |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
-| `tracedecay-counter.enzinol.workers.dev` | Aggregate tracedecayd counter (endpoint keeps its pre-rename name) | None | Silently ignored |
-| `raw.githubusercontent.com` | Fetch model pricing from [LiteLLM](https://github.com/BerriAI/litellm) | None (public file) | Falls back to embedded pricing |
+| `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
+| `tracedecay-counter.enzinol.workers.dev` | Aggregate token-savings counter | None | Silently ignored |
 
-All best-effort network calls use short timeouts (1-5 seconds) and never block the CLI or MCP server. The pricing fetch (5s timeout) only runs during `tracedecay cost` and is cached for 24 hours at `~/.tracedecay/pricing.json`.
+Provider usage and pricing do not add an outbound connection. `tracedecay cost`
+reads immutable provider-native usage observations and the deterministic bundled
+all-provider pricing table, identified by its content digest. Reads are
+side-effect-free: there is no request-triggered network refresh, home-directory
+pricing cache, or pricing environment override. Missing, unknown, or unavailable
+evidence remains typed rather than becoming a zero or a stale estimate. Semantic
+model downloads use a private TraceDecay cache, verify catalog-pinned lengths and
+SHA-256 digests before publication, and can be disabled with `HF_HUB_OFFLINE`.
 
-### No credentials or secrets
+### Credentials and secrets
 
-tracedecay does not require, store, or transmit any credentials, API keys, tokens, or passwords. All external API calls target public, unauthenticated endpoints.
+TraceDecay does not require credentials for its default local and public
+repository behavior. A user may explicitly configure a private GitHub review
+source with `access = "os_keyring"` and keyring service/account locators. The
+secret remains in the operating-system keyring; configuration stores only its
+locator. The daemon reads it into zeroizing memory, sends it only to GitHub
+over HTTPS, and mounts the source only after verifying an exact read-only
+permission set. Missing, ambiguous, write-capable, or unverifiable credentials
+fail closed.
 
 ### MCP server tools
 
@@ -71,20 +99,24 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 
 **Local-state tools** (write only inside the active TraceDecay store, never your source):
 
-- `tracedecay_session_start`, `tracedecay_session_end` — health-metric baselines
-- `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status` — store fact text, entity names, feedback events, trust-score inputs, and memory-bank repair state in the local project database.
+- `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_remove`, `tracedecay_fact_store_supersede`, and `tracedecay_fact_feedback` — store, remove, or supersede fact text, entity names, feedback events, and trust-score inputs in the local project database. The other exact `tracedecay_fact_store_*` routes and `tracedecay_memory_status` are read-only; repair is daemon-owned background work.
 
 ### Support bundles and storage diagnostics
 
-Storage status, doctor, quota, and support-bundle output must report the active project and store class (`project_local`, `profile_sharded`, global/accounting, or legacy) without exposing sensitive payloads by default. A redacted support bundle may include manifests, schema versions, aggregate counts, lock/dirty/quota state, and error codes; it must exclude source code, rendered `read_cache` bodies, transcript text, memory fact content, payload bodies, and response-handle bodies.
+Storage status, doctor, quota, and support-bundle output must report the active project, store class (`project_local`, `profile_sharded`, or global/accounting), and final-shape admission state without exposing sensitive payloads by default. A redacted support bundle may include aggregate counts, lock/dirty/quota state, and error codes; it must exclude source code, rendered `read_cache` bodies, transcript text, memory fact content, payload bodies, and response-handle bodies.
 
-Also redact credential-bearing git remotes, database overrides such as `TRACEDECAY_GLOBAL_DB`, private adapter config paths, response-handle identifiers that could retrieve plaintext, and error strings that embed local paths or secrets. Full paths or payload excerpts require an explicit opt-in flag and sensitive labeling. See [docs/PROFILE-STORAGE-SUPPORT.md](docs/PROFILE-STORAGE-SUPPORT.md) for the support-bundle and fixture contract.
+Also redact credential-bearing git remotes, database overrides such as `TRACEDECAY_GLOBAL_DB`, private adapter config paths, response-handle identifiers that could retrieve plaintext, and error strings that embed local paths or secrets. Full paths or payload excerpts require an explicit opt-in flag and sensitive labeling. See [docs/PROFILE-STORAGE-SUPPORT.md](docs/PROFILE-STORAGE-SUPPORT.md) for the support-bundle privacy boundary, and [the V2 operating model](docs/V2-OPERATING-MODEL.md) for final storage authority and reset behavior.
 
 **Test execution:**
 
 - `tracedecay_run_affected_tests` — compiles and runs the project's own test suite via a `cargo` subprocess (bounded by a configurable wall-clock timeout, default 300 s, and a per-invocation test cap)
 
-The edit tools target a single file with a unique anchor and re-index in place. They never run shell commands you didn't supply, and the server still **cannot** access the network on behalf of the AI agent. Every editing and state-mutating tool is single-file or single-record scoped — there is no bulk-delete or recursive-write primitive.
+The edit tools target a single file with a unique anchor and re-index in place.
+They never run shell commands you did not supply. Network-capable operations
+are limited to the documented release, pricing, semantic-model, telemetry, and
+configured GitHub review paths above. Every editing and state-mutating tool is
+single-file or single-record scoped — there is no bulk-delete or
+recursive-write primitive.
 
 > Note: file edits are applied by the agent on your behalf through your agent's own tool-approval flow. Treat tracedecay's edit tools with the same caution as your agent's built-in file-write tools.
 
@@ -104,22 +136,18 @@ The edit tools target a single file with a unique anchor and re-index in place. 
 
 tracedecay installs **no background daemon, system service, or autostart process by default**. Users can explicitly opt in with `tracedecay daemon install-service`, which installs a per-user systemd service on Linux or a per-user LaunchAgent on macOS. The daemon runs with **standard user privileges** and never requests elevation. Index freshness still relies on on-demand staleness checks, catch-up syncs when MCP clients connect, and bounded hook notifications; the daemon provides shared MCP process/socket reuse and scheduled automation for projects that connect to it.
 
-### Subprocess-isolated extraction
-
-Tree-sitter grammars are compiled C/C++ and can crash the process in ways Rust cannot catch. Each file is parsed inside a short-lived worker subprocess (the hidden `extract-worker` subcommand). The worker authenticates against its parent with a 256-bit per-spawn token supplied via the `TRACEDECAY_WORKER_TOKEN` environment variable; a user invoking `tracedecay extract-worker` directly fails immediately. Opt out with `TRACEDECAY_DISABLE_SUBPROCESS=1`.
-
 ### Unsafe code
 
 The codebase contains minimal `unsafe`, used in two cross-platform places:
 
 - **Memory-mapped monitor ring buffer** (`src/monitor.rs`) — `memmap2` maps `~/.tracedecay/monitor.mmap`, the shared buffer the `tracedecay monitor` TUI reads
-- **Tree-sitter FFI** (`src/extraction/ts_provider.rs`) — constructing the bundled WGSL grammar from its raw C entry point
+- **Tree-sitter FFI** (`crates/tracedecay-code-extraction/src/ts_provider.rs`) — constructing the bundled WGSL grammar from its raw C entry point
 
 The Windows-elevation `unsafe` documented in earlier versions was removed alongside the daemon in 6.0.0.
 
 ## Best Practices
 
-- Add `.tracedecay/` (and, for projects indexed before the rename, `.tracedecay/`) to your `.gitignore` to avoid committing local store markers or repo-local databases.
+- Add `.tracedecay/` to your `.gitignore` to avoid committing local store markers or repo-local databases.
 - If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
 - Keep tracedecay updated (`tracedecay upgrade`) to receive security fixes.
 - Review the [CHANGELOG](CHANGELOG.md) before upgrading to understand what changed.

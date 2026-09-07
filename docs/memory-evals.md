@@ -2,7 +2,7 @@
 
 tracedecay's holographic memory is only useful if agents keep it clean: no run
 noise, no secrets, no duplicate preferences, and recall that actually works
-across sessions. The eval suite under [`eval/`](../eval/) tests those
+across sessions. The memory suite under [`evals/memory/`](../evals/memory/) tests those
 *behaviors* end-to-end instead of unit-testing internals.
 
 The scenario taxonomy, the cost-gating pattern, and several prompts are adapted
@@ -16,27 +16,27 @@ Every scenario follows the same shape:
 
 1. **Fixture** — a throwaway project directory is created, `tracedecay init`
    builds a real `.tracedecay/` store, and the scenario's setup block seeds
-   facts (through the real `fact_store` write path, so HRR vectors and FTS
-   stay consistent) plus optional workspace files. Trust scores,
+   facts (through the real `fact_store` write path, so canonical rows, lineage,
+   and FTS stay consistent) plus optional workspace files. Trust scores,
    retrieval counts, and source labels are then pinned with SQL.
 2. **Drive** — either a scripted tool-call sequence (deterministic layer) or a
    real agent prompted over the generated tracedecay integration (real-model
    layer) exercises the memory write/recall/curation paths.
 3. **Assert** — end-state is checked with plain SQL against the fixture's
-   `.tracedecay/tracedecay.db` (plus structured checks of the
-   `tracedecay memory curate` dry-run report for curation scenarios).
+   `.tracedecay/tracedecay.db` plus terminal automation receipts for curation
+   scenarios.
 4. **Cleanup** — the fixture directory is deleted; nothing touches the host
    project's stores.
 
-Scenario declarations live in [`eval/scenarios/*.json`](../eval/scenarios/)
+Scenario declarations live in [`evals/memory/scenarios/*.json`](../evals/memory/scenarios/)
 and are shared by both layers, so prompts, setup, and assertions can never
 drift apart.
 
 ### Deterministic layer (no LLM, runs in CI)
 
-`tests/memory_eval_test.rs` replays scripted tool-call sequences through the
+`tests/memory_suite/memory_eval_test.rs` replays scripted tool-call sequences through the
 real `tracedecay` binary — the same code path MCP tool calls hit — and runs in
-the normal `cargo nextest run --workspace --no-fail-fast` suite (so it is part
+the normal `cargo nextest run --workspace --all-features --no-fail-fast` suite (so it is part
 of the existing CI test job on Linux/macOS/Windows; CI never calls a model).
 
 Each scenario runs up to two phases:
@@ -55,7 +55,7 @@ Each scenario runs up to two phases:
 
 ### Real-model layer (cost-gated, never in CI)
 
-`eval/run_real_model.py` drives a real agent through the same scenarios:
+`evals/memory/run_real_model.py` drives a real agent through the same scenarios:
 
 - **Hermes** (default): the runner creates an isolated temporary user home,
   runs `tracedecay install --agent hermes` there, and sends each scenario
@@ -71,15 +71,15 @@ Adopting mnemon's cost gate, nothing model-shaped runs unless **both**
 `blocked` report is recorded and the runner exits with code 2:
 
 ```bash
-# blocked (no flags): records eval/runs/<ts>/report.json with status=blocked
-python3 eval/run_real_model.py --scenario memory-no-pollution
+# blocked (no flags): records evals/memory/runs/<ts>/report.json with status=blocked
+python3 evals/memory/run_real_model.py --scenario memory-no-pollution
 
 # real run (consumes model credits/quota)
-python3 eval/run_real_model.py --scenario memory-no-pollution \
+python3 evals/memory/run_real_model.py --scenario memory-no-pollution \
     --agent-turn --i-understand-model-cost --model gpt-5.4-mini
 ```
 
-Reports and per-prompt agent transcripts land under `eval/runs/<timestamp>/`
+Reports and per-prompt agent transcripts land under `evals/memory/runs/<timestamp>/`
 (gitignored). Reports include per-assertion outcomes and best-effort token
 usage extracted from the agent output; the raw transcript is always saved so
 usage claims can be audited.
@@ -91,21 +91,20 @@ usage claims can be audited.
 | `memory-no-pollution` | stable | Single-turn throwaway tokens never become facts; durable decisions still can. |
 | `memory-secret-rejection` | stable | Credential-like values are rejected by the write path before they reach durable memory. |
 | `memory-skip-local` | stable | Content already visible in workspace files is neither stored nor recall-churned. |
-| `memory-supersede-without-dup` | stable | Preference pivots update the existing fact; naive duplicate adds must be flagged by curation dry-run for deletion of the older superseded fact. |
+| `memory-supersede-without-dup` | stable | Preference pivots update the existing canonical fact without creating a pending proposal. |
 | `memory-multiturn-continuity` | stable | Facts stored in one session are recalled (with a real retrieval hit) in the next. |
-| `memory-curation-conservatism` | stable | `tracedecay memory curate` never proposes deleting high-trust, high-access facts absent strong similarity, while genuine near-dups collapse — in dry-run and under `--apply`. |
 | `memory-feedback-trust` | stable | `fact_feedback` (helpful) raises `trust_score` above the seed and appends a `memory_feedback_events` audit row. |
 | `memory-ranking-retrieval-reinforcement` | stable | A frequently-retrieved fact out-ranks an equal-trust, never-retrieved rival — the `combined_score` usage boost, through the real search tool. |
 | `memory-ranking-feedback-promotes` | stable | Rating one fact `helpful` and an equally-relevant rival `unhelpful` flips their order in real search results (the full feedback → trust → rank loop). |
 
 ## Adding a scenario
 
-1. Drop a new `eval/scenarios/<id>.json` (copy an existing one; keep
+1. Drop a new `evals/memory/scenarios/<id>.json` (copy an existing one; keep
    `schema_version: 1`).
-2. Wire a `#[test]` for it in `tests/memory_eval_test.rs` — the
+2. Wire a `#[test]` for it in `tests/memory_suite/memory_eval_test.rs` — the
    `every_scenario_file_is_wired` test fails until you do.
 3. If it has a `real_model` block it is automatically runnable through
-   `eval/run_real_model.py`.
+   `evals/memory/run_real_model.py`.
 
 ## Triggering & adoption scorecard
 
@@ -113,28 +112,28 @@ The layers above test whether the memory *engine* behaves. They do **not** test
 whether a real model *chooses* to use memory unprompted — the behavior that
 actually determines whether durable memory helps a user. That is the
 **fact-store adoption scorecard**, built on the hermetic harness in
-[`eval/hermetic/`](../eval/hermetic/).
+[`evals/hermetic/`](../evals/hermetic/).
 
 ### How it works
 
-`eval/hermetic/run.sh` builds the dev binary, stages it at a non-cargo path,
+`evals/hermetic/run.sh` builds the dev binary, stages it at a non-cargo path,
 installs the plugin into a throwaway `CLAUDE_CONFIG_DIR`/`CODEX_HOME`/
 `TRACEDECAY_DATA_DIR`, indexes a project, then drives a **real** agent
 (`claude -p` or `codex exec --json`) at each corpus prompt and records the
 transcript. `score.py` classifies which tracedecay MCP tools and CLI commands
 each session used. The adoption corpus is
-[`eval/hermetic/corpora/fact-store-adoption.jsonl`](../eval/hermetic/corpora/fact-store-adoption.jsonl);
-`eval/hermetic/scorecard.py` rolls a run's `results.jsonl` into an adoption %
+[`evals/hermetic/corpora/fact-store-adoption.jsonl`](../evals/hermetic/corpora/fact-store-adoption.jsonl);
+`evals/hermetic/scorecard.py` rolls a run's `results.jsonl` into an adoption %
 per bucket.
 
 ```bash
-ENV=$(eval/hermetic/run.sh setup --agent codex --debug)   # subscription; no API
-eval/hermetic/run.sh index --env-dir "$ENV" --project <repo>
-eval/hermetic/run.sh run   --agent codex --env-dir "$ENV" \
-  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl
-python3 eval/hermetic/scorecard.py "$ENV"/results/results.jsonl \
-  --corpus eval/hermetic/corpora/fact-store-adoption.jsonl
-eval/hermetic/run.sh teardown --env-dir "$ENV"
+ENV=$(evals/hermetic/run.sh setup --agent codex --debug)   # subscription; no API
+evals/hermetic/run.sh index --env-dir "$ENV" --project <repo>
+evals/hermetic/run.sh run   --agent codex --env-dir "$ENV" \
+  --corpus evals/hermetic/corpora/fact-store-adoption.jsonl
+python3 evals/hermetic/scorecard.py "$ENV"/results/results.jsonl \
+  --corpus evals/hermetic/corpora/fact-store-adoption.jsonl
+evals/hermetic/run.sh teardown --env-dir "$ENV"
 ```
 
 Cost note: `codex` uses the local subscription (no per-token API); `claude`
@@ -170,7 +169,7 @@ Cost note: `codex` uses the local subscription (no per-token API); `claude`
   tool description did **not** help (the model never reached it).
 - **Fix:** `install --agent codex` writes the shared prompt rules plus a
   proactive-memory paragraph to the **global** `~/.codex/AGENTS.md`
-  (`src/agents/codex.rs::install_codex_global_prompt_rules`).
+  (`crates/tracedecay-agent-hosts/src/agents/codex.rs::install_codex_global_prompt_rules`).
 - **Result (n=1): proactive-store 0% → 100%, overall adoption 40% → 60%.**
 
 **The lever for adoption is the always-on, profile-level instruction the model

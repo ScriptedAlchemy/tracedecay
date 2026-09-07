@@ -1,0 +1,302 @@
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use tracedecay_domain::CodeGenerationId;
+
+use super::{
+    GraphVectorGenerationStoreV1, ProjectSemanticVectorCodeScopeLiveness,
+    ProjectSemanticVectorRetentionStep, ProjectSemanticVectorSourceLiveness,
+    ProjectVectorReadableSources, RetainedSemanticVectorGraphV1,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectVectorRetentionFailure {
+    ResetRequired(String),
+    Corrupt(String),
+    Unavailable(String),
+    Denied(String),
+}
+
+impl ProjectVectorRetentionFailure {
+    pub fn from_configuration(
+        error: tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1,
+    ) -> Self {
+        use tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1;
+        match error {
+            SemanticConfigurationBackendErrorV1::RejectedAt(stage) => Self::Corrupt(format!(
+                "semantic configuration inventory was rejected by its authority at {stage}"
+            )),
+            SemanticConfigurationBackendErrorV1::Conflict => Self::ResetRequired(
+                "semantic configuration inventory changed during retention".to_owned(),
+            ),
+            SemanticConfigurationBackendErrorV1::Rejected => Self::Corrupt(
+                "semantic configuration inventory was rejected by its authority".to_owned(),
+            ),
+            SemanticConfigurationBackendErrorV1::Unavailable => Self::Unavailable(
+                "semantic configuration inventory authority is unavailable".to_owned(),
+            ),
+        }
+    }
+
+    pub fn retention_step(self) -> ProjectSemanticVectorRetentionStep {
+        match self {
+            Self::ResetRequired(message) => {
+                ProjectSemanticVectorRetentionStep::ResetRequired(message)
+            }
+            Self::Corrupt(message) => ProjectSemanticVectorRetentionStep::Corrupt(message),
+            Self::Unavailable(message) => ProjectSemanticVectorRetentionStep::Unavailable(message),
+            Self::Denied(message) => ProjectSemanticVectorRetentionStep::Denied(message),
+        }
+    }
+
+    pub fn readable_sources(self) -> ProjectVectorReadableSources {
+        match self {
+            Self::ResetRequired(message) => ProjectVectorReadableSources::ResetRequired(message),
+            Self::Corrupt(message) => ProjectVectorReadableSources::Corrupt(message),
+            Self::Unavailable(message) => ProjectVectorReadableSources::Unavailable(message),
+            Self::Denied(message) => ProjectVectorReadableSources::Denied(message),
+        }
+    }
+
+    pub fn source_liveness(self) -> ProjectSemanticVectorSourceLiveness {
+        match self {
+            Self::ResetRequired(message) => {
+                ProjectSemanticVectorSourceLiveness::ResetRequired(message)
+            }
+            Self::Corrupt(message) => ProjectSemanticVectorSourceLiveness::Corrupt(message),
+            Self::Unavailable(message) => ProjectSemanticVectorSourceLiveness::Unavailable(message),
+            Self::Denied(message) => ProjectSemanticVectorSourceLiveness::Denied(message),
+        }
+    }
+
+    pub fn code_scope_liveness(self) -> ProjectSemanticVectorCodeScopeLiveness {
+        match self {
+            Self::ResetRequired(message) => {
+                ProjectSemanticVectorCodeScopeLiveness::ResetRequired(message)
+            }
+            Self::Corrupt(message) => ProjectSemanticVectorCodeScopeLiveness::Corrupt(message),
+            Self::Unavailable(message) => {
+                ProjectSemanticVectorCodeScopeLiveness::Unavailable(message)
+            }
+            Self::Denied(message) => ProjectSemanticVectorCodeScopeLiveness::Denied(message),
+        }
+    }
+}
+
+impl From<tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1>
+    for ProjectVectorRetentionFailure
+{
+    fn from(
+        error: tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1,
+    ) -> Self {
+        use tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1;
+        match error {
+            VectorGenerationStoreErrorV1::ResetRequired(message) => Self::ResetRequired(message),
+            VectorGenerationStoreErrorV1::Corrupt(message) => Self::Corrupt(message),
+            VectorGenerationStoreErrorV1::InvalidPlan(message) => Self::Denied(message),
+            // Preserve the typed reason exactly; the Display form would wrap it
+            // in the enum's descriptive prefix and break reason equality.
+            VectorGenerationStoreErrorV1::Unavailable(message) => Self::Unavailable(message),
+            other => Self::Unavailable(other.to_string()),
+        }
+    }
+}
+
+/// One wall span covers the whole paginated inventory sweep; the page counter
+/// records how much of the configuration corpus it walked. Pages are never
+/// individually spanned.
+#[hotpath::measure(
+    label = "daemon.code_index.semantic_vector.retention.configuration_sweep",
+    future = true
+)]
+pub async fn complete_configuration_inventory(
+    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+) -> Result<
+    tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+    ProjectVectorRetentionFailure,
+> {
+    use tracedecay_usecases::semantic_runtime::{
+        MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
+        SemanticConfigurationInventoryPageRequestV1,
+    };
+    let mut request = SemanticConfigurationInventoryPageRequestV1::first(
+        MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
+    )
+    .map_err(|error| ProjectVectorRetentionFailure::Denied(error.to_string()))?;
+    loop {
+        let page = configuration
+            .configuration_inventory_page(&request)
+            .await
+            .map_err(ProjectVectorRetentionFailure::from_configuration)?;
+        hotpath::gauge!(
+            "daemon.code_index.semantic_vector.retention.configuration_sweep.pages_total"
+        )
+        .inc(1_u64);
+        match (page.continuation, page.complete_receipt) {
+            (Some(cursor), None) => {
+                request = SemanticConfigurationInventoryPageRequestV1::after(
+                    cursor,
+                    MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
+                )
+                .map_err(|error| ProjectVectorRetentionFailure::Denied(error.to_string()))?;
+            }
+            (None, Some(receipt)) => return Ok(receipt),
+            _ => {
+                return Err(ProjectVectorRetentionFailure::Corrupt(
+                    "semantic configuration inventory coverage is incomplete".to_owned(),
+                ));
+            }
+        }
+    }
+}
+
+/// One wall span covers the whole configured-root validation sweep; the root
+/// counter records how many entries the sweep resolved against the published
+/// dependency index. Roots are never individually spanned.
+#[hotpath::measure(
+    label = "daemon.code_index.semantic_vector.retention.root_sweep",
+    future = true
+)]
+pub async fn validate_configured_vector_roots(
+    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    store: &GraphVectorGenerationStoreV1,
+    retained: &RetainedSemanticVectorGraphV1,
+    stage_revision: tracedecay_store::SemanticVectorStageCensusRevision,
+    inventory: tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+) -> Result<
+    (
+        tracedecay_usecases::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
+        BTreeSet<CodeGenerationId>,
+    ),
+    ProjectVectorRetentionFailure,
+> {
+    use tracedecay_usecases::semantic_runtime::{
+        MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
+        SemanticConfiguredVectorRootPageRequestV1,
+    };
+    let mut request = SemanticConfiguredVectorRootPageRequestV1::first(
+        inventory,
+        MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
+    )
+    .map_err(|error| ProjectVectorRetentionFailure::Denied(error.to_string()))?;
+    let mut sources = BTreeSet::new();
+    loop {
+        let page = configuration
+            .configured_vector_roots_page(&request)
+            .await
+            .map_err(ProjectVectorRetentionFailure::from_configuration)?;
+        hotpath::gauge!(
+            "daemon.code_index.semantic_vector.retention.root_sweep.roots_scanned_total"
+        )
+        .inc(page.roots.len() as u64);
+        for root in &page.roots {
+            let dependency = store
+                .published_generation_dependency(
+                    root,
+                    stage_revision,
+                    Arc::clone(retained.cancellation()),
+                )
+                .map_err(ProjectVectorRetentionFailure::from)?;
+            let tracedecay_store::SemanticVectorPublishedGenerationDependencyLookup::Published(
+                dependency,
+            ) = dependency
+            else {
+                return Err(ProjectVectorRetentionFailure::ResetRequired(
+                    "configured semantic vector root has no exact published dependency".to_owned(),
+                ));
+            };
+            sources.insert(
+                CodeGenerationId::new(dependency.source_generation.as_str())
+                    .map_err(|error| ProjectVectorRetentionFailure::Corrupt(error.to_string()))?,
+            );
+        }
+        match (page.continuation, page.complete_receipt) {
+            (Some(cursor), None) => {
+                request = SemanticConfiguredVectorRootPageRequestV1::after(
+                    cursor,
+                    MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
+                )
+                .map_err(|error| ProjectVectorRetentionFailure::Denied(error.to_string()))?;
+            }
+            (None, Some(receipt)) => {
+                store
+                    .validate_project_census_revision(
+                        stage_revision,
+                        Arc::clone(retained.cancellation()),
+                    )
+                    .map_err(ProjectVectorRetentionFailure::from)?;
+                return Ok((receipt, sources));
+            }
+            _ => {
+                return Err(ProjectVectorRetentionFailure::Corrupt(
+                    "configured semantic vector root coverage is incomplete".to_owned(),
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ProjectSemanticVectorCodeScopeLiveness, ProjectSemanticVectorSourceLiveness,
+        ProjectVectorRetentionFailure,
+    };
+    use tracedecay_usecases::store::vector_generations::VectorGenerationStoreErrorV1;
+
+    #[test]
+    fn vector_store_reset_and_corruption_remain_typed() {
+        let reset = ProjectVectorRetentionFailure::from(
+            VectorGenerationStoreErrorV1::ResetRequired("missing root".to_owned()),
+        );
+        let corrupt = ProjectVectorRetentionFailure::from(VectorGenerationStoreErrorV1::Corrupt(
+            "invalid dependency".to_owned(),
+        ));
+        let unavailable = ProjectVectorRetentionFailure::from(
+            VectorGenerationStoreErrorV1::Unavailable("graph is closed".to_owned()),
+        );
+
+        assert_eq!(
+            reset.clone(),
+            ProjectVectorRetentionFailure::ResetRequired("missing root".to_owned())
+        );
+        assert_eq!(
+            corrupt.clone(),
+            ProjectVectorRetentionFailure::Corrupt("invalid dependency".to_owned())
+        );
+        assert_eq!(
+            unavailable.clone(),
+            ProjectVectorRetentionFailure::Unavailable("graph is closed".to_owned())
+        );
+        assert!(matches!(
+            reset.clone().source_liveness(),
+            ProjectSemanticVectorSourceLiveness::ResetRequired(message)
+                if message == "missing root"
+        ));
+        assert!(matches!(
+            corrupt.clone().source_liveness(),
+            ProjectSemanticVectorSourceLiveness::Corrupt(message)
+                if message == "invalid dependency"
+        ));
+        assert!(matches!(
+            unavailable.clone().source_liveness(),
+            ProjectSemanticVectorSourceLiveness::Unavailable(message)
+                if message == "graph is closed"
+        ));
+        assert!(matches!(
+            reset.clone().code_scope_liveness(),
+            ProjectSemanticVectorCodeScopeLiveness::ResetRequired(message)
+                if message == "missing root"
+        ));
+        assert!(matches!(
+            corrupt.clone().code_scope_liveness(),
+            ProjectSemanticVectorCodeScopeLiveness::Corrupt(message)
+                if message == "invalid dependency"
+        ));
+        assert!(matches!(
+            unavailable.code_scope_liveness(),
+            ProjectSemanticVectorCodeScopeLiveness::Unavailable(message)
+                if message == "graph is closed"
+        ));
+    }
+}

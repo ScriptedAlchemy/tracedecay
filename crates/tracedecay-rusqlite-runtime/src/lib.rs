@@ -1,0 +1,60 @@
+//! Bundled SQLite storage runtime.
+
+mod admission;
+mod authority;
+pub mod backup;
+mod checkpoint;
+mod connection;
+pub use connection::{
+    ConnectionPolicyError, OpenedDatabaseFileError, VerifiedImmutableReader,
+    VerifiedImmutableReaderError, open_immutable_reader, open_verified_immutable_reader,
+};
+mod content_digest;
+pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_content_sha256};
+#[doc(hidden)]
+pub mod exact_sql;
+pub mod handoff;
+mod hotpath_observe;
+mod ledger;
+pub mod maintenance;
+mod operation;
+mod persistence;
+mod profiled_lock;
+pub mod read_consistency;
+pub mod reader;
+pub mod remote;
+pub mod repository;
+pub mod runtime;
+mod telemetry;
+#[cfg(test)]
+mod test_support;
+pub mod watermark;
+pub mod work;
+pub mod work_attempt;
+pub mod work_placement;
+pub mod work_product;
+pub mod work_run_control;
+pub mod workflow;
+mod writer;
+
+pub use authority::{
+    RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
+};
+pub use checkpoint::{
+    CheckpointBlocker, CheckpointBlockers, CheckpointFrameReport, CheckpointInterruption,
+    CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,
+    MaintenanceCheckpointMode,
+};
+pub use operation::{StorageOperationError, StorageOperationExecutor};
+pub use telemetry::{
+    ReaderAdmissionSnapshot, SqliteStoreSizeTelemetryPort, SqliteVmSnapshot, WalCheckpointSample,
+    WalCheckpointSnapshot, WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot,
+    WriterCommitSnapshot, WriterLockWorkSnapshot, WriterOperationCounters, WriterQueueSnapshot,
+    WriterServiceCounts, WriterTelemetrySnapshot, WriterTransactionMetrics,
+    WriterTransactionOutcome, WriterTransactionTotals,
+};
+pub use writer::{
+    CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,
+    ExistingWriterLocator, MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter,
+    WriterActorError, WriterOnlineBackupError, WriterStartError, WriterState,
+};

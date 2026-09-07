@@ -1,0 +1,1457 @@
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use rusqlite::{Connection, Transaction};
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId, ResolvedScope,
+    storage::{
+        StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
+    },
+};
+use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId};
+use tracedecay_store::{
+    AdmissionConfigV1, LocatorDigest, OperationPriorityV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,
+    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1, StorageRuntimeErrorV1,
+    StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+};
+
+use super::pool::FOREGROUND_RESERVED_GENERAL_WORKERS;
+use super::*;
+use crate::SqliteStoreSizeTelemetryPort;
+use crate::checkpoint::CheckpointBlockerSource;
+#[cfg(unix)]
+use crate::connection::OpenedDatabaseFile;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+#[derive(Clone)]
+pub(super) struct CountExecutor;
+
+impl ReaderQueryExecutor for CountExecutor {
+    fn execute_read(
+        &mut self,
+        snapshot: &Transaction<'_>,
+        _request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        let count: i64 = snapshot
+            .query_row("SELECT count(*) FROM markers", [], |row| row.get(0))
+            .map_err(|error| StorageRuntimeErrorV1::Infrastructure {
+                operation: format!("count markers: {error}"),
+            })?;
+        RuntimeReadOutcomeV1::new(
+            Some(RuntimeReadResultV1::GraphQuickCheck {
+                healthy: count == 1,
+            }),
+            RuntimeReadCoverageV1::Latest { observed: None },
+        )
+        .map_err(|error| StorageRuntimeErrorV1::Infrastructure {
+            operation: format!("build test read: {error}"),
+        })
+    }
+}
+
+/// A one-way latch threads synchronize on without polling: `set` flips it
+/// under the lock and notifies, `wait` parks on the condvar until the gate is
+/// set or the bound lapses.
+#[derive(Clone, Default)]
+struct Gate {
+    state: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Gate {
+    fn set(&self) {
+        let (set, changed) = &*self.state;
+        *set.lock().unwrap() = true;
+        changed.notify_all();
+    }
+
+    /// Returns whether the gate was set within the bound.
+    fn wait(&self, bound: Duration) -> bool {
+        let (set, changed) = &*self.state;
+        let (set, _) = changed
+            .wait_timeout_while(set.lock().unwrap(), bound, |set| !*set)
+            .unwrap();
+        *set
+    }
+}
+
+#[derive(Clone)]
+struct SlowExecutor {
+    delay: Duration,
+    entered: Gate,
+}
+
+impl ReaderQueryExecutor for SlowExecutor {
+    fn execute_read(
+        &mut self,
+        snapshot: &Transaction<'_>,
+        request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        self.entered.set();
+        std::thread::sleep(self.delay);
+        CountExecutor.execute_read(snapshot, request)
+    }
+}
+
+/// An executor that parks inside the read until the test releases it, so a
+/// test can assert ordering against a worker that is provably still running
+/// instead of racing a wall-clock bound.
+#[derive(Clone, Default)]
+struct GateExecutor {
+    entered: Gate,
+    release: Gate,
+    finished: Arc<AtomicU8>,
+}
+
+impl ReaderQueryExecutor for GateExecutor {
+    fn execute_read(
+        &mut self,
+        snapshot: &Transaction<'_>,
+        request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        self.entered.set();
+        // The bound is a harness guard, not a timing assumption: every test
+        // opens the gate, directly or through its watchdog.
+        self.release.wait(Duration::from_secs(60));
+        let outcome = CountExecutor.execute_read(snapshot, request);
+        self.finished.store(1, Ordering::SeqCst);
+        outcome
+    }
+}
+
+pub(super) struct TestStore {
+    _directory: tempfile::TempDir,
+    path: PathBuf,
+    pub(super) binding: StoreRuntimeBindingV1,
+}
+
+impl TestStore {
+    pub(super) fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reader.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .execute_batch("CREATE TABLE markers(value INTEGER NOT NULL);")
+            .unwrap();
+        let binding = serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.reader",
+                "profile_id": "profile.reader",
+                "scope": { "kind": "project", "project_id": "project.reader" }
+            },
+            "incarnation": 1,
+            "authority_epoch": 7
+        }))
+        .unwrap();
+        Self {
+            _directory: directory,
+            path,
+            binding,
+        }
+    }
+
+    pub(super) fn locator(&self) -> ExistingReaderLocator {
+        self.locator_at(self.path.clone())
+    }
+
+    fn locator_at(&self, path: PathBuf) -> ExistingReaderLocator {
+        let locator = VerifiedStoreLocatorV1::new(
+            self.binding.shard_id.clone(),
+            self.binding.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+        );
+        ExistingReaderLocator::new(self.binding.clone(), locator, path).unwrap()
+    }
+}
+
+fn telemetry_context(scope: ResolvedScope) -> RequestContext {
+    let actor = ActorId::new("actor.storage-telemetry-test").unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.storage-telemetry-test").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.storage.telemetry").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.storage.telemetry.read").unwrap()]),
+        DisclosureClass::Metadata,
+    )
+    .unwrap();
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.storage-telemetry-test").unwrap(),
+        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
+        CancellationContext::active("cancel.storage-telemetry-test").unwrap(),
+    )
+    .unwrap()
+}
+
+fn telemetry_scope() -> ResolvedScope {
+    ResolvedScope::new(
+        ProjectId::new("project.storage-telemetry-test").unwrap(),
+        RepositoryId::new("repository.storage-telemetry-test").unwrap(),
+        WorktreeId::new("worktree.storage-telemetry-test").unwrap(),
+        None,
+    )
+    .unwrap()
+}
+
+pub(super) struct Probe {
+    cancellation: RuntimeCancellationIdentityV1,
+    deadline: RuntimeDeadlineV1,
+    interruption: Arc<AtomicU8>,
+}
+
+impl Probe {
+    pub(super) fn for_request(request: &RuntimeReadRequestV1) -> Self {
+        Self {
+            cancellation: request.control().cancellation.clone(),
+            deadline: request.control().deadline.clone(),
+            interruption: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    fn cancel(&self) {
+        self.interruption.store(1, Ordering::SeqCst);
+    }
+}
+
+impl RuntimeRequestProbeV1 for Probe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        &self.cancellation
+    }
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        &self.deadline
+    }
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        match self.interruption.load(Ordering::SeqCst) {
+            0 => None,
+            1 => Some(RuntimeInterruptionV1::Cancelled),
+            _ => Some(RuntimeInterruptionV1::DeadlineExceeded),
+        }
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        false
+    }
+}
+
+enum SecondPollAction {
+    Cancel,
+    Release(ReaderLease<CountExecutor>),
+}
+
+struct SecondPollProbe {
+    base: Probe,
+    polls: AtomicU8,
+    action: Mutex<Option<SecondPollAction>>,
+}
+
+impl SecondPollProbe {
+    fn cancelling(request: &RuntimeReadRequestV1) -> Self {
+        Self {
+            base: Probe::for_request(request),
+            polls: AtomicU8::new(0),
+            action: Mutex::new(Some(SecondPollAction::Cancel)),
+        }
+    }
+
+    fn releasing(request: &RuntimeReadRequestV1, lease: ReaderLease<CountExecutor>) -> Self {
+        Self {
+            base: Probe::for_request(request),
+            polls: AtomicU8::new(0),
+            action: Mutex::new(Some(SecondPollAction::Release(lease))),
+        }
+    }
+}
+
+impl RuntimeRequestProbeV1 for SecondPollProbe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        self.base.cancellation_identity()
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        self.base.deadline_identity()
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        if self.polls.fetch_add(1, Ordering::SeqCst) > 0 {
+            match self.action.lock().unwrap().take() {
+                Some(SecondPollAction::Cancel) => self.base.cancel(),
+                Some(SecondPollAction::Release(lease)) => drop(lease),
+                None => {}
+            }
+        }
+        self.base.interruption()
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        false
+    }
+}
+
+pub(super) fn request(
+    binding: &StoreRuntimeBindingV1,
+    priority: OperationPriorityV1,
+) -> RuntimeReadRequestV1 {
+    let priority = match priority {
+        OperationPriorityV1::Health => "health",
+        OperationPriorityV1::Foreground => "foreground",
+        OperationPriorityV1::Background => "background",
+    };
+    serde_json::from_value(serde_json::json!({
+        "binding": binding,
+        "consistency": { "kind": "latest_available" },
+        "operation": { "kind": "graph_quick_check" },
+        "priority": priority,
+        "admission_bytes": 64,
+        "control": {
+            "requested_at": 1,
+            "deadline": { "deadline_id": "deadline.reader" },
+            "cancellation": { "cancellation_id": "cancellation.reader", "generation": 1 }
+        }
+    }))
+    .unwrap()
+}
+
+fn healthy(outcome: &RuntimeReadOutcomeV1) -> bool {
+    matches!(
+        outcome.value(),
+        Some(RuntimeReadResultV1::GraphQuickCheck { healthy: true })
+    )
+}
+
+pub(super) fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
+    let mut budget = AdmissionConfigV1::default().readers;
+    budget.min_per_hot_shard = 2;
+    budget.max_per_hot_shard = 2;
+    budget
+}
+
+#[test]
+fn reader_startup_recovers_a_retained_wal_before_reporting_ready() {
+    let store = TestStore::new();
+    let writer = crate::connection::open(&store.path, crate::connection::ConnectionMode::Writer)
+        .expect("open policy writer");
+    writer
+        .execute("INSERT INTO markers VALUES (1)", [])
+        .expect("write retained WAL frame");
+    drop(writer);
+    let mut shm = store.path.as_os_str().to_os_string();
+    shm.push("-shm");
+    let shm = PathBuf::from(shm);
+    std::fs::remove_file(&shm).expect("remove stale WAL index");
+
+    let _pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .expect("start readers over retained WAL");
+
+    assert!(
+        shm.exists(),
+        "ready readers must have completed the first WAL-backed schema read"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {
+    let store = TestStore::new();
+    let alias = store._directory.path().join("reader-alias.db");
+    std::fs::hard_link(&store.path, &alias).unwrap();
+    let opened = OpenedDatabaseFile::pin(&store.path).unwrap();
+    let locator = store.locator_at(alias).with_opened_database(opened);
+
+    let pool = ReaderPool::start(locator, AdmissionConfigV1::default().readers, CountExecutor)
+        .expect("reader startup is bound by file identity, not pathname spelling");
+
+    assert!(pool.opened_file_identity().is_some());
+}
+
+#[test]
+fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
+    let store = TestStore::new();
+    let (pressure_tx, pressure_rx) =
+        tokio::sync::watch::channel(crate::CheckpointPressure::BlockGeneral {
+            wal: crate::CheckpointWal {
+                frames: 64,
+                bytes: 256 * 1024 * 1024,
+            },
+            blockers: crate::CheckpointBlockers::default(),
+        });
+    let pool = ReaderPool::start_with_checkpoint_pressure(
+        store.locator(),
+        two_reader_budget(),
+        CountExecutor,
+        Some(pressure_rx),
+    )
+    .unwrap();
+    let general = request(&store.binding, OperationPriorityV1::Foreground);
+    let general_probe = Probe::for_request(&general);
+    assert!(matches!(
+        pool.acquire(&general, &general_probe, Duration::from_millis(20)),
+        Err(ReaderAcquireError::Saturated { .. })
+    ));
+
+    let health = request(&store.binding, OperationPriorityV1::Health);
+    let health_probe = Probe::for_request(&health);
+    {
+        let mut lease = pool
+            .acquire(&health, &health_probe, Duration::from_millis(20))
+            .unwrap();
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        assert!(matches!(
+            snapshot
+                .execute(health.clone(), &health_probe)
+                .unwrap()
+                .value(),
+            Some(RuntimeReadResultV1::GraphQuickCheck { .. })
+        ));
+    }
+
+    pressure_tx
+        .send(crate::CheckpointPressure::Open)
+        .expect("reader holds pressure receiver");
+    let mut lease = pool
+        .acquire(&general, &general_probe, Duration::from_millis(20))
+        .unwrap();
+    let mut snapshot = lease.begin_snapshot().unwrap();
+    assert!(matches!(
+        snapshot
+            .execute(general.clone(), &general_probe)
+            .unwrap()
+            .value(),
+        Some(RuntimeReadResultV1::GraphQuickCheck { .. })
+    ));
+}
+
+#[test]
+fn reserved_health_reader_reports_exact_store_size_pragmas() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+
+    let sample = pool
+        .read_store_size(Duration::from_millis(100), || None)
+        .expect("store size sample");
+
+    assert!(sample.page_size_bytes > 0);
+    assert!(sample.page_count > 0);
+    assert!(sample.freelist_pages <= sample.page_count);
+    let table_sizes = pool
+        .read_table_sizes(Duration::from_millis(100), || None)
+        .expect("table size samples");
+    assert!(
+        table_sizes
+            .iter()
+            .any(|sample| sample.table_name == "markers" && sample.bytes == 0),
+        "an empty table has zero payload bytes rather than one page of fabricated payload"
+    );
+    let snapshot = pool.snapshot();
+    assert_eq!(snapshot.leased_health, 0);
+    assert_eq!(snapshot.available_health, 1);
+}
+
+/// Store-size telemetry is a metadata read serving admitted status requests;
+/// a snapshot worker that cannot answer must yield a typed deadline error
+/// within the caller's bound instead of capturing the caller for as long as
+/// the worker stays busy.
+#[test]
+fn busy_snapshot_worker_bounds_the_store_size_reply() {
+    let store = TestStore::new();
+    let executor = GateExecutor::default();
+    let entered = executor.entered.clone();
+    let release = executor.release.clone();
+    let spawned = super::worker::spawn(
+        store.locator(),
+        executor,
+        Arc::new(crate::telemetry::ReaderAdmissionRecorder::default()),
+    )
+    .expect("spawn reader worker");
+    let client = spawned.client.clone();
+    client.begin().expect("begin read snapshot");
+
+    // Park the worker inside an executor read so the store-size command
+    // queues behind provably in-flight work.
+    let busy = std::thread::spawn({
+        let client = spawned.client.clone();
+        let request = request(&store.binding, OperationPriorityV1::Foreground);
+        move || {
+            let probe = Probe::for_request(&request);
+            // The parked read may finish either way once the gate opens; the
+            // assertion under test is the bounded telemetry reply below.
+            let _ = client.execute(request, &probe);
+        }
+    });
+    assert!(
+        entered.wait(Duration::from_secs(10)),
+        "the busy read must be running before the bounded reply is measured"
+    );
+
+    let started = Instant::now();
+    let result = client.store_size(Duration::from_millis(100));
+    let elapsed = started.elapsed();
+    release.set();
+    assert!(
+        matches!(
+            result,
+            Err(ReaderWorkerError::Interrupted {
+                reason: tracedecay_store::UnavailableReasonV1::DeadlineExceeded,
+            })
+        ),
+        "a busy worker must produce a typed deadline error, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the reply bound must hold while the worker is busy (waited {elapsed:?})"
+    );
+
+    busy.join().expect("join busy reader");
+    client.shutdown();
+    spawned.join.join().expect("join reader worker");
+}
+
+/// Table-size telemetry walks `dbstat` for the whole store, so on a
+/// multi-gigabyte database the scan runs for minutes. A caller that cannot
+/// get its reply within the bound must receive a typed deadline error and
+/// interrupt the worker instead of being captured for the scan's duration —
+/// captured callers on runtime workers are what starved the daemon shutdown
+/// drain of its own deadlines.
+#[test]
+fn busy_snapshot_worker_bounds_the_table_sizes_reply() {
+    let store = TestStore::new();
+    let executor = GateExecutor::default();
+    let entered = executor.entered.clone();
+    let release = executor.release.clone();
+    let spawned = super::worker::spawn(
+        store.locator(),
+        executor,
+        Arc::new(crate::telemetry::ReaderAdmissionRecorder::default()),
+    )
+    .expect("spawn reader worker");
+    let client = spawned.client.clone();
+    client.begin().expect("begin read snapshot");
+
+    // Park the worker inside an executor read so the table-sizes command
+    // queues behind provably in-flight work.
+    let busy = std::thread::spawn({
+        let client = spawned.client.clone();
+        let request = request(&store.binding, OperationPriorityV1::Foreground);
+        move || {
+            let probe = Probe::for_request(&request);
+            // The parked read may finish either way once the gate opens; the
+            // assertion under test is the bounded telemetry reply below.
+            let _ = client.execute(request, &probe);
+        }
+    });
+    assert!(
+        entered.wait(Duration::from_secs(10)),
+        "the busy read must be running before the bounded reply is measured"
+    );
+
+    let started = Instant::now();
+    let result = client.table_sizes(Duration::from_millis(100));
+    let elapsed = started.elapsed();
+    release.set();
+    assert!(
+        matches!(
+            result,
+            Err(ReaderWorkerError::Interrupted {
+                reason: tracedecay_store::UnavailableReasonV1::DeadlineExceeded,
+            })
+        ),
+        "a busy worker must produce a typed deadline error, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the reply bound must hold while the worker is busy (waited {elapsed:?})"
+    );
+
+    busy.join().expect("join busy reader");
+    client.shutdown();
+    spawned.join.join().expect("join reader worker");
+}
+
+#[test]
+fn exact_sql_health_snapshot_retires_its_reader_after_drop() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+
+    let snapshot = pool
+        .begin_exact_sql_health_snapshot(Duration::from_millis(100))
+        .unwrap();
+    assert_eq!(pool.snapshot().leased_health, 1);
+    drop(snapshot);
+
+    let state = pool.snapshot();
+    assert_eq!(state.leased_health, 0);
+    assert_eq!(state.health_workers, 0);
+    assert_eq!(state.available_health, 0);
+}
+
+#[test]
+fn application_telemetry_port_reads_real_store_size() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+
+    let read = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(port.store_size(&context, &StoreKeyV1::new("reader.db").unwrap()));
+
+    let StorageTelemetryReadV1::Observed { sample } = read else {
+        panic!("production telemetry port must observe the retained store");
+    };
+    assert!(sample.page_size_bytes > 0);
+    assert!(sample.page_count > 0);
+    assert!(sample.freelist_pages <= sample.page_count);
+}
+
+#[test]
+fn application_telemetry_port_compares_table_payload_watermarks() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let baseline =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    assert!(
+        matches!(
+            baseline,
+            TableGrowthTelemetryReadV1::BaselineEstablished {
+                tables_observed,
+                ..
+            } if tables_observed > 0
+        ),
+        "the first read must report baseline establishment, got {baseline:?}"
+    );
+    let connection = Connection::open(&store.path).unwrap();
+    for value in 0..256 {
+        connection
+            .execute("INSERT INTO markers(value) VALUES (?1)", [value])
+            .unwrap();
+    }
+
+    let growth =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    let TableGrowthTelemetryReadV1::Observed { samples, .. } = growth else {
+        panic!("the second read must compare table watermarks");
+    };
+    let markers = samples
+        .iter()
+        .find(|sample| sample.table.as_str() == "markers")
+        .expect("markers growth sample");
+    assert!(markers.current_bytes > markers.previous_bytes);
+}
+
+#[test]
+fn application_telemetry_port_marks_new_table_baseline_pending() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let baseline =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    assert!(matches!(
+        baseline,
+        TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+    ));
+
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE created_after_baseline (id INTEGER PRIMARY KEY, payload TEXT);
+             INSERT INTO created_after_baseline(payload) VALUES ('new');",
+        )
+        .unwrap();
+
+    let read =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    let TableGrowthTelemetryReadV1::Observed {
+        samples,
+        baseline_pending,
+        ..
+    } = read
+    else {
+        panic!("the second read must compare table watermarks");
+    };
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.table.as_str() != "created_after_baseline"),
+        "new table must not be compared against fabricated zero bytes"
+    );
+    let pending = baseline_pending
+        .iter()
+        .find(|pending| pending.table.as_str() == "created_after_baseline")
+        .expect("new table is explicitly baseline-pending");
+    assert!(pending.current_bytes.get() > 0);
+}
+
+#[test]
+fn application_telemetry_port_reports_denied_table_growth_without_zero() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+
+    let read = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(port.table_growth(&context, &StoreKeyV1::new("other.db").unwrap()));
+
+    assert_eq!(
+        read,
+        TableGrowthTelemetryReadV1::Denied {
+            store: StoreKeyV1::new("other.db").unwrap(),
+        }
+    );
+}
+
+#[test]
+fn deferred_snapshot_excludes_uncommitted_and_later_committed_rows() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let mut snapshot = lease.begin_snapshot().unwrap();
+
+    let mut writer = Connection::open(&store.path).unwrap();
+    let transaction = writer.transaction().unwrap();
+    transaction
+        .execute("INSERT INTO markers(value) VALUES (1)", [])
+        .unwrap();
+    assert!(!healthy(&snapshot.execute(read.clone(), &probe).unwrap()));
+    transaction.commit().unwrap();
+    assert!(
+        !healthy(&snapshot.execute(read.clone(), &probe).unwrap()),
+        "one lease must remain on its first-read snapshot"
+    );
+    drop(snapshot);
+
+    let mut next = lease.begin_snapshot().unwrap();
+    assert!(healthy(&next.execute(read, &probe).unwrap()));
+}
+
+#[test]
+fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let before = pool.snapshot().snapshot_admissions;
+
+    let first = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("first snapshot admission");
+    let second = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("second snapshot admission");
+    assert!(matches!(
+        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
+        Err(crate::exact_sql::ExactSqlError::ReaderUnavailable(_))
+    ));
+
+    assert_eq!(
+        pool.snapshot().snapshot_admissions,
+        before + 2,
+        "a rejected reader lease is not a snapshot admission"
+    );
+    drop((first, second));
+}
+
+#[test]
+fn reader_admission_records_acquire_wait_saturation_and_release() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let before = pool.telemetry_snapshot();
+
+    let first = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("first snapshot admission");
+    let second = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .expect("second snapshot admission");
+    assert!(
+        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+            .is_err(),
+        "the reserved health worker is not a general-lane overflow valve"
+    );
+
+    let held = pool.telemetry_snapshot();
+    assert_eq!(held.acquire_events, before.acquire_events + 2);
+    assert_eq!(held.release_events, before.release_events);
+    assert_eq!(held.saturated_events, before.saturated_events + 1);
+
+    drop((first, second));
+    let released = pool.telemetry_snapshot();
+    assert_eq!(released.release_events, before.release_events + 2);
+}
+
+#[test]
+fn saturated_general_lane_does_not_consume_reserved_health_reader() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let regular = request(&store.binding, OperationPriorityV1::Foreground);
+    let regular_probe = Probe::for_request(&regular);
+    let _first = pool
+        .acquire(&regular, &regular_probe, Duration::ZERO)
+        .unwrap();
+    let _second = pool
+        .acquire(&regular, &regular_probe, Duration::ZERO)
+        .unwrap();
+    assert!(matches!(
+        pool.acquire(&regular, &regular_probe, Duration::ZERO),
+        Err(ReaderAcquireError::Saturated {
+            scope: tracedecay_store::SaturationScopeV1::ReaderPool
+        })
+    ));
+
+    let health = request(&store.binding, OperationPriorityV1::Health);
+    let health_probe = Probe::for_request(&health);
+    let _health = pool
+        .acquire(&health, &health_probe, Duration::ZERO)
+        .unwrap();
+    let snapshot = pool.snapshot();
+    assert_eq!((snapshot.leased_general, snapshot.leased_health), (2, 1));
+}
+
+#[test]
+fn dispatch_acquisition_grace_admits_after_transient_lease_release() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let occupancy_probe = Probe::for_request(&read);
+    let _first = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let second = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let dispatch_probe = SecondPollProbe::releasing(&read, second);
+
+    let _replacement = pool
+        .acquire_for_dispatch(&read, &dispatch_probe)
+        .expect("one dispatch grace quantum should absorb a lease handoff");
+
+    assert_eq!(pool.snapshot().leased_general, 2);
+}
+
+#[test]
+fn dispatch_acquisition_grace_observes_cancellation_while_waiting() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let occupancy_probe = Probe::for_request(&read);
+    let _first = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let _second = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let dispatch_probe = SecondPollProbe::cancelling(&read);
+    let before = pool.snapshot();
+
+    assert!(matches!(
+        pool.acquire_for_dispatch(&read, &dispatch_probe),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::Cancelled
+        })
+    ));
+    assert_eq!(pool.snapshot(), before);
+}
+
+#[test]
+fn dispatch_acquisition_grace_keeps_true_saturation_bounded() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let _first = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let _second = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+
+    let started = Instant::now();
+    assert!(matches!(
+        pool.acquire_for_dispatch(&read, &probe),
+        Err(ReaderAcquireError::Saturated {
+            scope: tracedecay_store::SaturationScopeV1::ReaderPool
+        })
+    ));
+    let elapsed = started.elapsed();
+    assert!(elapsed >= pool::ACQUISITION_POLL_QUANTUM);
+    assert!(elapsed < Duration::from_secs(1));
+}
+
+#[test]
+fn drain_rejects_new_general_acquisitions_but_preserves_existing_and_health_leases() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let regular = request(&store.binding, OperationPriorityV1::Foreground);
+    let regular_probe = Probe::for_request(&regular);
+    let mut existing = pool
+        .acquire(&regular, &regular_probe, Duration::ZERO)
+        .unwrap();
+
+    pool.begin_drain();
+
+    assert_eq!(pool.snapshot().state, ReaderPoolState::Draining);
+    assert!(matches!(
+        pool.acquire(&regular, &regular_probe, Duration::ZERO),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::Draining
+        })
+    ));
+    let mut snapshot = existing.begin_snapshot().unwrap();
+    assert!(!healthy(
+        &snapshot.execute(regular.clone(), &regular_probe).unwrap()
+    ));
+
+    let health = request(&store.binding, OperationPriorityV1::Health);
+    let health_probe = Probe::for_request(&health);
+    let _health = pool
+        .acquire(&health, &health_probe, Duration::ZERO)
+        .unwrap();
+}
+
+#[test]
+fn cancellation_preempts_acquisition_without_changing_accounting() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    probe.cancel();
+    let before = pool.snapshot();
+    assert!(matches!(
+        pool.acquire(&read, &probe, Duration::from_secs(1)),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::Cancelled
+        })
+    ));
+    assert_eq!(pool.snapshot(), before);
+}
+
+#[test]
+fn retirement_is_elapsed_time_modelled_and_never_retires_the_floor() {
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    budget.max_per_hot_shard = 3;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let leases = (0..3)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect::<Vec<_>>();
+    drop(leases);
+
+    assert_eq!(pool.snapshot().general_workers, 3);
+    assert_eq!(
+        pool.retire_idle_at(Instant::now() + Duration::from_secs(60)),
+        1
+    );
+    assert_eq!(pool.snapshot().general_workers, 2);
+}
+
+#[test]
+fn dropping_snapshot_and_reader_lease_restores_capacity() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    {
+        let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+        let snapshot = lease.begin_snapshot().unwrap();
+        drop(snapshot);
+        assert_eq!(pool.snapshot().leased_general, 1);
+    }
+    let state = pool.snapshot();
+    assert_eq!(state.leased_general, 0);
+    assert_eq!(state.available_general, 2);
+}
+
+#[test]
+fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
+    let store = TestStore::new();
+    let executor = GateExecutor::default();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), executor.clone()).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let cancellation = Arc::clone(&probe.interruption);
+    let entered = executor.entered.clone();
+    let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let mut snapshot = lease.begin_snapshot().unwrap();
+    // Cancel only once the worker is provably inside the executor, so the
+    // return below can only be explained by the cancellation observation and
+    // never by the executor completing first.
+    std::thread::spawn(move || {
+        entered.wait(Duration::from_secs(30));
+        cancellation.store(1, Ordering::SeqCst);
+    });
+    // Watchdog: if cancellation regresses, `execute` blocks on the parked
+    // executor until the harness kills the test. Releasing the gate after a
+    // generous bound turns that hang into the clean assertion failures below.
+    let watchdog_release = executor.release.clone();
+    let watchdog = std::thread::spawn(move || {
+        if !watchdog_release.wait(Duration::from_secs(30)) {
+            watchdog_release.set();
+        }
+    });
+
+    let outcome = snapshot.execute(read, &probe).unwrap();
+    assert_eq!(
+        executor.finished.load(Ordering::SeqCst),
+        0,
+        "the query must return on cancellation while the executor is still running"
+    );
+    assert!(matches!(
+        outcome.coverage(),
+        RuntimeReadCoverageV1::Unavailable {
+            reason: tracedecay_store::UnavailableReasonV1::Cancelled,
+            ..
+        }
+    ));
+
+    drop(snapshot);
+    drop(lease);
+    assert_eq!(
+        executor.finished.load(Ordering::SeqCst),
+        0,
+        "snapshot and lease teardown must not wait for the abandoned executor"
+    );
+    executor.release.set();
+    watchdog.join().unwrap();
+}
+
+#[test]
+fn acquire_drives_burst_worker_retirement_on_entry() {
+    // `acquire_lane` no longer retires on every bounded poll tick, only on entry
+    // and after a notified wake. This guards that the entry retirement still
+    // fires: a burst worker aged past the idle window must be shed when the next
+    // acquisition walks the pool, shrinking back toward the floor.
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    budget.max_per_hot_shard = 3;
+    budget.idle_burst_retire_ms = 1;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+
+    let leases = (0..3)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect::<Vec<_>>();
+    drop(leases);
+    assert_eq!(pool.snapshot().general_workers, 3);
+    // Let the returned burst worker age past the 1ms idle window.
+    std::thread::sleep(Duration::from_millis(10));
+
+    // A fresh acquisition retires the aged burst worker on entry, then leases a
+    // survivor. The floor (min_per_hot_shard = 2) is never breached.
+    let lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let state = pool.snapshot();
+    assert_eq!(state.general_workers, 2);
+    assert_eq!(state.leased_general, 1);
+    drop(lease);
+}
+
+#[test]
+fn saturated_general_lane_recovers_when_long_held_leases_release() {
+    // Live defect probe: under store-scale load every general worker is held by
+    // a long-lived snapshot and concurrent acquirers report
+    // `Saturated { ReaderPool }`. Recovery must not depend on the acquisition
+    // loop retiring idle burst workers on every poll tick — retirement is gated
+    // to entry and notified wakes, and a waiter parked on a timed-out poll must
+    // still be woken and served the moment a lease is returned.
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    // An aggressive idle window makes the gated retirement path run on the
+    // notified wake that hands the released worker over.
+    budget.idle_burst_retire_ms = 1;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+
+    let held = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        pool.acquire(&read, &probe, Duration::ZERO),
+        Err(ReaderAcquireError::Saturated {
+            scope: tracedecay_store::SaturationScopeV1::ReaderPool
+        })
+    ));
+
+    let waiting = Arc::new(std::sync::Barrier::new(2));
+    let waiter_ready = Arc::clone(&waiting);
+    let waiter_pool = pool.clone();
+    let waiter_binding = store.binding.clone();
+    let waiter = std::thread::spawn(move || {
+        let read = request(&waiter_binding, OperationPriorityV1::Foreground);
+        let probe = Probe::for_request(&read);
+        waiter_ready.wait();
+        let started = Instant::now();
+        let lease = waiter_pool.acquire(&read, &probe, Duration::from_secs(5));
+        (lease.is_ok(), started.elapsed())
+    });
+
+    waiting.wait();
+    // Park the waiter across several timed-out poll quanta so recovery has to
+    // come from the release notification rather than from an entry scan.
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(pool.snapshot().leased_general, 2);
+    drop(held);
+
+    let (acquired, waited) = waiter.join().unwrap();
+    assert!(acquired, "released capacity must wake the parked acquirer");
+    assert!(
+        waited < Duration::from_secs(5),
+        "recovery must not depend on the acquisition deadline expiring: {waited:?}"
+    );
+    // The waiter dropped its lease as it returned, so the lane must be idle and
+    // immediately re-admitting rather than stuck reporting saturation.
+    let _after = pool
+        .acquire(&read, &probe, Duration::ZERO)
+        .expect("lane must admit immediately once the burst has drained");
+    assert_eq!(pool.snapshot().leased_general, 1);
+}
+
+#[test]
+fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() {
+    // The live saturation came from point lookups on the shared registered store
+    // opening a *pinned* read snapshot for one statement. A pinned snapshot owns
+    // its general worker for its whole life; a one-shot query must hand the
+    // worker straight back. This locks the difference the callers depend on.
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let statement = || {
+        crate::exact_sql::ExactSqlStatement::new(
+            "SELECT count(*) FROM markers".to_owned(),
+            Vec::new(),
+        )
+        .unwrap()
+    };
+
+    pool.execute_exact_sql_query(
+        statement(),
+        OperationPriorityV1::Foreground,
+        Duration::from_millis(200),
+    )
+    .unwrap();
+    assert_eq!(
+        pool.snapshot().leased_general,
+        0,
+        "a one-shot query must not retain its general worker"
+    );
+
+    let first = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .unwrap();
+    let second = pool
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .unwrap();
+    assert_eq!(pool.snapshot().leased_general, 2);
+    assert!(
+        pool.execute_exact_sql_query(
+            statement(),
+            OperationPriorityV1::Foreground,
+            Duration::from_millis(20)
+        )
+        .is_err(),
+        "pinned snapshots starve concurrent short reads once they fill the lane"
+    );
+
+    drop(first);
+    drop(second);
+    pool.execute_exact_sql_query(
+        statement(),
+        OperationPriorityV1::Foreground,
+        Duration::from_secs(2),
+    )
+    .expect("releasing the pinned snapshots must restore short-read capacity");
+}
+
+/// Foreground and background share the general lane, so without a reservation
+/// a bulk sweep that opens `max_per_hot_shard` concurrent reads leaves nothing
+/// for interactive queries. Background acquisitions must stop short.
+#[test]
+fn saturating_background_readers_never_block_a_foreground_read() {
+    let store = TestStore::new();
+    let budget = AdmissionConfigV1::default().readers;
+    let ceiling = budget.max_per_hot_shard - FOREGROUND_RESERVED_GENERAL_WORKERS;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+
+    let background = request(&store.binding, OperationPriorityV1::Background);
+    let background_probe = Probe::for_request(&background);
+    let held = (0..ceiling)
+        .map(|index| {
+            pool.acquire(&background, &background_probe, Duration::from_secs(2))
+                .unwrap_or_else(|error| panic!("background lease {index} must admit: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pool.snapshot().leased_general, ceiling);
+
+    // The lane has unspawned headroom left, but it belongs to the reservation.
+    assert!(
+        matches!(
+            pool.acquire(&background, &background_probe, Duration::from_millis(20)),
+            Err(ReaderAcquireError::Saturated { .. })
+        ),
+        "background must not admit past the reservation"
+    );
+
+    let foreground = request(&store.binding, OperationPriorityV1::Foreground);
+    let foreground_probe = Probe::for_request(&foreground);
+    let started = Instant::now();
+    let lease = pool
+        .acquire(&foreground, &foreground_probe, Duration::from_secs(2))
+        .expect("a foreground read must never queue behind saturating background readers");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the foreground read waited on background leases instead of the reservation"
+    );
+    assert_eq!(pool.snapshot().leased_general, ceiling + 1);
+
+    drop(lease);
+    drop(held);
+}
+
+/// The reservation is a share of the lane, never the whole lane: with the
+/// smallest legal budget background work must still admit.
+#[test]
+fn foreground_reservation_leaves_background_at_least_one_worker() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+
+    let background = request(&store.binding, OperationPriorityV1::Background);
+    let background_probe = Probe::for_request(&background);
+    let held = pool
+        .acquire(&background, &background_probe, Duration::from_secs(2))
+        .expect("a two-worker budget must still admit background work");
+
+    assert!(matches!(
+        pool.acquire(&background, &background_probe, Duration::from_millis(20)),
+        Err(ReaderAcquireError::Saturated { .. })
+    ));
+
+    let foreground = request(&store.binding, OperationPriorityV1::Foreground);
+    let foreground_probe = Probe::for_request(&foreground);
+    let reserved = pool
+        .acquire(&foreground, &foreground_probe, Duration::from_secs(2))
+        .expect("the reserved worker must remain reachable by foreground reads");
+
+    drop(reserved);
+    drop(held);
+}
+
+/// Occupancy alone cannot tell a busy lane from a starving one. The pool has
+/// to report blocked acquisitions too, and release the count on every exit
+/// path — including the saturated one, which is exactly when it is read.
+#[test]
+fn a_blocked_acquisition_is_reported_as_a_waiter_and_released() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let held = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(pool.snapshot().waiting_general, 0);
+
+    let blocked = {
+        let pool = pool.clone();
+        let binding = store.binding.clone();
+        std::thread::spawn(move || {
+            let read = request(&binding, OperationPriorityV1::Foreground);
+            let probe = Probe::for_request(&read);
+            pool.acquire(&read, &probe, Duration::from_millis(500))
+        })
+    };
+
+    assert!(
+        pool.wait_until_waiting_general(Duration::from_secs(2)),
+        "an acquisition blocked on a full lane must be visible as a waiter"
+    );
+    assert_eq!(pool.snapshot().waiting_general, 1);
+    assert_eq!(pool.snapshot().waiting_health, 0);
+
+    // The waiter gives up on its own bound; the count must not leak.
+    assert!(matches!(
+        blocked.join().unwrap(),
+        Err(ReaderAcquireError::Saturated { .. })
+    ));
+    assert_eq!(
+        pool.snapshot().waiting_general,
+        0,
+        "a saturated acquisition must release its waiter count"
+    );
+    drop(held);
+}
+
+/// A snapshot end that outruns its 5ms grace leaves the worker neither
+/// available nor leased. That state has to be counted: an unaccounted worker
+/// silently shrinks the lane and lets shutdown declare quiescence with a
+/// rollback still in flight.
+#[test]
+fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
+    let store = TestStore::new();
+    let executor = SlowExecutor {
+        delay: Duration::from_millis(400),
+        entered: Gate::default(),
+    };
+    let entered = executor.entered.clone();
+    let checkpoint_blockers = ReaderCheckpointBlockers::default();
+    let pool = ReaderPool::start_with_checkpoint_control(
+        store.locator(),
+        two_reader_budget(),
+        executor,
+        None,
+        checkpoint_blockers.clone(),
+    )
+    .unwrap();
+
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let cancel = Arc::clone(&probe.interruption);
+    let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+    {
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        // Cancel only once the worker is provably inside the executor's
+        // delay, so the cancellation always lands with most of the delay
+        // still ahead of the snapshot end.
+        std::thread::spawn(move || {
+            entered.wait(Duration::from_secs(30));
+            cancel.store(1, Ordering::SeqCst);
+        });
+        // The probe releases the caller while the worker is still inside the
+        // executor, so the snapshot end that follows cannot be acknowledged
+        // within its grace period.
+        let _ = snapshot.execute(read.clone(), &probe);
+    }
+    drop(lease);
+
+    let stranded = pool.snapshot();
+    assert_eq!(
+        stranded.limbo_general, 1,
+        "a worker that missed its snapshot-end grace must be counted as limbo"
+    );
+    assert_eq!(
+        stranded.leased_general, 0,
+        "the lease is over even though the worker has not come back"
+    );
+    assert!(
+        !pool.is_quiescent(),
+        "quiescence must not be reported while a rollback is in flight"
+    );
+    assert_eq!(
+        checkpoint_blockers.checkpoint_blockers().count(),
+        1,
+        "a rollback still in flight must remain a live checkpoint blocker"
+    );
+
+    // One worker is stuck, but the lane must not run degraded: it can grow a
+    // replacement rather than serve `max_per_hot_shard - 1` until it resolves.
+    // Both waits are far shorter than the executor delay still running on the
+    // limbo worker, so neither acquisition can be satisfied by its return.
+    let replacement_probe = Probe::for_request(&read);
+    let first = pool
+        .acquire(&read, &replacement_probe, Duration::from_millis(50))
+        .expect("the untouched worker must still serve");
+    let second = pool
+        .acquire(&read, &replacement_probe, Duration::from_millis(50))
+        .expect("the lane must replace the limbo worker instead of running short");
+    drop(first);
+    drop(second);
+
+    // The deferred return is bounded, so the limbo always resolves.
+    assert!(
+        pool.wait_until_quiescent(Duration::from_secs(3)),
+        "the pool must reach quiescence once the deferred end resolves"
+    );
+    assert_eq!(
+        pool.snapshot().limbo_general,
+        0,
+        "the limbo worker was never reclaimed or replaced"
+    );
+    assert!(
+        checkpoint_blockers.checkpoint_blockers().is_clear(),
+        "the blocker must clear only after rollback resolves"
+    );
+}

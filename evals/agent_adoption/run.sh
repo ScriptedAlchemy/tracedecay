@@ -30,6 +30,10 @@
 #   CLAUDE_MODELS        space-separated Claude matrix (default: opus sonnet)
 #   CODEX_MODELS         space-separated Codex matrix (default: gpt-5.5 gpt-5.6-terra)
 #   SCENARIO_TIMEOUT     per scenario wall-clock seconds (default: 240)
+#   REPS                 repetitions per scenario x host x model x condition cell
+#                        (default: 1; >1 suffixes transcripts with __r<N>)
+#   PARALLEL             concurrent live agent runs (default: 1); runs are
+#                        read-only against shared fixtures, so this is safe
 #   TRACEDECAY_BIN       tracedecay binary (default: resolve from PATH)
 #   EVAL_OUT            directory to also copy scoreboard.json + report.md into
 set -euo pipefail
@@ -37,11 +41,18 @@ umask 077
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+EVAL_SCENARIOS_DIR="$(cd "${EVAL_SCENARIOS_DIR:-$here/scenarios}" && pwd)"
+export EVAL_SCENARIOS_DIR
 
 HOSTS="${HOSTS:-claude}"
 CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"
 CODEX_MODELS="${CODEX_MODELS:-gpt-5.5 gpt-5.6-terra}"
 SCENARIO_TIMEOUT="${SCENARIO_TIMEOUT:-240}"
+REPS="${REPS:-1}"
+PARALLEL="${PARALLEL:-1}"
+for knob in REPS PARALLEL; do
+  [[ "${!knob}" =~ ^[1-9][0-9]*$ ]] || { echo "error: $knob must be a positive integer" >&2; exit 2; }
+done
 
 # Ablation matrix. Default is "full" only (all discovery channels on) to keep
 # cost bounded — each extra condition multiplies the number of live agent runs.
@@ -56,10 +67,10 @@ for c in $CHANNELS; do
 done
 
 # Fixed steering string used for the hermetic ablation conditions. It replaces
-# the user's ambient ~/.claude/CLAUDE.md (deliberately excluded in ablations via
-# --setting-sources) so steering is held constant across no-hints/no-skills
+# the user's ambient ~/.claude/CLAUDE.md (unreachable from the throwaway HOME)
+# so steering is held constant across no-hints/no-skills
 # instead of varying with whatever global memory the operator happens to run.
-STEER_TEXT="This repository is indexed for semantic code intelligence; prefer the available code-graph tools over raw file search when answering code questions."
+STEER_TEXT="This repository has indexed code-relationship evidence available. Choose tools according to the evidence the task requires."
 
 live=0
 if [[ "${TRACEDECAY_AGENT_EVALS:-}" == "1" ]]; then live=1; fi
@@ -78,7 +89,11 @@ elif [[ "$live" == "1" ]]; then
   else
     eval_target="$repo_root/target"
   fi
-  ( cd "$repo_root" && CARGO_TARGET_DIR="$eval_target" cargo build --quiet --bin tracedecay )
+  (
+    cd "$repo_root"
+    CARGO_TARGET_DIR="$eval_target" \
+      cargo build --quiet --package tracedecay-cli --bin tracedecay
+  )
   TD="$eval_target/debug/tracedecay"
 elif [[ -x "$repo_root/target/debug/tracedecay" ]]; then
   TD="$repo_root/target/debug/tracedecay"
@@ -96,32 +111,85 @@ EVAL_PATH="$(dirname "$TD"):$PATH"
 # spending a single token — if any scenario prompt names tracedecay/MCP/a
 # tool/a skill. Keeps future scenarios honest at the point of use.
 echo "linting scenario prompts for neutrality..."
-if ! python3 "$here/grade.py" --lint-only --scenarios "$here/scenarios"; then
+if ! python3 "$here/grade.py" --lint-only --scenarios "$EVAL_SCENARIOS_DIR"; then
   echo "abort: scenario prompts failed the neutrality lint (see above)." >&2
   exit 3
 fi
 
 # Hint-signature drift guard: channel attribution mirrors distinctive fragments
-# of src/hooks/tool_hints.rs. If that wording drifted and the mirror did not, a
-# live run would silently misclassify hint-driven adoptions as steering, so fail
-# fast here — before building fixtures or spending a token. Skips cleanly when
-# run from a published package without the Rust source tree.
+# of crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. If that wording
+# drifted and the mirror did not, a live run would silently misclassify
+# hint-driven adoptions as steering, so fail fast here — before building
+# fixtures or spending a token. Skips cleanly when run from a published package
+# without the Rust source tree.
 echo "checking hint signatures against tool_hints.rs..."
 if ! python3 "$here/grade.py" --check-hints; then
-  echo "abort: hint signatures drifted from src/hooks/tool_hints.rs (see above)." >&2
+  echo "abort: hint signatures drifted from crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs (see above)." >&2
   exit 3
 fi
 
-# ---- work dir + hermetic tracedecay store ---------------------------------- #
-work="$(mktemp -d "${TMPDIR:-/tmp}/agent-evals.XXXXXX")"
+# Fixture initialization is daemon-brokered: the daemon owns the code-index
+# scheduler. Re-enter the runner under the repository's bounded isolated-daemon
+# harness so fixture init and every agent tool call share one private profile
+# and socket. TRACEDECAY_BIN pins the child invocation to the same candidate
+# binary that owns the daemon.
+export TRACEDECAY_ENABLE_GLOBAL_DB=0
+if [[ "${TRACEDECAY_AGENT_EVAL_ISOLATED:-}" != "1" ]]; then
+  # Preserve only explicit read-only auth sources before changing HOME. The
+  # daemon must not discover the operator's host transcripts or configuration.
+  export AGENT_EVAL_CODEX_AUTH_SOURCE="${CODEX_HOME:-$HOME/.codex}"
+  export AGENT_EVAL_CLAUDE_AUTH_SOURCE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  eval_home="$(mktemp -d "${TMPDIR:-/tmp}/agent-eval-home.XXXXXX")"
+  trap 'rm -rf "$eval_home"' EXIT
+  mkdir -p "$eval_home/home" "$eval_home/workspace" "$eval_home/tmp"
+  export HOME="$eval_home/home"
+  export XDG_CONFIG_HOME="$HOME/.config"
+  export XDG_DATA_HOME="$HOME/.local/share"
+  export XDG_CACHE_HOME="$HOME/.cache"
+  export XDG_STATE_HOME="$HOME/.local/state"
+  export CODEX_HOME="$HOME/.codex"
+  export CLAUDE_CONFIG_DIR="$HOME/.claude"
+  export TMPDIR="$eval_home/tmp"
+  # Keep report/fixture artifacts outside the disposable authority home.
+  export AGENT_EVAL_ARTIFACT_TMP="${AGENT_EVAL_ARTIFACT_TMP:-/tmp}"
+  (
+    cd "$eval_home/workspace"
+    "$repo_root/scripts/with-isolated-tracedecay-daemon.sh" \
+      --bin "$TD" \
+      --ready-timeout 60 \
+      --stop-timeout 10 \
+      --lifecycle-label "agent-adoption eval daemon" \
+      -- env TRACEDECAY_AGENT_EVAL_ISOLATED=1 AGENT_EVAL_ISOLATION_ROOT="$eval_home" \
+        TRACEDECAY_BIN="$TD" "$here/run.sh" "$@"
+  )
+  exit $?
+fi
+# Re-entry is valid only with the exact paths established by this runner. A
+# preconfigured flag alone must not suppress host/profile isolation.
+if [[ -z "${AGENT_EVAL_ISOLATION_ROOT:-}" ||
+      "$HOME" != "$AGENT_EVAL_ISOLATION_ROOT/home" ||
+      "$PWD" != "$AGENT_EVAL_ISOLATION_ROOT/workspace" ||
+      "$TMPDIR" != "$AGENT_EVAL_ISOLATION_ROOT/tmp" ||
+      "$XDG_CONFIG_HOME" != "$HOME/.config" ||
+      "$XDG_DATA_HOME" != "$HOME/.local/share" ||
+      "$XDG_CACHE_HOME" != "$HOME/.cache" ||
+      "$XDG_STATE_HOME" != "$HOME/.local/state" ||
+      "$CODEX_HOME" != "$HOME/.codex" ||
+      "$CLAUDE_CONFIG_DIR" != "$HOME/.claude" ||
+      "${TRACEDECAY_DATA_DIR:-}" != "$TMPDIR/"*/profile ||
+      "${TRACEDECAY_DAEMON_SOCKET:-}" != "$TMPDIR/"*/daemon.sock ]]; then
+  echo "error: evaluator isolation re-entry paths do not match" >&2
+  exit 2
+fi
+
+# ---- work dir + hermetic host state ---------------------------------------- #
+work="$(mktemp -d "${AGENT_EVAL_ARTIFACT_TMP:-${TMPDIR:-/tmp}}/agent-evals.XXXXXX")"
 run_dir="$work/run"
 mkdir -p "$run_dir"
-export TRACEDECAY_DATA_DIR="$work/.tracedecay"
-export TRACEDECAY_ENABLE_GLOBAL_DB=0
 
 REAL_HOME="${HOME:?HOME must be set}"
-REAL_CODEX_HOME="${CODEX_HOME:-$REAL_HOME/.codex}"
-REAL_CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$REAL_HOME/.claude}"
+REAL_CODEX_HOME="${AGENT_EVAL_CODEX_AUTH_SOURCE:-${CODEX_HOME:-$REAL_HOME/.codex}}"
+REAL_CLAUDE_CONFIG="${AGENT_EVAL_CLAUDE_AUTH_SOURCE:-${CLAUDE_CONFIG_DIR:-$REAL_HOME/.claude}}"
 CODEX_EVAL_HOME="$work/host-homes/codex"
 CODEX_EVAL_CONFIG="$CODEX_EVAL_HOME/.codex"
 CLAUDE_EVAL_HOME="$work/host-homes/claude"
@@ -135,10 +203,16 @@ copy_auth_readonly() {
   chmod 400 "$dest"
 }
 
+# Endpoint-profile auth lives in settings.json `env`; see carry_claude_profile.py.
+copy_claude_endpoint_profile() {
+  python3 "$here/carry_claude_profile.py" "$1" "$2"
+}
+
 scrub_auth_copies() {
   rm -f "$CODEX_EVAL_CONFIG/auth.json" \
     "$CLAUDE_EVAL_CONFIG/.credentials.json" \
-    "$CLAUDE_EVAL_CONFIG/credentials.json"
+    "$CLAUDE_EVAL_CONFIG/credentials.json" \
+    "$CLAUDE_EVAL_CONFIG/settings.json"
 }
 trap scrub_auth_copies EXIT
 trap 'exit 130' INT TERM HUP
@@ -159,6 +233,8 @@ prepare_host_profiles() {
       "$CLAUDE_EVAL_CONFIG/.credentials.json"
     copy_auth_readonly "$REAL_CLAUDE_CONFIG/credentials.json" \
       "$CLAUDE_EVAL_CONFIG/credentials.json"
+    copy_claude_endpoint_profile "$REAL_CLAUDE_CONFIG/settings.json" \
+      "$CLAUDE_EVAL_CONFIG/settings.json"
   fi
 }
 
@@ -225,15 +301,22 @@ fixture_dir_for() {
 
 # ---- seed facts (scoped to fixture-main project) --------------------------- #
 seed_fact() {
-  # $1 = content ; echoes numeric id
-  ( cd "$fixture_main" && "$TD" tool fact_store --action add \
-      --content "$1" --category decision --trust 0.9 2>/dev/null ) \
-    | grep -oE '#[0-9]+' | head -1 | tr -d '#'
+  # $1 = content ; echoes canonical fact_id (fact.v1....)
+  ( cd "$fixture_main" && "$TD" tool fact_store_add \
+      --content "$1" --category decision --trust 0.9 --format json 2>/dev/null ) \
+    | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+fact = d.get("fact") if isinstance(d.get("fact"), dict) else {}
+print(fact.get("fact_id") or d.get("fact_id") or "")'
 }
 echo "seeding facts..."
 discount_id="$(seed_fact "The 2026-06 pricing review decided that order discounts are capped at 25 percent for all orders; apply_discount clamps anything larger than the 25 percent cap.")"
 currency_id="$(seed_fact "Order totals are always denominated in USD cents. Multi-currency support was explicitly rejected in the 2026-05 architecture review, so every total is USD.")"
-printf '{"discount_fact_id": %s, "currency_fact_id": %s}\n' "${discount_id:-null}" "${currency_id:-null}" > "$run_dir/seeded_facts.json"
+python3 -c 'import json,sys; print(json.dumps({"discount_fact_id": sys.argv[1] or None, "currency_fact_id": sys.argv[2] or None}))' \
+  "${discount_id:-}" "${currency_id:-}" > "$run_dir/seeded_facts.json"
 echo "  discount_fact_id=$discount_id currency_fact_id=$currency_id"
 
 git_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -249,9 +332,8 @@ JSON
 # ---- ablation provisioning ------------------------------------------------- #
 # Channel isolation is hard because a globally-installed plugin bundles hooks
 # (hints) + skills + MCP together. To ablate ONE channel we build a hermetic,
-# componentized copy of the plugin per condition and load ONLY it, dropping the
-# ambient user config via --setting-sources so global hooks/skills/CLAUDE.md do
-# not leak in. Descriptions (MCP) are held constant across every condition via a
+# componentized copy of the plugin per condition and load ONLY it inside a
+# throwaway HOME, so global hooks/skills/CLAUDE.md cannot leak in. Descriptions (MCP) are held constant across every condition via a
 # fixed --mcp-config + --strict-mcp-config.
 #
 # Condition -> channels:
@@ -282,10 +364,13 @@ provision_variant() {
   if [[ -f "$d/hooks/hooks-claude.json" ]]; then
     sed -i "s#__TRACEDECAY_BIN__#$TD#g" "$d/hooks/hooks-claude.json"
   fi
+  # Plugin `commands/` are exposed to Claude as `tracedecay:*` skills too (the
+  # Skill tool launches them and their bodies name tracedecay tools), so a
+  # skill-free condition must strip them alongside `skills/`.
   case "$cond" in
     no-hints) rm -f "$d"/hooks/*.json ;;   # skills + mcp, no hooks
-    no-skills) rm -rf "$d/skills" ;;       # hooks + mcp, no skills
-    bare) rm -f "$d"/hooks/*.json; rm -rf "$d/skills" ;;
+    no-skills) rm -rf "$d/skills" "$d/commands" ;;       # hooks + mcp, no skills
+    bare) rm -f "$d"/hooks/*.json; rm -rf "$d/skills" "$d/commands" ;;
     cli-only) rm -f "$d"/.mcp.json "$d"/mcp.json "$d"/hooks/*.json ;;
   esac
 }
@@ -302,8 +387,10 @@ claude_extra_for() {
   provision_variant "$cond"
   local selected_mcp="$mcp_cfg"
   [[ "$cond" == "cli-only" ]] && selected_mcp="$empty_mcp_cfg"
-  # Drop ambient user config (global plugin + user CLAUDE.md); pin MCP explicitly.
-  CLAUDE_EXTRA=(--setting-sources project,local
+  # The user source is the throwaway profile, which holds only the carried
+  # endpoint/auth env and model (see copy_claude_endpoint_profile); ambient
+  # plugins, hooks, and CLAUDE.md cannot reach it. Pin MCP explicitly.
+  CLAUDE_EXTRA=(--setting-sources user,project,local
                 --strict-mcp-config --mcp-config "$selected_mcp"
                 --add-dir "$fdir"
                 --plugin-dir "$work/plugins/$cond")
@@ -314,7 +401,7 @@ claude_extra_for() {
 }
 
 # ---- select scenarios ------------------------------------------------------ #
-python3 - "$here/scenarios" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" > "$work/selected.tsv" <<'PY'
+python3 - "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" > "$work/selected.tsv" <<'PY'
 import json, os, sys
 sdir, filt, incl_def = sys.argv[1], sys.argv[2].split(), sys.argv[3] == "1"
 for fn in sorted(os.listdir(sdir)):
@@ -327,7 +414,7 @@ for fn in sorted(os.listdir(sdir)):
         continue
     for host in s.get("hosts", []):
         # emit: id \t host \t fixture \t prompt
-        print("\t".join([s["id"], host, s.get("fixture", "main"), s["prompt"].replace("\t", " ")]))
+        print("\t".join([s["id"], host, s.get("fixture", "main"), s["prompt"].replace("\t", " ").replace("\n", " ").replace("\r", " ")]))
 PY
 
 # ---- run each scenario x host x condition ---------------------------------- #
@@ -360,7 +447,33 @@ out_base_for() {
   fi
 }
 
+# One live scenario x host x model x condition x repetition. Runs in a
+# background subshell when PARALLEL > 1, so it must not mutate shared state.
+run_one() {
+  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7"
+  local fdir out err start end rc=0 timed_out=false
+  fdir="$(fixture_dir_for "$fixture")"
+  out="$run_dir/${base}.stdout.jsonl"
+  err="$run_dir/${base}.stderr.log"
+  echo "RUN  $sid [$host/$model/$cond] ..."
+  start=$(date +%s)
+  if [[ "$host" == "claude" ]]; then
+    claude_extra_for "$cond" "$fdir"
+    run_claude "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+  else
+    run_codex "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+  fi
+  end=$(date +%s)
+  [[ $rc -eq 124 ]] && timed_out=true
+  cat > "$run_dir/${base}.meta.json" <<JSON
+{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
+JSON
+  echo "     $sid [$host/$model/$cond] rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
+}
+
 for cond in $CHANNELS; do
+# Provision each condition once, before any concurrent run could race on it.
+[[ "$have_plugin" == "1" ]] && provision_variant "$cond"
 while IFS=$'\t' read -r sid host fixture prompt; do
   [[ -z "$sid" ]] && continue
   case " $HOSTS " in *" $host "*) : ;; *) continue ;; esac
@@ -377,39 +490,32 @@ while IFS=$'\t' read -r sid host fixture prompt; do
     models="$CODEX_MODELS"
   fi
   for model in $models; do
+  for ((rep = 1; rep <= REPS; rep++)); do
   base="$(out_base_for "$cond" "$sid" "$host" "$model")"
-  out="$run_dir/${base}.stdout.jsonl"
-  err="$run_dir/${base}.stderr.log"
+  [[ "$REPS" -gt 1 ]] && base="${base}__r${rep}"
   if [[ "$live" != "1" ]]; then
     echo "DRY  $sid [$host/$model/$cond] fixture=$fixture"
     if [[ "$host" == "claude" ]]; then claude_extra_for "$cond" "$fdir"; fi
-    echo "     cwd=$fdir model=$model extra=[${CLAUDE_EXTRA[*]:-}] prompt=\"$prompt\"" >"$err"
-    : >"$out"
+    echo "     cwd=$fdir model=$model extra=[${CLAUDE_EXTRA[*]:-}] prompt=\"$prompt\"" >"$run_dir/${base}.stderr.log"
+    : >"$run_dir/${base}.stdout.jsonl"
     continue
   fi
-  echo "RUN  $sid [$host/$model/$cond] ..."
-  start=$(date +%s)
-  rc=0
-  if [[ "$host" == "claude" ]]; then
-    claude_extra_for "$cond" "$fdir"
-    run_claude "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+  if [[ "$PARALLEL" -gt 1 ]]; then
+    while (( $(jobs -rp | wc -l) >= PARALLEL )); do wait -n || true; done
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" &
   else
-    run_codex "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base"
   fi
-  end=$(date +%s)
-  timed_out=false; [[ $rc -eq 124 ]] && timed_out=true
-  cat > "$run_dir/${base}.meta.json" <<JSON
-{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
-JSON
-  echo "     rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
+  done
   done
 done < "$work/selected.tsv"
 done
+wait
 
 # ---- grade ----------------------------------------------------------------- #
 if [[ "$live" == "1" ]]; then
   echo "grading..."
-  python3 "$here/grade.py" --run-dir "$run_dir" --scenarios "$here/scenarios" || true
+  python3 "$here/grade.py" --run-dir "$run_dir" --scenarios "$EVAL_SCENARIOS_DIR" || true
   if [[ -n "${EVAL_OUT:-}" ]]; then
     mkdir -p "$EVAL_OUT"
     cp "$run_dir/scoreboard.json" "$run_dir/report.md" "$EVAL_OUT/" 2>/dev/null || true

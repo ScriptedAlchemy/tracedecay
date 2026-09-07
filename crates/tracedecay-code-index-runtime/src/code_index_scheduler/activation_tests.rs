@@ -1,0 +1,565 @@
+//! Cold-start activation contract for sealed code generations.
+//!
+//! Decoding a sealed generation is O(store): it re-mints every file's
+//! exact-extraction authority (a canonical SHA-256 over every chunk) and
+//! repeats the full canonical validation sweep. These tests pin the three
+//! properties that keep that work off the request path:
+//!
+//! - activation decodes and warms once, and the first query re-decodes nothing;
+//! - concurrent cold readers share the one in-flight decode;
+//! - the active generation stays pinned while superseded generations churn
+//!   through the LRU.
+//!
+//! Plus the invariant none of the above may weaken: a corrupt sealed store
+//! still fails every request, with no memoized verdict.
+
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::sync::Arc;
+
+use tempfile::TempDir;
+use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision};
+
+use super::{
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
+};
+use tracedecay_runtime_core::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Base directory for fixture temporary roots, resolved through every symlink.
+///
+/// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
+/// `/private/var`. Production canonicalizes a project root before it hashes
+/// the code-index scope and before it decides whether a dependency escaped the
+/// worktree, so a fixture path that still carries the symlink names a
+/// different scope than the one the scheduler writes and reads. Create the
+/// fixture inside the canonical temporary directory so every path taken from
+/// it is already canonical.
+fn canonical_temp_root() -> std::path::PathBuf {
+    let base = std::env::temp_dir();
+    base.canonicalize().unwrap_or(base)
+}
+
+fn fixture() -> TempDir {
+    let root = TempDir::new_in(canonical_temp_root()).expect("fixture root");
+    git(root.path(), &["init", "-q"]);
+    git(
+        root.path(),
+        &["config", "user.email", "activation@test.invalid"],
+    );
+    git(root.path(), &["config", "user.name", "Activation Test"]);
+    write(root.path(), "src/lib.rs", 0);
+    git(root.path(), &["add", "src/lib.rs"]);
+    git(root.path(), &["commit", "-q", "-m", "fixture"]);
+    root
+}
+
+fn write(root: &Path, path: &str, revision: usize) {
+    let target = root.join(path);
+    fs::create_dir_all(target.parent().expect("source parent")).expect("create source parent");
+    fs::write(
+        target,
+        format!("pub fn activation_revision() -> u32 {{ {revision} }}\n"),
+    )
+    .expect("write fixture source");
+}
+
+fn project_id() -> ProjectId {
+    ProjectId::new("project.code-index-activation").expect("valid project identity")
+}
+
+fn open(project: &Path, store_root: &Path) -> CodeIndexWorktreeSchedulerV1 {
+    CodeIndexWorktreeSchedulerV1::open(
+        project_id(),
+        project,
+        store_root.to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler")
+}
+
+fn publish(scheduler: &mut CodeIndexWorktreeSchedulerV1) -> CodeGenerationId {
+    match scheduler.reconcile_now().expect("reconcile") {
+        CodeIndexReconcileOutcomeV1::Published(evidence) => evidence.generation_id,
+        CodeIndexReconcileOutcomeV1::Noop(_) => panic!("expected a published generation"),
+    }
+}
+
+fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
+    DaemonCodeIndexPublicationStoreV1::new(
+        store_root,
+        store_root,
+        SanitizerRevision::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("sanitizer revision"),
+    )
+    .expect("open publication store")
+}
+
+/// A cold mount is a foreground routing operation, not a repository or sealed-
+/// store verification pass. The mounted route must become visible while the
+/// retained background owner is admission-blocked, and it must expose no
+/// generation until that owner proves the sealed generation still matches the
+/// exact worktree.
+#[tokio::test]
+async fn cold_mount_defers_sealed_decode_and_truth_verification_to_the_retained_owner() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), project.path());
+    let generation_id = {
+        let mut scheduler = open(project.path(), &scoped_store);
+        publish(&mut scheduler)
+    };
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
+    let background_admission = registry.background_reconcile_admission();
+    let mount_started = std::time::Instant::now();
+    assert!(
+        registry
+            .mount_worktree(
+                project_id(),
+                project.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount the exact worktree"),
+        "the cold route is newly mounted"
+    );
+    assert!(
+        mount_started.elapsed() < std::time::Duration::from_millis(250),
+        "foreground route mount exceeded the 250ms cold-admission budget: {:?}",
+        mount_started.elapsed()
+    );
+
+    let scheduler = registry
+        .scheduler_handle(project.path())
+        .await
+        .expect("mounted scheduler");
+    {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            0,
+            "foreground mount must not decode the sealed generation"
+        );
+        assert!(
+            !scheduler.verified_against_source(),
+            "a cold route is explicitly unverified until background truth completes"
+        );
+        assert!(
+            scheduler.latest_complete_already_decoded().is_none(),
+            "unverified sealed bytes cannot become a serving generation"
+        );
+    }
+    assert!(
+        registry
+            .latest_complete_ready(project.path())
+            .await
+            .is_none(),
+        "query admission returns typed unavailable while activation is warming"
+    );
+
+    background_admission.add_permits(1);
+    let activated = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if registry.latest_generation_id(project.path()).await.as_ref() == Some(&generation_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        activated.is_ok(),
+        "the retained owner must activate the exact sealed generation after verification"
+    );
+    registry.shutdown().await;
+}
+
+/// Activation pays the sealed decode and every retained serving derivation.
+/// The parser-admitted staging corpus is released after the lexical/exact
+/// owners consume it, while the first query still finds those owners warm and
+/// performs no second decode or lazily deferred O(store) build.
+#[test]
+fn activation_releases_exact_staging_without_cooling_query_owners() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = open(project.path(), store.path());
+        let _ = publish(&mut scheduler);
+    }
+
+    // Cold process view: a brand-new scheduler over an existing sealed store.
+    let scheduler = open(project.path(), store.path());
+    scheduler.prime_serving_caches();
+    let decodes_after_activation = scheduler.sealed_decode_count();
+    assert_eq!(
+        decodes_after_activation, 1,
+        "activation must decode the active generation exactly once"
+    );
+
+    // Every retained per-generation derivation an unpinned query would
+    // otherwise build lazily must already exist before the first request is
+    // served. Exact admission itself is staging: the installed exact and
+    // lexical owners have already consumed it, so retaining that full second
+    // chunk corpus would only inflate the idle daemon.
+    let latest = scheduler.latest_complete().expect("restored generation");
+    assert!(
+        latest.generation().is_validated(),
+        "activation must run the canonical validation sweep"
+    );
+    assert!(
+        !latest.generation().is_exact_admission_warm(),
+        "activation must release exact-admission staging after the serving owners consume it"
+    );
+    assert!(
+        latest.record_index_is_warm(),
+        "activation must build the record lookup indices"
+    );
+    assert!(
+        latest.query_owners_are_warm(),
+        "activation must build the exact/lexical/graph lane owners"
+    );
+
+    // Everything the serving path touches for an unpinned query. Owner reads
+    // must reuse the retained authority without reconstructing staging.
+    let _ = latest.record_index();
+    let first_owners = latest
+        .production_query_owners()
+        .expect("production lane owners");
+    let repeat_owners = latest
+        .production_query_owners()
+        .expect("repeat production lane owners");
+    assert!(
+        Arc::ptr_eq(&first_owners, &repeat_owners),
+        "serving must retain one warm query-owner allocation"
+    );
+    assert!(
+        !latest.generation().is_exact_admission_warm(),
+        "reading warm query owners must not reconstruct exact-admission staging"
+    );
+    latest
+        .test_attribution_authority()
+        .expect("test attribution authority");
+    // A second request repeats the whole sequence.
+    let repeat = scheduler.latest_complete().expect("repeat generation read");
+    repeat
+        .production_query_owners()
+        .expect("repeat generation production lane owners");
+
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_after_activation,
+        "serving a warmed generation must not re-read or re-decode sealed bytes"
+    );
+    assert!(
+        std::ptr::eq(latest.generation(), repeat.generation()),
+        "every reader must share the one decoded generation allocation"
+    );
+}
+
+/// A query that arrives while activation is still decoding must join the
+/// in-flight decode, not start a competing O(store) sweep of its own.
+#[test]
+fn concurrent_cold_readers_share_one_in_flight_decode() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let scoped_root = {
+        let mut scheduler = open(project.path(), store.path());
+        let _ = publish(&mut scheduler);
+        store.path().to_path_buf()
+    };
+
+    // A fresh publication store is the cold state the daemon starts from: the
+    // sealed pointer exists on disk and nothing is decoded yet.
+    let publication = publication_store(&scoped_root);
+    assert_eq!(publication.sealed_decode_count(), 0);
+
+    let readers = 8;
+    let barrier = Arc::new(std::sync::Barrier::new(readers));
+    let loaded = std::thread::scope(|scope| {
+        let handles = (0..readers)
+            .map(|_| {
+                let publication = publication.clone();
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    publication
+                        .load_active_shared()
+                        .expect("load active generation")
+                        .expect("active generation is present")
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("reader thread"))
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(
+        publication.sealed_decode_count(),
+        1,
+        "concurrent cold readers must share one decode instead of duplicating it"
+    );
+    let first = &loaded[0];
+    assert!(
+        loaded
+            .iter()
+            .all(|generation| Arc::ptr_eq(generation, first)),
+        "every parked reader must be handed the same decoded generation"
+    );
+}
+
+/// The decode-free admission is what lets a query with something servable in
+/// hand resolve freshness without ever entering the O(store) decode. It must
+/// abstain while nothing is decoded, never read sealed bytes, and serve the
+/// identical shared allocation once the generation is warm.
+#[test]
+fn the_decode_free_admission_abstains_instead_of_reading_sealed_bytes() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = open(project.path(), store.path());
+        let _ = publish(&mut scheduler);
+    }
+
+    let publication = publication_store(store.path());
+    assert_eq!(publication.sealed_decode_count(), 0);
+    assert!(
+        publication
+            .active_already_decoded()
+            .expect("decode-free probe")
+            .is_none(),
+        "nothing is decoded yet, so the decode-free admission abstains"
+    );
+    assert_eq!(
+        publication.sealed_decode_count(),
+        0,
+        "the decode-free admission must never read or decode sealed bytes"
+    );
+
+    // Nothing servable: the awaiting admission still pays the one decode.
+    let active = publication
+        .load_active_shared()
+        .expect("load active generation")
+        .expect("active generation is present");
+    assert_eq!(publication.sealed_decode_count(), 1);
+
+    // Warm: the probe now serves, and serves the same allocation.
+    let probed = publication
+        .active_already_decoded()
+        .expect("decode-free probe")
+        .expect("warm active generation");
+    assert!(
+        Arc::ptr_eq(&active, &probed),
+        "the decode-free admission must serve the one decoded generation"
+    );
+    assert_eq!(
+        publication.sealed_decode_count(),
+        1,
+        "probing a warm generation must not re-decode"
+    );
+}
+
+/// The other side of the same rule: when nothing is servable, awaiting the
+/// in-flight decode is still correct and still single-flight. A reader that
+/// arrives mid-decode parks and is handed the generation the holder installs,
+/// without starting a second sweep.
+#[test]
+fn the_awaiting_admission_still_joins_an_in_flight_decode() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = open(project.path(), store.path());
+        let _ = publish(&mut scheduler);
+    }
+
+    let publication = publication_store(store.path());
+    let expected = publication
+        .load_active_shared()
+        .expect("load active generation")
+        .expect("active generation is present");
+    let decodes = publication.sealed_decode_count();
+
+    // Occupy the barrier as an activation decode does.
+    let held = publication.hold_active_decode();
+    assert!(
+        publication
+            .active_already_decoded()
+            .expect("decode-free probe")
+            .is_none(),
+        "the decode-free admission abstains for the whole activation window"
+    );
+
+    let served = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            publication
+                .load_active_shared()
+                .expect("load active generation")
+                .expect("active generation is present")
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+        reader.join().expect("parked reader")
+    });
+
+    assert!(
+        Arc::ptr_eq(&served, &expected),
+        "a parked reader must be handed the generation the in-flight decode installs"
+    );
+    assert_eq!(
+        publication.sealed_decode_count(),
+        decodes,
+        "parking must join the in-flight decode, never start a second sweep"
+    );
+}
+
+/// Pinned and cursor-paged reads churn superseded generations through the LRU.
+/// The active generation lives in its own pinned slot, so that churn must never
+/// evict it and force a re-decode on an unpinned query.
+#[test]
+fn superseded_generation_churn_never_evicts_the_pinned_active_generation() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    // One more revision than the decoded-generation LRU can hold, so the
+    // superseded set alone would overflow it.
+    let revisions = super::DECODED_GENERATION_CACHE_CAPACITY + 2;
+    let mut superseded = Vec::with_capacity(revisions);
+    {
+        let mut scheduler = open(project.path(), store.path());
+        for revision in 0..revisions {
+            write(project.path(), "src/lib.rs", revision);
+            superseded.push(publish(&mut scheduler));
+        }
+    }
+
+    let scheduler = open(project.path(), store.path());
+    scheduler.prime_serving_caches();
+    let active = scheduler
+        .latest_complete()
+        .expect("restored generation")
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
+    let after_activation = scheduler.sealed_decode_count();
+    assert_eq!(after_activation, 1);
+
+    // Read every superseded generation, overflowing the LRU several times over.
+    let mut pinned_decodes = 0;
+    for generation_id in superseded.iter().filter(|id| **id != active) {
+        let before = scheduler.sealed_decode_count();
+        scheduler
+            .generation(generation_id)
+            .expect("pinned generation read")
+            .expect("pinned generation is present");
+        assert!(
+            scheduler.sealed_decode_count() > before,
+            "a cold pinned generation is decoded on first read"
+        );
+        pinned_decodes += scheduler.sealed_decode_count() - before;
+        // Re-reading the same pinned generation is served from the LRU.
+        let warm = scheduler.sealed_decode_count();
+        scheduler
+            .generation(generation_id)
+            .expect("repeat pinned read")
+            .expect("pinned generation is present");
+        assert_eq!(
+            scheduler.sealed_decode_count(),
+            warm,
+            "a decoded pinned generation must be served from the cache"
+        );
+    }
+    assert!(pinned_decodes > 0, "the fixture must exercise pinned reads");
+
+    let served = scheduler
+        .latest_complete()
+        .expect("active generation after churn");
+    assert_eq!(served.generation().manifest().generation_id, active);
+    assert!(!served.exact().expect("exact admission").is_empty());
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        after_activation + pinned_decodes,
+        "LRU pressure from superseded generations must never evict the active one"
+    );
+}
+
+/// The amortization above is only sound because nothing is memoized on failure.
+/// A corrupt sealed store must fail the first request and every request after
+/// it, with the full check re-run each time.
+#[test]
+fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = open(project.path(), store.path());
+        let _ = publish(&mut scheduler);
+    }
+
+    // Tamper with one content-addressed component while leaving the manifest
+    // and pointer intact. The component digest — never a cached failure
+    // verdict — must reject every attempted activation.
+    let generations_root = store.path().join("code-generations-v1");
+    let sealed_path = fs::read_dir(&generations_root)
+        .expect("read generations root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("generation-") && name.ends_with(".json"))
+        })
+        .expect("sealed generation file");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&sealed_path).expect("read generation manifest"))
+            .expect("decode generation manifest");
+    let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .expect("file segment digest");
+    let segment_path = store
+        .path()
+        .join("code-generation-segments-v1")
+        .join(format!("segment-{segment_digest}.json"));
+    let mut corrupted = fs::read(&segment_path).expect("read file segment");
+    let middle = corrupted.len() / 2;
+    corrupted[middle] ^= 1;
+    fs::write(segment_path, corrupted).expect("write corrupt file segment");
+
+    let publication = publication_store(store.path());
+    let first = publication.load_active_shared();
+    assert!(first.is_err(), "a corrupt generation must not serve");
+    let decodes_after_first = publication.sealed_decode_count();
+    assert_eq!(
+        decodes_after_first, 1,
+        "the failing request must have run the real decode"
+    );
+
+    let second = publication.load_active_shared();
+    assert!(
+        second.is_err(),
+        "a failed decode must never be memoized as a served generation"
+    );
+    assert_eq!(
+        publication.sealed_decode_count(),
+        2,
+        "the next request must repeat the full check rather than trust a verdict"
+    );
+}

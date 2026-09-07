@@ -1,0 +1,1419 @@
+use super::*;
+
+use tracedecay_usecases::semantic_runtime::{
+    project_committed_semantic_pins, project_semantic_retained_vector_generations,
+};
+
+/// The exact query profile these fixtures serve, which the query authority
+/// owns in production. The committed state names it only until a second
+/// activation displaces it out of both slots.
+fn serving_query_profile_id(
+    committed: &CommittedRetrievalProfileStateV1,
+) -> tracedecay_domain::FusionProfileId {
+    committed
+        .state
+        .rollback_profile()
+        .expect("fixture query rollback profile")
+        .profile()
+        .profile_id
+        .clone()
+}
+
+#[tokio::test]
+async fn committed_query_routes_install_and_rollback_as_one_revision() {
+    // `install_committed_query_authorities` canonicalizes the root it keys the
+    // semantic redundancy state on, so the fixture root has to be canonical
+    // before `project.path()` can read that state back. On macOS the
+    // `/var` -> `/private/var` spelling reads an empty slot instead.
+    let project = TempDir::new_in(
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
+    )
+    .expect("project root");
+    git(project.path(), &["init", "-q", "-b", "main"]);
+    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        project.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+        .expect("source file");
+    git(project.path(), &["add", "."]);
+    git(project.path(), &["commit", "-qm", "fixture"]);
+
+    let project_id = ProjectId::new("project.query-semantic-activation").expect("project id");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
+            .expect("resolved scope");
+    let store = TempDir::new().expect("store root");
+    let registry =
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount code index");
+    let cursor_store = TempDir::new().expect("cursor store");
+    let profile_root = cursor_store.path().join("profile");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-semantic-activation",
+    )
+    .expect("database scope");
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session registry");
+    let session_db = session_registry
+        .profile_sessions()
+        .await
+        .expect("session database");
+    let latest = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh_for_scope(&scope).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial code generation");
+    let cursor_keys = Arc::new(
+        session_db
+            .load_session_cursor_key_provider_result()
+            .await
+            .expect("cursor keys"),
+    );
+    let profile_id = session_db.binding().shard_id.profile_id.clone();
+    let provider = DaemonQueryAuthorityProviderV1::default();
+    let semantic = semantic_committed_state(scope.clone());
+    let prepared = provider
+        .prepare_after_successful_activation(
+            profile_id.clone(),
+            scope.clone(),
+            semantic.state.clone(),
+            Arc::clone(&cursor_keys),
+            &latest.generation().manifest().privacy_domain,
+        )
+        .expect("prepare semantic activation");
+    let delayed_semantic = provider
+        .prepare_after_successful_activation(
+            profile_id.clone(),
+            scope.clone(),
+            semantic.state.clone(),
+            Arc::clone(&cursor_keys),
+            &latest.generation().manifest().privacy_domain,
+        )
+        .expect("prepare delayed semantic activation");
+    let semantic_authority = Arc::new(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+                semantic.clone(),
+                serving_query_profile_id(&semantic),
+            )
+            .expect("prepare semantic route"),
+        );
+    let standalone_query_authority = Arc::clone(prepared.query_authority());
+    let standalone_semantic_authority = Arc::clone(&semantic_authority);
+    let semantic_attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("reserve semantic activation");
+    registry
+        .mount_query_authority_for_committed_fallback(
+            project.path(),
+            &scope,
+            semantic.state.configuration_revision(),
+            Arc::clone(&standalone_query_authority),
+        )
+        .await
+        .expect("mount core fallback under the exact committed fence");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "semantic warm-up must not remove exact, lexical, and graph search"
+    );
+    registry
+        .install_committed_query_authorities(
+            project.path(),
+            &scope,
+            || {
+                provider
+                    .commit_prepared_activation(&prepared)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: prepared.scope().clone(),
+                configuration_revision: prepared.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(prepared.query_authority()),
+            },
+            Some(semantic_authority),
+            None,
+            None,
+            prepare_project_semantic_redundancy_authority(&semantic),
+            &semantic_attempt,
+        )
+        .await
+        .expect("install semantic activation");
+    assert!(
+        registry
+            .mount_query_authority(project.path(), &scope, standalone_query_authority)
+            .await
+            .is_err(),
+        "standalone query installation cannot reset a committed pair"
+    );
+    assert!(
+        registry
+            .mount_semantic_query_authority(project.path(), &scope, standalone_semantic_authority,)
+            .await
+            .is_err(),
+        "standalone semantic installation cannot replace a committed pair"
+    );
+
+    assert!(matches!(
+        provider.status(Some(&scope)),
+        QueryAuthorityProviderStatusV1::Available { profile_id, .. }
+            if profile_id.as_str() == "profile.query-baseline"
+    ));
+    assert!(
+        registry.has_query_authority_for_scope(&scope).await,
+        "semantic activation must keep the mounted query fallback query authority"
+    );
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(semantic.state.configuration_revision().clone())
+        ))
+    );
+    let semantic_generation = semantic_pins().vector_generation_id;
+    assert_eq!(
+        project_committed_semantic_pins(project.path()).map(|pins| pins.vector_generation_id),
+        Some(semantic_generation.clone())
+    );
+    assert_eq!(
+        project_semantic_retained_vector_generations(project.path())
+            .expect("semantic retention roots")
+            .generation_ids(),
+        &BTreeSet::from([semantic_generation.clone()])
+    );
+    assert_eq!(
+        project_semantic_redundancy_revision(project.path()),
+        Some(semantic.state.configuration_revision().clone()),
+        "redundancy roots and authority publish under the installed query revision"
+    );
+
+    let exact_reobservation_attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("reserve exact semantic reobservation");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "an exact reobservation must not open a calibration-unavailable serving window"
+    );
+    assert_eq!(
+        project_committed_semantic_pins(project.path()).map(|pins| pins.vector_generation_id),
+        Some(semantic_generation.clone()),
+        "an exact reobservation must preserve the coherent semantic authority"
+    );
+    assert!(
+        !registry
+            .clear_failed_query_activation(
+                project.path(),
+                &scope,
+                Some(&semantic_generation),
+                prepare_project_semantic_redundancy_authority(&semantic),
+                &exact_reobservation_attempt,
+            )
+            .await
+            .expect("settle failed exact semantic reobservation"),
+        "failed exact reobservation cleanup must preserve the installed authority and cache"
+    );
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "failed exact reobservation must keep both healthy routes installed"
+    );
+    assert_eq!(
+        project_committed_semantic_pins(project.path()).map(|pins| pins.vector_generation_id),
+        Some(semantic_generation.clone()),
+        "failed exact reobservation must keep its committed semantic cache binding"
+    );
+
+    let rollback = query_rollback_committed_state(&semantic);
+    let prepared = provider
+        .prepare_after_successful_activation(
+            profile_id.clone(),
+            scope.clone(),
+            rollback.state.clone(),
+            Arc::clone(&cursor_keys),
+            &latest.generation().manifest().privacy_domain,
+        )
+        .expect("prepare query rollback");
+    let rollback_core_authority = Arc::clone(prepared.query_authority());
+    let rollback_attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            rollback.epoch,
+            rollback.state.configuration_revision(),
+            &rollback.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&rollback),
+        )
+        .await
+        .expect("reserve query rollback");
+    assert!(
+        project_committed_semantic_pins(project.path()).is_none(),
+        "reservation must revoke the prior semantic redundancy authority before any install"
+    );
+    assert_eq!(
+        project_semantic_redundancy_revision(project.path()),
+        Some(rollback.state.configuration_revision().clone())
+    );
+    assert_eq!(
+        project_semantic_retained_vector_generations(project.path())
+            .expect("reserved rollback roots")
+            .generation_ids(),
+        &BTreeSet::from([semantic_generation.clone()]),
+        "reservation publishes the durable desired roots without serving stale redundancy"
+    );
+    assert!(
+        registry
+            .begin_committed_query_activation(
+                project.path(),
+                &scope,
+                semantic.epoch,
+                semantic.state.configuration_revision(),
+                &semantic.transition_digest,
+                &prepare_project_semantic_redundancy_authority(&semantic),
+            )
+            .await
+            .is_err(),
+        "an older durable epoch cannot reserve after the newer rollback"
+    );
+    assert!(project_committed_semantic_pins(project.path()).is_none());
+    assert_eq!(
+        project_semantic_redundancy_revision(project.path()),
+        Some(rollback.state.configuration_revision().clone()),
+        "stale reservation cannot restore prior redundancy"
+    );
+    registry
+        .install_committed_query_authorities(
+            project.path(),
+            &scope,
+            || {
+                provider
+                    .commit_prepared_activation(&prepared)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: prepared.scope().clone(),
+                configuration_revision: prepared.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(prepared.query_authority()),
+            },
+            None,
+            None,
+            Some(&semantic_pins().vector_generation_id),
+            prepare_project_semantic_redundancy_authority(&rollback),
+            &rollback_attempt,
+        )
+        .await
+        .expect("install query rollback");
+    drop(prepared);
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(rollback.state.configuration_revision().clone())
+        )),
+        "semantic disable replaces both routes in one mounted revision"
+    );
+    assert_eq!(
+        Arc::strong_count(&rollback_core_authority),
+        2,
+        "the registry retains the exact prepared core authority"
+    );
+    assert!(
+        project_committed_semantic_pins(project.path()).is_none(),
+        "semantic disable clears the executable redundancy authority"
+    );
+    assert_eq!(
+        project_semantic_retained_vector_generations(project.path())
+            .expect("rollback retention roots")
+            .generation_ids(),
+        &BTreeSet::from([semantic_generation.clone()]),
+        "semantic disable retains the rollback generation root"
+    );
+    assert_eq!(
+        project_semantic_redundancy_revision(project.path()),
+        Some(rollback.state.configuration_revision().clone())
+    );
+
+    registry
+        .clear_failed_query_activation(
+            project.path(),
+            &scope,
+            None,
+            prepare_project_semantic_redundancy_authority(&semantic),
+            &semantic_attempt,
+        )
+        .await
+        .expect("settle delayed failed observer");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(rollback.state.configuration_revision().clone())
+        )),
+        "a delayed older failure cannot erase the coherently installed rollback"
+    );
+    assert!(project_committed_semantic_pins(project.path()).is_none());
+    assert_eq!(
+        project_semantic_retained_vector_generations(project.path())
+            .expect("newer roots after delayed failure")
+            .generation_ids(),
+        &BTreeSet::from([semantic_generation.clone()])
+    );
+    registry
+        .clear_failed_query_activation(
+            project.path(),
+            &scope,
+            None,
+            prepare_project_semantic_redundancy_authority(&rollback),
+            &rollback_attempt,
+        )
+        .await
+        .expect("fail closed current rollback observation");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(rollback.state.configuration_revision().clone())
+        )),
+        "a failed semantic observation retains byte-stable core fallback"
+    );
+    assert_eq!(
+        Arc::strong_count(&rollback_core_authority),
+        2,
+        "semantic observation failure must retain the same mounted core authority Arc"
+    );
+    assert!(project_committed_semantic_pins(project.path()).is_none());
+    assert_eq!(
+        project_semantic_retained_vector_generations(project.path())
+            .expect("failed desired roots")
+            .generation_ids(),
+        &BTreeSet::from([semantic_generation.clone()])
+    );
+    assert_eq!(
+        project_semantic_redundancy_revision(project.path()),
+        Some(rollback.state.configuration_revision().clone()),
+        "failed desired observation publishes its exact durable roots without an authority"
+    );
+
+    let delayed_semantic_authority = Arc::new(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+                semantic.clone(),
+                serving_query_profile_id(&semantic),
+            )
+            .expect("prepare delayed semantic route"),
+        );
+    assert!(
+        registry
+            .install_committed_query_authorities(
+                project.path(),
+                &scope,
+                || {
+                    provider
+                        .commit_prepared_activation(&delayed_semantic)
+                        .map_err(|error| error.to_string())
+                },
+                tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                    scope: delayed_semantic.scope().clone(),
+                    configuration_revision: delayed_semantic.configuration_revision().clone(),
+                    query_authority: std::sync::Arc::clone(delayed_semantic.query_authority()),
+                },
+                Some(delayed_semantic_authority),
+                None,
+                None,
+                prepare_project_semantic_redundancy_authority(&semantic),
+                &semantic_attempt,
+            )
+            .await
+            .is_err(),
+        "an older successful observer cannot cross the newer failed desired fence"
+    );
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(rollback.state.configuration_revision().clone())
+        ))
+    );
+    assert!(project_committed_semantic_pins(project.path()).is_none());
+    assert_eq!(
+        project_semantic_retained_vector_generations(project.path())
+            .expect("failed desired roots after delayed install")
+            .generation_ids(),
+        &BTreeSet::from([semantic_generation.clone()])
+    );
+
+    let retry_attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            rollback.epoch,
+            rollback.state.configuration_revision(),
+            &rollback.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&rollback),
+        )
+        .await
+        .expect("reserve exact rollback retry");
+    let retry = provider
+        .prepare_after_successful_activation(
+            profile_id.clone(),
+            scope.clone(),
+            rollback.state.clone(),
+            Arc::clone(&cursor_keys),
+            &latest.generation().manifest().privacy_domain,
+        )
+        .expect("prepare exact rollback retry");
+    let conflicting_profile = accepted_profile(
+        "same-revision-conflict",
+        &RetrieverKind::QUERY_FALLBACK_LANES,
+    );
+    let conflicting_state = RetrievalProfileStateV1::new(
+        rollback.state.configuration_revision().clone(),
+        conflicting_profile.clone(),
+        &RetrievalRuntimeCompatibilityV1 {
+            retrieval_ceiling: conflicting_profile.profile().retrieval_budget,
+            semantic: None,
+            semantic_ceiling: None,
+            rerank: None,
+            rerank_ceiling: None,
+        },
+    )
+    .expect("same-revision conflicting state");
+    assert_eq!(
+        provider
+            .prepare_after_successful_activation(
+                profile_id,
+                scope.clone(),
+                conflicting_state,
+                cursor_keys,
+                &latest.generation().manifest().privacy_domain,
+            )
+            .err(),
+        Some(QueryAuthorityUpdateErrorV1::ActivationNotCurrent),
+        "exact retry requires full scope and state identity"
+    );
+    registry
+        .install_committed_query_authorities(
+            project.path(),
+            &scope,
+            || {
+                provider
+                    .commit_prepared_activation(&retry)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: retry.scope().clone(),
+                configuration_revision: retry.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(retry.query_authority()),
+            },
+            None,
+            None,
+            Some(&semantic_pins().vector_generation_id),
+            prepare_project_semantic_redundancy_authority(&rollback),
+            &retry_attempt,
+        )
+        .await
+        .expect("install exact rollback retry");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            false,
+            Some(rollback.state.configuration_revision().clone())
+        )),
+        "the exact desired revision can reconcile after a failed observation"
+    );
+    registry.shutdown().await;
+}
+
+/// Cold-open contract: while a committed semantic activation restore is
+/// deferred (fence reserved, then failed as unavailable before install), the
+/// checked-in core exact/lexical/graph authority must stay mountable and the
+/// scope must keep a callable query authority. Semantic remains deferred: a
+/// standalone semantic mount is still refused, and the exact committed retry
+/// later installs the full pair, replacing the interim core authority.
+#[tokio::test]
+async fn deferred_committed_restore_keeps_core_query_lanes_mountable() {
+    let project = TempDir::new_in(
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
+    )
+    .expect("project root");
+    git(project.path(), &["init", "-q", "-b", "main"]);
+    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        project.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+        .expect("source file");
+    git(project.path(), &["add", "."]);
+    git(project.path(), &["commit", "-qm", "fixture"]);
+
+    let project_id = ProjectId::new("project.query-deferred-core-restore").expect("project id");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
+            .expect("resolved scope");
+    let store = TempDir::new().expect("store root");
+    let registry =
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount code index");
+    let cursor_store = TempDir::new().expect("cursor store");
+    let profile_root = cursor_store.path().join("profile");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-deferred-core-restore",
+    )
+    .expect("database scope");
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session registry");
+    let session_db = session_registry
+        .profile_sessions()
+        .await
+        .expect("session database");
+    let latest = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh_for_scope(&scope).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial code generation");
+    let cursor_keys = session_db
+        .load_session_cursor_key_provider_result()
+        .await
+        .expect("cursor keys");
+    let profile_id = session_db.binding().shard_id.profile_id.clone();
+    let provider = DaemonQueryAuthorityProviderV1::default();
+    let semantic = semantic_committed_state(scope.clone());
+
+    // Cold-open restore: the committed activation reserves the fence, then
+    // fails as unavailable (semantic runtime not ready) before any install.
+    let attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("reserve deferred committed restore");
+    assert!(
+        registry
+            .clear_failed_query_activation(
+                project.path(),
+                &scope,
+                None,
+                prepare_project_semantic_redundancy_authority(&semantic),
+                &attempt,
+            )
+            .await
+            .expect("settle deferred restore failure"),
+        "the deferred restore cleanup must adopt its own reservation"
+    );
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            false,
+            false,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "the deferred restore leaves the fence reserved with no installed authority"
+    );
+
+    // Core exact/lexical/graph lanes must stay mountable while the committed
+    // semantic restore is deferred: the revision-bound committed fallback
+    // seats them without abandoning the reserved fence, while the plain
+    // standalone mount stays refused by that fence.
+    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
+        mount_core_query_authority_for_committed_fallback_on_project_open(
+            &registry,
+            project.path(),
+            &scope,
+            semantic.state.configuration_revision(),
+            &cursor_keys,
+        )
+        .await
+        .expect("core fallback mounts while the committed restore is deferred");
+    assert!(
+        registry.has_query_authority_for_scope(&scope).await,
+        "exact/lexical/graph must stay callable while semantic restore is deferred"
+    );
+    assert!(
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::
+            mount_core_query_authority_on_project_open(
+                &registry,
+                project.path(),
+                &scope,
+                &cursor_keys,
+            )
+            .await
+            .is_err(),
+        "the standalone core mount stays refused by the committed fence"
+    );
+
+    // Semantic restoration stays deferred: no standalone semantic mount.
+    let standalone_semantic = Arc::new(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+            semantic.clone(),
+            serving_query_profile_id(&semantic),
+        )
+        .expect("prepare standalone semantic route"),
+    );
+    assert!(
+        registry
+            .mount_semantic_query_authority(project.path(), &scope, standalone_semantic)
+            .await
+            .is_err(),
+        "semantic must not mount standalone while the committed restore is deferred"
+    );
+
+    // Runtime readiness retries the exact committed activation: the pair
+    // installs atomically and replaces the interim core authority.
+    let retry_attempt = registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("reserve exact committed restore retry");
+    let prepared = provider
+        .prepare_after_successful_activation(
+            profile_id,
+            scope.clone(),
+            semantic.state.clone(),
+            Arc::new(cursor_keys),
+            &latest.generation().manifest().privacy_domain,
+        )
+        .expect("prepare committed restore retry");
+    let retry_semantic_authority = Arc::new(
+        tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+            semantic.clone(),
+            serving_query_profile_id(&semantic),
+        )
+        .expect("prepare committed semantic route"),
+    );
+    let core_query_authority = Arc::clone(prepared.query_authority());
+    registry
+        .install_committed_query_authorities(
+            project.path(),
+            &scope,
+            || {
+                provider
+                    .commit_prepared_activation(&prepared)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: prepared.scope().clone(),
+                configuration_revision: prepared.configuration_revision().clone(),
+                query_authority: std::sync::Arc::clone(prepared.query_authority()),
+            },
+            Some(retry_semantic_authority),
+            None,
+            None,
+            prepare_project_semantic_redundancy_authority(&semantic),
+            &retry_attempt,
+        )
+        .await
+        .expect("install committed restore retry");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(semantic.state.configuration_revision().clone())
+        )),
+        "the retried committed restore installs both routes in one revision"
+    );
+
+    // With the committed pair installed, the fence refuses standalone mounts.
+    assert!(
+        registry
+            .mount_query_authority(project.path(), &scope, core_query_authority)
+            .await
+            .is_err(),
+        "standalone query installation cannot replace the installed committed pair"
+    );
+    registry.shutdown().await;
+}
+
+/// #753 restart authority: project open restores a committed activation
+/// before the demand-driven code-index mount. With no worktree there is no
+/// serving state to bind yet, which the registrar must report as
+/// `Unavailable` (deferred, retried once the index seats), never as a
+/// conflicting committed state that fails the whole capability upgrade.
+#[tokio::test]
+async fn committed_restore_before_the_worktree_mount_defers_instead_of_conflicting() {
+    let project = TempDir::new_in(
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
+    )
+    .expect("project root");
+    git(project.path(), &["init", "-q", "-b", "main"]);
+    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        project.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+        .expect("source file");
+    git(project.path(), &["add", "."]);
+    git(project.path(), &["commit", "-qm", "fixture"]);
+
+    let project_id = ProjectId::new("project.query-restore-before-mount").expect("project id");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
+            .expect("resolved scope");
+    let registry =
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    let cursor_store = TempDir::new().expect("cursor store");
+    let profile_root = cursor_store.path().join("profile");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-restore-before-mount",
+    )
+    .expect("database scope");
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session registry");
+    let session_db = session_registry
+        .profile_sessions()
+        .await
+        .expect("session database");
+    let registrar = DaemonQueryActivationRegistrarV1::new(
+        DaemonQueryAuthorityProviderV1::default(),
+        registry.clone(),
+        project.path().to_path_buf(),
+        session_db,
+    );
+    let semantic = semantic_committed_state(scope.clone());
+
+    assert!(
+        !registry.is_worktree_mounted(project.path()).await,
+        "the fixture restores before any code-index mount"
+    );
+    assert_eq!(
+        registrar.activation_committed(semantic.clone()).await,
+        Err(RetrievalProfileActivationObserverErrorV1::Unavailable),
+        "a committed restore ahead of the worktree mount is deferred, not a stale committed state"
+    );
+
+    // Deferral reserves nothing: the later mount begins with a clean fence,
+    // so neither a stale attempt token nor a phantom revision can refuse the
+    // core lanes or the reconciler's exact retry.
+    registry
+        .mount_worktree(
+            project_id,
+            project.path(),
+            TempDir::new().expect("store root").keep(),
+            None,
+        )
+        .await
+        .expect("mount code index after the deferred restore");
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((false, false, None)),
+        "a deferred pre-mount restore must leave no fence behind"
+    );
+    registry
+        .begin_committed_query_activation(
+            project.path(),
+            &scope,
+            semantic.epoch,
+            semantic.state.configuration_revision(),
+            &semantic.transition_digest,
+            &prepare_project_semantic_redundancy_authority(&semantic),
+        )
+        .await
+        .expect("the reconciler's exact retry reserves the fence on the mounted worktree");
+    registry.shutdown().await;
+}
+
+fn restart_request(profile: &tracedecay_domain::FusionProfile) -> RetrievalRequest {
+    RetrievalRequest {
+        principal: PrincipalId::new("principal.query-restart").expect("principal"),
+        scope: RetrievalScope {
+            privacy_domain: PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
+            root: SingleRootScopeV1 {
+                repository: RepositoryId::new("repository.query-restart").expect("repository"),
+                worktree: Some(WorktreeId::new("worktree.query-restart").expect("worktree")),
+                reference: None,
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "7".repeat(64)))
+                .expect("freshness digest"),
+            authorization_revision: id("authorization.query-restart"),
+            captured_at: UtcMicros(100),
+        },
+        profile_id: profile.profile_id.clone(),
+        budget: profile.retrieval_budget,
+    }
+}
+
+fn empty_restart_lanes() -> Vec<tracedecay_query::retrieval::fusion::CompositionLaneInput> {
+    RetrieverKind::QUERY_FALLBACK_LANES
+        .into_iter()
+        .map(|lane| {
+            tracedecay_query::retrieval::fusion::CompositionLaneInput::new(
+                lane,
+                RetrieverOutcome::Complete(RetrieverBatch {
+                    candidates: Vec::new(),
+                    evidence_by_occurrence: BTreeMap::<_, ()>::new(),
+                    coverage: tracedecay_domain::retrieval::RetrieverCoverage::default(),
+                    continuation: None,
+                }),
+            )
+            .expect("empty lane")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
+    let directory = TempDir::new().expect("temporary profile");
+    let profile_root = directory.path().join("profile");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let project_root = directory.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    let project_id = ProjectId::new("project.query-restart").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("production project enrollment");
+    let profile_sessions_path =
+        tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
+    let _scope_guard = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "query-cursor-restart",
+    )
+    .expect("daemon database scope");
+    let session_registry =
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+            .await
+            .expect("session registry");
+    let database = session_registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("project session database");
+    assert_ne!(database.db_path(), profile_sessions_path);
+    assert!(
+        !profile_sessions_path.exists(),
+        "profile session shard must remain absent"
+    );
+    let cursor_keys = Arc::new(
+        database
+            .load_session_cursor_key_provider_result()
+            .await
+            .expect("durable cursor key provider"),
+    );
+    let scope = ResolvedScope::new(
+        project_id.clone(),
+        id("repository.query-restart"),
+        id("worktree.query-restart"),
+        None,
+    )
+    .expect("resolved scope");
+    let accepted = accepted_profile("query-restart", &RetrieverKind::QUERY_FALLBACK_LANES);
+    let state = RetrievalProfileStateV1::new(
+        id::<ConfigurationRevisionId>("configuration.query-restart.1"),
+        accepted.clone(),
+        &RetrievalRuntimeCompatibilityV1 {
+            retrieval_ceiling: accepted.profile().retrieval_budget,
+            semantic: None,
+            semantic_ceiling: None,
+            rerank: None,
+            rerank_ceiling: None,
+        },
+    )
+    .expect("initial state");
+    let provider = DaemonQueryAuthorityProviderV1::default();
+    provider
+        .install_evaluated_initial_state(
+            database.binding().shard_id.profile_id.clone(),
+            scope.clone(),
+            state.clone(),
+            cursor_keys,
+        )
+        .expect("install first production authority");
+    let authority = tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
+        &scope,
+        &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
+        &provider,
+    )
+    .expect("first production query authority");
+    let request = restart_request(accepted.profile());
+    let query = EphemeralSanitizedQueryViewV1::sanitize(
+        "restart-stable query",
+        SanitizerRevision::new("query-sanitizer.query-restart").expect("sanitizer"),
+        QueryNormalizationRevision::new("query-normalization.query-restart")
+            .expect("normalization"),
+    )
+    .expect("query view");
+    let bindings = tracedecay_query::retrieval::PreparedQueryBindingsV1::new(
+        "code_symbol_search",
+        scope.scope_digest.clone(),
+        CodeGenerationId::new("generation.query-restart").expect("generation"),
+        digest('8'),
+    )
+    .expect("prepared bindings");
+    let prepared_cursor = tracedecay_query::retrieval::PreparedQueryV1::prepare(
+        Arc::clone(&authority),
+        request.clone(),
+        None,
+    )
+    .expect("prepare first page")
+    .paginate(
+        &bindings,
+        vec!["first".to_owned(), "second".to_owned()],
+        1,
+        UtcMicros(100),
+    )
+    .expect("issue prepared cursor")
+    .next_cursor
+    .expect("prepared continuation");
+    let composed = authority
+        .compose(&request, &query, empty_restart_lanes(), 1, None)
+        .expect("compose first fusion page");
+    let fusion_cursor = authority
+        .continuation_cursor_at(&request, &query, &composed.composition, 0)
+        .expect("issue fusion cursor");
+
+    drop(authority);
+    drop(provider);
+    drop(database);
+    drop(session_registry);
+    let reopened_registry =
+        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("reopened session registry");
+    let reopened = reopened_registry
+        .project_sessions(project_id.clone(), [project_root])
+        .await
+        .expect("reopened durable project session database");
+    assert!(
+        !profile_sessions_path.exists(),
+        "reopen must not provision or consult the profile session shard"
+    );
+    let reopened_keys = Arc::new(
+        reopened
+            .load_session_cursor_key_provider_result()
+            .await
+            .expect("reopened durable cursor key provider"),
+    );
+    let reopened_provider = DaemonQueryAuthorityProviderV1::default();
+    reopened_provider
+        .install_evaluated_initial_state(
+            reopened.binding().shard_id.profile_id.clone(),
+            scope.clone(),
+            state.clone(),
+            Arc::clone(&reopened_keys),
+        )
+        .expect("install reopened production authority");
+    let reopened_authority =
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
+            &scope,
+            &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
+            &reopened_provider,
+        )
+        .expect("reopened production query authority");
+
+    let resumed = tracedecay_query::retrieval::PreparedQueryV1::prepare(
+        Arc::clone(&reopened_authority),
+        request.clone(),
+        Some(&prepared_cursor),
+    )
+    .expect("authenticate prepared continuation after reopen")
+    .paginate(
+        &bindings,
+        vec!["first".to_owned(), "second".to_owned()],
+        1,
+        UtcMicros(101),
+    )
+    .expect("resume prepared continuation after reopen");
+    assert_eq!(resumed.items, vec!["second"]);
+    reopened_authority
+        .compose(
+            &request,
+            &query,
+            empty_restart_lanes(),
+            1,
+            Some(&fusion_cursor),
+        )
+        .expect("resume fusion continuation after reopen");
+
+    let foreign_root = directory.path().join("foreign-project");
+    std::fs::create_dir_all(&foreign_root).expect("foreign project root");
+    let foreign_project_id =
+        ProjectId::new("project.query-restart-foreign").expect("foreign project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &foreign_root,
+        foreign_project_id.as_str(),
+    )
+    .expect("foreign production project enrollment");
+    let foreign_database = reopened_registry
+        .project_sessions(foreign_project_id, [foreign_root])
+        .await
+        .expect("foreign project session database");
+    let foreign_keys = Arc::new(
+        foreign_database
+            .load_session_cursor_key_provider_result()
+            .await
+            .expect("foreign durable cursor key provider"),
+    );
+    let mismatched_provider = DaemonQueryAuthorityProviderV1::default();
+    mismatched_provider
+        .install_evaluated_initial_state(
+            foreign_database.binding().shard_id.profile_id.clone(),
+            scope.clone(),
+            state,
+            foreign_keys,
+        )
+        .expect("install mismatched production authority");
+    let mismatched_authority =
+        tracedecay_code_index_runtime::code_index_scheduler::query_runtime::prepare_query_authority(
+            &scope,
+            &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
+            &mismatched_provider,
+        )
+        .expect("mismatched production query authority");
+    assert!(
+        tracedecay_query::retrieval::PreparedQueryV1::prepare(
+            Arc::clone(&mismatched_authority),
+            request.clone(),
+            Some(&prepared_cursor),
+        )
+        .is_err(),
+        "a foreign project's durable key must not authenticate the prepared cursor"
+    );
+    assert!(
+        mismatched_authority
+            .compose(
+                &request,
+                &query,
+                empty_restart_lanes(),
+                1,
+                Some(&fusion_cursor),
+            )
+            .is_err(),
+        "a foreign project's durable key must not authenticate the fusion cursor"
+    );
+}
+
+/// Install one committed semantic route through the exact production path:
+/// reserve the epoch fence, prepare the query authority, bind the semantic
+/// authority to the committed activation, and install both as one pair.
+async fn install_committed_semantic_route(
+    registry: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    provider: &DaemonQueryAuthorityProviderV1,
+    project_root: &Path,
+    profile_id: &UserProfileId,
+    cursor_keys: &Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
+    privacy_domain: &PrivacyDomainId,
+    query_profile_id: &tracedecay_domain::FusionProfileId,
+    committed: &CommittedRetrievalProfileStateV1,
+) {
+    let scope = committed.scope.clone();
+    let attempt = registry
+        .begin_committed_query_activation(
+            project_root,
+            &scope,
+            committed.epoch,
+            committed.state.configuration_revision(),
+            &committed.transition_digest,
+            &prepare_project_semantic_redundancy_authority(committed),
+        )
+        .await
+        .expect("reserve committed semantic activation");
+    let prepared = provider
+        .prepare_after_successful_activation(
+            profile_id.clone(),
+            scope.clone(),
+            committed.state.clone(),
+            Arc::clone(cursor_keys),
+            privacy_domain,
+        )
+        .expect("prepare committed semantic activation");
+    let semantic_authority = Arc::new(
+            tracedecay_code_index_runtime::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+                committed.clone(),
+                query_profile_id.clone(),
+            )
+            .expect("bind committed semantic route"),
+        );
+    registry
+        .install_committed_query_authorities(
+            project_root,
+            &scope,
+            || {
+                provider
+                    .commit_prepared_activation(&prepared)
+                    .map_err(|error| error.to_string())
+            },
+            tracedecay_code_index_runtime::PreparedQueryActivationViewV1 {
+                scope: prepared.scope().clone(),
+                configuration_revision: prepared.configuration_revision().clone(),
+                query_authority: Arc::clone(prepared.query_authority()),
+            },
+            Some(semantic_authority),
+            None,
+            None,
+            prepare_project_semantic_redundancy_authority(committed),
+            &attempt,
+        )
+        .await
+        .expect("install committed semantic activation");
+}
+
+/// An explicit profile rollback is a new authorized activation of the older
+/// immutable artifact, committed at the next epoch: afterwards the restored
+/// profile is the one queries must serve.
+///
+/// It must stay served when HEAD's branch label moves under the same
+/// checkout, which is exactly how the rollback journey reaches it - the
+/// operator checks the earlier commit out detached, the indexing lane seals a
+/// generation for the restored source, and only then is the older profile
+/// selected again. The resolved scope digest binds that label, so comparing it
+/// on the read path denied the freshly installed route and every strict query
+/// abstained `CalibrationUnavailable` with nothing installed to point at.
+#[tokio::test]
+async fn committed_rollback_serves_the_restored_profile_after_the_branch_label_moves() {
+    let project = TempDir::new_in(
+        tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&std::env::temp_dir()),
+    )
+    .expect("project root");
+    git(project.path(), &["init", "-q", "-b", "main"]);
+    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        project.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
+        .expect("source file");
+    git(project.path(), &["add", "."]);
+    git(project.path(), &["commit", "-qm", "fixture"]);
+
+    let project_id = ProjectId::new("project.query-semantic-rollback").expect("project id");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
+            .expect("resolved scope");
+    let store = TempDir::new().expect("store root");
+    let registry =
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount code index");
+    let cursor_store = TempDir::new().expect("cursor store");
+    let profile_root = cursor_store.path().join("profile");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _cursor_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        2,
+        "query-semantic-rollback",
+    )
+    .expect("database scope");
+    let session_registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session registry");
+    let session_db = session_registry
+        .profile_sessions()
+        .await
+        .expect("session database");
+    let latest = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_fresh_for_scope(&scope).await {
+                break latest;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial code generation");
+    let privacy_domain = latest.generation().manifest().privacy_domain.clone();
+    let cursor_keys = Arc::new(
+        session_db
+            .load_session_cursor_key_provider_result()
+            .await
+            .expect("cursor keys"),
+    );
+    let profile_id = session_db.binding().shard_id.profile_id.clone();
+    let provider = DaemonQueryAuthorityProviderV1::default();
+
+    let first = semantic_committed_state(scope.clone());
+    let second = committed_semantic_activation(
+        first.epoch + 1,
+        scope.clone(),
+        second_semantic_activation_state(&first.state),
+    );
+    let rollback = committed_semantic_activation(
+        second.epoch + 1,
+        scope.clone(),
+        semantic_profile_rollback_state(&second.state),
+    );
+    let restored_calibration = first
+        .state
+        .active()
+        .compatibility()
+        .semantic
+        .as_ref()
+        .expect("restored semantic pins")
+        .calibration
+        .calibration_profile_id
+        .clone();
+
+    // The evaluated query profile is named by the first committed state and
+    // carried forward once both slots hold semantic profiles, exactly as in
+    // production: install the sequence rather than the rollback alone.
+    let query_profile_id = serving_query_profile_id(&first);
+    for committed in [&first, &second, &rollback] {
+        install_committed_semantic_route(
+            &registry,
+            &provider,
+            project.path(),
+            &profile_id,
+            &cursor_keys,
+            &privacy_domain,
+            &query_profile_id,
+            committed,
+        )
+        .await;
+    }
+
+    assert_eq!(
+        registry
+            .served_semantic_pins_for_scope(&scope)
+            .await
+            .map(|pins| pins.calibration.calibration_profile_id),
+        Some(restored_calibration.clone()),
+        "the committed rollback must install the restored profile as the query authority"
+    );
+    assert_eq!(
+        registry
+            .query_authority_installation_for_scope(&scope)
+            .await,
+        Some((
+            true,
+            true,
+            Some(rollback.state.configuration_revision().clone())
+        )),
+        "the restored pair is installed under the rollback's own revision"
+    );
+
+    let moved_label_scope = tracedecay_application::ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        Some(tracedecay_domain::RefId::new("refs/heads/moved-after-rollback").expect("moved ref")),
+    )
+    .expect("moved-label scope");
+    assert_ne!(
+        moved_label_scope.scope_digest, scope.scope_digest,
+        "the fixture must actually move the label the scope digest binds"
+    );
+    assert_eq!(
+        registry
+            .served_semantic_pins_for_scope(&moved_label_scope)
+            .await
+            .map(|pins| pins.calibration.calibration_profile_id),
+        Some(restored_calibration),
+        "a branch label move under the same checkout is not an identity mismatch"
+    );
+
+    registry.shutdown().await;
+}

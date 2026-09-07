@@ -1,29 +1,106 @@
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
-#![cfg_attr(not(test), deny(clippy::expect_used))]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::wildcard_imports)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::single_match)]
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::redundant_closure)]
-#![allow(clippy::redundant_closure_for_method_calls)]
-#![allow(clippy::format_push_string)]
+//! Typed product use cases shared by CLI, MCP, HTTP, hooks, and daemon adapters.
+//!
+//! This is the top-of-stack use-case orchestration layer — what the root
+//! binary's `src/application/` tree became. `tracedecay-application` is a
+//! different, bottom-of-stack ports-and-contracts crate that only shares the
+//! word; see that crate's `lib.rs` for why the split-era plan briefly
+//! conflated them. This crate depends on `tracedecay-application` (never the
+//! reverse) along with `tracedecay-runtime-core`, `tracedecay-sessions`,
+//! `tracedecay-global-db`, `tracedecay-semantic`, and 14 other workspace
+//! crates; every edge is proven acyclic with `cargo tree -e normal -p <dep> |
+//! grep tracedecay-usecases` returning no matches. It deliberately does not
+//! depend on `tracedecay-agent-hosts`, `tracedecay-dashboard-api`, or the
+//! root binary crate — `tracedecay-dashboard-api` depends on this crate, so
+//! an edge back would be a Cargo cycle, and root-owned seams (`mcp`, `daemon`,
+//! `hooks`, `automation`, `dashboard`) must be resolved by port inversion,
+//! never by adding a dependency here.
+//!
+//! ## Composition-root ports
+//!
+//! Graph reads now go through the Grafeo-backed
+//! `tracedecay_global_db::VerifiedGraphRuntimePortV1` (defined in
+//! `tracedecay-runtime-core::store_runtime::verified_graph`), not a port
+//! owned by this crate — that landed after the one-shot crate split, when the
+//! SQLite graph authority was replaced by the embedded Grafeo runtime.
+//! Source-edit preview/apply still route through this crate's own task-local
+//! plan authority: [`tracedecay::capture_source_edit_plan`],
+//! [`tracedecay::apply_source_edit_plan`], and
+//! [`tracedecay::capture_planned_source_edit`]. Callers should use these
+//! rather than create a second root-owned plan.
+//! - [`tracedecay_configuration::RuntimeConfigurationAuthorityPort`], installed
+//!   via [`tracedecay_configuration::install_runtime_configuration_authority`]
+//!   before opening any configuration-backed use case. Configuration
+//!   value/persistence contracts live in `tracedecay-configuration` (re-exported
+//!   from `tracedecay_global_db::configuration::contracts`), not duplicated here.
+//!   [`config::retrieval`] stays in this crate because it is production-load-bearing
+//!   on search-eval.
+//! - Transport-independent response handles live in
+//!   `tracedecay_session_memory::response_handles`; MCP adapters should call
+//!   that module rather than keep a parallel handle store.
+//!
+//! ## Packaging
+//!
+//! `publish = false`. `semantic_runtime` reaches search-quality fixtures via
+//! `include_str!` outside this package's root (repo-root `tests/fixtures/`);
+//! workspace builds resolve it, but a standalone package build would not.
 
-pub mod context;
+/// Installs the registered global/session schema into the kernel's fail-closed
+/// port for this crate's test process.
+///
+/// `Database::publish_test_runtime` materialises a profile-scoped sidecar shard
+/// that the kernel initialises through
+/// `tracedecay_runtime_core::ports::registered_schema`. That port fails closed
+/// until the real schema — owned by `tracedecay-global-db` — is registered.
+/// Production wires it from the daemon composition root; this crate's test
+/// target reuses the identical installer through its `test-helpers`
+/// dev-dependency. Idempotent: the port keeps the first registration, so every
+/// fixture entry point can call it unconditionally.
+///
+/// Fixtures built on `tracedecay_global_db::tests::harness` register the
+/// installer themselves; only fixtures that reach `publish_test_runtime`
+/// directly need this call.
+#[cfg(test)]
+pub(crate) fn register_test_schema_installer() {
+    tracedecay_global_db::register_test_schema_installer();
+}
+
+pub mod advisory;
+pub mod code_index;
+pub mod config;
+pub mod configuration;
+pub mod dashboard_diagnostics;
+pub mod delivery;
 pub mod diagnose;
-pub mod graph;
-pub mod user_config;
+pub mod diagnostics_publication;
+pub mod diagnostics_query;
+pub mod diagnostics_store;
+// Public because `tracedecay-global-db` reaches the runtime external-source
+// store through the root shim.
+pub mod analytics_bridge;
+pub mod feedback;
+pub mod git_intelligence;
+pub mod git_query;
+pub mod git_reads;
+pub mod graph_health_delta;
+mod hotpath_observe;
+pub mod lsp_runtime;
+mod lsp_support;
+pub mod native_integration;
+pub mod observability;
+pub mod observation;
+pub mod operation_stream;
+pub mod primitives;
+pub mod semantic_runtime;
+pub mod settings_control;
+pub mod source_authorization;
+pub mod stack_coordinator;
+pub mod store;
+pub mod tracedecay;
+pub mod work;
+
+pub use lsp_support::analyzer_runtime_config_error;
+pub use source_authorization::{
+    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
+    ProjectSourceAccessDenial, ProjectSourceAccessOutcome, ProjectSourceAccessSnapshot,
+    ProjectSourceAccessSnapshotPort, project_source_access_snapshot_for_request,
+};

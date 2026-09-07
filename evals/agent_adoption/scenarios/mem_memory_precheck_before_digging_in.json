@@ -12,7 +12,8 @@
   "expected_tools": {
     "required_first": [
       "tracedecay_memory_status",
-      "tracedecay_fact_store",
+      "tracedecay_fact_store_list",
+      "tracedecay_fact_store_search",
       "tracedecay_context"
     ],
     "acceptable": [

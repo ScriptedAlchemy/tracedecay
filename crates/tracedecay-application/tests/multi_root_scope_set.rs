@@ -1,0 +1,380 @@
+mod common;
+
+use std::collections::BTreeSet;
+use std::fmt;
+
+use serde_json::json;
+use tracedecay_application::{
+    AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
+    AuthorizedScopeSetError, CancellationContext, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, MultiRootScopeSetCasRequestV1, RegisteredRootLocatorV1, RequestContext,
+    RequestId, ResolvedScope,
+};
+use tracedecay_domain::{
+    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
+    UserProfileId, UtcMicros, WorktreeId,
+};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+const CAPABILITY: &str = "capability.multi-root.query";
+const USE_CASE: &str = "use-case.multi-root.query";
+
+fn id<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    <T as TryFrom<String>>::Error: fmt::Debug,
+{
+    T::try_from(value.to_owned()).unwrap()
+}
+
+fn digest(byte: char) -> ManifestDigest {
+    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+}
+
+fn context(worktree: &str, suffix: &str) -> RequestContext {
+    context_at("project.fixture", "repository.fixture", worktree, suffix)
+}
+
+fn context_at(project: &str, repository: &str, worktree: &str, suffix: &str) -> RequestContext {
+    let scope = ResolvedScope::new(
+        id::<ProjectId>(project),
+        id::<RepositoryId>(repository),
+        id::<WorktreeId>(worktree),
+        Some(id::<RefId>("refs/heads/main")),
+    )
+    .unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        id(&format!("grant.{suffix}")),
+        1,
+        digest('a'),
+        id::<ActorId>("actor.issuer"),
+        UtcMicros(1),
+        UtcMicros(1_000),
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new(CAPABILITY).unwrap()]),
+        BTreeSet::from([UseCaseId::new(USE_CASE).unwrap()]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    RequestContext::new(
+        id::<ActorId>("actor.requester"),
+        scope,
+        grant,
+        RequestId::new(format!("request.{suffix}")).unwrap(),
+        Deadline::new(UtcMicros(900)).unwrap(),
+        CancellationContext::active(format!("cancel.{suffix}")).unwrap(),
+    )
+    .unwrap()
+}
+
+fn authorize(contexts: Vec<RequestContext>) -> AuthorizedScopeSet {
+    AuthorizedScopeSetAuthority::authorize(
+        ScopeSetId::new("scope-set.fixture").unwrap(),
+        ScopeSetRevision::new(1).unwrap(),
+        contexts,
+        &CapabilityId::new(CAPABILITY).unwrap(),
+        &UseCaseId::new(USE_CASE).unwrap(),
+        UtcMicros(10),
+    )
+    .unwrap()
+}
+
+#[test]
+fn authorized_scope_set_canonicalizes_two_exact_linked_worktrees() {
+    let main = context("worktree.main", "main");
+    let linked = context("worktree.linked", "linked");
+
+    let forward = authorize(vec![main.clone(), linked.clone()]);
+    let reverse = authorize(vec![linked, main]);
+
+    assert_eq!(forward.digest(), reverse.digest());
+    assert_eq!(forward.roots(), reverse.roots());
+    assert_eq!(forward.actor_id().as_str(), "actor.requester");
+    assert_eq!(forward.roots().len(), 2);
+    assert_eq!(
+        forward.roots()[0].scope().worktree_id.as_str(),
+        "worktree.linked"
+    );
+    assert_eq!(
+        forward.roots()[1].scope().worktree_id.as_str(),
+        "worktree.main"
+    );
+}
+
+#[test]
+fn scope_set_digest_and_deserialization_reject_identity_drift() {
+    let set = authorize(vec![
+        context("worktree.main", "main"),
+        context("worktree.linked", "linked"),
+    ]);
+    let mut wire = serde_json::to_value(&set).unwrap();
+    wire["roots"][1]["worktree_id"] = serde_json::json!("worktree.alias");
+
+    assert!(serde_json::from_value::<AuthorizedScopeSet>(wire).is_err());
+
+    let mut actor_drift = serde_json::to_value(&set).unwrap();
+    actor_drift["actor_id"] = serde_json::json!("actor.other");
+    assert!(serde_json::from_value::<AuthorizedScopeSet>(actor_drift).is_err());
+}
+
+#[test]
+fn local_worktree_ids_are_qualified_by_project_and_repository() {
+    let set = authorize(vec![
+        context_at(
+            "project.alpha",
+            "repository.alpha",
+            "worktree.local",
+            "alpha",
+        ),
+        context_at("project.beta", "repository.beta", "worktree.local", "beta"),
+    ]);
+
+    assert_eq!(set.roots().len(), 2);
+    assert_ne!(
+        set.roots()[0].scope().scope_digest,
+        set.roots()[1].scope().scope_digest
+    );
+}
+
+#[test]
+fn authorized_scope_set_preserves_registered_root_locator() {
+    let context = context("worktree.main", "main");
+    let locator = RegisteredRootLocatorV1::new(
+        context.scope().project_id.clone(),
+        UserProfileId::new("profile.fixture").unwrap(),
+        "store.fixture".to_owned(),
+        common::fixture_abs_root("/workspace/main"),
+    )
+    .unwrap();
+    let set = AuthorizedScopeSetAuthority::authorize_registered(
+        ScopeSetId::new("scope-set.registered-root").unwrap(),
+        ScopeSetRevision::new(1).unwrap(),
+        vec![AuthorizedRootAdmission::new(context, locator.clone()).unwrap()],
+        &CapabilityId::new(CAPABILITY).unwrap(),
+        &UseCaseId::new(USE_CASE).unwrap(),
+        UtcMicros(10),
+    )
+    .unwrap();
+
+    assert_eq!(set.roots()[0].locator(), Some(&locator));
+    assert_eq!(set.roots()[0].scope().project_id, locator.project_id);
+}
+
+#[test]
+fn registered_scope_set_refuses_missing_duplicate_and_foreign_profile_roots() {
+    let admission = |suffix: &str, profile: &str| {
+        let context = context_at(
+            &format!("project.{suffix}"),
+            &format!("repository.{suffix}"),
+            &format!("worktree.{suffix}"),
+            suffix,
+        );
+        let locator = RegisteredRootLocatorV1::new(
+            context.scope().project_id.clone(),
+            UserProfileId::new(profile).unwrap(),
+            "store.shared",
+            common::fixture_abs_root(&format!("/workspace/{suffix}")),
+        )
+        .unwrap();
+        AuthorizedRootAdmission::new(context, locator).unwrap()
+    };
+    let authorize = |roots| {
+        AuthorizedScopeSetAuthority::authorize_registered(
+            ScopeSetId::new("scope-set.registered-refusals").unwrap(),
+            ScopeSetRevision::new(1).unwrap(),
+            roots,
+            &CapabilityId::new(CAPABILITY).unwrap(),
+            &UseCaseId::new(USE_CASE).unwrap(),
+            UtcMicros(10),
+        )
+    };
+
+    assert_eq!(authorize(Vec::new()), Err(AuthorizedScopeSetError::Empty));
+
+    let duplicate = admission("duplicate", "profile.shared");
+    assert_eq!(
+        authorize(vec![duplicate.clone(), duplicate]),
+        Err(AuthorizedScopeSetError::DuplicateRoot)
+    );
+
+    assert_eq!(
+        authorize(vec![
+            admission("alpha", "profile.shared"),
+            admission("beta", "profile.foreign"),
+        ]),
+        Err(AuthorizedScopeSetError::Invalid(
+            "authorized roots must either all be registered under one profile store locator or all be pre-resolved"
+                .to_owned()
+        ))
+    );
+}
+
+#[test]
+fn scope_set_cas_selects_exact_registered_roots() {
+    let request: MultiRootScopeSetCasRequestV1 = serde_json::from_value(json!({
+        "scope_set_id": "scope-set.exact-roots",
+        "expected_revision": null,
+        "roots": [
+            {
+                "project_id": "project.same",
+                "root": common::fixture_abs_root("/workspace/linked")
+            },
+            {
+                "project_id": "project.same",
+                "root": common::fixture_abs_root("/workspace/main")
+            }
+        ]
+    }))
+    .expect("exact registered root selectors");
+    request.validate().expect("canonical exact root order");
+
+    let encoded = serde_json::to_value(request).expect("serialize selector");
+    assert_eq!(
+        encoded["roots"][0]["root"],
+        common::fixture_abs_root("/workspace/linked")
+    );
+    assert_eq!(
+        encoded["roots"][1]["root"],
+        common::fixture_abs_root("/workspace/main")
+    );
+    assert!(encoded.get("project_ids").is_none());
+}
+
+/// `0a9ebc97a` made every federated root carry the one shared profile-store
+/// locator. That locator is a *shared physical store* identity, and the
+/// authorized set still refuses a mixed one — it is not a substitute for the
+/// per-project authorization each root brings.
+#[test]
+fn federated_roots_refuse_a_foreign_profile_store_locator() {
+    let alpha = context_at(
+        "project.alpha",
+        "repository.alpha",
+        "worktree.alpha",
+        "alpha",
+    );
+    let beta = context_at("project.beta", "repository.beta", "worktree.beta", "beta");
+    let shared = |context: &RequestContext, profile: &str, root: &str| {
+        AuthorizedRootAdmission::new(
+            context.clone(),
+            RegisteredRootLocatorV1::new(
+                context.scope().project_id.clone(),
+                UserProfileId::new(profile).unwrap(),
+                "store.shared-profile".to_owned(),
+                common::fixture_abs_root(root),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let authorize_registered = |admissions: Vec<AuthorizedRootAdmission>| {
+        AuthorizedScopeSetAuthority::authorize_registered(
+            ScopeSetId::new("scope-set.federated").unwrap(),
+            ScopeSetRevision::new(1).unwrap(),
+            admissions,
+            &CapabilityId::new(CAPABILITY).unwrap(),
+            &UseCaseId::new(USE_CASE).unwrap(),
+            UtcMicros(10),
+        )
+    };
+
+    let same_profile = authorize_registered(vec![
+        shared(&alpha, "profile.fixture", "/workspace/alpha"),
+        shared(&beta, "profile.fixture", "/workspace/beta"),
+    ])
+    .expect("two projects under one profile store are a federated workspace");
+    assert_eq!(same_profile.roots().len(), 2);
+    assert_ne!(
+        same_profile.roots()[0].scope().project_id,
+        same_profile.roots()[1].scope().project_id,
+        "the shared store locator must not collapse the per-project identities"
+    );
+
+    let foreign = authorize_registered(vec![
+        shared(&alpha, "profile.fixture", "/workspace/alpha"),
+        shared(&beta, "profile.foreign", "/workspace/beta"),
+    ])
+    .expect_err("a root registered under a foreign profile store must be refused");
+    assert!(
+        matches!(foreign, tracedecay_application::AuthorizedScopeSetError::Invalid(message)
+            if message.contains("one profile store locator")),
+        "the refusal must name the profile store locator rule"
+    );
+
+    // A pre-resolved root cannot be smuggled in beside registered ones either:
+    // the locator is all-or-nothing evidence.
+    let mixed = AuthorizedScopeSetAuthority::authorize_registered(
+        ScopeSetId::new("scope-set.federated").unwrap(),
+        ScopeSetRevision::new(1).unwrap(),
+        vec![shared(&alpha, "profile.fixture", "/workspace/alpha")],
+        &CapabilityId::new(CAPABILITY).unwrap(),
+        &UseCaseId::new(USE_CASE).unwrap(),
+        UtcMicros(10),
+    )
+    .unwrap();
+    let mut wire = serde_json::to_value(&mixed).unwrap();
+    wire["roots"][0]["locator"] = serde_json::Value::Null;
+    assert!(
+        serde_json::from_value::<AuthorizedScopeSet>(wire).is_err(),
+        "dropping a root's registered locator must not survive re-admission"
+    );
+}
+
+/// The pairing between a workspace's factories and its authorized roots is on
+/// the exact scope digest (`8578e46eb`). Two roots that differ only by the
+/// reference their checkout has moved to are therefore two roots, not one: the
+/// checkout-identity relaxation the semantic source scope took is not applied
+/// to this authorization pairing, and a genuinely repeated exact root is a
+/// duplicate the set refuses outright.
+#[test]
+fn scope_digests_separate_references_and_refuse_a_duplicate_exact_root() {
+    let scope_at = |reference: &str| {
+        ResolvedScope::new(
+            id::<ProjectId>("project.fixture"),
+            id::<RepositoryId>("repository.fixture"),
+            id::<WorktreeId>("worktree.fixture"),
+            Some(id::<RefId>(reference)),
+        )
+        .unwrap()
+    };
+    let main = scope_at("refs/heads/main");
+    let detached = scope_at("refs/heads/release");
+    assert_ne!(
+        main.scope_digest, detached.scope_digest,
+        "one checkout on two references must not share a scope digest, or the \
+         federated pairing would attribute one root's factory to the other"
+    );
+
+    let duplicate = AuthorizedScopeSetAuthority::authorize(
+        ScopeSetId::new("scope-set.duplicate").unwrap(),
+        ScopeSetRevision::new(1).unwrap(),
+        vec![
+            context("worktree.duplicate", "first"),
+            context("worktree.duplicate", "second"),
+        ],
+        &CapabilityId::new(CAPABILITY).unwrap(),
+        &UseCaseId::new(USE_CASE).unwrap(),
+        UtcMicros(10),
+    )
+    .expect_err("a repeated exact root must be refused");
+    assert!(
+        matches!(
+            duplicate,
+            tracedecay_application::AuthorizedScopeSetError::DuplicateRoot
+        ),
+        "a repeated exact root must be typed as a duplicate: {duplicate:?}"
+    );
+
+    let empty = AuthorizedScopeSetAuthority::authorize(
+        ScopeSetId::new("scope-set.empty").unwrap(),
+        ScopeSetRevision::new(1).unwrap(),
+        Vec::new(),
+        &CapabilityId::new(CAPABILITY).unwrap(),
+        &UseCaseId::new(USE_CASE).unwrap(),
+        UtcMicros(10),
+    )
+    .expect_err("a workspace with no roots must be refused");
+    assert!(matches!(
+        empty,
+        tracedecay_application::AuthorizedScopeSetError::Empty
+    ));
+}

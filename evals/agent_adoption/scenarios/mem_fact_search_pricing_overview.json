@@ -11,7 +11,7 @@
   "prompt": "Before I start, are there any recorded decisions about how order pricing or discounts should work?",
   "expected_tools": {
     "required_first": [
-      "tracedecay_fact_store",
+      "tracedecay_fact_store_search",
       "tracedecay_context"
     ],
     "acceptable": [

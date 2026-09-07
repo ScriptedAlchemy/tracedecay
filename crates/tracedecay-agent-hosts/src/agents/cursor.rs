@@ -3,21 +3,45 @@
 //! Installs tracedecay's Cursor plugin bundle into Cursor's local plugin
 //! directory. The plugin owns MCP, hooks, and rule configuration.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 
+use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_and_write_json, load_json_file, load_jsonc_file_strict, safe_write_text_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    JsonConfigMutation, McpUninstallPolicy, UpdatePluginOutcome, load_json_file,
+    load_jsonc_file_strict, mcp_config_has_tracedecay, safe_remove_host_file, safe_write_text_file,
+    uninstall_mcp_server_entry, update_json_config_transactionally,
 };
 
-/// Cursor agent.
 pub struct CursorIntegration;
+
+/// Model-invocable skills shipped by the Cursor plugin.
+///
+/// The plugin bundle owns this inventory. Host steering adapters can re-export
+/// it without reaching back into a composition-root hook module.
+pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
+    "assessing-impact",
+    "code-health",
+    "diagnosing-analytics",
+    "discovering-tracedecay",
+    "editing-safely",
+    "exploring-code",
+    "fixing-build-and-type-errors",
+    "inspecting-managed-skills",
+    "investigating-unexpected-changes",
+    "managing-session-context",
+    "managing-work",
+    "managing-workflows",
+    "profiling-tracedecay-performance",
+    "project-memory",
+    "reviewing-changes",
+    "tracing-functions",
+    "using-the-cli",
+];
 
 impl AgentIntegration for CursorIntegration {
     fn name(&self) -> &'static str {
@@ -28,45 +52,8 @@ impl AgentIntegration for CursorIntegration {
         "cursor"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Reload Cursor — the tracedecay plugin is now installed");
-        eprintln!(
-            "  3. Optional: Cursor's Auto-review mode reviews every MCP call; to let \
-             tracedecay's read-only tools run without per-call review, copy the \
-             permissions.json mcpAllowlist snippet from the plugin README \
-             ({})",
-            cursor_plugin_install_dir(&ctx.home)
-                .join("README.md")
-                .display()
-        );
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        install_cursor_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        sweep_legacy_project_artifacts(project_path)?;
-
-        eprintln!();
-        eprintln!("Cursor local setup uses the tracedecay Cursor plugin.");
-        eprintln!("Reload Cursor so the plugin loads for this workspace.");
-        Ok(())
-    }
-
-    fn post_install<'a>(
-        &'a self,
-        project_path: Option<&'a Path>,
-    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
-        Box::pin(track_branch_after_install(project_path))
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
@@ -89,42 +76,26 @@ impl AgentIntegration for CursorIntegration {
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         if !cursor_plugin_manifest_path(home).exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Cursor,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Cursor,
                 &cursor_plugin_install_dir(home),
             )?,
         ])
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let install_dir = cursor_plugin_install_dir(&ctx.home);
-        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
-        crate::automation::memory_digest::remove_memory_digest_export(
-            &profile_root,
-            crate::automation::skill_targets::SkillInstallTarget::Cursor,
-            &install_dir,
-        )?;
-        remove_cursor_plugin_install(&install_dir)?;
-        let mcp_path = ctx.home.join(".cursor/mcp.json");
-        uninstall_mcp_server(&mcp_path);
-        sweep_legacy_project_artifacts_at_cwd(&ctx.home);
-
-        eprintln!();
-        eprintln!("Uninstall complete. TraceDecay has been removed from Cursor.");
-        eprintln!("Restart Cursor for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCursor integration\x1b[0m");
         let project_cursor = ctx.project_path.join(".cursor");
         doctor_check_plugin(dc, &ctx.home);
+        doctor_check_native_extension(dc, &ctx.home);
         if legacy_project_cursor_has_tracedecay(&project_cursor) {
             dc.warn(
                 "legacy project Cursor MCP/hooks/rule files are present; rerun \
@@ -132,44 +103,93 @@ impl AgentIntegration for CursorIntegration {
                  tracedecay-owned entries",
             );
         }
-        doctor_check_session_ingest(dc, &ctx.project_path);
         super::cursor_diagnostics::report_cursor_mcp_log_findings(dc, &ctx.home);
+    }
+
+    fn healthcheck_with_daemon_status(
+        &self,
+        dc: &mut DoctorCounters,
+        ctx: &HealthcheckContext,
+        daemon_status: Option<&Value>,
+    ) {
+        self.healthcheck(dc, ctx);
+        doctor_check_session_ingest(dc, &ctx.project_path, daemon_status);
+    }
+
+    fn host_component_registration(
+        &self,
+        component: HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> HostBundleRegistrationStateV1 {
+        if component == HostBundleComponentV1::Agent {
+            return cursor_native_extension_registration(&ctx.home);
+        }
+        let plugin_dir = cursor_plugin_install_dir(&ctx.home);
+        let manifest_path = cursor_plugin_manifest_path(&ctx.home);
+        let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+            return HostBundleRegistrationStateV1::Missing;
+        };
+        let Ok(manifest) = serde_json::from_slice::<Value>(&manifest_bytes) else {
+            return HostBundleRegistrationStateV1::Corrupt;
+        };
+        if manifest.get("name").and_then(Value::as_str) != Some("tracedecay") {
+            return HostBundleRegistrationStateV1::Corrupt;
+        }
+        let mcp = load_json_file(&plugin_dir.join("mcp.json"));
+        let mcp_current = mcp
+            .pointer("/mcpServers/tracedecay")
+            .is_some_and(Value::is_object);
+        if matches!(
+            component,
+            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
+        ) {
+            return if mcp_current {
+                HostBundleRegistrationStateV1::Current
+            } else {
+                HostBundleRegistrationStateV1::Repairable
+            };
+        }
+        let hooks = load_json_file(&plugin_dir.join("hooks/hooks.json"));
+        let native_hooks_current =
+            cursor_plugin_hook_expectations()
+                .iter()
+                .all(|(event, command)| {
+                    hooks["hooks"][event.as_str()]
+                        .as_array()
+                        .is_some_and(|entries| {
+                            entries.iter().any(|entry| {
+                                entry["command"]
+                                    .as_str()
+                                    .is_some_and(|value| value.contains(command))
+                            })
+                        })
+                });
+        if native_hooks_current && plugin_dir.join("rules/tracedecay.mdc").is_file() {
+            HostBundleRegistrationStateV1::Current
+        } else {
+            HostBundleRegistrationStateV1::Repairable
+        }
     }
 
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".cursor").is_dir()
     }
 
+    fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
+        let surface = home.join(".cursor");
+        surface.is_dir().then_some(surface)
+    }
+
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
         Some(cursor_plugin_manifest_path(home))
     }
 
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        vec![cursor_plugin_manifest_path(home)]
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
         cursor_plugin_manifest_path(home).exists()
-            || legacy_mcp_has_tracedecay(&home.join(".cursor/mcp.json"))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Post-install hook
-// ---------------------------------------------------------------------------
-
-/// Registers the project's current git branch for tracedecay indexing after a
-/// Cursor plugin install, so per-branch graphs stay in sync from the moment
-/// the integration is set up.
-///
-/// No-ops when there is no project path, no branch can be resolved, or the
-/// project has not been indexed yet (so it never bootstraps an index on its
-/// own).
-async fn track_branch_after_install(project_path: Option<&Path>) {
-    let Some(project_path) = project_path else {
-        return;
-    };
-    match crate::ports::cursor_post_install(project_path.to_path_buf()) {
-        Ok(task) => task.await,
-        Err(error) => {
-            eprintln!("\x1b[33mwarning:\x1b[0m could not finish Cursor post-install work: {error}");
-        }
     }
 }
 
@@ -183,12 +203,11 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
 /// `mcp.json`, and `hooks/hooks.json` entries are rendered through helpers at
 /// install time to inject the package version and the absolute tracedecay
 /// binary path.
-#[doc(hidden)]
-pub fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
+fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
     crate::agents::plugin_bundle::cursor_files()
 }
 
-fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
+pub fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tracedecay")
 }
 
@@ -196,15 +215,147 @@ fn cursor_plugin_manifest_path(home: &Path) -> PathBuf {
     cursor_plugin_install_dir(home).join(".cursor-plugin/plugin.json")
 }
 
-/// Path of the materialized always-applied memory rule rendered from the
-/// project fact store (see `hooks::memory_inject::regenerate_cursor_memory_rule`).
-/// The install path writes the embedded placeholder; hooks rewrite it in
-/// place with rendered facts.
-pub fn cursor_memory_rule_path(home: &Path) -> PathBuf {
-    cursor_plugin_install_dir(home).join("rules/tracedecay-memory.mdc")
+/// Deploy directory of the native diagnostics extension, versioned exactly
+/// like every VS Code-family extension install (`publisher.name-version`) and
+/// stamped with the real release version — a `0.0.0` directory next to
+/// otherwise-versioned components was an unstampable literal.
+pub(super) fn cursor_native_extension_relative_dir() -> String {
+    format!(
+        ".cursor/extensions/tracedecay.cursor-native-{}",
+        crate::PRODUCT_VERSION
+    )
 }
 
+fn cursor_native_extension_install_dir(home: &Path) -> PathBuf {
+    home.join(cursor_native_extension_relative_dir())
+}
+
+fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationStateV1 {
+    let install_dir = cursor_native_extension_install_dir(home);
+    let manifest_path = install_dir.join("package.json");
+    let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+        return HostBundleRegistrationStateV1::Missing;
+    };
+    let Ok(manifest) = serde_json::from_slice::<Value>(&manifest_bytes) else {
+        return HostBundleRegistrationStateV1::Corrupt;
+    };
+    let expected_manifest = manifest.get("name").and_then(Value::as_str) == Some("cursor-native")
+        && manifest.get("publisher").and_then(Value::as_str) == Some("tracedecay")
+        && manifest.get("main").and_then(Value::as_str) == Some("./dist/extension.js");
+    if !expected_manifest {
+        return HostBundleRegistrationStateV1::Corrupt;
+    }
+    if install_dir.join("dist/extension.js").is_file() {
+        HostBundleRegistrationStateV1::Current
+    } else {
+        HostBundleRegistrationStateV1::Repairable
+    }
+}
+
+/// Doctor coverage for the deployed native diagnostics extension — the one
+/// Cursor component the plugin-dir checks never touched, so a missing or
+/// half-deployed extension was invisible. A wholly absent extension is
+/// informational (the plugin-only install surface never claims it); a
+/// stale-version or half-deployed one warns because an install claimed it
+/// and it no longer loads current diagnostics.
+fn doctor_check_native_extension(dc: &mut DoctorCounters, home: &Path) {
+    let install_dir = cursor_native_extension_install_dir(home);
+    match cursor_native_extension_registration(home) {
+        HostBundleRegistrationStateV1::Current => dc.pass(&format!(
+            "Cursor native diagnostics extension {} deployed at {}",
+            crate::PRODUCT_VERSION,
+            install_dir.display()
+        )),
+        HostBundleRegistrationStateV1::Missing => {
+            let stale = stale_native_extension_dirs(home);
+            if stale.is_empty() {
+                dc.info(&format!(
+                    "Cursor native diagnostics extension {} not deployed ({}) — run \
+                     `tracedecay install --agent cursor`",
+                    crate::PRODUCT_VERSION,
+                    install_dir.display()
+                ));
+            } else {
+                dc.warn(&format!(
+                    "Cursor native diagnostics extension is stale ({}) while {} is current — \
+                     run `tracedecay install --agent cursor` to redeploy",
+                    stale.join(", "),
+                    crate::PRODUCT_VERSION
+                ));
+            }
+        }
+        HostBundleRegistrationStateV1::Repairable => dc.warn(&format!(
+            "Cursor native diagnostics extension at {} is incomplete (dist/extension.js \
+             missing) — run `tracedecay install --agent cursor`",
+            install_dir.display()
+        )),
+        HostBundleRegistrationStateV1::Corrupt => dc.fail(&format!(
+            "package.json at {} is not the tracedecay cursor-native extension — inspect and \
+             remove it, then run `tracedecay install --agent cursor`",
+            install_dir.display()
+        )),
+    }
+}
+
+/// Names of `~/.cursor/extensions/tracedecay.cursor-native-*` directories left
+/// by other product versions (e.g. the unstamped `0.0.0` deploys).
+fn stale_native_extension_dirs(home: &Path) -> Vec<String> {
+    let current = format!("tracedecay.cursor-native-{}", crate::PRODUCT_VERSION);
+    let Ok(entries) = std::fs::read_dir(home.join(".cursor/extensions")) else {
+        return Vec::new();
+    };
+    let mut stale: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| name.starts_with("tracedecay.cursor-native-") && *name != current)
+        .collect();
+    stale.sort();
+    stale
+}
+
+const RETIRED_CURSOR_MEMORY_RULE_MARKER: &str =
+    "<!-- generated by tracedecay from the project fact store; do not edit by hand -->";
+
+fn remove_retired_global_cursor_memory_rule(home: &Path) -> Result<bool> {
+    let rule_path = home.join(".cursor/rules/tracedecay-memory.mdc");
+    let metadata = match std::fs::symlink_metadata(&rule_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor memory rule {}: {error}",
+                    rule_path.display()
+                ),
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(false);
+    }
+    let contents =
+        std::fs::read_to_string(&rule_path).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to read retired Cursor memory rule {}: {error}",
+                rule_path.display()
+            ),
+        })?;
+    if !contents.contains(RETIRED_CURSOR_MEMORY_RULE_MARKER) {
+        return Ok(false);
+    }
+    std::fs::remove_file(&rule_path).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to remove retired Cursor memory rule {}: {error}",
+            rule_path.display()
+        ),
+    })?;
+    Ok(true)
+}
+
+#[hotpath::measure(label = "hosts.agent.cursor.plugin_install")]
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
+    remove_retired_global_cursor_memory_rule(home)?;
     let install_dir = cursor_plugin_install_dir(home);
     if let Some(parent) = install_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
@@ -223,39 +374,42 @@ fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
 }
 
 fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Result<()> {
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
-    crate::automation::skill_targets::install_managed_skills(
+    let profile_root =
+        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
+    super::retired_memory_digest::remove_state(&profile_root)?;
+    tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+        &crate::host_io(),
         &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Cursor,
-        install_dir,
-    )?;
-    crate::automation::memory_digest::sync_memory_digest_export(
-        &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Cursor,
+        tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Cursor,
         install_dir,
     )?;
     Ok(())
 }
 
 fn write_embedded_plugin(install_dir: &Path, tracedecay_bin: &str) -> Result<()> {
-    for (relative, contents) in embedded_plugin_files() {
-        let rendered = match relative {
-            ".cursor-plugin/plugin.json" => cursor_plugin_manifest(contents)?,
-            "mcp.json" => cursor_plugin_mcp(contents, tracedecay_bin)?,
-            "hooks/hooks.json" => cursor_plugin_hooks(contents, tracedecay_bin)?,
-            _ => contents.to_string(),
-        };
+    for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
         safe_write_text_file(&install_dir.join(relative), &rendered, None)?;
     }
     Ok(())
 }
 
-fn cursor_plugin_manifest(raw: &str) -> Result<String> {
-    super::plugin_bundle::stamp_manifest_version(raw)
-}
-
-fn cursor_plugin_mcp(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)
+/// Canonical rendered Cursor plugin inventory shared by explicit artifact
+/// refresh and the receipt-backed first-party catalog.
+pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+    embedded_plugin_files()
+        .into_iter()
+        .map(|(relative, contents)| {
+            let rendered = match relative {
+                ".cursor-plugin/plugin.json" => {
+                    super::plugin_bundle::stamp_manifest_version(contents)?
+                }
+                "mcp.json" => super::plugin_bundle::set_mcp_command(contents, tracedecay_bin)?,
+                "hooks/hooks.json" => cursor_plugin_hooks(contents, tracedecay_bin)?,
+                _ => contents.to_string(),
+            };
+            Ok((relative, rendered))
+        })
+        .collect()
 }
 
 fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
@@ -277,16 +431,19 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
             }
         }
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&hooks)?))
+    let rendered = format!("{}\n", serde_json::to_string_pretty(&hooks)?);
+    super::plugin_bundle::reject_unresolved_placeholders(&rendered, "Cursor hooks")?;
+    Ok(rendered)
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
+    super::sweep_superseded_plugin_siblings(install_dir, &[".cursor-plugin/plugin.json"])?;
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
         return Ok(());
     };
     if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(install_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", install_dir.display()),
+        safe_remove_host_file(install_dir).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", install_dir.display()),
         })?;
         return Ok(());
     }
@@ -312,22 +469,131 @@ fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
     // bundle means a newly retired skill is swept automatically — no
     // hand-maintained legacy list to fall out of date. User-added files
     // outside `skills/` (and any non-tracedecay skill dir) are preserved.
-    sweep_retired_bundle_skill_dirs(install_dir);
-    remove_cursor_managed_skill_overlay(install_dir);
+    sweep_retired_bundle_skill_dirs(install_dir)?;
+    remove_cursor_managed_skill_overlay(install_dir)?;
+    for path in cursor_plugin_managed_paths(install_dir) {
+        remove_cursor_plugin_file(&path)?;
+    }
     if cursor_plugin_dir_has_only_managed_files(install_dir) {
-        std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", install_dir.display()),
-        })?;
-    } else {
-        for path in cursor_plugin_managed_paths(install_dir) {
-            std::fs::remove_file(&path).ok();
+        match std::fs::remove_dir_all(install_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to remove {}: {error}", install_dir.display()),
+                });
+            }
         }
     }
     Ok(())
 }
 
-fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
-    std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
+fn remove_cursor_plugin_file(path: &Path) -> Result<()> {
+    match safe_remove_host_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        }),
+    }
+}
+
+fn remove_cursor_managed_skill_overlay(install_dir: &Path) -> Result<()> {
+    let overlay = install_dir.join("skills/agent-managed");
+    match super::collect_regular_files(&overlay) {
+        Ok(files) => {
+            for path in files {
+                remove_cursor_plugin_file(&path)?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to inspect {}: {error}", overlay.display()),
+            });
+        }
+    }
+    match std::fs::remove_dir_all(&overlay) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", overlay.display()),
+        }),
+    }
+}
+
+/// Recognize a receiptless Cursor deployment as a prior first-party install.
+///
+/// Pre-receipt releases deployed the plugin bundle without host-bundle v2
+/// receipts, so receipt evidence alone cannot tell those files from an
+/// operator's own. The recognizable provenance is the bundle's own durable
+/// anchor, exactly the evidence the legacy installer trusts before its clean
+/// replace: the plugin directory's `.cursor-plugin/plugin.json` naming
+/// `tracedecay` (plugin components), or the versioned native-extension
+/// directory carrying tracedecay's own `package.json` (the Agent component).
+/// Arbitrary bytes parked at a cataloged deploy path carry neither anchor and
+/// stay refused without the operator's explicit `--yes --adopt`.
+pub(crate) fn receiptless_component_provenance(
+    home: &Path,
+    component: HostBundleComponentV1,
+) -> bool {
+    if component == HostBundleComponentV1::Agent {
+        return matches!(
+            cursor_native_extension_registration(home),
+            HostBundleRegistrationStateV1::Current | HostBundleRegistrationStateV1::Repairable
+        );
+    }
+    cursor_plugin_dir_is_tracedecay(&cursor_plugin_install_dir(home))
+}
+
+/// Sweep retired artifacts only after the current plugin manifest proves the
+/// directory is TraceDecay-owned. Receiptless upgrades call this after their
+/// component-set receipt commits, so a failed cleanup is safely retryable by
+/// the next install, update, or repair.
+pub fn sweep_retired_cursor_plugin_artifacts(home: &Path) -> Result<()> {
+    let install_dir = cursor_plugin_install_dir(home);
+    if !cursor_plugin_dir_is_tracedecay(&install_dir) {
+        return Ok(());
+    }
+
+    sweep_retired_bundle_skill_dirs(&install_dir)?;
+    for relative in [
+        "rules/tracedecay-memory.mdc",
+        "rules/tracedecay-memory-digest.mdc",
+    ] {
+        let path = install_dir.join(relative);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to inspect retired Cursor plugin artifact {}: {error}",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to read retired Cursor plugin artifact {}: {error}",
+                path.display()
+            ),
+        })?;
+        if contents.contains(RETIRED_CURSOR_MEMORY_RULE_MARKER) {
+            std::fs::remove_file(&path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to remove retired Cursor plugin artifact {}: {error}",
+                    path.display()
+                ),
+            })?;
+        }
+    }
+    remove_retired_global_cursor_memory_rule(home)?;
+    Ok(())
 }
 
 /// Remove every `skills/<dir>` under the tracedecay plugin dir that the current
@@ -340,10 +606,19 @@ fn remove_cursor_managed_skill_overlay(install_dir: &Path) {
 /// whose `SKILL.md` carries no tracedecay marker is left untouched, so an
 /// upgrade never deletes a user's private workflow that happens to collide with
 /// a retired bundle slug.
-fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
+fn sweep_retired_bundle_skill_dirs(install_dir: &Path) -> Result<()> {
     let skills_root = install_dir.join("skills");
-    let Ok(entries) = std::fs::read_dir(&skills_root) else {
-        return;
+    let entries = match std::fs::read_dir(&skills_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor plugin skills at {}: {error}",
+                    skills_root.display()
+                ),
+            });
+        }
     };
     let shipped: std::collections::BTreeSet<String> = embedded_plugin_files()
         .into_iter()
@@ -354,8 +629,23 @@ fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
                 .map(str::to_string)
         })
         .collect();
-    for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+    for entry in entries {
+        let entry = entry.map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to inspect retired Cursor plugin skills at {}: {error}",
+                skills_root.display()
+            ),
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to inspect retired Cursor plugin skill at {}: {error}",
+                    entry.path().display()
+                ),
+            })?
+            .is_dir()
+        {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -368,8 +658,14 @@ fn sweep_retired_bundle_skill_dirs(install_dir: &Path) {
         if !skill_file_has_tracedecay_marker(&entry.path().join("SKILL.md")) {
             continue;
         }
-        std::fs::remove_dir_all(entry.path()).ok();
+        std::fs::remove_dir_all(entry.path()).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to remove retired Cursor plugin skill at {}: {error}",
+                entry.path().display()
+            ),
+        })?;
     }
+    Ok(())
 }
 
 /// True when a Cursor `SKILL.md` carries a tracedecay authorship marker, marking
@@ -400,14 +696,16 @@ fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
         .into_iter()
         .map(|(relative, _)| install_dir.join(relative))
         .collect();
+    // Retired in 0.0.66 when dynamic memory moved to ~/.cursor/rules. Keep the
+    // old receipt-owned path in the sweep inventory so install and uninstall
+    // can remove artifacts written by older bundles.
+    paths.push(install_dir.join("rules/tracedecay-memory.mdc"));
     paths.push(install_dir.join("rules/tracedecay-memory-digest.mdc"));
     paths
 }
 
 fn legacy_mcp_has_tracedecay(mcp_path: &Path) -> bool {
-    load_json_file(mcp_path)
-        .get("mcpServers")
-        .is_some_and(|servers| servers.get("tracedecay").is_some())
+    mcp_config_has_tracedecay(mcp_path, "mcpServers", load_json_file)
 }
 
 fn legacy_project_cursor_has_tracedecay(cursor_dir: &Path) -> bool {
@@ -445,7 +743,15 @@ fn sweep_legacy_project_artifacts(project_path: &Path) -> Result<()> {
         super::ensure_project_local_safe_path(project_path, path)?;
     }
     if legacy_mcp {
-        uninstall_mcp_server(&mcp_path);
+        uninstall_mcp_server_entry(
+            &mcp_path,
+            "mcpServers",
+            JsonConfigDialect::Json,
+            McpUninstallPolicy {
+                prune_empty_root: true,
+                remove_empty_file: true,
+            },
+        )?;
     }
     if legacy_hooks {
         remove_legacy_project_hooks(&hooks_path)?;
@@ -513,95 +819,40 @@ fn legacy_rule_has_tracedecay(rule_path: &Path) -> bool {
         .is_ok_and(|contents| contents.contains("tracedecay MCP tools"))
 }
 
-/// Remove the tracedecay MCP server entry from a Cursor `mcp.json`, deleting the
-/// file when it becomes empty and otherwise backing up before rewriting.
-fn uninstall_mcp_server(mcp_path: &Path) {
-    if !mcp_path.exists() {
-        eprintln!("  {} not found, skipping", mcp_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(mcp_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    };
-
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    }
-
-    let is_empty = settings.as_object().is_some_and(|o| {
-        o.iter()
-            .all(|(k, v)| k == "mcpServers" && v.as_object().is_some_and(serde_json::Map::is_empty))
-    });
-
-    if is_empty {
-        std::fs::remove_file(mcp_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            mcp_path.display()
-        );
-    } else if backup_and_write_json(mcp_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            mcp_path.display()
-        );
-    }
-}
-
 fn remove_legacy_project_hooks(hooks_path: &Path) -> Result<()> {
     if !hooks_path.exists() {
         return Ok(());
     }
-    let mut hooks = load_jsonc_file_strict(hooks_path)?;
-    let Some(events) = hooks
-        .get_mut("hooks")
-        .and_then(|value| value.as_object_mut())
-    else {
-        return Ok(());
-    };
+    let removed =
+        update_json_config_transactionally(hooks_path, JsonConfigDialect::Jsonc, |mut hooks| {
+            let Some(events) = hooks
+                .get_mut("hooks")
+                .and_then(|value| value.as_object_mut())
+            else {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            };
 
-    let mut removed = false;
-    for value in events.values_mut() {
-        let Some(entries) = value.as_array_mut() else {
-            continue;
-        };
-        let before = entries.len();
-        entries.retain(|entry| !is_legacy_tracedecay_hook(entry));
-        removed |= entries.len() != before;
-    }
-    events.retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
+            let mut removed = false;
+            for value in events.values_mut() {
+                let Some(entries) = value.as_array_mut() else {
+                    continue;
+                };
+                let before = entries.len();
+                entries.retain(|entry| !is_legacy_tracedecay_hook(entry));
+                removed |= entries.len() != before;
+            }
+            events.retain(|_, value| value.as_array().is_none_or(|entries| !entries.is_empty()));
 
-    if !removed {
-        return Ok(());
-    }
-    if events.is_empty() {
-        std::fs::remove_file(hooks_path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", hooks_path.display()),
+            if !removed {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            if events.is_empty() {
+                Ok((true, JsonConfigMutation::Remove))
+            } else {
+                Ok((true, JsonConfigMutation::Write(hooks)))
+            }
         })?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed legacy Cursor hooks from {}",
-            hooks_path.display()
-        );
-    } else if backup_and_write_json(hooks_path, &hooks) {
+    if removed {
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed legacy Cursor hooks from {}",
             hooks_path.display()
@@ -664,10 +915,9 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             manifest_path.display()
         ));
     }
-    if let Some(message) = super::cursor_diagnostics::plugin_version_staleness(
-        &manifest,
-        env!("TRACEDECAY_PRODUCT_VERSION"),
-    ) {
+    if let Some(message) =
+        super::cursor_diagnostics::plugin_version_staleness(&manifest, crate::PRODUCT_VERSION)
+    {
         dc.warn(&message);
     }
     doctor_check_plugin_mcp(dc, &plugin_dir.join("mcp.json"));
@@ -776,38 +1026,108 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     }
 }
 
-/// Flags a stalled Cursor transcript ingest. The per-turn hooks cap how much
-/// transcript tail they read,
-/// so a backlog above that cap will never drain on its own — exactly the
-/// "session recall is silently missing recent turns" failure users hit.
-fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
-    let Ok(Some(health)) = crate::ports::cursor_session_health(project_path) else {
+#[derive(serde::Deserialize)]
+struct CursorSessionIngestHealth {
+    tracked_transcripts: u64,
+    pending_transcripts: u64,
+    pending_bytes: u64,
+    max_transcript_pending_bytes: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CursorPlaceholderPathsState {
+    Available(Vec<String>),
+    Unavailable(String),
+}
+
+fn cursor_placeholder_paths_state(status: &Value) -> Option<CursorPlaceholderPathsState> {
+    let value = status.get("cursor_session_placeholder_paths")?;
+    if let Some(paths) = value.as_array() {
+        return Some(CursorPlaceholderPathsState::Available(
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        ));
+    }
+    if value.get("status").and_then(Value::as_str) == Some("unavailable") {
+        let reason = value
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        return Some(CursorPlaceholderPathsState::Unavailable(reason));
+    }
+    None
+}
+
+/// Flags a stalled Cursor transcript ingest using Doctor's daemon snapshot.
+fn doctor_check_session_ingest(
+    dc: &mut DoctorCounters,
+    project_path: &Path,
+    daemon_status: Option<&Value>,
+) {
+    let Some(status) = daemon_status else {
         return;
     };
-    if !health.literal_workspace_placeholder_paths.is_empty() {
+    let placeholder_paths = cursor_placeholder_paths_state(status);
+    if let Some(CursorPlaceholderPathsState::Unavailable(reason)) = &placeholder_paths {
+        dc.warn(&format!(
+            "Cursor transcript placeholder-path diagnostics unavailable from daemon ({reason}); \
+             literal workspace placeholders could not be checked"
+        ));
+    }
+    if status
+        .pointer("/cursor_session_ingest/status")
+        .and_then(Value::as_str)
+        == Some("unavailable")
+    {
+        dc.warn("Cursor transcript ingest health unavailable from daemon session authority");
+        return;
+    }
+    let Some(health) = status
+        .get("cursor_session_ingest")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+    else {
+        return;
+    };
+    let paths = match placeholder_paths {
+        Some(CursorPlaceholderPathsState::Available(paths)) => paths,
+        Some(CursorPlaceholderPathsState::Unavailable(_)) | None => Vec::new(),
+    };
+    report_cursor_session_ingest(dc, project_path, &health, paths.iter().map(String::as_str));
+}
+
+fn report_cursor_session_ingest<'a>(
+    dc: &mut DoctorCounters,
+    project_path: &Path,
+    health: &CursorSessionIngestHealth,
+    placeholder_paths: impl Iterator<Item = &'a str>,
+) {
+    let placeholder_paths = placeholder_paths.collect::<Vec<_>>();
+    if !placeholder_paths.is_empty() {
         dc.warn(&format!(
             "Cursor transcript ingest has {} path(s) with a literal workspace placeholder; \
              Cursor did not expand `${{workspaceFolder}}`, so session recall will miss those transcripts",
-            health.literal_workspace_placeholder_paths.len(),
+            placeholder_paths.len(),
         ));
-        for path in &health.literal_workspace_placeholder_paths {
+        for path in placeholder_paths {
             dc.info(&format!("  - {path}"));
         }
     }
-    let Ok(catch_up_cap) = crate::ports::cursor_catch_up_ingest_max_bytes() else {
-        return;
-    };
-    if health.max_transcript_pending_bytes > catch_up_cap {
+    if health.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES {
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
              per-transcript hook catch-up cap — it will not drain automatically and \
-             session recall is missing those turns. Run `tracedecay sessions ingest \
-             --project-path {}` to drain the backlog manually",
+             session recall is missing those turns. Run `tracedecay sessions import \
+             --project-path {}` to schedule bounded convergence",
             health.max_transcript_pending_bytes,
             health.pending_bytes,
             health.pending_transcripts,
-            catch_up_cap,
+            crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES,
             project_path.display(),
         ));
     } else {
@@ -819,25 +1139,52 @@ fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
-fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
+#[derive(Debug, PartialEq, Eq)]
+enum CursorPluginRuleDoctorState {
+    Missing,
+    Unreadable,
+    Incomplete,
+    Active,
+}
+
+fn cursor_plugin_rule_doctor_state(rule_path: &Path) -> CursorPluginRuleDoctorState {
     if !rule_path.exists() {
-        dc.warn(&format!(
+        return CursorPluginRuleDoctorState::Missing;
+    }
+    // The installer deploys the embedded rule byte-for-byte, so an active
+    // rule is one that still matches the bundle shipped with this binary; any
+    // edit or stale version is a reinstall, not a prose check.
+    match std::fs::read_to_string(rule_path) {
+        Ok(contents)
+            if embedded_plugin_files().iter().any(|(relative, embedded)| {
+                *relative == "rules/tracedecay.mdc" && *embedded == contents
+            }) =>
+        {
+            CursorPluginRuleDoctorState::Active
+        }
+        Ok(_) => CursorPluginRuleDoctorState::Incomplete,
+        Err(_) => CursorPluginRuleDoctorState::Unreadable,
+    }
+}
+
+fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
+    match cursor_plugin_rule_doctor_state(rule_path) {
+        CursorPluginRuleDoctorState::Missing => dc.warn(&format!(
             "{} not found — run `tracedecay install --agent cursor`",
             rule_path.display()
-        ));
-        return;
-    }
-    let contents = std::fs::read_to_string(rule_path).unwrap_or_default();
-    if contents.contains("alwaysApply: true") && contents.contains("tracedecay MCP tools") {
-        dc.pass(&format!(
+        )),
+        CursorPluginRuleDoctorState::Unreadable => dc.fail(&format!(
+            "Cursor plugin tracedecay rule is unreadable in {} — run `tracedecay install --agent cursor`",
+            rule_path.display()
+        )),
+        CursorPluginRuleDoctorState::Active => dc.pass(&format!(
             "Cursor plugin tracedecay rule active in {}",
             rule_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
+        )),
+        CursorPluginRuleDoctorState::Incomplete => dc.fail(&format!(
             "Cursor plugin tracedecay rule is incomplete in {} — run `tracedecay install --agent cursor`",
             rule_path.display()
-        ));
+        )),
     }
 }
 
@@ -845,7 +1192,16 @@ fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::agents::host_bundle_v2::{
+        HostBundleComponentDoctorStateV1, HostBundleError, HostBundleLifecycleOpV1,
+        HostBundleRegistrationStateV1, HostBundleWriterV1, HostComponentSetExecutionRequestV1,
+        HostComponentSetLifecycleRequestV1, HostComponentSetTransactionV1, HostKindV1,
+    };
     use tempfile::TempDir;
+    use tracedecay_host_integration::HostCapabilityUnavailableReasonV1;
+
+    const RETIRED_CURSOR_MEMORY_RULE_FIXTURE: &str =
+        "<!-- generated by tracedecay from the project fact store; do not edit by hand -->";
 
     fn plugin_source_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
@@ -903,7 +1259,7 @@ mod tests {
         let expectations = cursor_plugin_hook_expectations();
         assert_eq!(
             expectations.len(),
-            9,
+            8,
             "expected one entry per bundled lifecycle hook, got {expectations:?}"
         );
         assert!(expectations.contains(&(
@@ -990,6 +1346,630 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clean_cursor_install_update_and_doctor_preserve_user_config() {
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let user_config = home.path().join(".cursor/mcp.json");
+        std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        let user_config_bytes = br#"{"mcpServers":{"operator":{"command":"other"}}}"#;
+        std::fs::write(&user_config, user_config_bytes).unwrap();
+
+        let integration = CursorIntegration;
+        let context = InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "/opt/tracedecay-previous".to_string(),
+            tool_permissions: super::super::expected_tool_perms().expect("tool catalog"),
+            project_root: None,
+            dashboard: true,
+        };
+        assert_eq!(
+            integration.update_plugin(&context).unwrap(),
+            UpdatePluginOutcome::NotInstalled,
+            "update must refuse to create a Cursor installation that was never installed"
+        );
+        assert!(!cursor_plugin_install_dir(home.path()).exists());
+
+        install_cursor_plugin(home.path(), &context.tracedecay_bin).unwrap();
+        let plugin_dir = cursor_plugin_install_dir(home.path());
+        assert!(plugin_dir.join("agents/code-explorer.md").is_file());
+        let mcp_path = plugin_dir.join("mcp.json");
+        let installed_mcp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            installed_mcp["mcpServers"]["tracedecay"]["command"],
+            "/opt/tracedecay-previous"
+        );
+
+        let updated_context = InstallContext {
+            tracedecay_bin: "/opt/tracedecay-next".to_string(),
+            ..context
+        };
+        assert!(matches!(
+            integration.update_plugin(&updated_context).unwrap(),
+            UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()]
+        ));
+        let updated_mcp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            updated_mcp["mcpServers"]["tracedecay"]["command"], "/opt/tracedecay-next",
+            "the in-composer MCP registration must refresh for the new binary"
+        );
+        assert!(plugin_dir.join("agents/code-explorer.md").is_file());
+        assert_eq!(std::fs::read(&user_config).unwrap(), user_config_bytes);
+
+        let before_idempotent_update = std::fs::read(&mcp_path).unwrap();
+        assert!(matches!(
+            integration.update_plugin(&updated_context).unwrap(),
+            UpdatePluginOutcome::Refreshed(paths) if paths == vec![plugin_dir.clone()]
+        ));
+        assert_eq!(std::fs::read(&mcp_path).unwrap(), before_idempotent_update);
+
+        let mut doctor = DoctorCounters::new();
+        integration.healthcheck(
+            &mut doctor,
+            &HealthcheckContext {
+                home: home.path().to_path_buf(),
+                project_path: project.path().to_path_buf(),
+            },
+        );
+        assert_eq!(doctor.issues, 0);
+        assert_eq!(doctor.warnings, 0);
+    }
+
+    fn cursor_component_set(
+        tracedecay_bin: &str,
+    ) -> crate::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1 {
+        use crate::agents::host_bundle_registry::{
+            default_components, verified_embedded_host_component_set_with_tracedecay_bin,
+        };
+
+        verified_embedded_host_component_set_with_tracedecay_bin(
+            HostKindV1::CursorDesktop,
+            &default_components(HostKindV1::CursorDesktop),
+            0,
+            tracedecay_bin,
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .expect("the packaged Cursor Desktop component set must verify")
+    }
+
+    fn cursor_component_request(
+        operation: HostBundleLifecycleOpV1,
+        operation_id: [u8; 16],
+        explicit_confirmation: bool,
+    ) -> HostComponentSetExecutionRequestV1 {
+        HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation,
+                expected_host: HostKindV1::CursorDesktop,
+                expected_components: crate::agents::host_bundle_registry::default_components(
+                    HostKindV1::CursorDesktop,
+                ),
+                explicit_confirmation,
+                hermes_profile_bindings: 0,
+                explicit_adoption: false,
+            },
+            operation_id,
+        }
+    }
+
+    /// [`cursor_component_request`] carrying the operator's `--yes --adopt`.
+    fn adopting_cursor_component_request(
+        operation: HostBundleLifecycleOpV1,
+        operation_id: [u8; 16],
+    ) -> HostComponentSetExecutionRequestV1 {
+        let mut request = cursor_component_request(operation, operation_id, true);
+        request.lifecycle.explicit_adoption = true;
+        request
+    }
+
+    #[test]
+    fn cursor_component_transaction_updates_doctor_and_preserves_denied_state() {
+        // Resolves the product binary from ambient PATH twice (here and inside
+        // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
+        // PATH between the two reads.
+        let _env = crate::config::lock_user_data_dir_test_env();
+        use crate::agents::host_bundle_registry::{
+            HostBundleRegistryError, verified_embedded_default_host_component_set,
+        };
+
+        let home = TempDir::new().unwrap();
+        let lifecycle = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let user_config = home.path().join(".cursor/mcp.json");
+        let user_config_bytes = br#"{"mcpServers":{"operator":{"command":"other"}}}"#;
+        std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        std::fs::write(&user_config, user_config_bytes).unwrap();
+
+        let previous = cursor_component_set("/opt/tracedecay-v1");
+        let install = cursor_component_request(HostBundleLifecycleOpV1::Install, [61; 16], true);
+        let mut writer =
+            HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
+        let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            "cursor",
+            home.path(),
+            lifecycle.path(),
+            install.lifecycle.operation,
+            "/opt/tracedecay-v1".to_string(),
+        )
+        .unwrap();
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &previous.component_set,
+                &install,
+                &previous,
+                &mut registration,
+            )
+            .expect("the packaged Cursor set must install through its production transaction");
+
+        let mcp_path = cursor_plugin_install_dir(home.path()).join("mcp.json");
+        let installed_mcp: Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            installed_mcp["mcpServers"]["tracedecay"]["command"],
+            "/opt/tracedecay-v1"
+        );
+
+        let current_bin =
+            super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let current = cursor_component_set(&current_bin);
+        let update = cursor_component_request(HostBundleLifecycleOpV1::Update, [62; 16], true);
+        let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            "cursor",
+            home.path(),
+            lifecycle.path(),
+            update.lifecycle.operation,
+            current_bin.clone(),
+        )
+        .unwrap();
+        let update_receipt = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(&current.component_set, &update, &current, &mut registration)
+            .expect("a newer packaged Cursor set must update through the transaction");
+        assert_eq!(update_receipt.operation_id, update.operation_id);
+
+        let updated_mcp: Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            updated_mcp["mcpServers"]["tracedecay"]["command"],
+            current_bin
+        );
+        let updated_bytes = std::fs::read(&mcp_path).unwrap();
+
+        let mut repeat_registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            "cursor",
+            home.path(),
+            lifecycle.path(),
+            update.lifecycle.operation,
+            current_bin.clone(),
+        )
+        .unwrap();
+        let repeated_receipt = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &current.component_set,
+                &update,
+                &current,
+                &mut repeat_registration,
+            )
+            .expect("repeating the same confirmed transaction must be idempotent");
+        assert_eq!(repeated_receipt, update_receipt);
+        assert_eq!(std::fs::read(&mcp_path).unwrap(), updated_bytes);
+
+        let denied = cursor_component_request(HostBundleLifecycleOpV1::Update, [63; 16], false);
+        let rejected = cursor_component_set("/opt/tracedecay-v3");
+        let mut denied_registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+            "cursor",
+            home.path(),
+            lifecycle.path(),
+            denied.lifecycle.operation,
+            "/opt/tracedecay-v3".to_string(),
+        )
+        .unwrap();
+        let preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(
+                &rejected.component_set,
+                &denied,
+                &rejected,
+                &mut denied_registration,
+            )
+            .expect("a denied Cursor update must still produce its truthful preview");
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute_confirmed(
+                    &rejected.component_set,
+                    &denied,
+                    &preview,
+                    &rejected,
+                    &mut denied_registration,
+                )
+                .expect_err("an unconfirmed Cursor update must not mutate the installed release"),
+            HostBundleError::ConfirmationRequired
+        );
+        assert_eq!(std::fs::read(&mcp_path).unwrap(), updated_bytes);
+
+        let report = crate::agents::inspect_receipt_backed_host_components(
+            &HealthcheckContext {
+                home: home.path().to_path_buf(),
+                project_path: project.path().to_path_buf(),
+            },
+            lifecycle.path(),
+            crate::agents::TEST_GENERATOR_COMMIT,
+        )
+        .expect("Doctor must inspect the transaction receipts through production registration");
+        assert_eq!(
+            report.components.len(),
+            current.component_set.components.len(),
+            "Doctor must report exactly the Cursor Desktop component set: {report:#?}"
+        );
+        for expected_component in [
+            HostBundleComponentV1::Core,
+            HostBundleComponentV1::Agent,
+            HostBundleComponentV1::ContextMcp,
+        ] {
+            let component = report
+                .components
+                .iter()
+                .find(|component| component.component == Some(expected_component))
+                .unwrap_or_else(|| {
+                    panic!("Doctor omitted Cursor Desktop {expected_component:?}: {report:#?}")
+                });
+            assert_eq!(
+                component.host,
+                Some(HostKindV1::CursorDesktop),
+                "unexpected Doctor host for {expected_component:?}: {component:#?}; full report: {report:#?}"
+            );
+            assert_eq!(
+                component.state,
+                HostBundleComponentDoctorStateV1::Current,
+                "unexpected Doctor state for {expected_component:?}: {component:#?}; full report: {report:#?}"
+            );
+            assert_eq!(
+                component.registration,
+                Some(HostBundleRegistrationStateV1::Current),
+                "unexpected registration state for {expected_component:?}: {component:#?}; full report: {report:#?}"
+            );
+        }
+        assert_eq!(std::fs::read(&user_config).unwrap(), user_config_bytes);
+
+        assert_eq!(
+            verified_embedded_default_host_component_set(
+                HostKindV1::CursorCloud,
+                0,
+                crate::agents::TEST_GENERATOR_COMMIT
+            ),
+            Err(HostBundleRegistryError::HostComponentSetUnavailable {
+                host: HostKindV1::CursorCloud,
+                reason: HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
+            }),
+            "Cursor Cloud remains excluded from the production component transaction"
+        );
+    }
+
+    /// A live pre-receipt Cursor bundle — deployed by a release that predates
+    /// host-bundle receipts, stamped with an older product version and binary
+    /// path, and recorded by no receipt — must be taken over by the production
+    /// component transaction. `Install` (the operator's
+    /// `install --agent cursor`) adopts it, and `Update` (`update-plugin`)
+    /// restamps it to the running binary, instead of refusing with a
+    /// "recorded by no receipt" ownership conflict that no command can clear.
+    #[test]
+    fn cursor_component_transaction_takes_over_a_pre_receipt_bundle() {
+        // Resolves the product binary from ambient PATH twice (here and inside
+        // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
+        // PATH between the two reads.
+        let _env = crate::config::lock_user_data_dir_test_env();
+        for operation in [
+            HostBundleLifecycleOpV1::Install,
+            HostBundleLifecycleOpV1::Update,
+        ] {
+            let home = TempDir::new().unwrap();
+            let lifecycle = TempDir::new().unwrap();
+            let project = TempDir::new().unwrap();
+            // The pre-receipt live bundle: rendered for an older binary, with
+            // a version-stale manifest, and no v2 receipt anywhere.
+            let install_dir = cursor_plugin_install_dir(home.path());
+            write_embedded_plugin(&install_dir, "/opt/tracedecay-previous")
+                .expect("the simulated pre-receipt bundle must deploy");
+            let manifest_path = cursor_plugin_manifest_path(home.path());
+            let stamped = std::fs::read_to_string(&manifest_path).unwrap();
+            assert!(
+                stamped.contains(crate::PRODUCT_VERSION),
+                "the rendered manifest must carry the product version to re-stamp: {stamped}"
+            );
+            std::fs::write(
+                &manifest_path,
+                stamped.replace(crate::PRODUCT_VERSION, "0.1.0-beta.4"),
+            )
+            .unwrap();
+
+            // Doctor re-renders the expected catalog with the resolved
+            // binary, so the takeover must deploy exactly that binary for the
+            // receipts to read as the current release afterwards.
+            let current_bin =
+                super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+            let current = cursor_component_set(&current_bin);
+            let request = cursor_component_request(operation, [64; 16], true);
+            let mut writer =
+                HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path())
+                    .unwrap();
+            let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                "cursor",
+                home.path(),
+                lifecycle.path(),
+                operation,
+                current_bin.clone(),
+            )
+            .unwrap();
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &current.component_set,
+                    &request,
+                    &current,
+                    &mut registration,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{operation:?} must take over the pre-receipt Cursor bundle: {error}")
+                });
+
+            let manifest: Value =
+                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+            assert_eq!(
+                manifest["version"],
+                crate::PRODUCT_VERSION,
+                "{operation:?} must restamp the plugin manifest to the running product version"
+            );
+            let mcp: Value =
+                serde_json::from_slice(&std::fs::read(install_dir.join("mcp.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                mcp["mcpServers"]["tracedecay"]["command"],
+                Value::String(current_bin.clone()),
+                "{operation:?} must re-point the MCP registration at the running binary"
+            );
+
+            // The takeover recorded durable receipts: Doctor now reports the
+            // whole Cursor Desktop set as receipt-backed and current.
+            let report = crate::agents::inspect_receipt_backed_host_components(
+                &HealthcheckContext {
+                    home: home.path().to_path_buf(),
+                    project_path: project.path().to_path_buf(),
+                },
+                lifecycle.path(),
+                crate::agents::TEST_GENERATOR_COMMIT,
+            )
+            .expect("Doctor must inspect the adopted bundle through its new receipts");
+            assert_eq!(
+                report.components.len(),
+                current.component_set.components.len(),
+                "{operation:?} must leave every Cursor Desktop component receipt-backed: {report:#?}"
+            );
+            for component in &report.components {
+                assert_eq!(
+                    component.state,
+                    HostBundleComponentDoctorStateV1::Current,
+                    "{operation:?} left a non-current component: {component:#?}"
+                );
+            }
+        }
+    }
+
+    /// A cataloged deploy path proves nothing about ownership: bytes an
+    /// operator parked at the plugin manifest path carry no recognizable
+    /// legacy provenance, so Install and Update refuse them untouched unless
+    /// the operator explicitly adopts. Explicit adoption then takes them
+    /// over, backing the previous bytes up first.
+    #[test]
+    fn cursor_transaction_refuses_unrecognized_receiptless_bytes_without_adoption() {
+        // Resolves the product binary from ambient PATH twice (here and inside
+        // doctor); the lock keeps a sibling `AmbientPathGuard` from narrowing
+        // PATH between the two reads.
+        let _env = crate::config::lock_user_data_dir_test_env();
+        for operation in [
+            HostBundleLifecycleOpV1::Install,
+            HostBundleLifecycleOpV1::Update,
+        ] {
+            let home = TempDir::new().unwrap();
+            let lifecycle = TempDir::new().unwrap();
+            let manifest_path = cursor_plugin_manifest_path(home.path());
+            std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+            let operator_bytes = b"my own plugin experiment, not a tracedecay bundle";
+            std::fs::write(&manifest_path, operator_bytes).unwrap();
+
+            let current_bin =
+                super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+            let current = cursor_component_set(&current_bin);
+            let mut writer =
+                HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path())
+                    .unwrap();
+
+            let request = cursor_component_request(operation, [71; 16], true);
+            let mut registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                "cursor",
+                home.path(),
+                lifecycle.path(),
+                operation,
+                current_bin.clone(),
+            )
+            .unwrap();
+            let error = HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &current.component_set,
+                    &request,
+                    &current,
+                    &mut registration,
+                )
+                .expect_err("unrecognized receiptless bytes must refuse without adoption");
+            assert!(
+                matches!(error, HostBundleError::OwnershipConflict(_)),
+                "{operation:?}: {error}"
+            );
+            assert!(
+                error.to_string().contains("--yes --adopt"),
+                "the refusal must name the explicit adoption remedy: {error}"
+            );
+            assert_eq!(
+                std::fs::read(&manifest_path).unwrap(),
+                operator_bytes,
+                "{operation:?} must leave the refused file byte-for-byte untouched"
+            );
+
+            let adopt = adopting_cursor_component_request(operation, [72; 16]);
+            let mut adopting_registration = crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                "cursor",
+                home.path(),
+                lifecycle.path(),
+                operation,
+                current_bin.clone(),
+            )
+            .unwrap();
+            HostComponentSetTransactionV1::new(&mut writer)
+                .execute(
+                    &current.component_set,
+                    &adopt,
+                    &current,
+                    &mut adopting_registration,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("explicit adoption must take the file over: {error}")
+                });
+            let manifest: Value =
+                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+            assert_eq!(manifest["name"], "tracedecay");
+        }
+    }
+
+    /// The provenance recognizer trusts exactly the durable first-party
+    /// anchors: the plugin directory's own manifest naming tracedecay, and
+    /// tracedecay's versioned native-extension `package.json`. Arbitrary
+    /// bytes at those paths recognize nothing.
+    #[test]
+    fn receiptless_provenance_requires_a_first_party_anchor() {
+        let home = TempDir::new().unwrap();
+        for component in [
+            HostBundleComponentV1::Core,
+            HostBundleComponentV1::ContextMcp,
+            HostBundleComponentV1::Agent,
+        ] {
+            assert!(
+                !receiptless_component_provenance(home.path(), component),
+                "an empty home recognizes no {component:?} provenance"
+            );
+        }
+
+        let manifest_path = cursor_plugin_manifest_path(home.path());
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, b"not a tracedecay manifest").unwrap();
+        assert!(!receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Core
+        ));
+
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&json!({ "name": "tracedecay", "version": "0.1.0-beta.4" }))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Core
+        ));
+        assert!(receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::ContextMcp
+        ));
+        // The plugin anchor says nothing about the native extension.
+        assert!(!receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Agent
+        ));
+
+        let extension_dir = home.path().join(cursor_native_extension_relative_dir());
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(
+            extension_dir.join("package.json"),
+            br#"{"name":"cursor-native","publisher":"tracedecay","main":"./dist/extension.js"}"#,
+        )
+        .unwrap();
+        assert!(receiptless_component_provenance(
+            home.path(),
+            HostBundleComponentV1::Agent
+        ));
+    }
+
+    /// The bounded legacy-inventory sweep removes retired first-party
+    /// artifacts after adoption validated the bundle, and nothing else: a
+    /// user's own files survive, and a directory without the tracedecay
+    /// manifest anchor is never touched.
+    #[test]
+    fn retired_artifact_sweep_is_bounded_and_ownership_gated() {
+        let home = TempDir::new().unwrap();
+        let install_dir = cursor_plugin_install_dir(home.path());
+        write_embedded_plugin(&install_dir, "tracedecay").expect("bundle should deploy");
+        let retired = install_dir.join("rules/tracedecay-memory.mdc");
+        std::fs::write(&retired, RETIRED_CURSOR_MEMORY_RULE_FIXTURE).unwrap();
+        let user_rule = install_dir.join("rules/my-own-notes.mdc");
+        std::fs::write(&user_rule, b"operator notes").unwrap();
+
+        sweep_retired_cursor_plugin_artifacts(home.path()).expect("sweep should succeed");
+        assert!(
+            !retired.exists(),
+            "the retired memory rule must be swept from an owned bundle"
+        );
+        assert!(user_rule.exists(), "user files must survive the sweep");
+
+        // A same-name rule without the tracedecay marker is a user file too.
+        std::fs::write(&retired, b"my own memory rule").unwrap();
+        sweep_retired_cursor_plugin_artifacts(home.path()).expect("sweep should succeed");
+        assert_eq!(std::fs::read(&retired).unwrap(), b"my own memory rule");
+        std::fs::remove_file(&retired).unwrap();
+
+        // Without the manifest anchor the sweep never touches the directory.
+        std::fs::write(
+            install_dir.join(".cursor-plugin/plugin.json"),
+            b"not tracedecay",
+        )
+        .unwrap();
+        std::fs::write(&retired, RETIRED_CURSOR_MEMORY_RULE_FIXTURE).unwrap();
+        sweep_retired_cursor_plugin_artifacts(home.path()).expect("sweep should succeed");
+        assert!(retired.exists(), "an unowned directory must never be swept");
+    }
+
+    #[test]
+    fn native_extension_registration_is_receipt_doctor_ready() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(
+            cursor_native_extension_registration(tmp.path()),
+            HostBundleRegistrationStateV1::Missing
+        );
+
+        let install_dir = cursor_native_extension_install_dir(tmp.path());
+        std::fs::create_dir_all(install_dir.join("dist")).unwrap();
+        std::fs::write(
+            install_dir.join("package.json"),
+            r#"{
+                "name": "cursor-native",
+                "publisher": "tracedecay",
+                "main": "./dist/extension.js"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cursor_native_extension_registration(tmp.path()),
+            HostBundleRegistrationStateV1::Repairable
+        );
+
+        std::fs::write(
+            install_dir.join("dist/extension.js"),
+            "module.exports = {};",
+        )
+        .unwrap();
+        assert_eq!(
+            cursor_native_extension_registration(tmp.path()),
+            HostBundleRegistrationStateV1::Current
+        );
+    }
+
     /// The Cursor deploy set (composed from the shared `plugin/` tree) must
     /// cover every shared *model-invocable* skill (all non-`tracedecay-*`
     /// slugs), every native slash command, and Cursor's manifest/rules/agents —
@@ -1041,14 +2021,16 @@ mod tests {
             "hooks/hooks.json",
             "README.md",
             "rules/tracedecay.mdc",
-            "rules/tracedecay-memory.mdc",
         ] {
             assert!(
                 deploy.contains(expected),
                 "Cursor deploy set is missing {expected}"
             );
         }
-
+        assert!(
+            !deploy.contains("rules/tracedecay-memory.mdc"),
+            "dynamic project memory must not modify receipt-owned plugin files"
+        );
         // Every canonical agent is rendered into Cursor's generated deploy
         // set. Directory discovery prevents a newly added catalog entry from
         // being omitted by adapter generation.
@@ -1061,6 +2043,33 @@ mod tests {
                 "Cursor deploy set is missing agent {expected}"
             );
         }
+    }
+
+    /// The skill index injected into Cursor `sessionStart` context must match
+    /// the *model-invocable* skills shipped in the bundle — slash dispatchers
+    /// (`disable-model-invocation: true`) are explicit-invoke-only and would
+    /// be noise in steering context.
+    #[test]
+    fn session_context_skill_index_matches_bundle_skills() {
+        let mut bundled: Vec<String> = embedded_plugin_files()
+            .into_iter()
+            .filter_map(|(relative, contents)| {
+                let name = relative
+                    .strip_prefix("skills/")
+                    .and_then(|rest| rest.strip_suffix("/SKILL.md"))?;
+                (!contents.contains("disable-model-invocation: true")).then(|| name.to_string())
+            })
+            .collect();
+        bundled.sort();
+        let mut listed: Vec<String> = CURSOR_PLUGIN_SKILLS
+            .iter()
+            .map(|skill| (*skill).to_string())
+            .collect();
+        listed.sort();
+        assert_eq!(
+            bundled, listed,
+            "hooks::CURSOR_PLUGIN_SKILLS must list exactly the model-invocable bundled skills"
+        );
     }
 
     #[test]
@@ -1076,6 +2085,93 @@ mod tests {
         assert!(
             !install_dir.exists(),
             "embedded install should be fully removed on uninstall"
+        );
+    }
+
+    #[test]
+    fn uninstall_sweeps_retired_plugin_memory_rule() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        let retired_rule = install_dir.join("rules/tracedecay-memory.mdc");
+        std::fs::write(&retired_rule, RETIRED_CURSOR_MEMORY_RULE_FIXTURE).unwrap();
+
+        remove_cursor_plugin_install(&install_dir).expect("uninstall should succeed");
+
+        assert!(
+            !retired_rule.exists(),
+            "uninstall must remove the memory rule retired from the plugin inventory"
+        );
+        assert!(
+            !install_dir.exists(),
+            "the retired managed rule must not strand the owned plugin directory"
+        );
+    }
+
+    #[test]
+    fn install_sweeps_retired_plugin_memory_rule() {
+        let home = TempDir::new().unwrap();
+        let install_dir = cursor_plugin_install_dir(home.path());
+        write_embedded_plugin(&install_dir, "old-tracedecay")
+            .expect("old embedded install should succeed");
+        let retired_rule = install_dir.join("rules/tracedecay-memory.mdc");
+        std::fs::write(&retired_rule, RETIRED_CURSOR_MEMORY_RULE_FIXTURE).unwrap();
+
+        install_cursor_plugin(home.path(), "new-tracedecay").expect("install should refresh");
+
+        assert!(
+            !retired_rule.exists(),
+            "install must remove the memory rule retired from the plugin inventory"
+        );
+        assert!(install_dir.join("rules/tracedecay.mdc").exists());
+    }
+
+    #[test]
+    fn retired_global_memory_rule_is_removed_only_when_tracedecay_managed() {
+        let home = TempDir::new().unwrap();
+        let rule = home.path().join(".cursor/rules/tracedecay-memory.mdc");
+        std::fs::create_dir_all(rule.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rule,
+            format!("{RETIRED_CURSOR_MEMORY_RULE_MARKER}\nmanaged memory"),
+        )
+        .unwrap();
+
+        assert!(remove_retired_global_cursor_memory_rule(home.path()).unwrap());
+        assert!(!rule.exists());
+
+        std::fs::write(&rule, "my own Cursor rule").unwrap();
+        assert!(!remove_retired_global_cursor_memory_rule(home.path()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&rule).unwrap(),
+            "my own Cursor rule"
+        );
+    }
+
+    #[test]
+    fn install_sweeps_owned_superseded_plugin_siblings_only() {
+        let home = TempDir::new().unwrap();
+        let plugins = home.path().join(".cursor/plugins/local");
+        let retired = plugins.join("tracedecay.pre-v2-adopt");
+        let foreign = plugins.join("tracedecay.personal");
+        for dir in [&retired, &foreign] {
+            std::fs::create_dir_all(dir.join(".cursor-plugin")).unwrap();
+            std::fs::write(
+                dir.join(".cursor-plugin/plugin.json"),
+                serde_json::to_vec(&json!({ "name": "tracedecay" })).unwrap(),
+            )
+            .unwrap();
+        }
+
+        install_cursor_plugin(home.path(), "tracedecay").expect("install should succeed");
+
+        assert!(
+            !retired.exists(),
+            "a manifest-owned superseded tracedecay sibling must be swept"
+        );
+        assert!(
+            foreign.exists(),
+            "an owned-looking sibling without an explicitly retired suffix must be preserved"
         );
     }
 
@@ -1185,6 +2281,49 @@ mod tests {
         assert!(
             install_dir.join("user-file.txt").exists(),
             "an unmanaged dir must be left untouched"
+        );
+    }
+
+    #[test]
+    fn uninstall_removes_managed_files_and_preserves_user_files() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        std::fs::write(install_dir.join("user-keep.txt"), "keep").unwrap();
+
+        remove_cursor_plugin_install(&install_dir).expect("uninstall should succeed");
+
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("user-keep.txt")).unwrap(),
+            "keep"
+        );
+        assert!(
+            !install_dir.join(".cursor-plugin/plugin.json").exists(),
+            "managed plugin files must be removed beside operator files"
+        );
+        assert!(
+            !install_dir.join("rules/tracedecay.mdc").exists(),
+            "managed rule files must be removed beside operator files"
+        );
+    }
+
+    #[test]
+    fn leftover_managed_file_removal_propagates_errors() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        std::fs::write(install_dir.join("user-keep.txt"), "keep").unwrap();
+        let managed = install_dir.join("rules/tracedecay.mdc");
+        std::fs::remove_file(&managed).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+        std::fs::write(managed.join("nested"), "blocked").unwrap();
+
+        let error = remove_cursor_plugin_install(&install_dir)
+            .expect_err("a leftover managed path that is not a file must fail uninstall");
+        assert!(error.to_string().contains("failed to remove"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("user-keep.txt")).unwrap(),
+            "keep"
         );
     }
 
@@ -1313,6 +2452,63 @@ mod tests {
         assert!(!project.path().join(".cursor").exists());
     }
 
+    #[test]
+    fn detected_host_surface_reports_cursor_home() {
+        let home = TempDir::new().unwrap();
+        assert_eq!(CursorIntegration.detected_host_surface(home.path()), None);
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        assert_eq!(
+            CursorIntegration.detected_host_surface(home.path()),
+            Some(home.path().join(".cursor"))
+        );
+    }
+
+    #[test]
+    fn doctor_plugin_rule_distinguishes_unreadable_from_incomplete() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing.mdc");
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&missing),
+            CursorPluginRuleDoctorState::Missing
+        );
+
+        let incomplete = tmp.path().join("incomplete.mdc");
+        std::fs::write(&incomplete, "alwaysApply: false\n").unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&incomplete),
+            CursorPluginRuleDoctorState::Incomplete
+        );
+
+        let (_, embedded) = embedded_plugin_files()
+            .into_iter()
+            .find(|(relative, _)| *relative == "rules/tracedecay.mdc")
+            .expect("the Cursor bundle ships rules/tracedecay.mdc");
+        let active = tmp.path().join("active.mdc");
+        std::fs::write(&active, embedded).unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&active),
+            CursorPluginRuleDoctorState::Active
+        );
+        std::fs::write(&active, format!("{embedded}\n# local edit\n")).unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&active),
+            CursorPluginRuleDoctorState::Incomplete,
+            "an edited rule is drift, not an active install"
+        );
+
+        let unreadable = tmp.path().join("unreadable.mdc");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&unreadable),
+            CursorPluginRuleDoctorState::Unreadable
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_plugin_rule(&mut counters, &unreadable);
+        assert_eq!(counters.issues, 1);
+        assert_eq!(counters.warnings, 0);
+    }
+
     /// The cwd-based sweep must never treat the home directory as a project:
     /// `~/.cursor` is Cursor's user-level config tree.
     #[test]
@@ -1329,23 +2525,101 @@ mod tests {
         );
     }
 
-    /// The Cursor `post_install` hook (the branch-tracking logic that moved
-    /// off `main` and onto the integration) must be safe to run on a project
-    /// tracedecay has not indexed: it must not bootstrap a `.tracedecay/` index
-    /// or panic.
-    #[tokio::test]
-    async fn post_install_does_not_bootstrap_index() {
-        let project = tempfile::tempdir().expect("tempdir");
-        CursorIntegration.post_install(Some(project.path())).await;
-        assert!(
-            !project.path().join(".tracedecay").exists(),
-            "post_install must not create an index on an unindexed project"
-        );
+    fn session_ingest_status(placeholder_paths: Value) -> Value {
+        json!({
+            "cursor_session_ingest": {
+                "tracked_transcripts": 1,
+                "pending_transcripts": 0,
+                "pending_bytes": 0,
+                "max_transcript_pending_bytes": 0,
+            },
+            "cursor_session_placeholder_paths": placeholder_paths,
+        })
     }
 
-    /// A `None` project path is a no-op and must not panic.
-    #[tokio::test]
-    async fn post_install_handles_missing_project_path() {
-        CursorIntegration.post_install(None).await;
+    #[test]
+    fn cursor_placeholder_paths_empty_array_remains_available() {
+        let status = session_ingest_status(json!([]));
+        assert_eq!(
+            cursor_placeholder_paths_state(&status),
+            Some(CursorPlaceholderPathsState::Available(Vec::new()))
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(&mut counters, Path::new("/project"), Some(&status));
+        assert_eq!(counters.warnings, 0);
+    }
+
+    #[test]
+    fn cursor_placeholder_paths_nonempty_array_remains_available() {
+        let status = session_ingest_status(json!(["${workspaceFolder}/cursor.jsonl"]));
+        assert_eq!(
+            cursor_placeholder_paths_state(&status),
+            Some(CursorPlaceholderPathsState::Available(vec![
+                "${workspaceFolder}/cursor.jsonl".to_owned()
+            ]))
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(&mut counters, Path::new("/project"), Some(&status));
+        assert_eq!(counters.warnings, 1);
+    }
+
+    #[test]
+    fn cursor_placeholder_paths_typed_unavailable_is_warned() {
+        let status = session_ingest_status(json!({
+            "status": "unavailable",
+            "reason": "cursor_session_placeholder_paths_query_failed",
+        }));
+        assert_eq!(
+            cursor_placeholder_paths_state(&status),
+            Some(CursorPlaceholderPathsState::Unavailable(
+                "cursor_session_placeholder_paths_query_failed".to_owned()
+            ))
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(&mut counters, Path::new("/project"), Some(&status));
+        assert_eq!(counters.issues, 0);
+        assert_eq!(counters.warnings, 1);
+    }
+
+    #[test]
+    fn session_ingest_healthcheck_reports_daemon_snapshot() {
+        let mut counters = DoctorCounters::new();
+        let health = CursorSessionIngestHealth {
+            tracked_transcripts: 2,
+            pending_transcripts: 1,
+            pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
+            max_transcript_pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
+        };
+
+        report_cursor_session_ingest(
+            &mut counters,
+            Path::new("/project"),
+            &health,
+            ["${workspaceFolder}/cursor.jsonl"].into_iter(),
+        );
+
+        assert_eq!(counters.issues, 0);
+        assert_eq!(counters.warnings, 2);
+    }
+
+    #[test]
+    fn session_ingest_healthcheck_warns_when_daemon_authority_is_unavailable() {
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(
+            &mut counters,
+            Path::new("/project"),
+            Some(&serde_json::json!({
+                "cursor_session_ingest": {
+                    "status": "unavailable",
+                    "message": "daemon project session authority is unavailable",
+                }
+            })),
+        );
+
+        assert_eq!(counters.issues, 0);
+        assert_eq!(counters.warnings, 1);
     }
 }

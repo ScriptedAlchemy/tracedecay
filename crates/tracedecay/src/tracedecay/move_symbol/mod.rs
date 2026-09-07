@@ -1,0 +1,740 @@
+//! `move_symbol`: relocate a function (Rust-first, provider-agnostic shape)
+//! from its file to a destination file. The centerpiece is the post-move
+//! **impact report** — every reference, dependency, visibility, or module
+//! concern the move raises, surfaced as evidence-based, actionable hints
+//! derived from the code graph (callers/callees) and parse-level facts
+//! (identifiers, `use` lines, module declarations). Never regex-only guessing.
+
+mod fs_guards;
+mod hints;
+mod rendering;
+mod rust_paths;
+mod use_parsing;
+
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
+
+use tracedecay_application::source_edit::{MoveHint, MoveResult};
+use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_with};
+use tracedecay_domain::RelationEdgeKindV1;
+use tracedecay_domain::code_intelligence::Visibility;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
+use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
+
+use super::TraceDecay;
+use super::edits::{
+    EditSymbolV1, LeadingKind, capture_planned_source_edit, classify_leading_line,
+    edit_success_message, edit_symbol_from_summary, publish_planned_source_edit,
+    resolve_symbol_for_edit, rollback_planned_source_edit_files, splice_lines,
+    validate_planned_source_edit,
+};
+
+use fs_guards::{
+    ensure_text_unchanged, same_existing_file, validate_write_containment,
+    write_path_preserving_final_symlink,
+};
+use hints::{DependencyAnalysis, cfg_context_hints, cycle_risk_hints};
+use rendering::{
+    build_dest_content, combined_diff, dedup_preserve, remove_span_with_cleanup,
+    strip_orphaned_imports,
+};
+use rust_paths::{
+    crate_root_file, is_importable_item, module_stem, parent_module_candidates, rust_module_path,
+    source_declares_external_module, visibility_word,
+};
+use use_parsing::{UseLeaf, body_identifiers, parse_use_statements, portable_dependency_import};
+
+const MAX_MOVE_SYMBOLS_PER_FILE: usize = 10_000;
+const MAX_MOVE_CALLERS: usize = 100_000;
+
+impl TraceDecay {
+    /// Moves a resolved symbol from its current file to `dest_file`.
+    ///
+    /// `dry_run` (the default at the tool layer) computes the removal span, the
+    /// destination shape, the combined preview diff, and the full impact report
+    /// while writing nothing. `dry_run = false` performs the move (remove the
+    /// span — docs/attrs included — from the source, insert it at the
+    /// destination with a blank-line separator, and auto-insert unambiguous
+    /// needed imports), then returns the same impact report of everything that
+    /// still needs manual attention (callers, module declaration, visibility).
+    ///
+    /// `update_references` is reserved for a future version; in v1 caller
+    /// references are never auto-edited — the exact change rides in the hints.
+    #[hotpath::skip]
+    pub(crate) async fn move_symbol(
+        &self,
+        graph: SourceEditGraphReadV1,
+        symbol: &str,
+        dest_file: &str,
+        dry_run: bool,
+        _update_references: bool,
+    ) -> Result<MoveResult> {
+        let target = resolve_symbol_for_edit(&graph, symbol)?;
+        let symbol_label = format!("{} ({})", target.name, target.kind.as_str());
+        let source_rel = target.file_path.clone();
+        let dest_rel = self.resolve_dest_rel(dest_file)?;
+
+        let fail = |message: String, impact: Vec<MoveHint>| MoveResult {
+            success: false,
+            symbol: symbol_label.clone(),
+            source_file: source_rel.clone(),
+            dest_file: dest_rel.clone(),
+            moved_span: None,
+            dry_run,
+            diff: None,
+            applied_imports: Vec::new(),
+            impact,
+            message,
+        };
+
+        if dest_rel == source_rel {
+            return Ok(fail(
+                format!("destination is the symbol's own file ({source_rel}); nothing to move"),
+                Vec::new(),
+            ));
+        }
+
+        let source_abs = self.project_root.join(&source_rel);
+        let dest_abs = self.project_root.join(&dest_rel);
+        validate_write_containment(&self.project_root, &source_abs, "source")?;
+        validate_write_containment(&self.project_root, &dest_abs, "destination")?;
+        if same_existing_file(&source_abs, &dest_abs) {
+            return Ok(fail(
+                format!(
+                    "destination resolves to the symbol's own file ({source_rel}); nothing to move"
+                ),
+                Vec::new(),
+            ));
+        }
+        // Both writes and the rollback below now go through the
+        // project-root-scoped source edit authority, so only the resolver's
+        // validation is still needed here: it errors when either path cannot be
+        // inspected, and neither resolved path is used afterwards.
+        write_path_preserving_final_symlink(&source_abs, "source")?;
+        write_path_preserving_final_symlink(&dest_abs, "destination")?;
+        let source = std::fs::read_to_string(&source_abs).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to read {source_rel}: {e}"),
+        })?;
+        let src_lines: Vec<&str> = source.lines().collect();
+
+        // The admitted generation supplies the exact extraction-attested span.
+        let (mut start, end_inclusive) = target.line_bounds(&source)?;
+        if start >= src_lines.len() || start > end_inclusive {
+            return Ok(fail(
+                format!(
+                    "symbol span [{}..={}] out of bounds for {}-line file",
+                    start,
+                    end_inclusive,
+                    src_lines.len()
+                ),
+                Vec::new(),
+            ));
+        }
+        // A contiguous leading `//!` inner module-doc line in the attested span
+        // can never belong to the moved item — inner docs attach to the enclosing
+        // module, not the following item. Advance past it so the source keeps its
+        // module doc and the destination doesn't receive a stray `//!` mid-file
+        // (a hard E0753).
+        while start < end_inclusive
+            && classify_leading_line(src_lines[start]) == LeadingKind::InnerDoc
+        {
+            start += 1;
+        }
+        let moved_text = src_lines[start..=end_inclusive].join("\n");
+
+        // Destination collision: refuse rather than clobber.
+        let dest_nodes = graph
+            .reader()
+            .symbols_in_logical_file(
+                &dest_rel,
+                MAX_MOVE_SYMBOLS_PER_FILE + 1,
+                graph.cancellation(),
+            )
+            .map_err(|error| map_code_graph_read_runtime_error(map_projection_error(error)))?;
+        if dest_nodes.len() > MAX_MOVE_SYMBOLS_PER_FILE {
+            return Err(TraceDecayError::project_route(
+                "source-edit-symbol-budget-exhausted",
+                false,
+                "move destination contains more than 10,000 symbols",
+            ));
+        }
+        if let Some(clash) = dest_nodes
+            .iter()
+            .map(edit_symbol_from_summary)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .find(|candidate| candidate.name == target.name && is_importable_item(&candidate.kind))
+        {
+            let hint = MoveHint {
+                kind: "collision".to_string(),
+                file: dest_rel.clone(),
+                line: Some(clash.start_line.saturating_add(1)),
+                detail: format!(
+                    "destination already defines `{}` ({})",
+                    clash.name,
+                    clash.kind.as_str()
+                ),
+                suggestion: Some(
+                    "rename one of them or choose a different destination".to_string(),
+                ),
+            };
+            return Ok(fail(
+                format!("destination {dest_rel} already defines `{}`", target.name),
+                vec![hint],
+            ));
+        }
+
+        let residual = remove_span_with_cleanup(&src_lines, start, end_inclusive);
+        let source_modified = splice_lines(&residual, source.ends_with('\n'));
+
+        // Dependency + import analysis: what the moved body needs at the
+        // destination, and which of those we can auto-insert unambiguously.
+        // Read the destination, distinguishing "does not exist yet" (a fresh
+        // destination file) from "exists but unreadable" (e.g. non-UTF8). Only
+        // the former is treated as empty; an unreadable existing file must refuse
+        // rather than be silently clobbered.
+        let (dest_original, dest_existed) = match std::fs::read_to_string(&dest_abs) {
+            Ok(text) => (text, true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+            Err(e) => {
+                return Ok(fail(
+                    format!("failed to read destination {dest_rel}: {e}"),
+                    Vec::new(),
+                ));
+            }
+        };
+        let dest_module = rust_module_path(&dest_rel);
+        let src_module = rust_module_path(&source_rel);
+        let analysis = self
+            .analyze_dependencies(
+                &target,
+                &graph,
+                &source_rel,
+                &dest_rel,
+                &source,
+                &source_modified,
+                &moved_text,
+            )
+            .await?;
+        let source_modified =
+            strip_orphaned_imports(&source_modified, &analysis.orphaned_source_imports);
+
+        let applied_imports = dedup_preserve(
+            &analysis.auto_imports,
+            &dest_original,
+            dest_module.as_deref(),
+        );
+        let dest_modified = build_dest_content(&dest_original, &applied_imports, &moved_text);
+
+        let mut impact = analysis.hints;
+        impact.extend(
+            self.caller_hints(
+                &graph,
+                &target,
+                &source_rel,
+                &dest_rel,
+                src_module.as_deref(),
+                dest_module.as_deref(),
+            )
+            .await?,
+        );
+        if let Some(hint) = self.module_missing_hint(&dest_rel).await {
+            impact.push(hint);
+        }
+        impact.extend(cfg_context_hints(&moved_text, &dest_rel));
+        impact.extend(cycle_risk_hints(
+            &dest_original,
+            &dest_rel,
+            src_module.as_deref(),
+        ));
+
+        if dry_run {
+            capture_planned_source_edit(
+                &source_rel,
+                Some(source.as_str()),
+                Some(source_modified.as_str()),
+            );
+            capture_planned_source_edit(
+                &dest_rel,
+                dest_existed.then_some(dest_original.as_str()),
+                Some(dest_modified.as_str()),
+            );
+            let diff = combined_diff(
+                &source_rel,
+                &source,
+                &source_modified,
+                &dest_rel,
+                &dest_original,
+                &dest_modified,
+            );
+            return Ok(MoveResult {
+                success: true,
+                symbol: symbol_label,
+                source_file: source_rel,
+                dest_file: dest_rel,
+                moved_span: Some(moved_text),
+                dry_run: true,
+                diff: Some(diff),
+                applied_imports,
+                impact,
+                message: edit_success_message(true, "move previewed"),
+            });
+        }
+
+        // Apply only if both files still match the snapshots used to build the
+        // move. Dependency analysis can take long enough for another agent or
+        // editor to change either file; blindly writing those stale snapshots
+        // would discard unrelated work.
+        validate_planned_source_edit(
+            &source_rel,
+            Some(source.as_str()),
+            Some(source_modified.as_str()),
+        )?;
+        validate_planned_source_edit(
+            &dest_rel,
+            dest_existed.then_some(dest_original.as_str()),
+            Some(dest_modified.as_str()),
+        )?;
+        ensure_text_unchanged(&source_abs, Some(&source), &source_rel)?;
+        ensure_text_unchanged(
+            &dest_abs,
+            dest_existed.then_some(dest_original.as_str()),
+            &dest_rel,
+        )?;
+        // Write each file through an atomic sibling rename. Destination first
+        // deliberately leaves a duplicate symbol (recoverable) rather than a
+        // missing one if the process stops between the two commits.
+        publish_planned_source_edit(
+            &self.project_root,
+            &dest_rel,
+            dest_existed.then_some(dest_original.as_str()),
+            &dest_modified,
+        )?;
+        if let Err(e) = ensure_text_unchanged(&source_abs, Some(&source), &source_rel)
+            .and_then(|()| ensure_text_unchanged(&dest_abs, Some(&dest_modified), &dest_rel))
+            .and_then(|()| {
+                publish_planned_source_edit(
+                    &self.project_root,
+                    &source_rel,
+                    Some(source.as_str()),
+                    &source_modified,
+                )
+            })
+        {
+            // Roll back so a half-applied move leaves no trace. If the
+            // destination existed before, restore its original bytes; if we
+            // created it, delete it (and any now-empty parent dirs we created)
+            // rather than leaving an empty file behind. Never overwrite a
+            // third party's destination edit while rolling back.
+            let rollback = rollback_planned_source_edit_files(
+                &self.project_root,
+                &[
+                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                        relative_path: source_rel.clone(),
+                        expected: Some(source.clone()),
+                        intended: Some(source_modified.clone()),
+                    },
+                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                        relative_path: dest_rel.clone(),
+                        expected: dest_existed.then_some(dest_original.clone()),
+                        intended: Some(dest_modified.clone()),
+                    },
+                ],
+            );
+            if !dest_existed && rollback.is_ok() {
+                let mut dir = dest_abs.parent().map(Path::to_path_buf);
+                while let Some(d) = dir {
+                    if d == self.project_root {
+                        break;
+                    }
+                    // `remove_dir` removes only empty dirs and errors otherwise,
+                    // so this naturally stops at the first non-empty ancestor.
+                    if std::fs::remove_dir(&d).is_err() {
+                        break;
+                    }
+                    dir = d.parent().map(Path::to_path_buf);
+                }
+            }
+            return Err(TraceDecayError::Config {
+                message: match rollback {
+                    Ok(()) => format!(
+                        "move aborted before writing {source_rel}: {e}; destination rolled back"
+                    ),
+                    Err(rollback_error) => format!(
+                        "move aborted before writing {source_rel}: {e}; rollback incomplete: {rollback_error}"
+                    ),
+                },
+            });
+        }
+        Ok(MoveResult {
+            success: true,
+            symbol: symbol_label,
+            source_file: source_rel,
+            dest_file: dest_rel,
+            moved_span: Some(moved_text),
+            dry_run: false,
+            diff: None,
+            applied_imports,
+            impact,
+            message: "move applied".to_string(),
+        })
+    }
+
+    /// Normalizes `dest_file` (absolute or project-relative) to a
+    /// project-relative, forward-slash path, rejecting escapes.
+    fn resolve_dest_rel(&self, dest_file: &str) -> Result<String> {
+        let raw = Path::new(dest_file);
+        let rel: PathBuf = if raw.is_absolute() {
+            raw.strip_prefix(&self.project_root)
+                .map_err(|_| TraceDecayError::Config {
+                    message: "destination is not within the project".to_string(),
+                })?
+                .to_path_buf()
+        } else {
+            PathBuf::from(dest_file)
+        };
+        // Canonicalize the relative path BEFORE the equality guard and collision
+        // check compare it: reject `..` escapes and drop `.` (CurDir) components,
+        // rebuilding from `Component::Normal` parts only. Without this a
+        // `./src/pricing.rs` destination compares unequal to the graph's
+        // normalized `src/pricing.rs`, slipping past the same-file guard and the
+        // collision check — the apply would then write and truncate the very same
+        // inode, silently deleting the symbol.
+        let mut normalized = PathBuf::new();
+        for comp in rel.components() {
+            match comp {
+                Component::Normal(part) => normalized.push(part),
+                Component::ParentDir => {
+                    return Err(TraceDecayError::Config {
+                        message: "destination path must not contain '..'".to_string(),
+                    });
+                }
+                // Drop `.` (CurDir) so `./x` canonicalizes to `x`, and drop any
+                // root/prefix components (they cannot survive `strip_prefix`
+                // above) rather than embed them in a relative path.
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            }
+        }
+        let s = normalized.to_string_lossy().replace('\\', "/");
+        if s.is_empty() {
+            return Err(TraceDecayError::Config {
+                message: "destination path is empty".to_string(),
+            });
+        }
+        Ok(s)
+    }
+
+    /// Dependency analysis for the moved body: same-file symbols and source
+    /// `use`-imports the body references that will no longer resolve at the
+    /// destination. Produces auto-insertable imports plus hints for the rest.
+    #[hotpath::skip]
+    async fn analyze_dependencies(
+        &self,
+        target: &EditSymbolV1,
+        graph: &SourceEditGraphReadV1,
+        source_rel: &str,
+        dest_rel: &str,
+        source: &str,
+        source_modified: &str,
+        moved_text: &str,
+    ) -> Result<DependencyAnalysis> {
+        let src_module = rust_module_path(source_rel);
+        let mut out = DependencyAnalysis::default();
+        // Scan only real code: a doc-comment mention (e.g. ``[`compute_total`]``)
+        // and identifiers that appear only inside string literals are not
+        // dependencies, so comments and strings are masked before tokenizing.
+        // Implicit format captures (`format!("{helper}")`) survive the mask and
+        // remain counted as real uses.
+        let code_only = masked_rust_source_with(moved_text, MaskOptions::UNUSED_IMPORTS);
+        let idents = body_identifiers(&code_only);
+        let source_code_only =
+            masked_rust_source_with(source_modified, MaskOptions::UNUSED_IMPORTS);
+        // Hoisted out of the `use`-statement loop below: `source_code_only`
+        // never changes across iterations, so recomputing its identifier set
+        // on every matching `use` statement was pure waste.
+        //
+        // `use` statements are excluded from the residual-identifier scan:
+        // an import's own line must not count as a "use" of its binding, or
+        // an import referenced only by the moved symbol could never be
+        // recognized as orphaned.
+        let residual_use_lines: HashSet<String> = parse_use_statements(source_modified)
+            .into_iter()
+            .map(|stmt| stmt.text.trim().to_string())
+            .collect();
+        let source_without_uses: String = source_code_only
+            .lines()
+            .filter(|line| !residual_use_lines.contains(line.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source_identifiers = body_identifiers(&source_without_uses);
+
+        // 1. Same-file item dependencies (structs, enums, helpers, consts, …).
+        let src_nodes = graph
+            .reader()
+            .symbols_in_logical_file(
+                source_rel,
+                MAX_MOVE_SYMBOLS_PER_FILE + 1,
+                graph.cancellation(),
+            )
+            .map_err(|error| map_code_graph_read_runtime_error(map_projection_error(error)))?;
+        if src_nodes.len() > MAX_MOVE_SYMBOLS_PER_FILE {
+            return Err(TraceDecayError::project_route(
+                "source-edit-symbol-budget-exhausted",
+                false,
+                "move source contains more than 10,000 symbols",
+            ));
+        }
+        let mut handled: HashSet<String> = HashSet::new();
+        for node in src_nodes
+            .iter()
+            .map(edit_symbol_from_summary)
+            .collect::<Result<Vec<_>>>()?
+        {
+            if node.occurrence == target.occurrence
+                || node.name == target.name
+                || !is_importable_item(&node.kind)
+            {
+                continue;
+            }
+            if node.name.is_empty() || !idents.contains(&node.name) {
+                continue;
+            }
+            if !handled.insert(node.name.clone()) {
+                continue;
+            }
+            let module = src_module.as_deref().unwrap_or("crate");
+            let use_line = format!("use {module}::{};", node.name);
+            let visible = matches!(node.visibility, Visibility::Pub | Visibility::PubCrate);
+            if visible {
+                out.auto_imports.push(use_line);
+            } else {
+                out.hints.push(MoveHint {
+                    kind: "dependency_broken".to_string(),
+                    file: dest_rel.to_string(),
+                    line: None,
+                    detail: format!(
+                        "moved body depends on `{}` ({}), which is {} in {source_rel}",
+                        node.name,
+                        node.kind.as_str(),
+                        visibility_word(&node.visibility)
+                    ),
+                    suggestion: Some(format!(
+                        "add `{use_line}` at the destination and escalate `{}` to `pub(crate)`",
+                        node.name
+                    )),
+                });
+                out.hints.push(MoveHint {
+                    kind: "visibility_required".to_string(),
+                    file: source_rel.to_string(),
+                    line: Some(node.start_line + 1),
+                    detail: format!(
+                        "`{}` is {} but is now referenced from another module",
+                        node.name,
+                        visibility_word(&node.visibility)
+                    ),
+                    suggestion: Some(format!("change `{}` to at least `pub(crate)`", node.name)),
+                });
+            }
+        }
+
+        // 2. Source `use`-import dependencies the moved body relies on.
+        for stmt in parse_use_statements(source) {
+            let matched: Vec<&UseLeaf> = stmt
+                .leaves
+                .iter()
+                .filter(|leaf| idents.contains(&leaf.binding))
+                .collect();
+            if matched.is_empty() {
+                continue;
+            }
+            if stmt.leaves.len() == 1 && !stmt.glob {
+                if let Some(import) = portable_dependency_import(&stmt.text) {
+                    out.auto_imports.push(import);
+                } else {
+                    out.hints.push(MoveHint {
+                        kind: "import_needed".to_string(),
+                        file: dest_rel.to_string(),
+                        line: None,
+                        detail: format!(
+                            "moved body uses a source-relative import from {source_rel}: `{}`",
+                            stmt.text.trim()
+                        ),
+                        suggestion: Some(format!(
+                            "resolve `{}` against the source module and add a destination-stable import",
+                            stmt.text.trim()
+                        )),
+                    });
+                }
+                // Orphaned-import: source no longer needs it after the move,
+                // so the move removes it instead of leaving a dead import.
+                let leaf = &stmt.leaves[0].binding;
+                if !source_identifiers.contains(leaf) {
+                    out.orphaned_source_imports
+                        .push(stmt.text.trim().to_string());
+                    out.hints.push(MoveHint {
+                        kind: "orphaned_import_removed".to_string(),
+                        file: source_rel.to_string(),
+                        line: Some(stmt.line),
+                        detail: format!(
+                            "`{}` was only used by the moved symbol and was removed from {source_rel}",
+                            stmt.text.trim()
+                        ),
+                        suggestion: None,
+                    });
+                }
+            } else {
+                let names: Vec<&str> = matched.iter().map(|l| l.binding.as_str()).collect();
+                out.hints.push(MoveHint {
+                    kind: "import_needed".to_string(),
+                    file: dest_rel.to_string(),
+                    line: None,
+                    detail: format!(
+                        "moved body uses {names:?} from a grouped/glob import in {source_rel}"
+                    ),
+                    suggestion: Some(format!(
+                        "add an import for {names:?} at the destination (from `{}`)",
+                        stmt.text.trim()
+                    )),
+                });
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Caller hints: every graph call edge into the moved symbol, classified by
+    /// whether the caller shared the source module (unqualified call — needs a
+    /// `use` for the new module) or referenced it via another module (path/use
+    /// now points at the old location).
+    #[hotpath::skip]
+    async fn caller_hints(
+        &self,
+        graph: &SourceEditGraphReadV1,
+        target: &EditSymbolV1,
+        source_rel: &str,
+        dest_rel: &str,
+        src_module: Option<&str>,
+        dest_module: Option<&str>,
+    ) -> Result<Vec<MoveHint>> {
+        let mut hints = Vec::new();
+        let caller_batches = graph
+            .reader()
+            .callers(
+                std::slice::from_ref(&target.occurrence),
+                &[RelationEdgeKindV1::Calls],
+                MAX_MOVE_CALLERS,
+                graph.cancellation(),
+            )
+            .map_err(|error| map_code_graph_read_runtime_error(map_projection_error(error)))?;
+        let [callers] = caller_batches.as_slice() else {
+            return Err(TraceDecayError::project_route(
+                "code-graph-projection-corrupt",
+                false,
+                "move caller batch does not match its requested symbol seed",
+            ));
+        };
+        let dest_mod = dest_module.unwrap_or("crate");
+        let src_mod = src_module.unwrap_or("crate");
+        for edge in callers {
+            let caller = edit_symbol_from_summary(&edge.neighbor)?;
+            let same_module = caller.file_path == source_rel;
+            let detail;
+            let suggestion;
+            if same_module {
+                detail = format!(
+                    "`{}` called `{}` unqualified from the same module; it now lives in {dest_rel}",
+                    caller.name, target.name
+                );
+                suggestion = Some(format!(
+                    "add `use {dest_mod}::{};` to {}",
+                    target.name, caller.file_path
+                ));
+            } else {
+                detail = format!(
+                    "`{}` in {} references `{}` via `{src_mod}`; the path is now `{dest_mod}`",
+                    caller.name, caller.file_path, target.name
+                );
+                suggestion = Some(format!(
+                    "retarget the reference from `{src_mod}::{}` to `{dest_mod}::{}`",
+                    target.name, target.name
+                ));
+            }
+            hints.push(MoveHint {
+                kind: "caller_reference".to_string(),
+                file: caller.file_path.clone(),
+                line: None,
+                detail,
+                suggestion,
+            });
+
+            // The moved fn's own visibility may be too narrow for a caller that
+            // is now in a different module tree.
+            if matches!(
+                target.visibility,
+                Visibility::Private | Visibility::PubSuper
+            ) && caller.file_path != dest_rel
+            {
+                hints.push(MoveHint {
+                    kind: "visibility_required".to_string(),
+                    file: dest_rel.to_string(),
+                    line: None,
+                    detail: format!(
+                        "`{}` is {} but has a caller in another module ({})",
+                        target.name,
+                        visibility_word(&target.visibility),
+                        caller.file_path
+                    ),
+                    suggestion: Some(format!(
+                        "escalate `{}` to at least `pub(crate)` at the destination",
+                        target.name
+                    )),
+                });
+            }
+        }
+        Ok(hints)
+    }
+
+    /// Hint when the destination file's module is not declared anywhere in the
+    /// crate. Existing-but-unlinked files need the same hint as fresh files.
+    #[hotpath::skip]
+    async fn module_missing_hint(&self, dest_rel: &str) -> Option<MoveHint> {
+        let stem = module_stem(dest_rel)?;
+        if self.module_declared(dest_rel, &stem) {
+            return None;
+        }
+        let parent = self.declaring_parent_file(dest_rel);
+        Some(MoveHint {
+            kind: "module_missing".to_string(),
+            file: parent.clone(),
+            line: None,
+            detail: format!("module `{stem}` for {dest_rel} is not declared in the crate"),
+            suggestion: Some(format!("add `mod {stem};` to {parent}")),
+        })
+    }
+
+    /// The nearest existing file that could declare `dest_rel`'s module,
+    /// falling back to the exact parent-module path that must be created.
+    fn declaring_parent_file(&self, dest_rel: &str) -> String {
+        let candidates = parent_module_candidates(dest_rel);
+        candidates
+            .iter()
+            .find(|candidate| self.project_root.join(candidate).is_file())
+            .cloned()
+            .or_else(|| candidates.into_iter().next())
+            .unwrap_or_else(|| crate_root_file(dest_rel))
+    }
+
+    /// True when some file that could be the parent module of `dest_rel`
+    /// already contains a `mod <stem>;` declaration.
+    fn module_declared(&self, dest_rel: &str, stem: &str) -> bool {
+        for candidate in parent_module_candidates(dest_rel) {
+            if let Ok(text) = std::fs::read_to_string(self.project_root.join(&candidate))
+                && source_declares_external_module(&text, stem)
+            {
+                return true;
+            }
+        }
+        false
+    }
+}

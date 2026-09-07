@@ -1,15 +1,13 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
-use crate::{Result, error::config_error};
-
-use super::managed_skill_format::target_key;
-use super::managed_skill_model::{
+use crate::managed_skill_format::target_key;
+use crate::managed_skill_model::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
-    ManagedSkill, ManagedSkillPendingUpdate, ManagedSkillState, ManagedSkillUpdate,
-    ManagedSupportFile, SkillInstallTarget,
+    ManagedSkill, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
 };
-use super::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
+use crate::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
+use crate::{Result, config_error};
 
 const ALLOWED_SUPPORT_ROOTS: &[&str] = &["references", "templates", "scripts", "assets"];
 pub(crate) const MAX_NATIVE_SKILL_NAME_CHARS: usize = 64;
@@ -40,13 +38,11 @@ pub(crate) fn validate_native_skill_markdown(markdown: &str) -> Result<()> {
     let name = frontmatter
         .get("name")
         .and_then(SkillFrontmatterValue::as_scalar)
-        .ok_or_else(|| config_error("native skill frontmatter requires scalar name".to_string()))?;
+        .ok_or_else(|| config_error("native skill frontmatter requires scalar name"))?;
     let description = frontmatter
         .get("description")
         .and_then(SkillFrontmatterValue::as_scalar)
-        .ok_or_else(|| {
-            config_error("native skill frontmatter requires scalar description".to_string())
-        })?;
+        .ok_or_else(|| config_error("native skill frontmatter requires scalar description"))?;
     validate_native_skill_name(name)?;
     validate_native_skill_description(description)
 }
@@ -60,7 +56,7 @@ fn validate_native_skill_name(name: &str) -> Result<()> {
     }
     if name.starts_with('-') || name.ends_with('-') || name.contains("--") {
         return Err(config_error(
-            "native skill name must use kebab-case lowercase letters, numbers, or '-'".to_string(),
+            "native skill name must use kebab-case lowercase letters, numbers, or '-'",
         ));
     }
     if name
@@ -70,7 +66,7 @@ fn validate_native_skill_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(config_error(
-            "native skill name must use kebab-case lowercase letters, numbers, or '-'".to_string(),
+            "native skill name must use kebab-case lowercase letters, numbers, or '-'",
         ))
     }
 }
@@ -201,7 +197,7 @@ fn validate_body_markdown(body: &str) -> Result<()> {
     let trimmed_start = body.trim_start();
     if trimmed_start.starts_with("---\n") || trimmed_start.starts_with("---\r\n") {
         return Err(config_error(
-            "managed skill body_markdown cannot include YAML frontmatter".to_string(),
+            "managed skill body_markdown cannot include YAML frontmatter",
         ));
     }
     if body.len() > MAX_MANAGED_SKILL_BODY_BYTES {
@@ -231,7 +227,7 @@ fn validate_skill_category(category: &str) -> Result<()> {
     validate_frontmatter_scalar("category", category)?;
     if category.len() > 64 {
         return Err(config_error(
-            "managed skill category cannot exceed 64 characters".to_string(),
+            "managed skill category cannot exceed 64 characters",
         ));
     }
     if category
@@ -241,16 +237,14 @@ fn validate_skill_category(category: &str) -> Result<()> {
         Ok(())
     } else {
         Err(config_error(
-            "managed skill category must use lowercase letters, numbers, '-' or '_'".to_string(),
+            "managed skill category must use lowercase letters, numbers, '-' or '_'",
         ))
     }
 }
 
 fn validate_skill_targets(targets: &[SkillInstallTarget]) -> Result<()> {
     if targets.is_empty() {
-        return Err(config_error(
-            "managed skill targets cannot be empty".to_string(),
-        ));
+        return Err(config_error("managed skill targets cannot be empty"));
     }
     let mut seen = BTreeSet::new();
     for target in targets {
@@ -268,6 +262,7 @@ pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_skill_id(&skill.metadata.id)?;
     validate_frontmatter_scalar("title", &skill.metadata.title)?;
     validate_frontmatter_scalar("summary", &skill.metadata.summary)?;
+    validate_native_skill_description(&skill.metadata.routing_description)?;
     validate_skill_category(&skill.metadata.category)?;
     validate_skill_targets(&skill.metadata.targets)?;
     validate_body_markdown(&skill.body_markdown)?;
@@ -278,62 +273,15 @@ pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_managed_support_files(&skill.support_files)
 }
 
-pub fn validate_managed_pending_update(
-    id: &str,
-    pending: &ManagedSkillPendingUpdate,
-) -> Result<()> {
-    validate_skill_id(id)?;
-    if pending.metadata.id != id {
-        return Err(config_error(format!(
-            "managed skill pending update id '{}' does not match '{id}'",
-            pending.metadata.id
-        )));
-    }
-    validate_checksum("base_checksum", &pending.base_checksum)?;
-    if pending.staged_at <= 0 {
-        return Err(config_error(
-            "managed skill staged_at must be a positive timestamp".to_string(),
-        ));
-    }
-    if pending
-        .resulting_state
-        .is_some_and(|state| state != ManagedSkillState::Archived)
-    {
-        return Err(config_error(
-            "managed skill pending update resulting_state must be archived".to_string(),
-        ));
-    }
-    let skill = ManagedSkill {
-        metadata: pending.metadata.clone(),
-        body_markdown: pending.body_markdown.clone(),
-        support_files: pending.support_files.clone(),
-        pending_update: None,
-    };
-    validate_managed_skill(&skill)
-}
-
-fn validate_checksum(field: &str, checksum: &str) -> Result<()> {
-    validate_non_empty(field, checksum)?;
-    let Some(digest) = checksum.strip_prefix("sha256:") else {
-        return Err(config_error(format!(
-            "managed skill {field} must be a sha256 checksum"
-        )));
-    };
-    if digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(config_error(format!(
-            "managed skill {field} must be a sha256 checksum"
-        )))
-    }
-}
-
 pub fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> {
     if let Some(title) = &update.title {
         validate_frontmatter_scalar("title", title)?;
     }
     if let Some(summary) = &update.summary {
         validate_frontmatter_scalar("summary", summary)?;
+    }
+    if let Some(routing_description) = &update.routing_description {
+        validate_native_skill_description(routing_description)?;
     }
     if let Some(category) = &update.category {
         validate_skill_category(category)?;
@@ -355,10 +303,11 @@ pub fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> 
 mod tests {
     use std::path::PathBuf;
 
-    use super::super::managed_skill_model::{
+    use crate::managed_skill_model::{
         ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
         SkillInstallTarget,
     };
+
     use super::*;
 
     fn valid_draft() -> ManagedSkillDraft {
@@ -366,6 +315,7 @@ mod tests {
             id: "managed-validation-eval".to_string(),
             title: "Managed Validation Eval".to_string(),
             summary: "validate generated managed skill packages".to_string(),
+            routing_description: "Validate generated managed skill packages.".to_string(),
             category: "validation".to_string(),
             targets: vec![SkillInstallTarget::Codex, SkillInstallTarget::Claude],
             body_markdown: "# Managed Validation Eval\n\nUse this when validating skills."
@@ -383,6 +333,45 @@ mod tests {
     fn managed_skill_validation_accepts_valid_draft() {
         let skill = valid_draft().materialize().unwrap();
         validate_managed_skill(&skill).unwrap();
+    }
+
+    #[test]
+    fn routing_description_requires_valid_authored_host_text() {
+        for description in ["", " ", " leading", "trailing ", "two\nlines", "two\rlines"] {
+            let mut draft = valid_draft();
+            draft.routing_description = description.to_string();
+            assert!(draft.materialize().is_err(), "accepted {description:?}");
+            let update = ManagedSkillUpdate {
+                routing_description: Some(description.to_string()),
+                ..Default::default()
+            };
+            assert!(validate_managed_skill_update(&update).is_err());
+        }
+        let mut draft = valid_draft();
+        draft.routing_description = "é".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS);
+        let skill = draft.clone().materialize().unwrap();
+        skill.render_native_skill_markdown().unwrap();
+        draft.routing_description.push('é');
+        assert!(draft.materialize().is_err());
+        let update = ManagedSkillUpdate {
+            routing_description: Some("a".repeat(MAX_NATIVE_SKILL_DESCRIPTION_CHARS + 1)),
+            ..Default::default()
+        };
+        assert!(validate_managed_skill_update(&update).is_err());
+    }
+
+    #[test]
+    fn new_drafts_and_metadata_require_authored_routing_description() {
+        let mut draft = serde_json::to_value(valid_draft()).unwrap();
+        draft.as_object_mut().unwrap().remove("routing_description");
+        assert!(serde_json::from_value::<ManagedSkillDraft>(draft).is_err());
+
+        let mut skill = serde_json::to_value(valid_draft().materialize().unwrap()).unwrap();
+        skill["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("routing_description");
+        assert!(serde_json::from_value::<ManagedSkill>(skill).is_err());
     }
 
     #[test]

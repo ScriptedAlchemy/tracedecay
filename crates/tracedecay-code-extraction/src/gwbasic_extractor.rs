@@ -7,13 +7,13 @@
 /// as Function, GOSUB/GOTO as call references, and REM lines as docstrings.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::basic_common::{
     BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
 };
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -21,7 +21,7 @@ use tracedecay_domain::code_intelligence::{
 pub struct GwBasicExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -29,12 +29,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -46,18 +46,23 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -66,31 +71,41 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl GwBasicExtractor {
-    /// Extract code graph nodes and edges from a GW-BASIC source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the BASIC source code to parse.
     pub fn extract_gwbasic(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
-        // Create the File root node.
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -120,9 +135,13 @@ impl GwBasicExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Collect all lines from the AST.
-        let root = tree.root_node();
-        let lines = Self::collect_lines(&state, root);
+        let mut selected_lines = Vec::new();
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            if child.kind() == "line" {
+                selected_lines.push((child.start_byte(), child.end_byte()));
+            }
+        });
+        let lines = Self::collect_selected_lines(&state, tree, &selected_lines);
 
         // First pass: extract DEF FN definitions as Function nodes.
         Self::extract_def_fn(&mut state, &lines);
@@ -138,32 +157,34 @@ impl GwBasicExtractor {
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("gwbasic")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load GW-BASIC grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("gwbasic", "GW-BASIC", source)
     }
 
-    /// Collect all lines from the program into a structured list.
-    fn collect_lines<'a>(state: &ExtractionState, root: TsNode<'a>) -> Vec<BasicLine<'a>> {
+    fn collect_selected_lines<'tree>(
+        state: &ExtractionState,
+        tree: &'tree Tree,
+        selected_lines: &[(usize, usize)],
+    ) -> Vec<BasicLine<'tree>> {
         let mut lines = Vec::new();
+        let root = tree.root_node();
         let mut cursor = root.walk();
         if cursor.goto_first_child() {
             loop {
                 let node = cursor.node();
-                if node.kind() == "line" {
-                    if let Some(basic_line) = Self::parse_line(state, node) {
-                        lines.push(basic_line);
-                    }
+                if node.kind() == "line"
+                    && selected_lines.contains(&(node.start_byte(), node.end_byte()))
+                    && let Some(basic_line) = Self::parse_line(state, node)
+                {
+                    lines.push(basic_line);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -198,7 +219,7 @@ impl GwBasicExtractor {
                 let stripped = text
                     .get(..3)
                     .filter(|p| p.eq_ignore_ascii_case("REM"))
-                    .map_or(text.as_str(), |_| &text[3..])
+                    .map_or(text, |_| &text[3..])
                     .trim()
                     .to_string();
                 comment_text = Some(stripped);
@@ -243,13 +264,13 @@ impl GwBasicExtractor {
             let start_column = basic_line.node.start_position().column as u32;
             let end_column = basic_line.node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), fn_name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Function, &fn_name, start_line);
+            let id = generate_node_id(&state.file_path, &NodeKind::Function, fn_name, start_line);
             let text = state.node_text(basic_line.node);
 
             let graph_node = Node {
                 id: id.clone(),
                 kind: NodeKind::Function,
-                name: fn_name,
+                name: fn_name.to_string(),
                 qualified_name,
                 file_path: state.file_path.clone(),
                 start_line,
@@ -332,13 +353,13 @@ impl GwBasicExtractor {
         let start_column = basic_line.node.start_position().column as u32;
         let end_column = basic_line.node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
         let text = state.node_text(basic_line.node);
 
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -409,12 +430,9 @@ impl GwBasicExtractor {
                         body_end += 1;
                         break;
                     }
-                    // Also check for inline RETURN in IF statements
-                    // (e.g. `1010 IF ... THEN PRINT "ERROR": RETURN`)
-                    if Self::line_has_return(lines[body_end].node) {
-                        // Keep going — the inline RETURN doesn't end the subroutine
-                        // unless it's the last statement before the next REM block.
-                    }
+                    // An inline RETURN in an IF statement (e.g. `1010 IF ...
+                    // THEN PRINT "ERROR": RETURN`) does not end the subroutine;
+                    // only a standalone return_statement line does.
                     // Stop at the next REM block (which would be the start of another subroutine).
                     if lines[body_end].statement_kind == "comment" {
                         break;
@@ -501,7 +519,6 @@ impl GwBasicExtractor {
                         });
                     }
 
-                    // Extract GOSUB/GOTO call sites from the body.
                     for line in &lines[body_start..body_end] {
                         Self::extract_calls_from_line(state, line, &fn_id);
                     }
@@ -544,26 +561,6 @@ impl GwBasicExtractor {
         }
     }
 
-    /// Check if a line node contains a `return_statement` anywhere in its AST.
-    fn line_has_return(node: TsNode<'_>) -> bool {
-        if node.kind() == "return_statement" {
-            return true;
-        }
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if Self::line_has_return(child) {
-                    return true;
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        false
-    }
-
     /// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).
     fn extract_top_level_calls(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
         let file_node_id = state
@@ -590,12 +587,11 @@ impl GwBasicExtractor {
         let kind = node.kind();
         match kind {
             "gosub_statement" | "goto_statement" => {
-                // Extract the target line number.
                 if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
                     let target = state.node_text(ln_node);
                     state.unresolved_refs.push(UnresolvedRef {
                         from_node_id: from_node_id.to_string(),
-                        reference_name: target,
+                        reference_name: target.to_string(),
                         reference_kind: EdgeKind::Calls,
                         line: node.start_position().row as u32,
                         column: node.start_position().column as u32,
@@ -641,5 +637,15 @@ impl crate::LanguageExtractor for GwBasicExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_gwbasic(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

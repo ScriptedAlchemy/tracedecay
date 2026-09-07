@@ -4,11 +4,7 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_lua_extract_functions() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -18,7 +14,6 @@ fn test_lua_extract_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // Functions: log (local), Connection.new, Pool.new
     assert_eq!(
         fns.len(),
         3,
@@ -35,11 +30,7 @@ fn test_lua_extract_functions() {
 
 #[test]
 fn test_lua_extract_methods() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -49,8 +40,6 @@ fn test_lua_extract_methods() {
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
-    // Methods: Connection:connect, Connection:disconnect, Connection:isConnected,
-    //          Pool:acquire, Pool:release
     assert_eq!(
         methods.len(),
         5,
@@ -67,11 +56,7 @@ fn test_lua_extract_methods() {
 
 #[test]
 fn test_lua_extract_consts() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -94,11 +79,7 @@ fn test_lua_extract_consts() {
 
 #[test]
 fn test_lua_extract_requires() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -115,11 +96,7 @@ fn test_lua_extract_requires() {
 
 #[test]
 fn test_lua_call_sites() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -131,7 +108,6 @@ fn test_lua_call_sites() {
         .collect();
     assert!(!call_refs.is_empty(), "should have call refs");
 
-    // log function calls print and string.format
     assert!(
         call_refs.iter().any(|r| r.reference_name == "print"),
         "should find print call"
@@ -143,32 +119,27 @@ fn test_lua_call_sites() {
         "should find string.format call"
     );
 
-    // Connection.new calls setmetatable
     assert!(
         call_refs.iter().any(|r| r.reference_name == "setmetatable"),
         "should find setmetatable call"
     );
 
-    // Connection:connect calls log
     assert!(
         call_refs.iter().any(|r| r.reference_name == "log"),
         "should find log call"
     );
 
-    // Pool:acquire calls Connection.new
     assert!(
         call_refs
             .iter()
             .any(|r| r.reference_name == "Connection.new"),
         "should find Connection.new call"
     );
-    // Pool:acquire calls conn:connect
     assert!(
         call_refs.iter().any(|r| r.reference_name == "conn:connect"),
         "should find conn:connect call"
     );
 
-    // Pool:release calls table.insert
     assert!(
         call_refs.iter().any(|r| r.reference_name == "table.insert"),
         "should find table.insert call"
@@ -177,11 +148,7 @@ fn test_lua_call_sites() {
 
 #[test]
 fn test_lua_docstrings() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -214,7 +181,6 @@ fn test_lua_docstrings() {
         connect_method.docstring
     );
 
-    // MAX_RETRIES should have docstring
     let max_retries = result
         .nodes
         .iter()
@@ -233,11 +199,7 @@ fn test_lua_docstrings() {
 
 #[test]
 fn test_lua_file_node() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     let files: Vec<_> = result
@@ -251,11 +213,7 @@ fn test_lua_file_node() {
 
 #[test]
 fn test_lua_contains_edges() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     let contains: Vec<_> = result
@@ -263,7 +221,6 @@ fn test_lua_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 2 Use + 2 Const + 3 Function + 5 Method = 12 Contains edges
     assert!(
         contains.len() >= 12,
         "should have >= 12 Contains edges, got {}",
@@ -273,11 +230,7 @@ fn test_lua_contains_edges() {
 
 #[test]
 fn test_lua_local_function_is_private() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -296,16 +249,11 @@ fn test_lua_local_function_is_private() {
 
 #[test]
 fn test_lua_dot_function_qualified_name() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    // Connection.new should have qualified name containing Connection
     let conn_new_fns: Vec<_> = result
         .nodes
         .iter()
@@ -325,11 +273,7 @@ fn test_lua_dot_function_qualified_name() {
 
 #[test]
 fn test_lua_signatures() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.lua"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
     let result = extractor.extract("sample.lua", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

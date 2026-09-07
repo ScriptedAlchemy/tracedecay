@@ -1,296 +1,757 @@
 //! Dashboard endpoints for project and user settings.
 
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::Serialize;
 use serde_json::{Value, json};
+use tracedecay_api::configuration::{
+    DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
+    SETTINGS_REFRESH_OPERATION, configuration_application_problem_error,
+    configuration_authority_unavailable_error, configuration_revision_conflict_error,
+    parse_code_index_worker_settings_patch, parse_project_settings_patch,
+    parse_user_settings_patch, settings_validation_error,
+    validate_code_index_worker_settings_patch, validate_user_settings_patch,
+};
+use tracedecay_application::{
+    ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
+};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail};
-use crate::automation::config as automation_config;
-use crate::config::{
-    TelemetryConfig, TraceDecayConfig, load_config_from_path, save_config_to_path,
+use super::read_model::{
+    DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
+    DashboardLegalActionRefV1, scope_from_state,
 };
-use crate::user_config::{self, UserConfig};
+use crate::application::settings_control::{
+    ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,
+    TelemetrySettingsPatchV1, context_scout_settings_are_enabled, effective_context_scout_settings,
+    preview_project_settings,
+};
+use crate::config::TraceDecayConfig;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
+use tracedecay_configuration::{
+    DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
+    parse_duration_millis, plan_user_settings_mutation,
+};
+use tracedecay_domain::configuration::{
+    CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1, ConfigurationIdempotencyKey,
+    ConfigurationRevisionId,
+};
 
-type ApiResult = std::result::Result<Json<Value>, JsonError>;
+use crate::application_surface::{DashboardConfigurationApplyError, configuration_apply_error};
+
+pub use tracedecay_api::configuration::{
+    CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, UserSettingsPatch,
+};
+
+/// The independent profile-session state that owns the code-index worker
+/// preference. It deliberately carries a different revision from the ordinary
+/// profile settings resource, so a worker write cannot be sequenced with a
+/// project or user settings write under a misleading shared CAS token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardCodeIndexWorkerConfigurationV1 {
+    pub configuration_snapshot_id: String,
+    pub configuration_revision_id: String,
+    pub code_index_workers: CodeIndexWorkerSelectionV1,
+}
+
+/// The committed profile-worker configuration returned by the exact
+/// ProfileSessions authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardCodeIndexWorkerSettingsCommitV1 {
+    pub current: DashboardCodeIndexWorkerConfigurationV1,
+}
+
+/// The only failures the dashboard boundary can interpret without inventing a
+/// durable outcome. The root adapter owns store/error conversion and must
+/// retain the exact ProfileSessions lease that performed the operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DashboardCodeIndexWorkerSettingsErrorV1 {
+    Unavailable,
+    RevisionConflict { actual_revision_id: String },
+}
+
+pub type DashboardCodeIndexWorkerSettingsFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    DashboardCodeIndexWorkerConfigurationV1,
+                    DashboardCodeIndexWorkerSettingsErrorV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub type DashboardCodeIndexWorkerSettingsCommitFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    DashboardCodeIndexWorkerSettingsCommitV1,
+                    DashboardCodeIndexWorkerSettingsErrorV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Injected root-owned authority for the sole ProfileSessions-backed worker
+/// configuration resource. It intentionally has no batch operation: project
+/// and ordinary profile settings are different durable resources.
+pub trait DashboardProfileCodeIndexWorkerSettingsPort: Send + Sync {
+    fn read<'a>(&'a self) -> DashboardCodeIndexWorkerSettingsFuture<'a>;
+
+    fn commit<'a>(
+        &'a self,
+        selection: CodeIndexWorkerSelectionV1,
+        expected_revision: ConfigurationRevisionId,
+        idempotency_key: ConfigurationIdempotencyKey,
+    ) -> DashboardCodeIndexWorkerSettingsCommitFuture<'a>;
+}
+
+type ApiResult = std::result::Result<
+    Json<DashboardEnvelopeV1<SettingsPayloadV1>>,
+    DashboardConfigurationRouteErrorV1,
+>;
+type ProjectSettingsPatchResult =
+    std::result::Result<Json<ProjectSettingsPatchResponseV1>, DashboardConfigurationRouteErrorV1>;
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
+const PROFILE_CODE_INDEX_WORKER_SELECTION_OPERATION: &str = "profile_code_index_worker_selection";
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ProjectSettingsPatch {
-    #[serde(default)]
-    include: Option<Vec<String>>,
-    #[serde(default)]
-    exclude: Option<Vec<String>>,
-    #[serde(default)]
-    max_file_size: Option<u64>,
-    #[serde(default)]
-    extract_docstrings: Option<bool>,
-    #[serde(default)]
-    track_call_sites: Option<bool>,
-    #[serde(default)]
-    git_ignore: Option<bool>,
-    #[serde(default)]
-    telemetry: Option<TelemetrySettingsPatch>,
-    #[serde(default)]
-    sync: Option<SyncSettingsPatch>,
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct SettingsPayloadV1 {
+    project: ProjectSettingsPayloadV1,
+    user: UserSettingsPayloadV1,
+    automation: AutomationSettingsPayloadV1,
+    environment: EnvironmentSettingsPayloadV1,
+    storage: StorageSettingsPayloadV1,
+    version: VersionSettingsPayloadV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resync_recommended: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restart_recommended: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct SyncSettingsPatch {
-    #[serde(default)]
-    auto_track_pr_branches: Option<bool>,
-    #[serde(default)]
-    auto_track_pr_poll_secs: Option<u64>,
+#[derive(Serialize)]
+pub struct ProjectSettingsPatchResponseV1 {
+    /// Exact application settlement returned by the configuration binding.
+    /// `None` means the submitted patch was already the current state.
+    application_outcome: Option<ApplicationOutcome<Value>>,
+    current: DashboardEnvelopeV1<SettingsPayloadV1>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct TelemetrySettingsPatch {
-    #[serde(default)]
-    timings: Option<bool>,
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct ProjectSettingsPayloadV1 {
+    config_path: String,
+    legacy_config_path: String,
+    legacy_config_read_only: bool,
+    configuration_snapshot_id: String,
+    configuration_revision_id: String,
+    config: ProjectEditableSettingsV1,
+    tracedecay_dir_gitignored: bool,
+    pr_autotrack: PrAutoTrackPayloadV1,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct UserSettingsPatch {
-    #[serde(default)]
-    upload_enabled: Option<bool>,
-    #[serde(default)]
-    watcher_debounce: Option<String>,
-    #[serde(default)]
-    extraction_timeout_secs: Option<u64>,
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct ProjectEditableSettingsV1 {
+    include: Vec<String>,
+    exclude: Vec<String>,
+    max_file_size: u64,
+    extract_docstrings: bool,
+    track_call_sites: bool,
+    git_ignore: bool,
+    telemetry: TelemetrySettingsV1,
+    sync: SyncSettingsV1,
+    /// Rendered from the effective `context_scout.settings.v1` value;
+    /// the dashboard holds no Scout state of its own.
+    context_scout: bool,
 }
 
+fn project_editable_settings(
+    configuration: &crate::config::PinnedRuntimeConfiguration,
+) -> ProjectEditableSettingsV1 {
+    let config: &TraceDecayConfig = &configuration.config;
+    ProjectEditableSettingsV1 {
+        include: config.include.clone(),
+        exclude: config.exclude.clone(),
+        max_file_size: config.max_file_size,
+        extract_docstrings: config.extract_docstrings,
+        track_call_sites: config.track_call_sites,
+        git_ignore: config.git_ignore,
+        telemetry: TelemetrySettingsV1 {
+            timings: config.telemetry.timings,
+        },
+        sync: SyncSettingsV1 {
+            auto_track_pr_branches: config.sync.auto_track_pr_branches,
+            auto_track_pr_poll_secs: config.sync.auto_track_pr_poll_secs,
+        },
+        context_scout: context_scout_settings_are_enabled(&effective_context_scout_settings(
+            &configuration.snapshot,
+        )),
+    }
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct TelemetrySettingsV1 {
+    timings: bool,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct SyncSettingsV1 {
+    auto_track_pr_branches: bool,
+    auto_track_pr_poll_secs: u64,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct UserSettingsPayloadV1 {
+    legacy_config_path: String,
+    legacy_config_read_only: bool,
+    configuration_snapshot_id: String,
+    configuration_revision_id: String,
+    /// Independent ProfileSessions revision for the code-index worker
+    /// resource. It is intentionally not interchangeable with the ordinary
+    /// user settings revision above.
+    code_index_worker_configuration_snapshot_id: String,
+    code_index_worker_configuration_revision_id: String,
+    upload_enabled: bool,
+    code_index_workers: CodeIndexWorkerSelectionV1,
+    /// The admitted process-wide plan. A persisted selection may differ until
+    /// the daemon restarts, so unavailable is carried as `null` rather than
+    /// fabricated from the saved preference.
+    code_index_worker_status: Option<CodeIndexWorkerStatusV1>,
+    watcher_debounce: String,
+    extraction_timeout_secs: u64,
+    installed_agents: Vec<String>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct AutomationSettingsPayloadV1 {
+    config_endpoint: String,
+    availability: SettingsAvailabilityV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configuration_revision_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_mode: Option<String>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct SettingsAvailabilityV1 {
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_authority: Option<String>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct EnvironmentSettingsPayloadV1 {
+    global_accounting_mode: String,
+    global_accounting_enabled: bool,
+    pricing_offline: bool,
+    variables: Vec<EnvironmentVariableV1>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct EnvironmentVariableV1 {
+    name: String,
+    active: bool,
+    value: Option<String>,
+    description: String,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct StorageSettingsPayloadV1 {
+    project_id: Option<String>,
+    project_root: String,
+    storage_mode: String,
+    store_root: String,
+    dashboard_root: String,
+    graph_db: String,
+    memory_db: String,
+    lcm_db: String,
+    lcm_scope: String,
+    savings_db: String,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct VersionSettingsPayloadV1 {
+    version: String,
+    channel: String,
+    cached_latest_version: Option<String>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct PrAutoTrackPayloadV1 {
+    tracked: Vec<PrAutoTrackEntryV1>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct PrAutoTrackEntryV1 {
+    branch: String,
+    pr: u64,
+    head_branch: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardPrAutoTrackEntryV1 {
+    pub branch: String,
+    pub pr: u64,
+    pub head_branch: String,
+}
+
+pub trait DashboardPrAutoTrackReadPort: Send + Sync {
+    fn managed_summary(&self, store_root: &Path) -> Vec<DashboardPrAutoTrackEntryV1>;
+}
+
+static PR_AUTOTRACK_READ_PORT: OnceLock<Arc<dyn DashboardPrAutoTrackReadPort>> = OnceLock::new();
+
+pub fn install_dashboard_pr_autotrack_read_port(
+    port: Arc<dyn DashboardPrAutoTrackReadPort>,
+) -> Result<(), Arc<dyn DashboardPrAutoTrackReadPort>> {
+    PR_AUTOTRACK_READ_PORT.set(port)
+}
+
+#[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
-    Ok(Json(settings_payload(&state).await?))
+    Ok(Json(settings_envelope(&state, None, None, None).await?))
 }
 
+#[hotpath::measure(label = "dashboard_api.settings.patch_project", future = true)]
 pub async fn patch_project_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
-) -> ApiResult {
-    let patch = serde_json::from_value::<ProjectSettingsPatch>(patch)
-        .map_err(|err| patch_shape_error("project settings", &err))?;
-
-    let mut errors = Vec::new();
-    if let Some(globs) = &patch.include {
-        validate_globs("include", globs, &mut errors);
-    }
-    if let Some(globs) = &patch.exclude {
-        validate_globs("exclude", globs, &mut errors);
-    }
-    if patch.max_file_size == Some(0) {
-        errors.push(validation_error(
-            "max_file_size",
-            "max_file_size must be at least 1 byte",
-        ));
-    }
-    if let Some(sync) = &patch.sync {
-        if let Some(secs) = sync.auto_track_pr_poll_secs {
-            if secs < crate::config::MIN_AUTO_TRACK_PR_POLL_SECS {
-                errors.push(validation_error(
-                    "auto_track_pr_poll_secs",
-                    &format!(
-                        "auto_track_pr_poll_secs must be at least {} seconds",
-                        crate::config::MIN_AUTO_TRACK_PR_POLL_SECS
-                    ),
+) -> ProjectSettingsPatchResult {
+    let patch = parse_project_settings_patch(patch)?;
+    let idempotency_key =
+        ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "idempotency_key",
+                "message": "idempotency_key must be one non-empty canonical caller-stable value"
+            }]))
+        })?;
+    let current = crate::config::cached_runtime_configuration(&state.project_root)
+        .map_err(|_| configuration_authority_unavailable_error())?;
+    let project_id = state
+        .project_id
+        .as_deref()
+        .ok_or_else(configuration_authority_unavailable_error)
+        .and_then(|project_id| {
+            tracedecay_domain::ProjectId::new(project_id)
+                .map_err(|_| configuration_authority_unavailable_error())
+        })?;
+    let preview = preview_project_settings(
+        &project_id,
+        &current,
+        ProjectSettingsPatchV1 {
+            expected_revision_id: patch.expected_revision_id,
+            include: patch.include,
+            exclude: patch.exclude,
+            max_file_size: patch.max_file_size,
+            extract_docstrings: patch.extract_docstrings,
+            track_call_sites: patch.track_call_sites,
+            git_ignore: patch.git_ignore,
+            telemetry: patch.telemetry.map(|telemetry| TelemetrySettingsPatchV1 {
+                timings: telemetry.timings,
+            }),
+            sync: patch.sync.map(|sync| SyncSettingsPatchV1 {
+                auto_track_pr_branches: sync.auto_track_pr_branches,
+                auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
+            }),
+            context_scout: patch.context_scout,
+        },
+    )
+    .map_err(project_preview_error)?;
+    let application_outcome = if preview.changed {
+        let runtime = state
+            .application_invocation_executor
+            .as_deref()
+            .ok_or_else(configuration_authority_unavailable_error)?;
+        let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
+            return Err(configuration_authority_unavailable_error());
+        };
+        let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
+            .map_err(|_| configuration_authority_unavailable_error())?;
+        let expected_revision = preview.expected_revision.clone();
+        match runtime
+            .apply_configuration_batch(
+                request_id,
+                mutations,
+                preview.expected_revision,
+                idempotency_key,
+            )
+            .await
+        {
+            Ok(outcome) => Some(outcome),
+            Err(DashboardConfigurationApplyError::ApplicationProblem(problem)) => {
+                return Err(project_apply_error(
+                    &state.project_root,
+                    &expected_revision,
+                    problem,
                 ));
             }
+            Err(error) => return Err(configuration_apply_error(error)),
         }
-    }
-    if !errors.is_empty() {
-        return Err(validation_failed(&errors));
-    }
-
-    let current = load_config_from_path(&state.project_root, &state.config_path)
-        .map_err(|err| internal_error(&err))?;
-    let sync = patch.sync.as_ref().map_or_else(
-        || current.sync.clone(),
-        |sync| crate::config::SyncConfig {
-            auto_track_pr_branches: sync
-                .auto_track_pr_branches
-                .unwrap_or(current.sync.auto_track_pr_branches),
-            auto_track_pr_poll_secs: sync
-                .auto_track_pr_poll_secs
-                .unwrap_or(current.sync.auto_track_pr_poll_secs),
-            ..current.sync.clone()
-        },
-    );
-    let telemetry = patch.telemetry.map_or_else(
-        || current.telemetry.clone(),
-        |telemetry| TelemetryConfig {
-            timings: telemetry.timings.unwrap_or(current.telemetry.timings),
-        },
-    );
-    let updated = TraceDecayConfig {
-        include: patch.include.unwrap_or_else(|| current.include.clone()),
-        exclude: patch.exclude.unwrap_or_else(|| current.exclude.clone()),
-        max_file_size: patch.max_file_size.unwrap_or(current.max_file_size),
-        extract_docstrings: patch
-            .extract_docstrings
-            .unwrap_or(current.extract_docstrings),
-        track_call_sites: patch.track_call_sites.unwrap_or(current.track_call_sites),
-        git_ignore: patch.git_ignore.unwrap_or(current.git_ignore),
-        telemetry,
-        sync,
-        ..current.clone()
+    } else {
+        None
     };
-    let resync_recommended = updated != current;
-    if resync_recommended {
-        save_config_to_path(&state.config_path, &updated).map_err(|err| internal_error(&err))?;
-    }
 
-    let mut payload = settings_payload(&state).await?;
-    payload["resync_recommended"] = json!(resync_recommended);
-    Ok(Json(payload))
+    Ok(Json(ProjectSettingsPatchResponseV1 {
+        application_outcome,
+        current: settings_envelope(&state, Some(preview.resync_recommended), None, None).await?,
+    }))
 }
 
+#[hotpath::measure(label = "dashboard_api.settings.patch_user", future = true)]
 pub async fn patch_user_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<UserSettingsPatch>(patch)
-        .map_err(|err| patch_shape_error("user settings", &err))?;
-
-    let mut errors = Vec::new();
-    if let Some(debounce) = &patch.watcher_debounce {
-        if user_config::parse_duration(debounce).is_none() {
-            errors.push(validation_error(
-                "watcher_debounce",
-                "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
-            ));
+    let patch = parse_user_settings_patch(patch)?;
+    validate_user_settings_patch(&patch, |value| parse_duration_millis(value).is_some())?;
+    let idempotency_key =
+        ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "idempotency_key",
+                "message": "idempotency_key must be one non-empty canonical caller-stable value"
+            }]))
+        })?;
+    let expected_revision =
+        ConfigurationRevisionId::new(patch.expected_revision_id).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "expected_revision_id",
+                "message": "expected_revision_id must name one canonical configuration revision"
+            }]))
+        })?;
+    let runtime = state
+        .application_invocation_executor
+        .as_deref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let profile_id = runtime
+        .user_profile_id()
+        .cloned()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let current = state
+        .user_settings
+        .read()
+        .await
+        .map_err(|_| configuration_authority_unavailable_error())?;
+    let plan = plan_user_settings_mutation(
+        &current,
+        profile_id,
+        UserSettingsMutationV1 {
+            upload_enabled: patch.upload_enabled,
+            watcher_debounce: patch.watcher_debounce,
+            extraction_timeout_secs: patch.extraction_timeout_secs,
+        },
+    )
+    .map_err(|_| configuration_authority_unavailable_error())?;
+    if !plan.mutations.is_empty() {
+        let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
+            .map_err(|_| configuration_authority_unavailable_error())?;
+        if let Err(error) = runtime
+            .apply_configuration_batch(
+                request_id,
+                plan.mutations,
+                expected_revision,
+                idempotency_key,
+            )
+            .await
+        {
+            return Err(configuration_apply_error(error));
         }
     }
-    if patch.extraction_timeout_secs == Some(0) {
-        errors.push(validation_error(
-            "extraction_timeout_secs",
-            "extraction_timeout_secs must be at least 1 second",
-        ));
-    }
-    if !errors.is_empty() {
-        return Err(validation_failed(&errors));
-    }
 
-    let mut config = UserConfig::load();
-    let restart_recommended = patch
-        .watcher_debounce
-        .as_ref()
-        .is_some_and(|value| *value != config.watcher_debounce)
-        || patch
-            .extraction_timeout_secs
-            .is_some_and(|value| value != config.extraction_timeout_secs);
-    if let Some(upload_enabled) = patch.upload_enabled {
-        config.upload_enabled = upload_enabled;
-    }
-    if let Some(debounce) = patch.watcher_debounce {
-        config.watcher_debounce = debounce;
-    }
-    if let Some(timeout) = patch.extraction_timeout_secs {
-        config.extraction_timeout_secs = timeout;
-    }
-    match config.save_with_recovery() {
-        Ok(Some(backup)) => {
-            eprintln!(
-                "[tracedecay] note: corrupt config.toml backed up to {} before regenerating",
-                backup.display()
-            );
-        }
-        Ok(None) => {}
-        Err(err) => {
-            return Err(internal_error(&format!(
-                "failed to save user config: {err}"
-            )));
-        }
-    }
-
-    let mut payload = settings_payload(&state).await?;
-    payload["restart_recommended"] = json!(restart_recommended);
-    Ok(Json(payload))
+    Ok(Json(
+        settings_envelope(&state, None, Some(plan.restart_recommended), None).await?,
+    ))
 }
 
-async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, JsonError> {
-    let project_config = load_config_from_path(&state.project_root, &state.config_path)
-        .map_err(|err| internal_error(&err))?;
-    let project_config_path = state.config_path.clone();
-    let user = UserConfig::load();
-    let user_config_path = user_config::config_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-
-    let global_automation = user.automation.clone();
-    let project_automation = automation_config::load_project_config(&state.dashboard_root)
+/// Saves only the ProfileSessions-backed code-index worker selection. This is
+/// deliberately not a branch of `patch_user_settings`: its independent CAS
+/// revision makes a mixed project/profile mutation unrepresentable.
+#[hotpath::measure(label = "dashboard_api.settings.patch_workers", future = true)]
+pub async fn patch_code_index_worker_settings(
+    State(state): State<DashboardState>,
+    Json(patch): Json<Value>,
+) -> ApiResult {
+    let patch = parse_code_index_worker_settings_patch(patch)?;
+    validate_code_index_worker_settings_patch(&patch)?;
+    let worker_admission_errors = code_index_worker_admission_errors(
+        &patch.code_index_workers,
+        tracedecay_code_index::parallelism::installed_worker_status().as_ref(),
+    );
+    if !worker_admission_errors.is_empty() {
+        return Err(settings_validation_error(worker_admission_errors));
+    }
+    let idempotency_key =
+        ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "idempotency_key",
+                "message": "idempotency_key must be one non-empty canonical caller-stable value"
+            }]))
+        })?;
+    let expected_revision =
+        ConfigurationRevisionId::new(patch.expected_revision_id).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "expected_revision_id",
+                "message": "expected_revision_id must name one canonical configuration revision"
+            }]))
+        })?;
+    let port = state
+        .profile_code_index_worker_settings
+        .as_deref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let committed = match port
+        .commit(
+            patch.code_index_workers,
+            expected_revision.clone(),
+            idempotency_key,
+        )
         .await
-        .ok()
-        .flatten();
-    let automation =
-        automation_config::effective_config(&global_automation, project_automation.as_ref())
-            .unwrap_or(global_automation);
+    {
+        Ok(committed) => committed,
+        Err(DashboardCodeIndexWorkerSettingsErrorV1::Unavailable) => {
+            return Err(configuration_authority_unavailable_error());
+        }
+        Err(DashboardCodeIndexWorkerSettingsErrorV1::RevisionConflict { actual_revision_id }) => {
+            return Err(configuration_revision_conflict_error(
+                "the profile code-index worker configuration revision changed before this selection could be saved",
+                expected_revision.as_str(),
+                &actual_revision_id,
+            ));
+        }
+    };
 
-    Ok(json!({
-        "project": {
-            "config_path": project_config_path.display().to_string(),
-            "config": project_config,
-            "tracedecay_dir_gitignored": crate::config::is_in_gitignore(&state.project_root),
-            "pr_autotrack": pr_autotrack_payload(state),
+    Ok(Json(
+        settings_envelope(&state, None, Some(true), Some(&committed.current)).await?,
+    ))
+}
+
+/// Reject a persisted exact width when the installed daemon plan exposes the
+/// current CPU and memory admission ceilings. When no plan is installed, the
+/// saved selection remains a restart-time decision rather than an invented
+/// capacity claim.
+fn code_index_worker_admission_errors(
+    selection: &CodeIndexWorkerSelectionV1,
+    status: Option<&CodeIndexWorkerStatusV1>,
+) -> Vec<Value> {
+    let (CodeIndexWorkerSelectionV1::Exact { workers }, Some(status)) = (selection, status) else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    if *workers > status.available_logical_cpus {
+        errors.push(json!({
+            "field": "code_index_workers",
+            "message": format!(
+                "code_index_workers exact mode must request no more than {} available logical CPUs",
+                status.available_logical_cpus,
+            ),
+        }));
+    }
+    if *workers > status.memory_safe_workers {
+        errors.push(json!({
+            "field": "code_index_workers",
+            "message": format!(
+                "code_index_workers exact mode must request no more than {} memory-safe workers",
+                status.memory_safe_workers,
+            ),
+        }));
+    }
+    errors
+}
+
+async fn settings_envelope(
+    state: &DashboardState,
+    resync_recommended: Option<bool>,
+    restart_recommended: Option<bool>,
+    committed_worker_configuration: Option<&DashboardCodeIndexWorkerConfigurationV1>,
+) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
+{
+    let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
+        .map_err(|_| configuration_authority_unavailable_error())?;
+    let legacy_config_path = state.config_path.clone();
+    let user = state
+        .user_settings
+        .read()
+        .await
+        .map_err(|_| configuration_authority_unavailable_error())?;
+    let worker_configuration = match committed_worker_configuration {
+        Some(configuration) => configuration.clone(),
+        None => state
+            .profile_code_index_worker_settings
+            .as_deref()
+            .ok_or_else(configuration_authority_unavailable_error)?
+            .read()
+            .await
+            .map_err(|_| configuration_authority_unavailable_error())?,
+    };
+    let automation = automation_settings_payload(&project_configuration);
+    let payload = SettingsPayloadV1 {
+        project: ProjectSettingsPayloadV1 {
+            config_path: legacy_config_path.display().to_string(),
+            legacy_config_path: legacy_config_path.display().to_string(),
+            legacy_config_read_only: true,
+            configuration_snapshot_id: project_configuration
+                .snapshot
+                .snapshot_id
+                .as_str()
+                .to_owned(),
+            configuration_revision_id: project_configuration.revision_id.as_str().to_owned(),
+            config: project_editable_settings(&project_configuration),
+            tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
+            pr_autotrack: pr_autotrack_payload(state),
         },
-        "user": {
-            "config_path": user_config_path,
-            "upload_enabled": user.upload_enabled,
-            "watcher_debounce": user.watcher_debounce,
-            "extraction_timeout_secs": user.extraction_timeout_secs,
-            "installed_agents": user.installed_agents,
+        user: user_settings_payload(&user, &worker_configuration),
+        automation,
+        environment: environment_payload(),
+        storage: StorageSettingsPayloadV1 {
+            project_id: state.project_id.clone(),
+            project_root: state.project_root.display().to_string(),
+            storage_mode: state.storage_mode.clone(),
+            store_root: state.store_root.display().to_string(),
+            dashboard_root: state.dashboard_root.display().to_string(),
+            graph_db: state.graph_db_path.clone(),
+            memory_db: state.mem_db_path.clone(),
+            lcm_db: state.lcm_db_path.clone(),
+            lcm_scope: state.lcm_scope.clone(),
+            savings_db: state.savings_db_path.clone(),
         },
-        "automation": {
-            "config_endpoint": AUTOMATION_CONFIG_ENDPOINT,
-            "enabled": automation.enabled,
-            "backend": automation.backend,
-            "host_mode": automation.host_mode,
+        version: VersionSettingsPayloadV1 {
+            version: state.build_version.to_owned(),
+            channel: if crate::cloud::is_beta(state.build_version) {
+                "beta".to_owned()
+            } else {
+                "stable".to_owned()
+            },
+            cached_latest_version: non_empty(&user.cached_latest_version).map(str::to_owned),
         },
-        "environment": environment_payload(state),
-        "storage": {
-            "project_id": state.project_id,
-            "project_root": state.project_root.display().to_string(),
-            "storage_mode": state.storage_mode,
-            "store_root": state.store_root.display().to_string(),
-            "dashboard_root": state.dashboard_root.display().to_string(),
-            "graph_db": state.graph_db_path,
-            "memory_db": state.mem_db_path,
-            "lcm_db": state.lcm_db_path,
-            "lcm_scope": state.lcm_scope,
-            "savings_db": state.savings_db_path,
+        resync_recommended,
+        restart_recommended,
+    };
+    // Both editable scopes settle through the one cataloged daemon
+    // configuration effect. A profile write additionally requires the exact
+    // profile identity bound by the daemon handshake.
+    let mut legal_actions = Vec::new();
+    if state.application_invocation_executor.is_some() {
+        legal_actions.push(DashboardLegalActionRefV1::new(
+            DashboardLegalActionKindV1::RequestApply,
+            PROJECT_SETTINGS_APPLY_OPERATION,
+        ));
+    }
+    if state.profile_code_index_worker_settings.is_some() {
+        legal_actions.push(DashboardLegalActionRefV1::new(
+            DashboardLegalActionKindV1::RequestApply,
+            PROFILE_CODE_INDEX_WORKER_SELECTION_OPERATION,
+        ));
+    }
+    legal_actions.push(DashboardLegalActionRefV1::new(
+        DashboardLegalActionKindV1::Refresh,
+        SETTINGS_REFRESH_OPERATION,
+    ));
+
+    Ok(DashboardEnvelopeV1::ready(
+        scope_from_state(state),
+        DashboardCoverageV1::complete(1, "configuration_control_plane"),
+        payload,
+    )
+    .with_legal_actions(legal_actions))
+}
+
+fn user_settings_payload(
+    user: &UserSettingsSnapshotV1,
+    worker_configuration: &DashboardCodeIndexWorkerConfigurationV1,
+) -> UserSettingsPayloadV1 {
+    UserSettingsPayloadV1 {
+        legacy_config_path: user.legacy_config_path.clone(),
+        legacy_config_read_only: true,
+        configuration_snapshot_id: user.configuration_snapshot_id.clone(),
+        configuration_revision_id: user.configuration_revision_id.clone(),
+        code_index_worker_configuration_snapshot_id: worker_configuration
+            .configuration_snapshot_id
+            .clone(),
+        code_index_worker_configuration_revision_id: worker_configuration
+            .configuration_revision_id
+            .clone(),
+        upload_enabled: user.upload_enabled,
+        code_index_workers: worker_configuration.code_index_workers,
+        code_index_worker_status: tracedecay_code_index::parallelism::installed_worker_status(),
+        watcher_debounce: user.watcher_debounce.clone(),
+        extraction_timeout_secs: user.extraction_timeout_secs,
+        installed_agents: user.installed_agents.clone(),
+    }
+}
+
+fn automation_settings_payload(
+    project_configuration: &crate::config::PinnedRuntimeConfiguration,
+) -> AutomationSettingsPayloadV1 {
+    match from_configuration_snapshot(&project_configuration.snapshot) {
+        Ok(automation) => AutomationSettingsPayloadV1 {
+            config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
+            availability: SettingsAvailabilityV1 {
+                available: true,
+                reason: None,
+                required_authority: None,
+            },
+            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
+            enabled: Some(automation.enabled),
+            backend: Some(automation.backend.as_str().to_owned()),
+            host_mode: Some(automation.host_mode.as_str().to_owned()),
         },
-        "version": {
-            "version": state.product_version,
-            "channel": state.release_channel,
-            "cached_latest_version": non_empty(&user.cached_latest_version),
+        Err(err) => AutomationSettingsPayloadV1 {
+            config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
+            availability: SettingsAvailabilityV1 {
+                available: false,
+                reason: Some(format!(
+                    "pinned automation configuration could not be resolved: {err}"
+                )),
+                required_authority: Some("pinned automation configuration".to_owned()),
+            },
+            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
+            enabled: None,
+            backend: None,
+            host_mode: None,
         },
-    }))
+    }
 }
 
 /// Lists the PR branches the daemon currently auto-tracks for this project, read
 /// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
 /// feature has tracked nothing yet.
-fn pr_autotrack_payload(state: &DashboardState) -> Value {
-    let tracked = state
-        .pr_autotrack_reader
-        .as_ref()
-        .map_or_else(Vec::new, |reader| reader(state.store_root.clone()));
-    json!({ "tracked": tracked })
+fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
+    let tracked = PR_AUTOTRACK_READ_PORT
+        .get()
+        .map(|port| {
+            port.managed_summary(&state.store_root)
+                .into_iter()
+                .map(|entry| PrAutoTrackEntryV1 {
+                    branch: entry.branch,
+                    pr: entry.pr,
+                    head_branch: entry.head_branch,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    PrAutoTrackPayloadV1 { tracked }
 }
 
-fn environment_payload(state: &DashboardState) -> Value {
-    let pricing_offline =
-        std::env::var("TRACEDECAY_OFFLINE").is_ok_and(|v| !v.is_empty() && v != "0");
-    json!({
-        "global_accounting_mode": state.accounting_mode.source,
-        "global_accounting_enabled": state.accounting_mode.enabled,
-        "pricing_offline": pricing_offline,
-        "variables": [
+fn environment_payload() -> EnvironmentSettingsPayloadV1 {
+    let accounting_mode = tracedecay_global_db::global_accounting_mode();
+    EnvironmentSettingsPayloadV1 {
+        global_accounting_mode: accounting_mode.as_str().to_owned(),
+        global_accounting_enabled: accounting_mode.enabled(),
+        pricing_offline: true,
+        variables: vec![
             env_variable(
                 "TRACEDECAY_ENABLE_GLOBAL_DB",
                 "Force-enables (truthy) or disables (falsy) global savings-ledger recording. Wins over TRACEDECAY_DISABLE_GLOBAL_DB.",
@@ -298,10 +759,6 @@ fn environment_payload(state: &DashboardState) -> Value {
             env_variable(
                 "TRACEDECAY_DISABLE_GLOBAL_DB",
                 "A truthy value disables global savings/accounting recording.",
-            ),
-            env_variable(
-                "TRACEDECAY_OFFLINE",
-                "Skips network pricing fetches; the Savings tab uses cached or fallback model prices.",
             ),
             env_variable(
                 "TRACEDECAY_GLOBAL_DB",
@@ -312,77 +769,167 @@ fn environment_payload(state: &DashboardState) -> Value {
                 "Pins the user-level TraceDecay data directory (default ~/.tracedecay).",
             ),
         ],
-    })
+    }
 }
 
-fn env_variable(name: &str, description: &str) -> Value {
+fn env_variable(name: &str, description: &str) -> EnvironmentVariableV1 {
     let value = std::env::var(name).ok().filter(|value| !value.is_empty());
-    json!({
-        "name": name,
-        "active": value.is_some(),
-        "value": value,
-        "description": description,
-    })
+    EnvironmentVariableV1 {
+        name: name.to_owned(),
+        active: value.is_some(),
+        value,
+        description: description.to_owned(),
+    }
 }
 
 fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn validate_globs(field: &str, globs: &[String], errors: &mut Vec<Value>) {
-    for pattern in globs {
-        if pattern.trim().is_empty() {
-            errors.push(validation_error(
-                field,
-                &format!("{field} patterns must not be empty"),
-            ));
-            continue;
+fn project_preview_error(
+    error: ProjectSettingsPreviewErrorV1,
+) -> DashboardConfigurationRouteErrorV1 {
+    match error {
+        ProjectSettingsPreviewErrorV1::Validation(issues) => settings_validation_error(issues),
+        ProjectSettingsPreviewErrorV1::RevisionConflict { expected, actual } => {
+            configuration_revision_conflict_error(
+                "settings changed after this edit began; refresh and retry",
+                &expected,
+                &actual,
+            )
         }
-        if let Err(err) = glob::Pattern::new(pattern) {
-            errors.push(validation_error(
-                field,
-                &format!("invalid glob pattern '{pattern}': {err}"),
-            ));
+        ProjectSettingsPreviewErrorV1::InvalidAuthority => {
+            configuration_authority_unavailable_error()
         }
     }
 }
 
-fn validation_error(field: &str, message: &str) -> Value {
-    json!({ "field": field, "message": message })
+/// Renders a rejected project apply as the refusal a settings client can act
+/// on.
+///
+/// The local preview only refuses a stale revision when the patch carries no
+/// mutation at all: a stale patch that does carry one may still be an exact
+/// idempotent replay, and only the daemon owns that replay authority. So the
+/// authority is the one that rejects a genuinely superseded edit — and it
+/// collapses revision and idempotency conflicts into a single opaque
+/// `configuration.conflict`, which names neither the CAS precondition nor the
+/// revision that now holds.
+///
+/// This re-reads the pinned runtime configuration the same route already
+/// serves as the revision authority. When the revision that now holds is no
+/// longer the one this edit expected, the CAS precondition provably failed and
+/// the typed conflict carries both revisions. Every other rejection — an
+/// idempotency conflict against the current revision included — keeps the
+/// daemon's own problem envelope rather than being relabeled by a guess.
+fn project_apply_error(
+    project_root: &Path,
+    expected_revision: &ConfigurationRevisionId,
+    problem: ApplicationProblemEnvelope,
+) -> DashboardConfigurationRouteErrorV1 {
+    if problem.problem.kind() == ApplicationProblemKind::Conflict
+        && let Ok(current) = crate::config::cached_runtime_configuration(project_root)
+        && current.revision_id != *expected_revision
+    {
+        return configuration_revision_conflict_error(
+            "settings changed after this edit began; refresh and retry",
+            expected_revision.as_str(),
+            current.revision_id.as_str(),
+        );
+    }
+    configuration_application_problem_error(problem)
 }
 
-fn validation_failed(errors: &[Value]) -> JsonError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": "settings validation failed",
-            "validation_errors": errors,
-        })),
-    )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tracedecay_domain::configuration::CodeIndexWorkerLimitingReasonV1;
 
-fn patch_shape_error(scope: &str, err: &serde_json::Error) -> JsonError {
-    let message = format!("invalid {scope} patch: {err}");
-    let field = unknown_field(&message).unwrap_or_else(|| "patch".to_string());
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": message,
-            "validation_errors": [{ "field": field, "message": message }],
-        })),
-    )
-}
+    fn serialization_schema<T: JsonSchema>() -> Value {
+        let generator = schemars::generate::SchemaSettings::default()
+            .for_serialize()
+            .into_generator();
+        serde_json::to_value(generator.into_root_schema_for::<T>())
+            .expect("serialize settings patch schema")
+    }
 
-fn unknown_field(message: &str) -> Option<String> {
-    let start = message.find("unknown field `")? + "unknown field `".len();
-    let rest = &message[start..];
-    let end = rest.find('`')?;
-    Some(rest[..end].to_string())
-}
+    #[test]
+    fn route_settings_patch_schemas_are_canonical() {
+        let project_route = serialization_schema::<ProjectSettingsPatch>();
+        let project_canonical =
+            serialization_schema::<tracedecay_api::configuration::ProjectSettingsPatch>();
+        assert_eq!(project_route, project_canonical);
+        assert_eq!(
+            project_route["required"],
+            json!(["expected_revision_id", "idempotency_key"])
+        );
 
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
-    )
+        let user_route = serialization_schema::<UserSettingsPatch>();
+        let user_canonical =
+            serialization_schema::<tracedecay_api::configuration::UserSettingsPatch>();
+        assert_eq!(user_route, user_canonical);
+        assert_eq!(
+            user_route["required"],
+            json!(["expected_revision_id", "idempotency_key"])
+        );
+
+        let workers_route = serialization_schema::<CodeIndexWorkerSettingsPatch>();
+        let workers_canonical =
+            serialization_schema::<tracedecay_api::configuration::CodeIndexWorkerSettingsPatch>();
+        assert_eq!(workers_route, workers_canonical);
+        assert_eq!(
+            workers_route["required"],
+            json!([
+                "expected_revision_id",
+                "idempotency_key",
+                "code_index_workers"
+            ])
+        );
+    }
+
+    #[test]
+    fn exact_workers_above_current_logical_cpu_limit_are_a_typed_refusal() {
+        let status = CodeIndexWorkerStatusV1 {
+            configured: CodeIndexWorkerSelectionV1::Automatic {},
+            environment_override_workers: None,
+            effective_workers: 4,
+            available_logical_cpus: 4,
+            memory_safe_workers: 6,
+            limiting_reason: CodeIndexWorkerLimitingReasonV1::AutomaticAllCores,
+        };
+
+        assert_eq!(
+            code_index_worker_admission_errors(
+                &CodeIndexWorkerSelectionV1::Exact { workers: 5 },
+                Some(&status),
+            ),
+            vec![json!({
+                "field": "code_index_workers",
+                "message": "code_index_workers exact mode must request no more than 4 available logical CPUs",
+            })]
+        );
+    }
+
+    #[test]
+    fn exact_workers_above_current_memory_safe_limit_are_a_typed_refusal() {
+        let status = CodeIndexWorkerStatusV1 {
+            configured: CodeIndexWorkerSelectionV1::Automatic {},
+            environment_override_workers: None,
+            effective_workers: 4,
+            available_logical_cpus: 6,
+            memory_safe_workers: 4,
+            limiting_reason: CodeIndexWorkerLimitingReasonV1::ResidentMemory,
+        };
+
+        assert_eq!(
+            code_index_worker_admission_errors(
+                &CodeIndexWorkerSelectionV1::Exact { workers: 5 },
+                Some(&status),
+            ),
+            vec![json!({
+                "field": "code_index_workers",
+                "message": "code_index_workers exact mode must request no more than 4 memory-safe workers",
+            })]
+        );
+    }
 }

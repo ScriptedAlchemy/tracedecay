@@ -2,6 +2,12 @@ use tracedecay_code_extraction::CppExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+// Inlined rather than `mod`: each of these files compiles twice — as a
+// module of `main.rs` and as its own test target — and a `#[path] mod`
+// would load the same file as a module four times in the `main` binary,
+// which rustc rejects. `include!` gives each target its own copy in its
+// own namespace, and resolves identically in both compilations.
+include!("support/docstrings.rs");
 #[test]
 fn test_cpp_file_node_is_root() {
     let source = r#"
@@ -469,76 +475,49 @@ using namespace std;
     assert_eq!(uses.len(), 1, "nodes: {:?}", result.nodes);
 }
 
+/// Every comment style C++ must lift into a function docstring. The table is a
+/// fixed-size array, so it can never iterate empty.
 #[test]
-fn test_cpp_docstring_block_comment() {
-    let source = r#"
+fn test_cpp_docstring_comment_styles() {
+    let cases: [(&str, &str, &[&str]); 3] = [
+        (
+            "block comment",
+            r#"
 /* Adds two integers together. */
 int add(int a, int b) {
     return a + b;
 }
-"#;
-    let extractor = CppExtractor;
-    let result = extractor.extract("math.cpp", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 1);
-    let doc = fns[0].docstring.as_ref().expect("should have docstring");
-    assert!(doc.contains("Adds two integers"), "docstring: {:?}", doc);
-}
-
-#[test]
-fn test_cpp_docstring_line_comment() {
-    let source = r#"
+"#,
+            &["Adds two integers"],
+        ),
+        (
+            "line comment",
+            r#"
 // Multiplies two numbers.
 int mul(int a, int b) {
     return a * b;
 }
-"#;
-    let extractor = CppExtractor;
-    let result = extractor.extract("math.cpp", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 1);
-    let doc = fns[0].docstring.as_ref().expect("should have docstring");
-    assert!(
-        doc.contains("Multiplies two numbers"),
-        "docstring: {:?}",
-        doc
-    );
-}
-
-#[test]
-fn test_cpp_docstring_triple_slash() {
-    let source = r#"
+"#,
+            &["Multiplies two numbers"],
+        ),
+        (
+            "triple slash",
+            r#"
 /// Divides two numbers.
 /// Returns the quotient.
 int divide(int a, int b) {
     return a / b;
 }
-"#;
-    let extractor = CppExtractor;
-    let result = extractor.extract("math.cpp", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+"#,
+            &["Divides two numbers", "Returns the quotient"],
+        ),
+    ];
 
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 1);
-    let doc = fns[0].docstring.as_ref().expect("should have docstring");
-    assert!(doc.contains("Divides two numbers"), "docstring: {:?}", doc);
-    assert!(doc.contains("Returns the quotient"), "docstring: {:?}", doc);
+    for (style, source, expected) in cases {
+        let extractor = CppExtractor;
+        let result = extractor.extract("math.cpp", source);
+        assert_node_docstring(style, &result, NodeKind::Function, None, expected);
+    }
 }
 
 #[test]

@@ -1,0 +1,920 @@
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use tracedecay_domain::{ObservationScopeV1, ProjectId};
+
+use crate::admission::HostAdmission;
+use crate::observation::ObservationCancellation;
+use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::source::{
+    HostProviderCoverage, TranscriptDiscoveryBounds, persist_codex_history_frontier,
+    persist_host_provider_coverage, read_codex_history_frontier, read_host_provider_coverage,
+    run_blocking_transcript_section,
+};
+use crate::runtime::{
+    SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
+    hermes, kimi, kiro, opencode, vibe,
+};
+
+use super::failure::{
+    ProviderRunOutcome, TranscriptCatchUpFailure, cancelled_claude_provider_outcome,
+    cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
+    warn_transcript_catch_up_failure,
+};
+
+pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
+    SessionProvider::Codex,
+    SessionProvider::Kiro,
+    SessionProvider::Kimi,
+    SessionProvider::OpenCode,
+    SessionProvider::Cline,
+    SessionProvider::RooCode,
+    SessionProvider::Kilo,
+    SessionProvider::Claude,
+    SessionProvider::Cursor,
+    SessionProvider::Hermes,
+    SessionProvider::Vibe,
+];
+
+const MAX_CODEX_SOURCE_FAILURES_PER_PASS: usize = 8;
+
+fn cursor_composer_run_outcome(
+    composer: &cursor_composer::CursorComposerSweepOutcome,
+    error: Option<&crate::runtime::source::TranscriptIngestError>,
+) -> ProviderRunOutcome {
+    let mut outcome = ProviderRunOutcome::bounded(
+        TranscriptIngestStats {
+            sessions_upserted: composer.sessions_upserted,
+            messages_upserted: composer.messages_upserted,
+        },
+        composer.bytes_consumed,
+        composer.deferred_by_byte_cap,
+    );
+    if let Some(error) = error.filter(|error| !error.is_cancelled()) {
+        outcome.add_failure(warn_transcript_catch_up_failure(
+            "cursor",
+            "observation",
+            error,
+            "project Cursor composer observation catch-up failed",
+        ));
+    }
+    outcome
+}
+
+fn merge_cursor_sweep_outcome(
+    outcome: &mut ProviderRunOutcome,
+    session_ids: &mut BTreeSet<String>,
+    sweep: cursor::CursorSweepIngestOutcome,
+    remaining: u64,
+) {
+    session_ids.extend(sweep.session_ids);
+    outcome.stats.sessions_upserted = u64::try_from(session_ids.len()).unwrap_or(u64::MAX);
+    outcome.stats.messages_upserted = outcome
+        .stats
+        .messages_upserted
+        .saturating_add(sweep.stats.messages_upserted);
+    outcome.bytes_consumed = outcome
+        .bytes_consumed
+        .saturating_add(sweep.stats.bytes_consumed);
+    outcome.add_deferred_units(u64::from(
+        sweep.stats.source_deferred || sweep.stats.bytes_consumed > remaining,
+    ));
+}
+
+fn claude_provider_run_outcome(
+    stats: &claude_observation::ClaudeObservationIngestStats,
+    error: Option<&claude_observation::ClaudeObservationIngestError>,
+    max_new_bytes: u64,
+) -> ProviderRunOutcome {
+    let mut outcome =
+        ProviderRunOutcome::bounded(stats.transcript, stats.source_bytes_scanned, false);
+    outcome.add_deferred_units(
+        stats
+            .deferred_sources
+            .saturating_add(u64::from(stats.source_bytes_scanned > max_new_bytes)),
+    );
+    if let Some(error) = error.filter(|error| !error.is_typed_cancellation()) {
+        let failure = claude_catch_up_failure("observation", error);
+        tracing::warn!(
+            reason_code = failure.reason_code,
+            retryable = failure.retryable,
+            "project Claude observation catch-up failed"
+        );
+        outcome.add_failure(failure);
+    }
+    outcome
+}
+
+fn codex_source_failure_saturates_pass(failure_count: usize, retryable: bool) -> bool {
+    retryable || failure_count >= MAX_CODEX_SOURCE_FAILURES_PER_PASS
+}
+
+pub(super) struct ProjectProviderRun<'a> {
+    pub(super) project_root: &'a Path,
+    pub(super) project_id: &'a ProjectId,
+    pub(super) facade: &'a dyn HostAdmission,
+    pub(super) scope: &'a ObservationScopeV1,
+    pub(super) candidate: SessionProvider,
+    pub(super) max_new_bytes: u64,
+    pub(super) cancellation: &'a ObservationCancellation,
+    pub(super) codex_discovery: Option<(&'a codex::CodexDiscoveryHub, &'a str)>,
+}
+
+pub(super) struct ProjectProviderRunResult {
+    pub(super) outcome: ProviderRunOutcome,
+    pub(super) claude_projected_session_ids: BTreeSet<String>,
+}
+
+impl ProjectProviderRunResult {
+    fn provider(outcome: ProviderRunOutcome) -> Self {
+        Self {
+            outcome,
+            claude_projected_session_ids: BTreeSet::new(),
+        }
+    }
+
+    fn claude(outcome: ProviderRunOutcome, claude_projected_session_ids: BTreeSet<String>) -> Self {
+        Self {
+            outcome,
+            claude_projected_session_ids,
+        }
+    }
+}
+
+impl<'a> ProjectProviderRun<'a> {
+    /// Provider-run chokepoint: boxes the whole per-provider ingest future so
+    /// the project catch-up loop inherits a bounded debug poll frame and no
+    /// longer pins each `run()` at the call site.
+    pub(super) fn run(self) -> Pin<Box<dyn Future<Output = ProjectProviderRunResult> + Send + 'a>> {
+        Box::pin(async move {
+            if self.cancellation.is_cancelled() {
+                return ProjectProviderRunResult::provider(ProviderRunOutcome::skipped());
+            }
+            match self.candidate {
+                SessionProvider::Codex => {
+                    ProjectProviderRunResult::provider(self.run_codex().await)
+                }
+                SessionProvider::Kiro => ProjectProviderRunResult::provider(self.run_kiro().await),
+                SessionProvider::Kimi => ProjectProviderRunResult::provider(self.run_kimi().await),
+                SessionProvider::OpenCode => {
+                    ProjectProviderRunResult::provider(self.run_opencode().await)
+                }
+                SessionProvider::Cline | SessionProvider::RooCode | SessionProvider::Kilo => {
+                    ProjectProviderRunResult::provider(self.run_cline_like().await)
+                }
+                SessionProvider::Claude => self.run_claude().await,
+                SessionProvider::Cursor => {
+                    ProjectProviderRunResult::provider(self.run_cursor().await)
+                }
+                SessionProvider::Hermes => {
+                    ProjectProviderRunResult::provider(self.run_hermes().await)
+                }
+                SessionProvider::Vibe => ProjectProviderRunResult::provider(self.run_vibe().await),
+            }
+        })
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.codex", future = true)]
+    async fn run_codex(self) -> ProviderRunOutcome {
+        let Some(source) = codex::CodexSource::new() else {
+            return ProviderRunOutcome::skipped();
+        };
+        let stored = match read_codex_history_frontier(self.facade, self.scope).await {
+            Ok(frontier) => frontier,
+            Err(error) => {
+                return ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "codex",
+                        "frontier",
+                        &error,
+                        "project Codex discovery frontier read failed",
+                    ),
+                    0,
+                );
+            }
+        };
+        let stored_coverage =
+            match read_host_provider_coverage(self.facade, self.scope, "codex").await {
+                Ok(coverage) => coverage,
+                Err(error) => {
+                    return ProviderRunOutcome::failed(
+                        warn_transcript_catch_up_failure(
+                            "codex",
+                            "coverage",
+                            &error,
+                            "project Codex coverage read failed",
+                        ),
+                        0,
+                    );
+                }
+            };
+        let frontier = stored.for_coverage(matches!(
+            stored_coverage,
+            Some(HostProviderCoverage::Complete)
+        ));
+        let discovered = match self.codex_discovery {
+            Some((hub, consumer)) => match hub
+                .discover(
+                    consumer,
+                    &source,
+                    TranscriptDiscoveryBounds::default_walk(),
+                    frontier,
+                )
+                .await
+            {
+                Ok(codex::CodexDiscoveryDelivery::Ready(pass)) => Ok(pass),
+                Ok(codex::CodexDiscoveryDelivery::Waiting) => {
+                    return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, true);
+                }
+                Err(error) => Err(error),
+            },
+            None => run_blocking_transcript_section(|| {
+                source
+                    .discover_transcript_paths_with_frontier(
+                        TranscriptDiscoveryBounds::default_walk(),
+                        frontier,
+                    )
+                    .map(Arc::new)
+            }),
+        };
+        let pass = match discovered {
+            Ok(pass) => pass,
+            Err(error) => {
+                return ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "codex",
+                        "discovery",
+                        &error,
+                        "project Codex transcript discovery failed",
+                    ),
+                    0,
+                );
+            }
+        };
+        let next_frontier = pass.next_frontier;
+        let discovery = &pass.report;
+        let mut remaining = self.max_new_bytes;
+        let mut deferred = discovery.is_truncated();
+        let mut frontier_committable = true;
+        let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        for path in &discovery.paths {
+            if remaining == 0 {
+                deferred = true;
+                frontier_committable = false;
+                break;
+            }
+            if self.cancellation.is_cancelled() {
+                deferred = true;
+                frontier_committable = false;
+                break;
+            }
+            match codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+                path,
+                self.project_root,
+                self.project_id.clone(),
+                self.facade,
+                Some(remaining),
+                self.cancellation,
+            )
+            .await
+            {
+                Ok(progress) => {
+                    deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
+                    frontier_committable &=
+                        !progress.source_deferred && progress.bytes_consumed <= remaining;
+                    remaining = remaining.saturating_sub(progress.bytes_consumed);
+                }
+                Err(error) => {
+                    if let Some(cancelled) = cancelled_provider_outcome(&error)
+                    {
+                        return cancelled;
+                    }
+                    let failure = warn_transcript_catch_up_failure(
+                        "codex",
+                        "observation",
+                        &error,
+                        "project Codex observation catch-up failed",
+                    );
+                    let stop = codex_source_failure_saturates_pass(
+                        outcome.failures.len().saturating_add(1),
+                        failure.retryable,
+                    );
+                    outcome.add_failure(failure);
+                    frontier_committable = false;
+                    if stop {
+                        deferred = true;
+                        break;
+                    }
+                }
+            }
+        }
+        outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
+        outcome.add_deferred_units(u64::from(deferred));
+        let mut frontier_persisted = frontier_committable;
+        if frontier_committable
+            && next_frontier != stored
+            && let Err(error) =
+                persist_codex_history_frontier(self.facade, self.scope, stored, next_frontier).await
+        {
+            frontier_persisted = false;
+            outcome.add_deferred_units(1);
+            outcome.add_failure(warn_transcript_catch_up_failure(
+                "codex",
+                "frontier",
+                &error,
+                "project Codex history frontier persistence failed",
+            ));
+        }
+        let coverage = if deferred || !frontier_persisted {
+            HostProviderCoverage::Partial
+        } else {
+            HostProviderCoverage::Complete
+        };
+        if stored_coverage != Some(coverage)
+            && let Err(error) = persist_host_provider_coverage(
+                self.facade,
+                self.scope,
+                "codex",
+                coverage,
+                u64::from(coverage != HostProviderCoverage::Complete),
+            )
+            .await
+        {
+            outcome.add_failure(warn_transcript_catch_up_failure(
+                "codex",
+                "coverage",
+                &error,
+                "project Codex coverage persistence failed",
+            ));
+        }
+        if frontier_committable
+            && frontier_persisted
+            && let Some((hub, consumer)) = self.codex_discovery
+        {
+            hub.acknowledge(consumer);
+        }
+        crate::runtime::pipeline_metrics::record_historical_ingest(
+            coverage == HostProviderCoverage::Complete,
+        );
+        outcome
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.kiro", future = true)]
+    async fn run_kiro(self) -> ProviderRunOutcome {
+        let Some(source) = kiro::KiroSource::new() else {
+            return ProviderRunOutcome::skipped();
+        };
+        match kiro::capture_kiro_snapshot_observations(
+            self.facade,
+            &source,
+            self.project_root,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                TranscriptIngestStats::default(),
+                outcome.bytes_consumed,
+                outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
+            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "kiro",
+                        "observation",
+                        &error,
+                        "project Kiro observation catch-up failed",
+                    ),
+                    0,
+                )
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.kimi", future = true)]
+    async fn run_kimi(self) -> ProviderRunOutcome {
+        let Some(source) = kimi::KimiSource::new() else {
+            return ProviderRunOutcome::skipped();
+        };
+        match kimi::capture_kimi_observations(
+            self.facade,
+            &source,
+            self.project_root,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let mut run = ProviderRunOutcome::bounded(
+                    TranscriptIngestStats::default(),
+                    outcome.bytes_consumed,
+                    outcome.deferred,
+                );
+                if outcome.discovery_failures > 0 {
+                    run.add_failure(TranscriptCatchUpFailure::source_discovery_partial("kimi"));
+                }
+                run
+            }
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                    return cancelled;
+                }
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "kimi",
+                        "observation",
+                        &error,
+                        "project Kimi observation catch-up failed",
+                    ),
+                    0,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    self.scope,
+                    "kimi",
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "kimi",
+                        "coverage",
+                        &coverage_error,
+                        "project Kimi coverage persistence failed",
+                    ));
+                }
+                run
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.opencode", future = true)]
+    async fn run_opencode(self) -> ProviderRunOutcome {
+        let Some(source) = opencode::OpenCodeSource::new_for_project(self.project_root) else {
+            return ProviderRunOutcome::skipped();
+        };
+        match opencode::capture_opencode_observations(
+            self.facade,
+            &source,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let mut run = ProviderRunOutcome::bounded(
+                    outcome.stats,
+                    outcome.bytes_consumed,
+                    outcome.deferred_by_byte_cap
+                        || outcome.scan_cancelled
+                        || outcome.scan_input_bound_reached,
+                );
+                if outcome.scan_non_durable_units > 0 || outcome.scan_unavailable_units > 0 {
+                    run.add_failure(TranscriptCatchUpFailure::source_scan_partial(
+                        "opencode",
+                        outcome.scan_unavailable_units > 0,
+                    ));
+                }
+                run
+            }
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                    return cancelled;
+                }
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "opencode",
+                        "observation",
+                        &error,
+                        "project OpenCode observation catch-up failed",
+                    ),
+                    0,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    self.scope,
+                    "opencode",
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "opencode",
+                        "coverage",
+                        &coverage_error,
+                        "project OpenCode coverage persistence failed",
+                    ));
+                }
+                run
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.cline_like", future = true)]
+    async fn run_cline_like(self) -> ProviderRunOutcome {
+        let source = match self.candidate {
+            SessionProvider::Cline => cline_like::ClineLikeSource::cline(),
+            SessionProvider::RooCode => cline_like::ClineLikeSource::roo_code(),
+            SessionProvider::Kilo => cline_like::ClineLikeSource::kilo(),
+            _ => None,
+        };
+        let Some(source) = source else {
+            return ProviderRunOutcome::skipped();
+        };
+        match cline_like::capture_cline_like_snapshot_observations(
+            self.facade,
+            &source,
+            self.project_root,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                TranscriptIngestStats::default(),
+                outcome.bytes_consumed,
+                outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
+            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                    return cancelled;
+                }
+                let failure =
+                    classify_transcript_ingest_failure(self.candidate.id(), "observation", &error);
+                tracing::warn!(
+                    provider = self.candidate.id(),
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "project snapshot observation catch-up failed"
+                );
+                ProviderRunOutcome::failed(failure, 0)
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.vibe", future = true)]
+    async fn run_vibe(self) -> ProviderRunOutcome {
+        let Some(source) = vibe::VibeSource::new() else {
+            return ProviderRunOutcome::skipped();
+        };
+        match vibe::capture_vibe_observations(
+            self.facade,
+            &source,
+            self.project_root,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                TranscriptIngestStats::default(),
+                outcome.bytes_consumed,
+                outcome.deferred || outcome.bytes_consumed > self.max_new_bytes,
+            ),
+            Err(error) => {
+                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                    return cancelled;
+                }
+                ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "vibe",
+                        "observation",
+                        &error,
+                        "project Vibe observation catch-up failed",
+                    ),
+                    0,
+                )
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.claude", future = true)]
+    async fn run_claude(self) -> ProjectProviderRunResult {
+        match ingest_project_claude_observations(
+            self.project_root,
+            self.project_id.clone(),
+            self.facade,
+            self.max_new_bytes,
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(stats) => {
+                let mut outcome = claude_provider_run_outcome(&stats, None, self.max_new_bytes);
+                if let Err(error) = persist_host_provider_coverage(
+                    self.facade,
+                    self.scope,
+                    "claude",
+                    if outcome.deferred_units == 0 {
+                        HostProviderCoverage::Complete
+                    } else {
+                        HostProviderCoverage::Partial
+                    },
+                    outcome.deferred_units,
+                )
+                .await
+                {
+                    outcome.add_failure(warn_transcript_catch_up_failure(
+                        "claude",
+                        "coverage",
+                        &error,
+                        "project Claude coverage persistence failed",
+                    ));
+                }
+                ProjectProviderRunResult::claude(outcome, stats.projected_session_ids().clone())
+            }
+            Err(error) => {
+                if let Some(stats) = error.accumulated_stats() {
+                    return ProjectProviderRunResult::claude(
+                        claude_provider_run_outcome(stats, Some(&error), self.max_new_bytes),
+                        stats.projected_session_ids().clone(),
+                    );
+                }
+                if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
+                    return ProjectProviderRunResult::provider(cancelled);
+                }
+                let failure = claude_catch_up_failure("observation", &error);
+                tracing::warn!(
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "project Claude observation catch-up failed"
+                );
+                ProjectProviderRunResult::provider(ProviderRunOutcome::failed(failure, 0))
+            }
+        }
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.cursor", future = true)]
+    async fn run_cursor(self) -> ProviderRunOutcome {
+        let (composer, composer_error) =
+            if let Some(source) = cursor_composer::CursorComposerSource::new() {
+                match source
+                    .ingest_capped_with_cancellation(
+                        self.facade,
+                        self.project_root,
+                        self.project_id.clone(),
+                        cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
+                        Some(self.max_new_bytes),
+                        self.cancellation,
+                    )
+                    .await
+                {
+                    Ok(outcome) => (outcome, None),
+                    Err(failure) => (failure.outcome, Some(failure.error)),
+                }
+            } else {
+                (cursor_composer::CursorComposerSweepOutcome::default(), None)
+            };
+        let mut outcome = cursor_composer_run_outcome(&composer, composer_error.as_ref());
+        if composer_error.is_some() {
+            return outcome;
+        }
+        if self.cancellation.is_cancelled() {
+            return outcome;
+        }
+        let mut session_ids = composer.projected_session_ids();
+        let jsonl_skip_session_ids = composer.jsonl_skip_session_ids();
+        let remaining = self.max_new_bytes.saturating_sub(composer.bytes_consumed);
+        match cursor::try_ingest_cursor_project_sweep_capped_with_session_ids(
+            self.project_root,
+            self.project_id.clone(),
+            self.facade,
+            Some(remaining),
+            jsonl_skip_session_ids,
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(sweep) => {
+                merge_cursor_sweep_outcome(&mut outcome, &mut session_ids, sweep, remaining);
+            }
+            Err(error) => {
+                if error.is_cancelled() {
+                    return outcome;
+                }
+                outcome.add_failure(warn_transcript_catch_up_failure(
+                    "cursor",
+                    "observation",
+                    &error,
+                    "project Cursor observation catch-up failed",
+                ));
+            }
+        }
+        if let Err(error) = persist_host_provider_coverage(
+            self.facade,
+            self.scope,
+            "cursor",
+            if outcome.deferred_units == 0 {
+                HostProviderCoverage::Complete
+            } else {
+                HostProviderCoverage::Partial
+            },
+            outcome.deferred_units,
+        )
+        .await
+        {
+            outcome.add_failure(warn_transcript_catch_up_failure(
+                "cursor",
+                "coverage",
+                &error,
+                "project Cursor coverage persistence failed",
+            ));
+        }
+        outcome
+    }
+
+    #[hotpath::measure(label = "sessions.ingest.project.hermes", future = true)]
+    async fn run_hermes(self) -> ProviderRunOutcome {
+        let Some(outcome) = hermes::ingest_for_project_capped_with_admission_and_cancellation(
+            self.project_root,
+            self.project_id.clone(),
+            self.facade,
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        else {
+            return ProviderRunOutcome::skipped();
+        };
+        ProviderRunOutcome::bounded(
+            outcome.stats,
+            outcome.bytes_consumed,
+            outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
+        )
+    }
+}
+
+async fn ingest_project_claude_observations(
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &dyn HostAdmission,
+    max_new_bytes: u64,
+    cancellation: &ObservationCancellation,
+) -> std::result::Result<
+    claude_observation::ClaudeObservationIngestStats,
+    claude_observation::ClaudeObservationIngestError,
+> {
+    let Some(source) = claude::ClaudeSource::new() else {
+        return Ok(claude_observation::ClaudeObservationIngestStats::default());
+    };
+    claude_observation::ingest_source_with_observations_with_admission(
+        &source,
+        project_root,
+        ObservationScopeV1::Project { project_id },
+        admission,
+        Some(max_new_bytes),
+        cancellation.clone(),
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::runtime::SessionProvider;
+    use crate::runtime::claude_observation::{
+        ClaudeObservationIngestError, ClaudeObservationIngestStats,
+    };
+    use crate::runtime::cursor::{CursorSweepIngestOutcome, CursorTranscriptIngestStats};
+    use crate::runtime::cursor_composer::CursorComposerSweepOutcome;
+    use crate::runtime::shared::TranscriptIngestStats;
+    use crate::runtime::source::TranscriptIngestError;
+
+    use super::{
+        MAX_CODEX_SOURCE_FAILURES_PER_PASS, PROJECT_CATCH_UP_PROVIDERS, ProviderRunOutcome,
+        claude_provider_run_outcome, codex_source_failure_saturates_pass,
+        cursor_composer_run_outcome, merge_cursor_sweep_outcome,
+    };
+
+    #[test]
+    fn project_catch_up_schedules_every_final_host() {
+        for provider in [
+            SessionProvider::Claude,
+            SessionProvider::Codex,
+            SessionProvider::Cursor,
+            SessionProvider::Kimi,
+            SessionProvider::OpenCode,
+        ] {
+            assert!(PROJECT_CATCH_UP_PROVIDERS.contains(&provider));
+        }
+    }
+
+    #[test]
+    fn codex_source_failures_bound_each_provider_pass() {
+        assert!(!codex_source_failure_saturates_pass(
+            MAX_CODEX_SOURCE_FAILURES_PER_PASS - 1,
+            false,
+        ));
+        assert!(codex_source_failure_saturates_pass(
+            MAX_CODEX_SOURCE_FAILURES_PER_PASS,
+            false,
+        ));
+        assert!(codex_source_failure_saturates_pass(1, true));
+    }
+
+    #[test]
+    fn cancelled_composer_run_keeps_committed_project_stats() {
+        let mut composer = CursorComposerSweepOutcome::default();
+        composer.sessions_upserted = 1;
+        composer.messages_upserted = 257;
+        composer.bytes_consumed = 42;
+        composer.deferred_by_byte_cap = true;
+        let error = TranscriptIngestError::Cancelled { provider: "cursor" };
+
+        let outcome = cursor_composer_run_outcome(&composer, Some(&error));
+
+        assert_eq!(outcome.stats.sessions_upserted, 1);
+        assert_eq!(outcome.stats.messages_upserted, 257);
+        assert_eq!(outcome.bytes_consumed, 42);
+        assert_eq!(outcome.deferred_units, 1);
+        assert!(outcome.failures.is_empty());
+    }
+
+    #[test]
+    fn failed_composer_run_keeps_committed_project_stats_and_failure() {
+        let mut composer = CursorComposerSweepOutcome::default();
+        composer.sessions_upserted = 1;
+        composer.messages_upserted = 256;
+        let error = TranscriptIngestError::InvalidFrameState { provider: "cursor" };
+
+        let outcome = cursor_composer_run_outcome(&composer, Some(&error));
+
+        assert_eq!(outcome.stats.sessions_upserted, 1);
+        assert_eq!(outcome.stats.messages_upserted, 256);
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(!outcome.succeeded());
+    }
+
+    #[test]
+    fn project_cursor_run_unions_cross_source_session_identity() {
+        let mut outcome = ProviderRunOutcome::bounded(
+            TranscriptIngestStats {
+                sessions_upserted: 1,
+                messages_upserted: 2,
+            },
+            10,
+            false,
+        );
+        let mut session_ids = BTreeSet::from(["shared-session".to_string()]);
+        let sweep = CursorSweepIngestOutcome {
+            stats: CursorTranscriptIngestStats {
+                sessions_upserted: 1,
+                messages_upserted: 3,
+                bytes_consumed: 4,
+                source_deferred: true,
+            },
+            session_ids: BTreeSet::from(["shared-session".to_string()]),
+        };
+
+        merge_cursor_sweep_outcome(&mut outcome, &mut session_ids, sweep, 10);
+
+        assert_eq!(outcome.stats.sessions_upserted, 1);
+        assert_eq!(outcome.stats.messages_upserted, 5);
+        assert_eq!(outcome.bytes_consumed, 14);
+        assert_eq!(outcome.deferred_units, 1);
+    }
+
+    #[test]
+    fn cancelled_claude_projection_termination_keeps_committed_project_stats() {
+        let mut stats = ClaudeObservationIngestStats::default();
+        stats.transcript = TranscriptIngestStats {
+            sessions_upserted: 1,
+            messages_upserted: 256,
+        };
+        stats.observations_committed = 256;
+        stats.source_bytes_scanned = 42;
+        let error = ClaudeObservationIngestError::Terminated {
+            stats: Box::new(stats),
+            error: Box::new(ClaudeObservationIngestError::Transcript(
+                TranscriptIngestError::Cancelled { provider: "claude" },
+            )),
+        };
+
+        let outcome = claude_provider_run_outcome(
+            error.accumulated_stats().expect("projection stats"),
+            Some(&error),
+            64,
+        );
+
+        assert_eq!(outcome.stats.sessions_upserted, 1);
+        assert_eq!(outcome.stats.messages_upserted, 256);
+        assert_eq!(outcome.bytes_consumed, 42);
+        assert!(outcome.failures.is_empty());
+    }
+}

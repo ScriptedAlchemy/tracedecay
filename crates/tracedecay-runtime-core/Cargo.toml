@@ -2,35 +2,127 @@
 name = "tracedecay-runtime-core"
 version = "0.1.0"
 publish = false
-edition = "2024"
-description = "Low-level runtime utilities for TraceDecay"
+edition.workspace = true
+description = "TraceDecay runtime kernel: storage layout, database engine, stores, memory, git/worktree topology, and process leases"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-capture/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-store/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-capture/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-capture/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+]
+default = []
+# Forwarded from the root package. Gates daemonless fixture runtimes and the
+# in-process transport doubles used by storage-runtime tests.
+test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
+# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
+# surfaces (engine fixtures and explicit database fixture runtimes) to
+# dependent crates' test builds. Never gates production code or forwards a
+# dependency feature. Distinct from `test-transport`, which gates in-process
+# transport doubles and forwards a dependency feature.
+test-helpers = []
+
 [dependencies]
+memmap2 = "0.9"
+aho-corasick = "1.1.5"
+hotpath.workspace = true
+tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
 amari-holographic = "0.23.0"
-bincode = "1.3"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
-gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1"] }
-glob = "0.3"
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
-libsql = "0.9.30"
+percent-encoding = "2"
 regex = "1.12.3"
 reflink-copy = "0.1"
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml_ng = "0.10"
 sha2 = "0.11"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tracedecay-capture = { path = "../tracedecay-capture" }
-tracedecay-automation = { path = "../tracedecay-automation" }
-tracedecay-domain = { path = "../tracedecay-domain" }
-tracedecay-lsp = { path = "../tracedecay-lsp" }
-tree-sitter = "0.26"
+tokio-util = "0.7.19"
+toml = "1"
+tracing = "0.1"
+url = "2"
+
+[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
 
 [dev-dependencies]
+criterion = "0.5"
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+
+hex = "0.4"
+sha2 = "0.11"
 tempfile = "3"
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lite"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[[bench]]
+name = "exact_sql_writer_workload"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "git_repository_authority"
+harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(tracedecay_observation_fault_harness)",
+    "cfg(tokio_unstable)",
+    # Gates the one db::coverage test that drives a real graph query; the
+    # `GraphQueryManager` it needs lives above this kernel.
+    "cfg(tracedecay_graph_query_tests)",
+] }

@@ -1,0 +1,40 @@
+{
+  "description": "Canonical envelope for a Cursor composer bubble that co-locates Message text with todos[{id,content,status}].",
+  "version": 1,
+  "provider": "cursor",
+  "native_record_kind": "bubble",
+  "relations": {
+    "session_id": "comp-1",
+    "thread_id": "comp-1",
+    "absent": [
+      "turn_id",
+      "agent_id",
+      "parent_agent_id",
+      "parent_message_id"
+    ]
+  },
+  "evidence": {
+    "ordering_domain": "snapshot_order",
+    "range": {
+      "start": 1,
+      "end": 2
+    },
+    "native_sequence": 1
+  },
+  "fact_kinds": [
+    "message",
+    "workflow_lifecycle",
+    "workflow_lifecycle",
+    "workflow_lifecycle"
+  ],
+  "encoded_must_contain": [
+    "Working the checklist.",
+    "First todo",
+    "Second todo",
+    "completed",
+    "pending"
+  ],
+  "encoded_must_not_contain": [
+    "revision"
+  ]
+}

@@ -1,0 +1,1020 @@
+use crate::common::{EnvVarGuard, lock_global_db_env, lock_recovering_poison};
+use std::path::Path;
+use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay_agent_hosts::hooks::{
+    HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
+    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
+    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
+    codex_workspace_status_from_event, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_subagent_start,
+    evaluate_hook_decision, evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths,
+    record_codex_subagent_start,
+};
+use tracedecay_runtime_core::storage::{
+    pin_fixture_repository_identity, resolve_layout_for_current_profile,
+};
+
+fn is_blocked(json: &str) -> bool {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap();
+    v["hookSpecificOutput"]["permissionDecision"].as_str() == Some("deny")
+}
+
+fn get_block_reason(json: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap();
+    v["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn read_hook_analytics_events(root: &Path) -> Vec<serde_json::Value> {
+    let path = root.join("hook_analytics.jsonl");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn analytics_contains(events: &[serde_json::Value], event: &str, category: Option<&str>) -> bool {
+    events.iter().any(|item| {
+        item["event"].as_str() == Some(event)
+            && category.is_none_or(|category| item["category"].as_str() == Some(category))
+    })
+}
+
+fn enroll_profile_project(project_root: &Path, project_id: &str) {
+    pin_fixture_repository_identity(project_root, project_id).unwrap();
+}
+
+/// The composition root's hook runtime handle, built explicitly for each
+/// fixture. Hook and host behavior lives in `tracedecay-agent-hosts`, which
+/// reaches registered project identity and the canonical store layout only
+/// through this handle; no slot exists for a test binary to leave empty.
+fn hook_runtime() -> tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1 {
+    tracedecay::hook_runtime()
+}
+
+#[test]
+fn test_blocks_explore_agent() {
+    let input = r#"{"subagent_type": "Explore", "prompt": "find files"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_allows_non_explore_agent() {
+    let input = r#"{"subagent_type": "general-purpose", "prompt": "write a function"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(result.is_empty(), "allow should produce no output");
+}
+
+#[test]
+fn test_blocks_exploration_prompt_explore() {
+    let input = r#"{"prompt": "Explore the codebase and find all API endpoints"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_codebase_structure_prompt() {
+    let input = r#"{"prompt": "Understand the codebase structure"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_call_graph_prompt() {
+    let input = r#"{"prompt": "Show me the call graph for this function"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_who_calls_prompt() {
+    let input = r#"{"prompt": "who calls the process_data function?"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_callers_of_prompt() {
+    let input = r#"{"prompt": "find callers of handle_request"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_callees_of_prompt() {
+    let input = r#"{"prompt": "what are the callees of main?"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_symbol_lookup_prompt() {
+    let input = r#"{"prompt": "do a symbol lookup for TraceDecay"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_read_every_prompt() {
+    let input = r#"{"prompt": "read every file in src/"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_blocks_entire_codebase_prompt() {
+    let input = r#"{"prompt": "scan the entire codebase for patterns"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_allows_normal_prompt() {
+    let input = r#"{"prompt": "write a unit test for the parse function"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(result.is_empty(), "allow should produce no output");
+}
+
+#[test]
+fn test_allows_empty_input() {
+    let result = evaluate_hook_decision("");
+    assert!(result.is_empty(), "allow should produce no output");
+}
+
+#[test]
+fn test_allows_invalid_json() {
+    let result = evaluate_hook_decision("not json at all");
+    assert!(result.is_empty(), "allow should produce no output");
+}
+
+#[test]
+fn test_allows_no_prompt_no_subagent() {
+    let input = r#"{"foo": "bar"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(result.is_empty(), "allow should produce no output");
+}
+
+#[test]
+fn test_case_insensitive_blocking() {
+    let input = r#"{"prompt": "EXPLORE the Codebase Architecture"}"#;
+    let result = evaluate_hook_decision(input);
+    assert!(is_blocked(&result));
+}
+
+#[test]
+fn test_block_response_has_reason() {
+    let input = r#"{"subagent_type": "Explore"}"#;
+    let result = evaluate_hook_decision(input);
+    let reason = get_block_reason(&result);
+    assert!(reason.contains("tracedecay MCP tools"));
+    assert!(reason.contains("tracedecay hint:"));
+}
+
+#[test]
+fn test_block_response_uses_correct_hook_schema() {
+    let input = r#"{"subagent_type": "Explore"}"#;
+    let result = evaluate_hook_decision(input);
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(
+        v["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some("PreToolUse")
+    );
+    assert_eq!(
+        v["hookSpecificOutput"]["permissionDecision"].as_str(),
+        Some("deny")
+    );
+    assert!(
+        v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .is_some()
+    );
+}
+
+#[test]
+fn test_kiro_blocks_delegate_code_research_task() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "tool_name": "delegate",
+        "tool_input": {
+            "task": "Explore the codebase architecture and call graph"
+        }
+    }"#;
+    let reason = evaluate_kiro_pre_tool_use(input).unwrap();
+    assert!(reason.contains("tracedecay MCP tools"));
+    assert!(reason.contains("tracedecay hint:"));
+}
+
+#[test]
+fn test_kiro_blocks_subagent_research_prompt() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "tool_name": "subagent",
+        "tool_input": {
+            "prompt": "who calls the process_data function?"
+        }
+    }"#;
+    assert!(evaluate_kiro_pre_tool_use(input).is_some());
+}
+
+#[test]
+fn test_kiro_allows_delegate_execution_task() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "tool_name": "delegate",
+        "tool_input": {
+            "task": "Run the full test suite and report failures"
+        }
+    }"#;
+    assert!(evaluate_kiro_pre_tool_use(input).is_none());
+}
+
+#[test]
+fn test_kiro_allows_non_delegation_tool() {
+    let input = r#"{
+        "hook_event_name": "preToolUse",
+        "tool_name": "read",
+        "tool_input": {
+            "prompt": "Explore the entire codebase"
+        }
+    }"#;
+    assert!(evaluate_kiro_pre_tool_use(input).is_none());
+}
+
+#[test]
+fn test_kiro_allows_invalid_json() {
+    assert!(evaluate_kiro_pre_tool_use("not json").is_none());
+}
+
+#[test]
+fn test_cursor_subagent_start_allows_explore_research_task() {
+    let input = r#"{
+        "hook_event_name": "subagentStart",
+        "subagent_type": "explore",
+        "task": "Explore the codebase architecture and call graph"
+    }"#;
+
+    assert!(evaluate_cursor_subagent_start(input).is_none());
+}
+
+#[test]
+fn test_cursor_subagent_start_allows_execution_task() {
+    let input = r#"{
+        "hook_event_name": "subagentStart",
+        "subagent_type": "generalPurpose",
+        "task": "Run the test suite and summarize failures"
+    }"#;
+
+    assert!(evaluate_cursor_subagent_start(input).is_none());
+}
+
+#[test]
+fn test_cursor_subagent_start_allows_tracedecay_plugin_agents() {
+    // The plugin's own agents are tracedecay-first by construction and must
+    // never be denied, even with a research-looking task.
+    for subagent_type in [
+        "code-explorer",
+        "code-health-auditor",
+        "session-historian",
+        "tracedecay:code-explorer",
+        "CodeExplorer",
+    ] {
+        let input = format!(
+            r#"{{
+                "hook_event_name": "subagentStart",
+                "subagent_type": "{subagent_type}",
+                "task": "Explore the codebase architecture and call graph"
+            }}"#
+        );
+        assert!(
+            evaluate_cursor_subagent_start(&input).is_none(),
+            "{subagent_type} must be allow-listed"
+        );
+    }
+}
+
+#[test]
+fn test_cursor_project_root_uses_workspace_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "beforeSubmitPrompt",
+            "workspace_roots": [{}]
+        }}"#,
+        serde_json::to_string(dir.path().to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(
+        cursor_project_root_from_event(&input),
+        Some(dir.path().to_path_buf())
+    );
+}
+
+#[test]
+fn test_cursor_project_root_uses_file_path_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    let file = src.join("lib.rs");
+    let input = format!(
+        r#"{{
+            "hook_event_name": "afterFileEdit",
+            "file_path": {}
+        }}"#,
+        serde_json::to_string(file.to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(
+        cursor_project_root_from_event(&input),
+        Some(dir.path().to_path_buf())
+    );
+}
+
+#[test]
+fn test_cursor_project_root_prefers_cwd_in_multi_root_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_a = dir.path().join("root-a");
+    let root_b = dir.path().join("root-b");
+    std::fs::create_dir_all(root_a.join(".tracedecay")).unwrap();
+    std::fs::create_dir_all(root_b.join(".tracedecay")).unwrap();
+    std::fs::write(root_a.join(".tracedecay/tracedecay.db"), "").unwrap();
+    std::fs::write(root_b.join(".tracedecay/tracedecay.db"), "").unwrap();
+    let cwd_b = root_b.join("src");
+    std::fs::create_dir_all(&cwd_b).unwrap();
+
+    let input = format!(
+        r#"{{
+            "hook_event_name": "beforeSubmitPrompt",
+            "workspace_roots": [{}, {}],
+            "cwd": {},
+            "transcript_path": {}
+        }}"#,
+        serde_json::to_string(root_a.to_str().unwrap()).unwrap(),
+        serde_json::to_string(root_b.to_str().unwrap()).unwrap(),
+        serde_json::to_string(cwd_b.to_str().unwrap()).unwrap(),
+        serde_json::to_string(root_b.join("agent-transcripts/s1.jsonl").to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(cursor_project_root_from_event(&input), Some(root_b));
+}
+
+#[test]
+fn test_kiro_post_tool_use_rel_paths_targets_written_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "fs_write",
+            "cwd": {},
+            "tool_input": {{
+                "path": "src/lib.rs"
+            }}
+        }}"#,
+        serde_json::to_string(root.to_str().unwrap()).unwrap()
+    );
+
+    let rels = kiro_post_tool_use_rel_paths(&input, &root);
+
+    assert_eq!(rels, ["src/lib.rs"]);
+}
+
+#[test]
+fn test_kiro_post_tool_use_rel_paths_skips_paths_outside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "postToolUse",
+            "tool_name": "fs_write",
+            "cwd": {},
+            "tool_input": {{
+                "path": "../outside.rs"
+            }}
+        }}"#,
+        serde_json::to_string(root.to_str().unwrap()).unwrap()
+    );
+
+    assert!(kiro_post_tool_use_rel_paths(&input, &root).is_empty());
+}
+
+#[test]
+fn test_build_cursor_session_context_uninitialized_suggests_init() {
+    let context = build_cursor_session_context(false, None, None);
+    assert!(context.contains("tracedecay init"));
+    assert!(context.contains("tracedecay MCP tools"));
+    assert!(
+        !context.contains("Workflow skills:"),
+        "uninitialized workspaces should not advertise skills: {context}"
+    );
+}
+
+#[test]
+fn test_build_cursor_session_context_initialized_includes_freshness() {
+    let context = build_cursor_session_context(true, Some("last indexed 2m ago"), None);
+    assert!(
+        context.len() <= tracedecay_agent_hosts::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
+        "cursor initialized context should stay within its {} char budget, got {} chars: {context}",
+        tracedecay_agent_hosts::hooks::CURSOR_SESSION_CONTEXT_BUDGET,
+        context.len()
+    );
+    assert!(context.contains("last indexed 2m ago"));
+    assert!(
+        !context.contains("tracedecay init"),
+        "initialized workspaces should not be told to run init: {context}"
+    );
+    assert!(context.contains("TraceDecay project hint:"));
+    assert!(context.contains("ToolSearch"));
+    assert!(context.contains("tracedecay_find_exact_symbol"));
+    assert!(context.contains("tracedecay_test_map"));
+}
+
+#[test]
+fn test_build_codex_session_context_carries_compact_steering() {
+    let context = tracedecay_agent_hosts::hooks::build_codex_session_context(
+        true,
+        Some("last indexed 2m ago"),
+    );
+    assert!(
+        context.len() <= tracedecay_agent_hosts::hooks::CODEX_SESSION_CONTEXT_BUDGET,
+        "codex initialized context should stay within its {} char budget, got {} chars: {context}",
+        tracedecay_agent_hosts::hooks::CODEX_SESSION_CONTEXT_BUDGET,
+        context.len()
+    );
+    assert!(context.contains("TraceDecay project hint:"));
+    assert!(context.contains("tracedecay_context"));
+    assert!(context.contains("ToolSearch"));
+    assert!(context.contains("tracedecay_find_exact_symbol"));
+    assert!(context.contains("tracedecay_test_map"));
+    assert!(context.contains("last indexed 2m ago"));
+    assert!(context.contains("tracedecay_project_search"));
+    assert!(context.contains("tracedecay_message_search"));
+    assert!(context.contains("tracedecay_fact_store"));
+    assert!(context.contains("before asking the user to repeat"));
+    let uninit = tracedecay_agent_hosts::hooks::build_codex_session_context(false, None);
+    assert!(uninit.contains("tracedecay init"));
+    assert!(uninit.contains("tracedecay_project_search"));
+    assert!(uninit.contains("tracedecay_message_search"));
+}
+
+#[test]
+fn test_build_codex_session_context_for_unindexed_project_suggests_init() {
+    let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
+        HookWorkspaceStatus::UnindexedProject,
+        None,
+    );
+
+    assert!(context.contains("tracedecay_context"));
+    assert!(context.contains("tracedecay init"));
+    assert!(context.contains("tracedecay_project_list"));
+    assert!(context.contains("tracedecay_project_search"));
+    assert!(context.contains("tracedecay_message_search"));
+}
+
+#[test]
+fn test_build_codex_session_context_for_generic_workspace_uses_session_guidance() {
+    let context = tracedecay_agent_hosts::hooks::build_codex_session_context_for_workspace(
+        HookWorkspaceStatus::Generic,
+        None,
+    );
+
+    assert!(context.contains("TraceDecay session context"));
+    assert!(context.contains("tracedecay_lcm_expand_query"));
+    assert!(context.contains("tracedecay_message_search"));
+    assert!(context.contains("tracedecay_fact_store"));
+    assert!(context.contains("before asking the user to repeat"));
+    assert!(context.contains("Do NOT store secrets or credentials"));
+    assert!(
+        !context.contains("tracedecay init"),
+        "non-project chats should not be told to initialize a code graph: {context}"
+    );
+    assert!(
+        !context.contains("tracedecay_context"),
+        "non-project chats should not get code graph steering: {context}"
+    );
+    assert!(
+        !context.contains("code-graph"),
+        "non-project chats should not mention code graph setup: {context}"
+    );
+    assert!(
+        !context.contains("repository"),
+        "non-project chats should not mention repositories: {context}"
+    );
+}
+
+#[tokio::test]
+async fn test_codex_user_prompt_submit_generic_workspace_suppresses_code_hints() {
+    let generic = tempfile::tempdir().unwrap();
+    let event = serde_json::json!({
+        "cwd": generic.path(),
+        "session_id": "codex-generic-prompt-1",
+        "prompt": "Who calls build_codex_session_context?"
+    })
+    .to_string();
+
+    let context = codex_user_prompt_submit_context_for_event(&hook_runtime(), &event).await;
+
+    // Prompt steering is turn-local: UserPromptSubmit no longer repeats the
+    // session bootstrap, so a generic workspace produces no context at all.
+    assert!(
+        context.is_empty(),
+        "generic workspaces should emit no prompt steering: {context}"
+    );
+    assert!(
+        !context.contains("tracedecay hint:"),
+        "generic workspaces should suppress prompt-derived code hints: {context}"
+    );
+    assert!(
+        !context.contains("tracedecay_context"),
+        "generic workspaces should not include code graph tools: {context}"
+    );
+    assert!(
+        !context.contains("tracedecay init"),
+        "generic workspaces should not suggest code graph initialization: {context}"
+    );
+}
+
+#[tokio::test]
+// Intentional: this test pins process-wide TraceDecay profile env while awaited
+// hook context generation resolves profile storage and records analytics.
+#[allow(clippy::await_holding_lock)]
+async fn test_codex_user_prompt_submit_records_workspace_status_and_missing_session_hint() {
+    let _lock = lock_global_db_env();
+    let project = tempfile::tempdir().unwrap();
+    let generic = tempfile::tempdir().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    let profile_root = profile.path().canonicalize().unwrap();
+    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    enroll_profile_project(&project_root, "codex_prompt_analytics");
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    std::fs::create_dir_all(&layout.data_root).unwrap();
+
+    let generic_event = serde_json::json!({
+        "cwd": generic.path(),
+        "session_id": "codex-generic-analytics",
+        "prompt": "Who calls build_codex_session_context?"
+    })
+    .to_string();
+    let generic_context =
+        codex_user_prompt_submit_context_for_event(&hook_runtime(), &generic_event).await;
+    // Turn-local steering: a generic workspace still records its workspace
+    // status but emits no prompt context.
+    assert!(
+        generic_context.is_empty(),
+        "generic workspaces should emit no prompt steering: {generic_context}"
+    );
+
+    let prompt_event = serde_json::json!({
+        "cwd": project_root,
+        "prompt": "Please explain the impact of changing parse_user"
+    })
+    .to_string();
+    let prompt_context =
+        codex_user_prompt_submit_context_for_event(&hook_runtime(), &prompt_event).await;
+    assert!(prompt_context.contains("tracedecay hint:"));
+
+    let profile_events = read_hook_analytics_events(&profile_root);
+    assert!(profile_events.iter().any(|item| {
+        item["event"].as_str() == Some("workspace_status")
+            && item["workspace_status"].as_str() == Some("generic")
+    }));
+
+    let project_events = read_hook_analytics_events(&layout.data_root);
+    assert!(project_events.iter().any(|item| {
+        item["event"].as_str() == Some("workspace_status")
+            && item["workspace_status"].as_str() == Some("initialized")
+    }));
+    assert!(analytics_contains(
+        &project_events,
+        "missing_session",
+        Some("impact")
+    ));
+}
+
+#[test]
+fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
+    let generic = tempfile::tempdir().unwrap();
+    let generic_event = serde_json::json!({ "cwd": generic.path() }).to_string();
+    assert_eq!(
+        codex_workspace_status_from_event(&generic_event),
+        HookWorkspaceStatus::Generic
+    );
+
+    let project_like = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project_like.path().join("Cargo.toml"),
+        "[package]\nname = \"x\"\n",
+    )
+    .unwrap();
+    let project_event = serde_json::json!({ "cwd": project_like.path() }).to_string();
+    assert_eq!(
+        codex_workspace_status_from_event(&project_event),
+        HookWorkspaceStatus::UnindexedProject
+    );
+
+    let git_like = tempfile::tempdir().unwrap();
+    std::fs::create_dir(git_like.path().join(".git")).unwrap();
+    let nested = git_like.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let git_event = serde_json::json!({ "cwd": nested }).to_string();
+    assert_eq!(
+        codex_workspace_status_from_event(&git_event),
+        HookWorkspaceStatus::UnindexedProject
+    );
+}
+
+#[test]
+fn test_codex_workspace_status_detects_initialized_trace_decay_project() {
+    let _lock = lock_global_db_env();
+    let project = tempfile::tempdir().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    let profile_root = profile.path().canonicalize().unwrap();
+    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    enroll_profile_project(&project_root, "codex_workspace_status_initialized");
+
+    let nested = project_root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let event = serde_json::json!({ "cwd": nested }).to_string();
+    assert_eq!(
+        codex_workspace_status_from_event(&event),
+        HookWorkspaceStatus::Initialized
+    );
+}
+
+#[test]
+fn test_build_cursor_session_context_lists_skills_and_tokens_saved() {
+    let context = build_cursor_session_context(true, None, Some(12_345));
+    assert!(context.contains("Workflow skills: tracedecay:"));
+    assert!(context.contains("discovering-tracedecay"));
+    assert!(context.contains("exploring-code"));
+    assert!(context.contains("managing-session-context"));
+    assert!(context.contains("12345"));
+
+    let without_savings = build_cursor_session_context(true, None, Some(0));
+    assert!(
+        !without_savings.contains("Tokens saved"),
+        "a zero counter should not be reported: {without_savings}"
+    );
+}
+
+#[test]
+fn test_cursor_staleness_hint_formats_relative_age() {
+    assert!(cursor_staleness_hint(0).contains("just"));
+    assert!(cursor_staleness_hint(120).contains('m'));
+    assert!(cursor_staleness_hint(7_200).contains('h'));
+}
+
+#[test]
+fn test_cursor_session_start_json_sets_context_and_env_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = cursor_session_start_json(Some(dir.path()), "hello context");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["additional_context"], "hello context");
+    assert_eq!(
+        v["env"]["TRACEDECAY_PROJECT_ROOT"].as_str(),
+        Some(dir.path().to_string_lossy().as_ref())
+    );
+}
+
+#[test]
+fn test_cursor_session_start_json_without_root_omits_env_path() {
+    let json = cursor_session_start_json(None, "ctx");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["additional_context"], "ctx");
+    assert!(v["env"].get("TRACEDECAY_PROJECT_ROOT").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Codex hook handlers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_codex_additional_context_json_uses_codex_schema() {
+    let json = codex_additional_context_json("SessionStart", "hello context");
+    assert_eq!(
+        json,
+        additional_context_json("SessionStart", "hello context"),
+        "the shipped Codex compatibility API must delegate byte-exactly to the canonical formatter"
+    );
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some("SessionStart")
+    );
+    assert_eq!(
+        v["hookSpecificOutput"]["additionalContext"].as_str(),
+        Some("hello context")
+    );
+    // Codex must not reuse the Cursor/Claude permission output shapes.
+    assert!(v.get("permission").is_none());
+    assert!(v["hookSpecificOutput"].get("permissionDecision").is_none());
+}
+
+#[test]
+fn test_codex_subagent_start_redirects_explore_research_agent() {
+    // Codex SubagentStart cannot hard-stop a subagent (`continue: false` is
+    // ignored), so the handler steers it via hookSpecificOutput.additionalContext.
+    let input = r#"{
+        "hook_event_name": "SubagentStart",
+        "agent_type": "explore",
+        "cwd": "/tmp/x"
+    }"#;
+
+    let output = evaluate_codex_subagent_start(input).expect("should redirect research subagent");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(
+        v["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some("SubagentStart")
+    );
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay MCP tools")
+    );
+    assert!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay hint:")
+    );
+    // Must use the Codex output schema, not Cursor's `permission`/`user_message`.
+    assert!(
+        v.get("permission").is_none(),
+        "Codex hook output must not use Cursor's subagentStart fields"
+    );
+}
+
+#[test]
+fn test_codex_subagent_start_allows_execution_agent() {
+    let input = r#"{
+        "hook_event_name": "SubagentStart",
+        "agent_type": "generalPurpose",
+        "prompt": "Run the test suite and summarize failures"
+    }"#;
+    assert!(evaluate_codex_subagent_start(input).is_none());
+}
+
+#[test]
+fn test_codex_subagent_start_allows_invalid_json() {
+    assert!(evaluate_codex_subagent_start("not json").is_none());
+}
+
+#[test]
+fn test_codex_subagent_start_injects_context_for_new_no_history_agent() {
+    let _lock = lock_global_db_env();
+    let profile = tempfile::tempdir().unwrap();
+    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path().to_str().unwrap());
+    let input = r#"{
+        "hook_event_name": "SubagentStart",
+        "agent_type": "generalPurpose",
+        "session_id": "codex-subagent-session-1",
+        "is_new": true,
+        "has_history": false,
+        "prompt": "Implement the fix in the relevant files"
+    }"#;
+
+    let output = evaluate_codex_subagent_start(input).expect("new subagent should get context");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let context = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+
+    assert_eq!(
+        v["hookSpecificOutput"]["hookEventName"].as_str(),
+        Some("SubagentStart")
+    );
+    assert!(context.contains("new/no-history subagent"));
+    assert!(context.contains("tracedecay_context"));
+    assert!(context.contains("tracedecay:exploring-code"));
+    assert!(context.contains("tracedecay_lcm_expand_query"));
+    assert!(context.contains("tracedecay_message_search"));
+    assert!(
+        v.get("continue").is_none(),
+        "Codex SubagentStart must stay fail-open"
+    );
+}
+
+#[test]
+fn test_codex_subagent_start_dedupes_context_per_session() {
+    let _lock = lock_global_db_env();
+    let project = tempfile::tempdir().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    let profile_root = profile.path().canonicalize().unwrap();
+    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    enroll_profile_project(&project_root, "codex_subagent_dedupe");
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    std::fs::create_dir_all(&layout.data_root).unwrap();
+    let input = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "agent_type": "generalPurpose",
+        "session_id": "codex-subagent-session-2",
+        "cwd": project_root,
+        "is_new": true,
+        "has_history": false
+    })
+    .to_string();
+
+    assert!(evaluate_codex_subagent_start(&input).is_some());
+    assert!(
+        evaluate_codex_subagent_start(&input).is_none(),
+        "repeated SubagentStart context should be suppressed per session"
+    );
+}
+
+#[test]
+fn test_codex_subagent_start_no_history_does_not_suppress_later_research_context() {
+    let _lock = lock_global_db_env();
+    let project = tempfile::tempdir().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    let profile_root = profile.path().canonicalize().unwrap();
+    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    enroll_profile_project(&project_root, "codex_subagent_research_after_no_history");
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    std::fs::create_dir_all(&layout.data_root).unwrap();
+    let no_history_input = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "agent_type": "generalPurpose",
+        "session_id": "codex-subagent-session-research-after-no-history",
+        "cwd": project_root,
+        "is_new": true,
+        "has_history": false,
+        "prompt": "Implement the requested fix"
+    })
+    .to_string();
+    let research_input = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "agent_type": "explore",
+        "session_id": "codex-subagent-session-research-after-no-history",
+        "cwd": project_root,
+        "prompt": "Explore the codebase architecture before changing files"
+    })
+    .to_string();
+
+    assert!(evaluate_codex_subagent_start(&no_history_input).is_some());
+
+    let output = evaluate_codex_subagent_start(&research_input)
+        .expect("later research/explore subagent should still get context");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let context = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(context.contains("tracedecay MCP tools"));
+    assert!(context.contains("tracedecay hint:"));
+}
+
+#[test]
+fn test_codex_subagent_start_counts_and_formats_log_line() {
+    let _lock = lock_global_db_env();
+    let project = tempfile::tempdir().unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let project_root = project.path().canonicalize().unwrap();
+    let profile_root = profile.path().canonicalize().unwrap();
+    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root.to_str().unwrap());
+    enroll_profile_project(&project_root, "codex_subagent_count");
+    let input = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "agent_type": "generalPurpose",
+        "session_id": "codex-subagent-session-3",
+        "cwd": project_root
+    })
+    .to_string();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| panic!("failed to build tokio runtime: {err}"));
+    assert_eq!(
+        runtime.block_on(record_codex_subagent_start(&hook_runtime(), &input)),
+        Some(1)
+    );
+    assert_eq!(
+        runtime.block_on(record_codex_subagent_start(&hook_runtime(), &input)),
+        Some(2)
+    );
+
+    let line = codex_subagent_start_log_line(&input, Some(2), true);
+    assert!(line.contains("Codex SubagentStart #2"));
+    assert!(line.contains("agent_type=generalPurpose"));
+    assert!(line.contains("additional_context=true"));
+
+    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
+    let events = read_hook_analytics_events(&layout.data_root);
+    assert!(events.iter().any(|item| {
+        item["event"].as_str() == Some("codex_subagent_start")
+            && item["count"].as_u64() == Some(1)
+            && item["agent_type"].as_str() == Some("generalPurpose")
+    }));
+    assert!(events.iter().any(|item| {
+        item["event"].as_str() == Some("codex_subagent_start")
+            && item["count"].as_u64() == Some(2)
+            && item["agent_type"].as_str() == Some("generalPurpose")
+    }));
+}
+
+#[test]
+fn test_codex_apply_patch_rel_paths_extracts_patched_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let command = "*** Begin Patch\n\
+        *** Update File: src/lib.rs\n\
+        @@\n-old\n+new\n\
+        *** Add File: src/new_mod.rs\n+contents\n\
+        *** Delete File: src/old_mod.rs\n\
+        *** End Patch\n";
+
+    let mut rels = codex_apply_patch_rel_paths(command, &root, &root);
+    rels.sort();
+    assert_eq!(
+        rels,
+        vec![
+            "src/lib.rs".to_string(),
+            "src/new_mod.rs".to_string(),
+            "src/old_mod.rs".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_codex_apply_patch_rel_paths_resolves_relative_to_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let cwd = root.join("crate_a");
+    std::fs::create_dir_all(&cwd).unwrap();
+    // apply_patch paths are relative to the session cwd, which may be a
+    // subdirectory of the discovered project root.
+    let command = "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch\n";
+
+    let rels = codex_apply_patch_rel_paths(command, &cwd, &root);
+    assert_eq!(rels, vec!["crate_a/src/lib.rs".to_string()]);
+}
+
+#[test]
+fn test_codex_apply_patch_rel_paths_skips_paths_outside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let command = "*** Begin Patch\n*** Update File: /etc/passwd\n*** End Patch\n";
+
+    let rels = codex_apply_patch_rel_paths(command, &root, &root);
+    assert!(
+        rels.is_empty(),
+        "absolute paths outside the project root must be ignored, got {rels:?}"
+    );
+}
+
+#[test]
+fn test_codex_project_root_uses_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
+    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    let input = format!(
+        r#"{{
+            "hook_event_name": "PostToolUse",
+            "cwd": {}
+        }}"#,
+        serde_json::to_string(dir.path().to_str().unwrap()).unwrap()
+    );
+
+    assert_eq!(
+        codex_project_root_from_event(&input),
+        Some(dir.path().to_path_buf())
+    );
+}
+
+/// Regression guard for tolerant recovery from a poisoned env lock.
+#[test]
+fn poisoned_env_lock_is_recovered_by_tolerant_acquire() {
+    use std::sync::Mutex;
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    let poisoned = std::panic::catch_unwind(|| {
+        let _guard = LOCK.lock().unwrap();
+        panic!("simulated panic while holding the env lock");
+    });
+    assert!(poisoned.is_err(), "the injected closure must have panicked");
+    assert!(
+        LOCK.is_poisoned(),
+        "a panic while holding the guard must poison the mutex"
+    );
+
+    assert!(
+        LOCK.lock().is_err(),
+        "poisoned lock must surface Err to a plain lock()/unwrap() caller"
+    );
+
+    let _recovered = lock_recovering_poison(&LOCK);
+}

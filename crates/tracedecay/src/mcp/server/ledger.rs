@@ -1,0 +1,747 @@
+//! Token-savings ledger and tool/hook analytics recording.
+
+use super::*;
+use tracedecay_global_db::RegisteredGlobalDb;
+
+/// Upper bound for [`McpServer::ledger_writes_settled`]. Savings-ledger writes
+/// are fire-and-forget `SQLite` appends that finish in well under a second on a
+/// healthy machine, so 10 s is generous headroom; the point is that the wait
+/// is *finite* — a wedged recorder task can never hang the caller (tests,
+/// shutdown drains) indefinitely as the previous unbounded loop allowed.
+const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn configuration_authority_unavailable(detail: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("configuration authority unavailable: {detail}"),
+    }
+}
+
+fn upload_enabled_from_desired_configuration(
+    desired: &tracedecay_domain::configuration::ConfigurationSnapshotV1,
+) -> Result<bool> {
+    use tracedecay_domain::configuration::{
+        ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
+    };
+
+    let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY)
+        .map_err(configuration_authority_unavailable)?;
+    match desired.effective_values.get(&key) {
+        Some(ConfigurationValueV1::Boolean(enabled)) => Ok(*enabled),
+        Some(_) => Err(configuration_authority_unavailable(
+            "desired upload setting is not boolean",
+        )),
+        None => Err(configuration_authority_unavailable(
+            "desired upload setting is missing",
+        )),
+    }
+}
+
+// Global accounting (savings ledger + worldwide-counter flushes) is enabled
+// by default; see `tracedecay_global_db::global_accounting_mode` for the env
+// override precedence.
+
+/// Where this server's savings-ledger and analytics writes land.
+///
+/// A server built without an accounting database is legitimate (a direct
+/// `McpServer::new` has no profile to account against), but it used to be
+/// *silent*: each recorder independently checked both handles and returned
+/// early, so a fixture that forgot to mount a database failed later as a
+/// missing row in an assertion far from the construction that caused it.
+/// Naming the state makes the absence observable at construction — see
+/// [`McpServer::ledger_sink_is_mounted`] — and collapses three copies of
+/// the same fallback into one resolution.
+pub(crate) enum LedgerSink {
+    Mounted(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
+    NotMounted,
+}
+
+pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
+    pub(crate) project_root: &'a Path,
+    pub(crate) session_id: Option<String>,
+    pub(crate) tool_name: &'a str,
+    pub(crate) request_id: &'a Value,
+    pub(crate) arguments: &'a Value,
+    pub(crate) duration_us: Option<u64>,
+    pub(crate) error: &'a TraceDecayError,
+    pub(crate) connection_client_name: Option<&'a str>,
+    pub(crate) connection_instance_id: Option<&'a str>,
+}
+
+impl McpServer {
+    /// Resolves the ledger sink: the dedicated accounting database when the
+    /// daemon mounted one, otherwise the registry handle it shares with, and
+    /// [`LedgerSink::NotMounted`] when this server accounts against nothing.
+    pub(crate) fn ledger_sink(&self) -> LedgerSink {
+        self.accounting_db
+            .as_ref()
+            .or(self.global_db.as_ref())
+            .map_or(LedgerSink::NotMounted, |db| LedgerSink::Mounted(db.clone()))
+    }
+
+    /// Whether any ledger write from this server can reach a database.
+    ///
+    /// Lets a caller assert its accounting wiring where it is built rather
+    /// than discovering the gap as an absent row much later.
+    pub fn ledger_sink_is_mounted(&self) -> bool {
+        matches!(self.ledger_sink(), LedgerSink::Mounted(_))
+    }
+
+    /// Reads the upload policy from the daemon-retained desired configuration
+    /// snapshot. There is deliberately no `config.toml` fallback: without the
+    /// canonical authority, the upload decision is unavailable.
+    #[hotpath::measure(label = "mcp.ledger.read_upload_policy", future = true)]
+    pub(super) async fn canonical_upload_enabled(&self) -> Result<bool> {
+        let cg = self.cg_snapshot().await;
+        let desired = cg
+            .configuration_runtime()
+            .client()
+            .current()
+            .await
+            .map_err(|error| {
+                configuration_authority_unavailable(format!(
+                    "cannot read desired upload setting: {error}"
+                ))
+            })?;
+        upload_enabled_from_desired_configuration(&desired.snapshot)
+    }
+
+    /// Estimates the raw-file token cost ("before") for the given file
+    /// paths from the cached file-token map (indexed file bytes / 4).
+    /// Pure lookup — persists nothing.
+    #[hotpath::measure(label = "mcp.ledger.estimate_raw_tokens")]
+    pub(crate) fn estimate_raw_file_tokens(&self, file_paths: &[String]) -> u64 {
+        if file_paths.is_empty() {
+            return 0;
+        }
+        // Paths arrive from indexed node rows on every tool response. A blank
+        // one is bad index data, not a broken invariant, so it is skipped
+        // rather than asserted on this shared response path.
+        let map = crate::mcp::server::requests::recover_lock(&self.file_token_map);
+        file_paths
+            .iter()
+            .filter(|path| !path.is_empty())
+            .filter_map(|path| map.get(path.as_str()))
+            .sum()
+    }
+
+    /// Fire-and-forget persistence for one accounted tool response: the
+    /// tokens-saved counters (project DB, resettable local counter, ledger
+    /// sink) plus the live monitor ring-buffer entry.
+    ///
+    /// `net_saved_tokens` must already be the *net* saving for one call
+    /// (`before.saturating_sub(after)`), not the gross raw-file estimate:
+    /// crediting the full "before" would count a full-file read whose
+    /// response contains the entire file as 100% saved.
+    ///
+    /// The in-memory counter advances synchronously so concurrent calls
+    /// account exact totals; the `SQLite` and mmap writes ride the observed
+    /// ledger-write path so the response never waits on them and tests can
+    /// still await durability via [`Self::ledger_writes_settled`]. Shutdown
+    /// persists the final counter independently.
+    #[hotpath::measure(label = "mcp.ledger.persist_token_accounting")]
+    pub(crate) fn spawn_token_accounting_persist(
+        &self,
+        monitor_project_root: &Path,
+        tool_name: &str,
+        net_saved_tokens: u64,
+        raw_file_tokens: u64,
+    ) {
+        let persist = self
+            .tokens_saved
+            .as_ref()
+            .filter(|_| net_saved_tokens != 0)
+            .map(|tokens_saved| {
+                let new_total =
+                    tokens_saved.fetch_add(net_saved_tokens, Ordering::Relaxed) + net_saved_tokens;
+                (
+                    std::sync::Arc::clone(&self.cg),
+                    self.ledger_sink(),
+                    new_total,
+                )
+            });
+        let monitor_project_root = monitor_project_root.to_path_buf();
+        let tool_name = tool_name.to_owned();
+        self.spawn_observed_ledger_write(async move {
+            if let Some((cg_lock, sink, new_total)) = persist {
+                let cg = cg_lock.read().await.clone();
+                let _ = cg.set_tokens_saved(new_total).await;
+                let _ = cg.add_local_counter(net_saved_tokens).await;
+                if let LedgerSink::Mounted(gdb) = sink
+                    && let Err(error) = gdb
+                        .try_upsert_project_tokens(cg.project_root(), new_total)
+                        .await
+                {
+                    // Background persist: the response already went out, so
+                    // the failed ledger write degrades to a named warning.
+                    tracing::warn!(error = %error, "background token-accounting persist failed");
+                }
+            }
+            // The monitor entry opens, locks, and mmaps a file; keep that
+            // off the async workers.
+            let monitor_write = tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::monitor_ring::write_entry(
+                    &monitor_project_root,
+                    "tracedecay",
+                    &tool_name,
+                    net_saved_tokens,
+                    raw_file_tokens,
+                );
+            });
+            if let Err(error) = monitor_write.await {
+                tracing::warn!(error = %error, "live monitor entry write failed");
+            }
+        });
+    }
+
+    /// Resolves once every savings-ledger write spawned so far has
+    /// completed (immediately when none are pending — including when global
+    /// accounting is disabled and no writes are ever spawned).
+    ///
+    /// Test-only observability for the fire-and-forget ledger recorder:
+    /// production code never calls this, so the request path stays
+    /// non-blocking, while tests can await durability deterministically
+    /// instead of polling the DB against a wall-clock deadline.
+    ///
+    /// Bounded by [`LEDGER_SETTLE_TIMEOUT`] so a spawned write that wedges
+    /// (a stuck DB handle, a task that never resolves) can never hang the
+    /// caller forever — the earlier unbounded loop made a wedged write
+    /// manifest as an un-observable, indefinitely-hung integration test.
+    #[hotpath::skip]
+    pub async fn ledger_writes_settled(&self) {
+        self.ledger_writes_settled_within(LEDGER_SETTLE_TIMEOUT)
+            .await;
+    }
+
+    /// Like [`Self::ledger_writes_settled`] but bounded by an explicit
+    /// `timeout`. Returns `true` when every spawned ledger write settled
+    /// within the bound, `false` when the bound elapsed with writes still
+    /// pending. A timeout is never silent: it logs a warning naming how many
+    /// writes were still outstanding so a wedged recorder is diagnosable.
+    #[hotpath::skip]
+    pub async fn ledger_writes_settled_within(&self, timeout: std::time::Duration) -> bool {
+        let wait = async {
+            loop {
+                // Register interest *before* re-checking so a completion
+                // between the check and the await cannot be missed.
+                let notified = self.ledger_write_notify.notified();
+                let started = self.ledger_writes_started.load(Ordering::SeqCst);
+                let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
+                if finished >= started {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        if tokio::time::timeout(timeout, wait).await.is_ok() {
+            return true;
+        }
+        let started = self.ledger_writes_started.load(Ordering::SeqCst);
+        let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
+        let pending = started.saturating_sub(finished);
+        tracing::warn!(
+            ?timeout,
+            pending,
+            "timed out waiting for savings-ledger writes"
+        );
+        false
+    }
+
+    /// Test-only hook: spawn an observed ledger write that never completes, so
+    /// tests can prove [`Self::ledger_writes_settled`] stays bounded when a
+    /// recorder task wedges. Uses the same [`Self::spawn_observed_ledger_write`]
+    /// accounting the production path uses, so the counters advance identically.
+    #[cfg(test)]
+    pub(crate) fn spawn_wedged_ledger_write_for_test(&self) {
+        self.spawn_observed_ledger_write(std::future::pending::<()>());
+    }
+
+    /// Internal: snapshot of the current `file_token_map`. Exposed for
+    /// integration tests only; not part of the stable public API.
+    #[doc(hidden)]
+    pub fn file_token_map_snapshot(&self) -> HashMap<String, u64> {
+        crate::mcp::server::requests::recover_lock(&self.file_token_map).clone()
+    }
+
+    /// Admits one background worldwide-counter flush at each 30-second boundary.
+    ///
+    /// The complete flush runs on the observed ledger-write path so responses
+    /// never await configuration or cloud I/O and shutdown still drains it.
+    #[hotpath::measure(label = "mcp.ledger.flush_worldwide")]
+    pub(crate) fn maybe_flush_worldwide(self: &Arc<Self>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let last = self.last_flush_at.load(Ordering::Relaxed);
+        if now - last < 30 {
+            return;
+        }
+        if !claim_worldwide_flush(&self.last_flush_at, last, now) {
+            return;
+        }
+
+        let (Some(tokens_saved), Some(last_flushed_tokens)) =
+            (&self.tokens_saved, &self.last_flushed_tokens)
+        else {
+            return;
+        };
+        let current = tokens_saved.load(Ordering::Relaxed);
+        let last_flushed = last_flushed_tokens.load(Ordering::Relaxed);
+        if current <= last_flushed {
+            return;
+        }
+        let delta = current - last_flushed;
+
+        if !self.ledger_sink_is_mounted() {
+            return;
+        }
+
+        let server = Arc::clone(self);
+        self.spawn_observed_ledger_write(async move {
+            let upload_enabled = match server.canonical_upload_enabled().await {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "worldwide counter upload skipped because configuration authority is unavailable"
+                    );
+                    return;
+                }
+            };
+            let saved = tokio::task::spawn_blocking(move || {
+                persist_worldwide_delta(delta, upload_enabled)
+            })
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "worldwide counter flush task failed");
+                false
+            });
+            if saved
+                && let Some(last_flushed_tokens) = server.last_flushed_tokens.as_ref()
+            {
+                last_flushed_tokens.store(current, Ordering::Release);
+            }
+        });
+    }
+
+    #[hotpath::measure(label = "mcp.ledger.record_error_analytics")]
+    pub(crate) fn record_mcp_tool_error_analytics(
+        &self,
+        request: McpToolErrorAnalyticsRequest<'_>,
+    ) {
+        let McpToolErrorAnalyticsRequest {
+            project_root,
+            session_id,
+            tool_name,
+            request_id,
+            arguments,
+            duration_us,
+            error,
+            connection_client_name,
+            connection_instance_id,
+        } = request;
+        let LedgerSink::Mounted(gdb) = self.ledger_sink() else {
+            return;
+        };
+        // `TraceDecayError`'s `Display` (via `thiserror`) already carries a
+        // variant-classified, human-readable message (e.g. "config error:
+        // missing required parameter: handle"); bounded truncation happens
+        // in `mcp_tool_analytics_event`.
+        let failure_reason = error.to_string();
+        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            project_root,
+            session_id,
+            tool_name,
+            outcome: "error",
+            raw_file_tokens: 0,
+            response_tokens: 0,
+            net_saved_tokens: 0,
+            duration_us,
+            timestamp: crate::tracedecay::current_timestamp(),
+            request_id,
+            arguments,
+            internal_analytics: None,
+            client_name: connection_client_name,
+            mcp_instance_id: connection_instance_id,
+            failure_reason: Some(&failure_reason),
+        });
+        self.spawn_observed_ledger_write(async move {
+            if let Err(e) = gdb.append_analytics_event(&event).await {
+                tracing::warn!(error = %e, "MCP error analytics event insert failed");
+            }
+        });
+    }
+
+    /// Best-effort hook-route analytics after authoritative admission commit.
+    ///
+    /// Insert failures are logged only — they never alter
+    /// [`HostAdmissionOutcome`]. The durable admission sequence is carried as
+    /// the event idempotency identity, so identical but distinct admissions
+    /// remain distinct analytics rows.
+    #[hotpath::measure(label = "mcp.ledger.record_route_analytics")]
+    pub(crate) fn record_hook_route_analytics(
+        &self,
+        project_root: &std::path::Path,
+        event: &hook_events::HookEvent,
+        current_branch: Option<&str>,
+        admission_seq: u64,
+    ) {
+        let Some(event) = hook_route_analytics_event(
+            project_root,
+            event,
+            current_branch,
+            crate::tracedecay::current_timestamp(),
+            admission_seq,
+        ) else {
+            return;
+        };
+        let LedgerSink::Mounted(gdb) = self.ledger_sink() else {
+            return;
+        };
+        self.spawn_observed_ledger_write(async move {
+            if let Err(e) = gdb.append_analytics_event(&event).await {
+                // Deliberate fail-open: admission already committed; telemetry
+                // loss is preferred over blocking or rewriting host outcomes.
+                tracing::warn!(error = %e, "hook route analytics insert failed");
+            }
+        });
+    }
+
+    /// Records a live session↔git span from one hook route notification.
+    ///
+    /// Route metadata carries `(session_id, thread_id, cwd, worktree,
+    /// branch)`; when the route names a session and resolves to a registered
+    /// project, this folds one [`SpanObservation`] into that project's
+    /// `sessions.db` span table (see [`tracedecay_sessions::runtime::git_correlation`]).
+    /// Mid-session branch/worktree switches are handled by the span table
+    /// itself — the observation always carries the *current* branch.
+    ///
+    /// This analytics side write is intentionally fail-open: any resolution
+    /// or DB error is dropped. Graph snapshots, git derivation, debounce, and
+    /// the span write all run on the observed ledger path so the notification
+    /// never waits on them. An in-process debounce keyed by
+    /// `(provider, session, branch, worktree)` collapses a burst of tool-use
+    /// events to one write per
+    /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+    /// (spans merge regardless, so a dropped observation only widens a span
+    /// slightly less).
+    #[hotpath::measure(label = "mcp.ledger.record_span_observation")]
+    pub(crate) fn record_hook_span_observation(
+        self: &Arc<Self>,
+        event: &hook_events::HookEvent,
+        selected: &crate::mcp::project_route::ResolvedProjectRoute,
+    ) {
+        const MAX_SPAN_IDENTIFIER_BYTES: usize = 256;
+
+        let Some(route) = event.route.as_ref() else {
+            return;
+        };
+
+        let bounded_identifier = |value: Option<&str>| {
+            value
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.len() <= MAX_SPAN_IDENTIFIER_BYTES
+                        && !value.chars().any(char::is_control)
+                })
+                .map(str::to_string)
+        };
+        let Some(session_id) = bounded_identifier(route.session_id.as_deref()).and_then(|value| {
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok()
+        }) else {
+            return;
+        };
+        let route_cwd = route.cwd.as_deref().or(event.cwd.as_deref());
+        let Some(cwd) = route_cwd else {
+            return;
+        };
+        let Ok(selected_server) = selected.retained_server() else {
+            return;
+        };
+        let Some(db) = self.session_db.clone() else {
+            return;
+        };
+        let thread_id = bounded_identifier(route.thread_id.as_deref()).and_then(|value| {
+            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok()
+        });
+        let ts = crate::tracedecay::current_timestamp();
+        // Session-only pre-debounce: the full key needs branch/worktree, which
+        // cost gix/git discovery. A burst for one session almost always shares
+        // those, so reject here before paying for derivation. Mid-session
+        // branch switches inside the window are dropped; spans merge anyway.
+        let session_pre_key = format!("hook-span-session:{session_id}");
+        let should_derive = self
+            .span_observation_debounce
+            .lock()
+            .map_or(true, |mut debounce| {
+                debounce.should_record(&session_pre_key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+            });
+        if !should_derive {
+            return;
+        }
+        let cwd = cwd.to_path_buf();
+        let server = Arc::clone(self);
+        self.spawn_observed_ledger_write(async move {
+            let project_root = selected_server
+                .cg_snapshot()
+                .await
+                .project_root()
+                .to_path_buf();
+            let active_project_root = server.cg_snapshot().await.project_root().to_path_buf();
+            if RegisteredGlobalDb::canonical_project_key(&project_root)
+                != RegisteredGlobalDb::canonical_project_key(&active_project_root)
+            {
+                return;
+            }
+            // Derive the worktree and branch from the freshly authorized cwd.
+            // Route-provided worktree/branch strings are hints, not authority.
+            // The derivation walks the filesystem (gix discovery) and may
+            // spawn git, so it runs on the blocking pool, off the
+            // notification hot path.
+            let derived = tokio::task::spawn_blocking(move || {
+                let worktree_raw = tracedecay_runtime_core::worktree::git_worktree_root(&cwd)
+                    .unwrap_or(project_root);
+                let worktree_raw =
+                    hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
+                        .ok()?;
+                let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
+                let branch = bounded_identifier(
+                    tracedecay_runtime_core::branch::current_branch(&worktree_raw).as_deref(),
+                );
+                Some((worktree, branch))
+            })
+            .await;
+            let Ok(Some((worktree, branch))) = derived else {
+                return;
+            };
+
+            // Hook routes are provider-agnostic: leave provider empty.
+            let key =
+                git_correlation::span_debounce_key("", &session_id, branch.as_deref(), &worktree);
+            let should_record =
+                server
+                    .span_observation_debounce
+                    .lock()
+                    .map_or(true, |mut debounce| {
+                        debounce.should_record(&key, ts, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+                    });
+            if !should_record {
+                return;
+            }
+
+            let observation = SpanObservation {
+                provider: String::new(),
+                session_id,
+                thread_id,
+                branch,
+                worktree,
+                ts,
+                source: SpanSource::HookRoute,
+            };
+            if let Err(e) = tracedecay_global_db::GlobalDbGitCorrelationStore::new(db)
+                .record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
+                .await
+            {
+                tracing::warn!(error = %e, "hook route span record failed");
+            }
+        });
+    }
+
+    pub(crate) fn spawn_observed_ledger_write<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.ledger_writes_started.fetch_add(1, Ordering::SeqCst);
+        let finished = self.ledger_writes_finished.clone();
+        let notify = self.ledger_write_notify.clone();
+        tokio::spawn(async move {
+            future.await;
+            finished.fetch_add(1, Ordering::SeqCst);
+            notify.notify_waiters();
+        });
+    }
+}
+
+fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
+    let mut config = tracedecay_session_memory::user_config::UserConfig::load();
+    config.pending_upload = config.pending_upload.saturating_add(delta);
+    if upload_enabled && crate::cloud::flush_pending(config.pending_upload).is_some() {
+        config.pending_upload = 0;
+        config.last_upload_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+    }
+    match config.save() {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not save upload config");
+            false
+        }
+    }
+}
+
+fn claim_worldwide_flush(last_flush_at: &AtomicI64, expected: i64, now: i64) -> bool {
+    last_flush_at
+        .compare_exchange(expected, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU64;
+
+    use tracedecay_domain::configuration::{
+        ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
+    };
+
+    use super::*;
+
+    fn desired_configuration() -> ConfigurationSnapshotV1 {
+        let registry =
+            crate::config::registry::ConfigurationRegistry::core().expect("configuration registry");
+        crate::config::resolver::resolve_configuration(&registry, &[])
+            .expect("default desired configuration")
+            .snapshot
+    }
+
+    #[test]
+    fn upload_setting_comes_from_the_desired_configuration_snapshot() {
+        let mut desired = desired_configuration();
+        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
+        desired
+            .effective_values
+            .insert(key, ConfigurationValueV1::Boolean(true));
+
+        assert!(
+            upload_enabled_from_desired_configuration(&desired)
+                .expect("desired boolean setting must be readable")
+        );
+    }
+
+    #[test]
+    fn missing_desired_upload_setting_is_typed_unavailable() {
+        let mut desired = desired_configuration();
+        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
+        desired.effective_values.remove(&key);
+
+        assert!(matches!(
+            upload_enabled_from_desired_configuration(&desired),
+            Err(TraceDecayError::Config { message })
+                if message.starts_with("configuration authority unavailable")
+        ));
+    }
+
+    #[test]
+    fn non_boolean_desired_upload_setting_is_typed_unavailable() {
+        let mut desired = desired_configuration();
+        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
+        desired
+            .effective_values
+            .insert(key, ConfigurationValueV1::Unsigned(1));
+
+        assert!(matches!(
+            upload_enabled_from_desired_configuration(&desired),
+            Err(TraceDecayError::Config { message })
+                if message.starts_with("configuration authority unavailable")
+        ));
+    }
+
+    #[test]
+    fn concurrent_boundary_calls_claim_exactly_one_worldwide_flush() {
+        let last_flush_at = Arc::new(AtomicI64::new(10));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let claimed = Arc::new(AtomicU64::new(0));
+        let workers = (0..16)
+            .map(|_| {
+                let last_flush_at = Arc::clone(&last_flush_at);
+                let barrier = Arc::clone(&barrier);
+                let claimed = Arc::clone(&claimed);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if claim_worldwide_flush(&last_flush_at, 10, 40) {
+                        claimed.fetch_add(1, Ordering::AcqRel);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("flush claimant");
+        }
+
+        assert_eq!(claimed.load(Ordering::Acquire), 1);
+        assert_eq!(last_flush_at.load(Ordering::Acquire), 40);
+    }
+
+    #[test]
+    fn disabled_upload_records_each_delta_once_after_durable_save() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let mut config = tracedecay_session_memory::user_config::UserConfig::load();
+        config.pending_upload = 0;
+        config.save().expect("initialize isolated user config");
+        let current = 37_u64;
+        let last_flushed = AtomicU64::new(0);
+
+        for _ in 0..2 {
+            let previous = last_flushed.load(Ordering::Acquire);
+            if current > previous {
+                let saved = persist_worldwide_delta(current - previous, false);
+                if saved {
+                    last_flushed.store(current, Ordering::Release);
+                }
+            }
+        }
+
+        let persisted = tracedecay_session_memory::user_config::UserConfig::load();
+        assert_eq!(persisted.pending_upload, current);
+        assert_eq!(last_flushed.load(Ordering::Acquire), current);
+    }
+
+    #[tokio::test]
+    async fn concurrent_response_boundary_admits_one_observed_background_flush() {
+        let (cg, _project, _pin) = super::super::writer_test_support::init_indexed_repo().await;
+        let database = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "ledger-worldwide-single-flight",
+        )
+        .await;
+        let context = super::super::McpServerConstructionContext::direct(cg, None)
+            .with_direct_databases(Some(database.registered.clone()), None, None, None);
+        let server = super::super::McpServer::new_with_context(context).await;
+        let tokens_saved = server.tokens_saved.as_ref().expect("fixture token counter");
+        let last_flushed = server
+            .last_flushed_tokens
+            .as_ref()
+            .expect("fixture flushed counter");
+        let baseline = last_flushed.load(Ordering::Acquire);
+        tokens_saved.store(baseline + 41, Ordering::Release);
+        server.last_flush_at.store(0, Ordering::Release);
+        let started_before = server.ledger_writes_started.load(Ordering::SeqCst);
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let callers = (0..16)
+            .map(|_| {
+                let server = Arc::clone(&server);
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    server.maybe_flush_worldwide();
+                })
+            })
+            .collect::<Vec<_>>();
+        for caller in callers {
+            caller.await.expect("boundary caller");
+        }
+
+        assert_eq!(
+            server.ledger_writes_started.load(Ordering::SeqCst),
+            started_before + 1,
+            "concurrent completed responses must admit exactly one flush owner"
+        );
+        server.ledger_writes_settled().await;
+        assert_eq!(
+            last_flushed.load(Ordering::Acquire),
+            baseline + 41,
+            "shutdown-observed settlement must advance durable token accounting"
+        );
+        server.shutdown_background_tasks().await;
+    }
+}

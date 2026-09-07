@@ -3,11 +3,8 @@ use tracedecay_code_extraction::NixExtractor;
 use tracedecay_domain::*;
 
 fn extract_sample() -> ExtractionResult {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.nix"
-    ))
-    .expect("failed to read sample.nix");
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.nix")
+        .expect("failed to read sample.nix");
     let extractor = NixExtractor;
     extractor.extract("sample.nix", &source)
 }
@@ -38,7 +35,6 @@ fn test_nix_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // log and mkConnection are top-level functions
     assert!(
         fns.iter().any(|f| f.name == "log"),
         "log function not found, got: {:?}",
@@ -94,7 +90,6 @@ fn test_nix_nested_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // mkPool and validateConfig are nested inside networking module
     assert!(
         fns.iter().any(|f| f.name == "mkPool"),
         "mkPool nested function not found, got: {:?}",
@@ -106,7 +101,6 @@ fn test_nix_nested_functions() {
         fns.iter().map(|f| &f.name).collect::<Vec<_>>()
     );
 
-    // Verify mkPool is qualified under networking
     let mk_pool = fns.iter().find(|f| f.name == "mkPool").unwrap();
     assert!(
         mk_pool.qualified_name.contains("networking"),
@@ -119,7 +113,6 @@ fn test_nix_nested_functions() {
 fn test_nix_docstrings() {
     let result = extract_sample();
 
-    // defaultPort should have a docstring
     let dp = result
         .nodes
         .iter()
@@ -132,7 +125,6 @@ fn test_nix_docstrings() {
         dp.docstring
     );
 
-    // log should have a docstring
     let log_fn = result
         .nodes
         .iter()
@@ -152,7 +144,6 @@ fn test_nix_docstrings() {
         log_fn.docstring
     );
 
-    // networking should have a docstring
     let net = result
         .nodes
         .iter()
@@ -178,7 +169,6 @@ fn test_nix_call_sites() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(!call_refs.is_empty(), "should have call site refs");
-    // mkConnection should be called (e.g., from mkPool)
     assert!(
         call_refs.iter().any(|r| r.reference_name == "mkConnection"),
         "should find mkConnection call, got: {:?}",
@@ -197,7 +187,6 @@ fn test_nix_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File -> consts, functions, module; module -> nested functions/consts
     assert!(
         contains.len() >= 5,
         "should have >= 5 Contains edges, got {}",
@@ -266,24 +255,20 @@ fn test_nix_function_signature() {
 }
 
 fn extract_flake() -> ExtractionResult {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample-flake.nix"
-    ))
-    .expect("failed to read sample-flake.nix");
+    let source = std::fs::read_to_string("../../tests/fixtures/sample-flake.nix")
+        .expect("failed to read sample-flake.nix");
     let extractor = NixExtractor;
     extractor.extract("flake.nix", &source)
 }
 
 // -------------------------------------------------------------------
-// Enhancement 2: Import path resolution
+// Import path resolution
 // -------------------------------------------------------------------
 
 #[test]
 fn test_nix_import_path_resolution() {
     let result = extract_sample();
 
-    // Should have a Use node for `import ./utils.nix`
     let uses: Vec<_> = result
         .nodes
         .iter()
@@ -300,7 +285,6 @@ fn test_nix_import_path_resolution() {
             .collect::<Vec<_>>()
     );
 
-    // Should have an unresolved Uses ref for ./utils.nix
     let uses_refs: Vec<_> = result
         .unresolved_refs
         .iter()
@@ -318,7 +302,7 @@ fn test_nix_import_path_resolution() {
 }
 
 // -------------------------------------------------------------------
-// Enhancement 1: Derivation field extraction
+// Derivation field extraction
 // -------------------------------------------------------------------
 
 #[test]
@@ -375,7 +359,7 @@ fn test_nix_derivation_fields() {
 }
 
 // -------------------------------------------------------------------
-// Enhancement 3: Flake output schema awareness
+// Flake output schema awareness
 // -------------------------------------------------------------------
 
 #[test]
@@ -412,7 +396,6 @@ fn test_nix_flake_output_modules() {
         module_names
     );
 
-    // Verify that these are nested under outputs
     let packages = modules.iter().find(|m| m.name == "packages").unwrap();
     assert!(
         packages.qualified_name.contains("outputs"),
@@ -422,7 +405,7 @@ fn test_nix_flake_output_modules() {
 }
 
 // -------------------------------------------------------------------
-// Enhancement 1+3: mkShell field extraction
+// mkShell field extraction
 // -------------------------------------------------------------------
 
 #[test]

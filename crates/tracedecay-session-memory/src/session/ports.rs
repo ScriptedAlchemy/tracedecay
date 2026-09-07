@@ -1,0 +1,11 @@
+//! Authorized temporal execution contract.
+//!
+//! The registered global database owns both the only production executor and
+//! this contract. Re-exporting that authority keeps retrieval callers and the
+//! executor on one type identity instead of maintaining a second, structurally
+//! identical port inside the use-case crate.
+
+pub use tracedecay_session_temporal_store::execution::{
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
+    SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
+};

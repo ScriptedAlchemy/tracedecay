@@ -1,0 +1,39 @@
+{
+  "composerId": "comp-1",
+  "name": "Composer session",
+  "createdAt": 1700000000000,
+  "lastUpdatedAt": null,
+  "unifiedMode": "agent",
+  "modelConfig": {
+    "modelName": "claude-opus-4-8"
+  },
+  "workspaceIdentifier": {
+    "id": "ws-hash-1",
+    "uri": {
+      "fsPath": "/tmp/fixture-project",
+      "path": "/tmp/fixture-project"
+    }
+  },
+  "todos": [
+    {
+      "id": "t1",
+      "content": "First todo",
+      "status": "completed"
+    },
+    {
+      "id": "t2",
+      "content": "Second todo",
+      "status": "pending"
+    }
+  ],
+  "fullConversationHeadersOnly": [
+    {
+      "bubbleId": "b-user",
+      "type": 1
+    },
+    {
+      "bubbleId": "b-asst",
+      "type": 2
+    }
+  ]
+}

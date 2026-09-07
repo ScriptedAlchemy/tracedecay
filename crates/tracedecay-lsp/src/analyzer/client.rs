@@ -5,14 +5,41 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::SinkExt;
+use lsp_types::request::{
+    CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
+    DocumentSymbolRequest, GotoDeclaration, GotoDeclarationParams, GotoDefinition,
+    GotoImplementation, GotoImplementationParams, GotoTypeDefinition, GotoTypeDefinitionParams,
+    HoverRequest, PrepareRenameRequest, References, Request as LspRequest, SignatureHelpRequest,
+    TypeHierarchyPrepare, TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
+};
+use lsp_types::{
+    CallHierarchyIncomingCallsParams, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
+    Diagnostic as StandardDiagnostic, DiagnosticSeverity as StandardDiagnosticSeverity,
+    DocumentSymbolParams, GotoDefinitionParams, HoverParams, NumberOrString,
+    PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, TextDocumentPositionParams,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
+    WorkspaceSymbolParams,
+};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_util::codec::{FramedRead, FramedWrite};
+use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 
-use crate::broker::{CodeDiagnostic, DiagnosticSeverity};
-use crate::{LspError, LspError as TraceDecayError, Result};
+use super::broker::{CodeDiagnostic, DiagnosticSeverity};
+use super::error::{
+    AnalyzerCancellation as CancellationToken, AnalyzerResult as Result,
+    AnalyzerRuntimeError as TraceDecayError,
+};
+
+use crate::{
+    AnalyzerEvent, AsyncContentLengthError, ContentLengthCodec, UpstreamCapabilities,
+    read_content_length_frame_until,
+};
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -61,6 +88,169 @@ pub struct LspDocument {
     pub text: String,
 }
 
+/// Standard LSP semantic/navigation requests retained by the analyzer client.
+///
+/// Each variant carries the `lsp-types` request DTO for its standard method;
+/// this boundary never invents an analyzer-specific wire shape.
+#[derive(Clone, Debug)]
+pub enum LspSemanticRequest {
+    Declaration(GotoDeclarationParams),
+    Definition(GotoDefinitionParams),
+    TypeDefinition(GotoTypeDefinitionParams),
+    Implementation(GotoImplementationParams),
+    References(ReferenceParams),
+    Hover(HoverParams),
+    DocumentSymbols(DocumentSymbolParams),
+    WorkspaceSymbols(WorkspaceSymbolParams),
+    PrepareCallHierarchy(CallHierarchyPrepareParams),
+    IncomingCalls(CallHierarchyIncomingCallsParams),
+    OutgoingCalls(CallHierarchyOutgoingCallsParams),
+    SignatureHelp(SignatureHelpParams),
+    PrepareTypeHierarchy(TypeHierarchyPrepareParams),
+    TypeHierarchySupertypes(TypeHierarchySupertypesParams),
+    TypeHierarchySubtypes(TypeHierarchySubtypesParams),
+    PrepareRename(TextDocumentPositionParams),
+}
+
+pub fn decode_semantic_request(
+    request: crate::LspSemanticRequest,
+) -> std::result::Result<LspSemanticRequest, LspSemanticRequestError> {
+    let method = request.method();
+    let params = request.into_params();
+    match method {
+        "textDocument/declaration" => decode(params).map(LspSemanticRequest::Declaration),
+        "textDocument/definition" => decode(params).map(LspSemanticRequest::Definition),
+        "textDocument/typeDefinition" => decode(params).map(LspSemanticRequest::TypeDefinition),
+        "textDocument/implementation" => decode(params).map(LspSemanticRequest::Implementation),
+        "textDocument/references" => decode(params).map(LspSemanticRequest::References),
+        "textDocument/hover" => decode(params).map(LspSemanticRequest::Hover),
+        "textDocument/documentSymbol" => decode(params).map(LspSemanticRequest::DocumentSymbols),
+        "workspace/symbol" => decode(params).map(LspSemanticRequest::WorkspaceSymbols),
+        "textDocument/prepareCallHierarchy" => {
+            decode(params).map(LspSemanticRequest::PrepareCallHierarchy)
+        }
+        "callHierarchy/incomingCalls" => decode(params).map(LspSemanticRequest::IncomingCalls),
+        "callHierarchy/outgoingCalls" => decode(params).map(LspSemanticRequest::OutgoingCalls),
+        "textDocument/signatureHelp" => decode(params).map(LspSemanticRequest::SignatureHelp),
+        "textDocument/prepareTypeHierarchy" => {
+            decode(params).map(LspSemanticRequest::PrepareTypeHierarchy)
+        }
+        "typeHierarchy/supertypes" => {
+            decode(params).map(LspSemanticRequest::TypeHierarchySupertypes)
+        }
+        "typeHierarchy/subtypes" => decode(params).map(LspSemanticRequest::TypeHierarchySubtypes),
+        "textDocument/prepareRename" => decode(params).map(LspSemanticRequest::PrepareRename),
+        _ => Err(LspSemanticRequestError::InvalidResponse {
+            class: "unsupported semantic method".to_owned(),
+        }),
+    }
+}
+
+pub fn encode_semantic_request(
+    request: LspSemanticRequest,
+) -> std::result::Result<crate::LspSemanticRequest, LspSemanticRequestError> {
+    let method = request.method();
+    let params = match request {
+        LspSemanticRequest::Declaration(params)
+        | LspSemanticRequest::Definition(params)
+        | LspSemanticRequest::TypeDefinition(params)
+        | LspSemanticRequest::Implementation(params) => serde_json::to_value(params),
+        LspSemanticRequest::References(params) => serde_json::to_value(params),
+        LspSemanticRequest::Hover(params) => serde_json::to_value(params),
+        LspSemanticRequest::DocumentSymbols(params) => serde_json::to_value(params),
+        LspSemanticRequest::WorkspaceSymbols(params) => serde_json::to_value(params),
+        LspSemanticRequest::PrepareCallHierarchy(params) => serde_json::to_value(params),
+        LspSemanticRequest::IncomingCalls(params) => serde_json::to_value(params),
+        LspSemanticRequest::OutgoingCalls(params) => serde_json::to_value(params),
+        LspSemanticRequest::SignatureHelp(params) => serde_json::to_value(params),
+        LspSemanticRequest::PrepareTypeHierarchy(params) => serde_json::to_value(params),
+        LspSemanticRequest::TypeHierarchySupertypes(params) => serde_json::to_value(params),
+        LspSemanticRequest::TypeHierarchySubtypes(params) => serde_json::to_value(params),
+        LspSemanticRequest::PrepareRename(params) => serde_json::to_value(params),
+    }
+    .map_err(|error| LspSemanticRequestError::InvalidResponse {
+        class: error.to_string(),
+    })?;
+    Ok(crate::LspSemanticRequest::from_standard(method, params))
+}
+
+fn decode<T: DeserializeOwned>(value: Value) -> std::result::Result<T, LspSemanticRequestError> {
+    serde_json::from_value(value).map_err(|error| LspSemanticRequestError::InvalidResponse {
+        class: error.to_string(),
+    })
+}
+
+impl LspSemanticRequest {
+    pub fn method(&self) -> &'static str {
+        match self {
+            Self::Declaration(_) => GotoDeclaration::METHOD,
+            Self::Definition(_) => GotoDefinition::METHOD,
+            Self::TypeDefinition(_) => GotoTypeDefinition::METHOD,
+            Self::Implementation(_) => GotoImplementation::METHOD,
+            Self::References(_) => References::METHOD,
+            Self::Hover(_) => HoverRequest::METHOD,
+            Self::DocumentSymbols(_) => DocumentSymbolRequest::METHOD,
+            Self::WorkspaceSymbols(_) => WorkspaceSymbolRequest::METHOD,
+            Self::PrepareCallHierarchy(_) => CallHierarchyPrepare::METHOD,
+            Self::IncomingCalls(_) => CallHierarchyIncomingCalls::METHOD,
+            Self::OutgoingCalls(_) => CallHierarchyOutgoingCalls::METHOD,
+            Self::SignatureHelp(_) => SignatureHelpRequest::METHOD,
+            Self::PrepareTypeHierarchy(_) => TypeHierarchyPrepare::METHOD,
+            Self::TypeHierarchySupertypes(_) => TypeHierarchySupertypes::METHOD,
+            Self::TypeHierarchySubtypes(_) => TypeHierarchySubtypes::METHOD,
+            Self::PrepareRename(_) => PrepareRenameRequest::METHOD,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LspSemanticRequestError {
+    Cancelled,
+    TimedOut,
+    Remote { code: Option<i64>, message: String },
+    Transport { class: String },
+    InvalidResponse { class: String },
+}
+
+impl LspSemanticRequestError {
+    pub fn analyzer_event(&self) -> AnalyzerEvent {
+        match self {
+            Self::Cancelled => AnalyzerEvent::Cancelled,
+            Self::TimedOut => AnalyzerEvent::TimedOut,
+            Self::Remote { .. } => AnalyzerEvent::RemoteError,
+            Self::Transport { .. } => AnalyzerEvent::TransportFailed,
+            Self::InvalidResponse { .. } => AnalyzerEvent::InvalidResponse,
+        }
+    }
+
+    pub fn coverage_token(&self) -> &'static str {
+        self.analyzer_event()
+            .coverage_token()
+            .unwrap_or("analyzer-request-failed")
+    }
+}
+
+impl std::fmt::Display for LspSemanticRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("analyzer request was cancelled"),
+            Self::TimedOut => f.write_str("analyzer request timed out"),
+            Self::Remote {
+                code: Some(code),
+                message,
+            } => write!(f, "analyzer returned error {code}: {message}"),
+            Self::Remote {
+                code: None,
+                message,
+            } => write!(f, "analyzer returned an error: {message}"),
+            Self::Transport { class } => write!(f, "analyzer transport failed: {class}"),
+            Self::InvalidResponse { class } => {
+                write!(f, "analyzer returned an invalid response: {class}")
+            }
+        }
+    }
+}
+
 pub async fn collect_document_diagnostics(
     command: &str,
     args: &[String],
@@ -89,9 +279,11 @@ pub async fn collect_document_diagnostics_with_timeouts(
 
 pub struct StdioLspClient {
     command: String,
+    upstream_capabilities: UpstreamCapabilities,
     document_versions: BTreeMap<String, i32>,
-    stdin: tokio::process::ChildStdin,
-    reader: BufReader<tokio::process::ChildStdout>,
+    next_request_id: ConnectionLocalRequestSequence,
+    stdin: FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
+    reader: FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
     child: tokio::process::Child,
     stderr_task: JoinHandle<()>,
 }
@@ -115,7 +307,7 @@ impl StdioLspClient {
                 message: format!("failed to spawn LSP server '{command}': {e}"),
             })?;
 
-        let mut stdin = child.stdin.take().ok_or_else(|| TraceDecayError::Config {
+        let stdin = child.stdin.take().ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to open stdin for LSP server '{command}'"),
         })?;
         let stdout = child.stdout.take().ok_or_else(|| TraceDecayError::Config {
@@ -124,7 +316,8 @@ impl StdioLspClient {
         let stderr = child.stderr.take().ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to open stderr for LSP server '{command}'"),
         })?;
-        let mut reader = BufReader::new(stdout);
+        let mut stdin = FramedWrite::new(stdin, ContentLengthCodec::new());
+        let mut reader = FramedRead::new(stdout, ContentLengthCodec::new());
         let stderr_capture = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = spawn_stderr_capture(stderr, Arc::clone(&stderr_capture));
 
@@ -137,10 +330,30 @@ impl StdioLspClient {
                 "params": {
                     "processId": null,
                     "rootUri": file_uri(project_root),
+                    "initializationOptions": lsp_initialization_options(command),
                     "capabilities": {
                         "textDocument": {
-                            "publishDiagnostics": {}
-                        }
+                            "publishDiagnostics": {},
+                            "declaration": { "linkSupport": true },
+                            "definition": { "linkSupport": true },
+                            "typeDefinition": { "linkSupport": true },
+                            "implementation": { "linkSupport": true },
+                            "references": {},
+                            "hover": {
+                                "contentFormat": ["markdown", "plaintext"]
+                            },
+                            "documentSymbol": {
+                                "hierarchicalDocumentSymbolSupport": true
+                            },
+                            "callHierarchy": {},
+                            "signatureHelp": {
+                                "contextSupport": true
+                            },
+                            "typeHierarchy": {}
+                        },
+                        "workspace": {
+                            "symbol": {}
+                        },
                     },
                     "workspaceFolders": [{
                         "uri": file_uri(project_root),
@@ -161,28 +374,27 @@ impl StdioLspClient {
         // crash reason (e.g. a toolchain's "unknown binary" complaint) is
         // never dropped.
         let initialize_result = match send_initialize {
-            Ok(()) => tokio::time::timeout(
-                timeouts.initialize_response,
-                wait_for_initialize(&mut reader),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(TraceDecayError::Config {
-                    message: format!(
-                        "LSP server '{command}' initialize timed out after {} ms",
-                        timeouts.initialize_response.as_millis()
-                    ),
-                })
-            }),
+            Ok(()) => {
+                wait_for_initialize(
+                    &mut reader,
+                    tokio::time::Instant::now() + timeouts.initialize_response,
+                    command,
+                    timeouts.initialize_response,
+                )
+                .await
+            }
             Err(err) => Err(err),
         };
-        if let Err(err) = initialize_result {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            let _ = stderr_task.await;
-            let stderr = captured_stderr(&stderr_capture).await;
-            return Err(enrich_start_error(command, err, &stderr));
-        }
+        let initialize_response = match initialize_result {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                let _ = stderr_task.await;
+                let stderr = captured_stderr(&stderr_capture).await;
+                return Err(enrich_start_error(command, error, &stderr));
+            }
+        };
         write_message_with_timeout(
             &mut stdin,
             json!({
@@ -196,7 +408,11 @@ impl StdioLspClient {
 
         Ok(Self {
             command: command.to_string(),
+            upstream_capabilities: UpstreamCapabilities::from_initialize_response(
+                &initialize_response,
+            ),
             document_versions: BTreeMap::new(),
+            next_request_id: ConnectionLocalRequestSequence::starting_at(2),
             stdin,
             reader,
             child,
@@ -204,6 +420,397 @@ impl StdioLspClient {
         })
     }
 
+    pub(crate) fn upstream_capabilities(&self) -> UpstreamCapabilities {
+        self.upstream_capabilities.clone()
+    }
+
+    /// Opens `path` upstream once, so a semantic request can name it.
+    ///
+    /// The analyzer answers only for documents in its own view. Diagnostics
+    /// already open theirs (`collect_document_diagnostics`), but the semantic
+    /// lane forwarded the bare request, so a document the diagnostics sweep had
+    /// not happened to open yet came back `-32603 file not found` — surfaced to
+    /// the client as `providerUnavailable` for `documentSymbol`/`hover` on a
+    /// file it had just opened. Both lanes share one client and one
+    /// `document_versions` ledger, so this never re-opens what the other lane
+    /// already sent.
+    ///
+    /// ponytail: on-disk text, matching the diagnostics lane. Unsaved buffer
+    /// content would need the gateway's synced document plumbed down here.
+    pub(crate) async fn ensure_document_open(
+        &mut self,
+        path: &Path,
+        language_id: &str,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<()> {
+        let uri = file_uri(path);
+        if self.document_versions.contains_key(&uri) {
+            return Ok(());
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            // Unreadable here is not this lane's refusal to make: let the
+            // analyzer answer for whatever it already knows about the path.
+            return Ok(());
+        };
+        write_message_with_timeout(
+            &mut self.stdin,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": text,
+                    }
+                }
+            }),
+            timeouts.message_io,
+        )
+        .await?;
+        self.document_versions.insert(uri, 1);
+        Ok(())
+    }
+
+    /// Sends one standard semantic request and returns its standard JSON
+    /// result after matching the JSON-RPC correlation id. Notifications and
+    /// stale responses from a cancelled request are deliberately ignored.
+    #[hotpath::measure(label = "lsp_analyzer_semantic_request", impl_type = "StdioLspClient")]
+    pub async fn semantic_request(
+        &mut self,
+        request: LspSemanticRequest,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        match request {
+            LspSemanticRequest::Declaration(params) => {
+                self.declaration(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::Definition(params) => {
+                self.definition(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::TypeDefinition(params) => {
+                self.type_definition(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::Implementation(params) => {
+                self.implementation(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::References(params) => {
+                self.references(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::Hover(params) => self.hover(params, cancellation, timeouts).await,
+            LspSemanticRequest::DocumentSymbols(params) => {
+                // Boxed: with profiling enabled this arm's future is the
+                // largest in the dispatch and inflates every sibling arm,
+                // since a match future is as large as its widest branch.
+                Box::pin(self.document_symbols(params, cancellation, timeouts)).await
+            }
+            LspSemanticRequest::WorkspaceSymbols(params) => {
+                // Boxed: with profiling enabled this arm's future is the
+                // largest in the dispatch and inflates every sibling arm,
+                // since a match future is as large as its widest branch.
+                Box::pin(self.workspace_symbols(params, cancellation, timeouts)).await
+            }
+            LspSemanticRequest::PrepareCallHierarchy(params) => {
+                self.prepare_call_hierarchy(params, cancellation, timeouts)
+                    .await
+            }
+            LspSemanticRequest::IncomingCalls(params) => {
+                self.incoming_calls(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::OutgoingCalls(params) => {
+                self.outgoing_calls(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::SignatureHelp(params) => {
+                self.signature_help(params, cancellation, timeouts).await
+            }
+            LspSemanticRequest::PrepareTypeHierarchy(params) => {
+                self.prepare_type_hierarchy(params, cancellation, timeouts)
+                    .await
+            }
+            LspSemanticRequest::TypeHierarchySupertypes(params) => {
+                self.type_hierarchy_supertypes(params, cancellation, timeouts)
+                    .await
+            }
+            LspSemanticRequest::TypeHierarchySubtypes(params) => {
+                self.type_hierarchy_subtypes(params, cancellation, timeouts)
+                    .await
+            }
+            LspSemanticRequest::PrepareRename(params) => {
+                self.prepare_rename(params, cancellation, timeouts).await
+            }
+        }
+    }
+
+    pub async fn declaration(
+        &mut self,
+        params: GotoDeclarationParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoDeclaration>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn definition(
+        &mut self,
+        params: GotoDefinitionParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoDefinition>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn type_definition(
+        &mut self,
+        params: GotoTypeDefinitionParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoTypeDefinition>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn implementation(
+        &mut self,
+        params: GotoImplementationParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<GotoImplementation>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn references(
+        &mut self,
+        params: ReferenceParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<References>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn hover(
+        &mut self,
+        params: HoverParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<HoverRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    #[hotpath::measure(label = "lsp_analyzer_document_symbols", impl_type = "StdioLspClient")]
+    pub async fn document_symbols(
+        &mut self,
+        params: DocumentSymbolParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<DocumentSymbolRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    #[hotpath::measure(label = "lsp_analyzer_workspace_symbols", impl_type = "StdioLspClient")]
+    pub async fn workspace_symbols(
+        &mut self,
+        params: WorkspaceSymbolParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<WorkspaceSymbolRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn prepare_call_hierarchy(
+        &mut self,
+        params: CallHierarchyPrepareParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<CallHierarchyPrepare>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn incoming_calls(
+        &mut self,
+        params: CallHierarchyIncomingCallsParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<CallHierarchyIncomingCalls>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn outgoing_calls(
+        &mut self,
+        params: CallHierarchyOutgoingCallsParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<CallHierarchyOutgoingCalls>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn signature_help(
+        &mut self,
+        params: SignatureHelpParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<SignatureHelpRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn prepare_type_hierarchy(
+        &mut self,
+        params: TypeHierarchyPrepareParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<TypeHierarchyPrepare>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn type_hierarchy_supertypes(
+        &mut self,
+        params: TypeHierarchySupertypesParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<TypeHierarchySupertypes>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn type_hierarchy_subtypes(
+        &mut self,
+        params: TypeHierarchySubtypesParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<TypeHierarchySubtypes>(params, cancellation, timeouts)
+            .await
+    }
+
+    pub async fn prepare_rename(
+        &mut self,
+        params: TextDocumentPositionParams,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError> {
+        self.request_json::<PrepareRenameRequest>(params, cancellation, timeouts)
+            .await
+    }
+
+    #[hotpath::measure(label = "lsp_analyzer_request_json", impl_type = "StdioLspClient")]
+    async fn request_json<R>(
+        &mut self,
+        params: R::Params,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<Value, LspSemanticRequestError>
+    where
+        R: LspRequest,
+    {
+        let response = self.request::<R>(params, cancellation, timeouts).await?;
+        serde_json::to_value(response).map_err(|error| LspSemanticRequestError::InvalidResponse {
+            class: error.to_string(),
+        })
+    }
+
+    #[hotpath::measure(label = "lsp_analyzer_request", impl_type = "StdioLspClient")]
+    async fn request<R>(
+        &mut self,
+        params: R::Params,
+        cancellation: &CancellationToken,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<R::Result, LspSemanticRequestError>
+    where
+        R: LspRequest,
+    {
+        if cancellation.is_cancelled() {
+            return Err(LspSemanticRequestError::Cancelled);
+        }
+        let request_id = self.next_request_id.next_number().map_err(|error| {
+            LspSemanticRequestError::InvalidResponse {
+                class: error.to_string(),
+            }
+        })?;
+        let params = serde_json::to_value(params).map_err(|error| {
+            LspSemanticRequestError::InvalidResponse {
+                class: error.to_string(),
+            }
+        })?;
+        write_message_with_timeout(
+            &mut self.stdin,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": R::METHOD,
+                "params": params,
+            }),
+            timeouts.message_io,
+        )
+        .await
+        .map_err(semantic_transport_error)?;
+
+        let deadline = tokio::time::Instant::now() + timeouts.refresh;
+        loop {
+            let message = tokio::select! {
+                () = cancellation.cancelled() => {
+                    let _ = self.cancel_request(request_id, timeouts).await;
+                    return Err(LspSemanticRequestError::Cancelled);
+                }
+                message = read_message_until(&mut self.reader, deadline, timeouts) => {
+                    match message {
+                        Ok(message) => message,
+                        Err(_error) if tokio::time::Instant::now() >= deadline => {
+                            let _ = self.cancel_request(request_id, timeouts).await;
+                            return Err(LspSemanticRequestError::TimedOut);
+                        }
+                        Err(error) => return Err(semantic_transport_error(error)),
+                    }
+                }
+            };
+            let Some(message) = message else {
+                let _ = self.cancel_request(request_id, timeouts).await;
+                return Err(LspSemanticRequestError::TimedOut);
+            };
+            if message.id != Some(json!(request_id)) {
+                continue;
+            }
+            if let Some(error) = message.error {
+                return Err(LspSemanticRequestError::Remote {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+            let result = message.result.unwrap_or(Value::Null);
+            return serde_json::from_value(result).map_err(|error| {
+                LspSemanticRequestError::InvalidResponse {
+                    class: error.to_string(),
+                }
+            });
+        }
+    }
+
+    async fn cancel_request(
+        &mut self,
+        request_id: u64,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<()> {
+        write_message_with_timeout(
+            &mut self.stdin,
+            cancel_request_message(request_id),
+            timeouts.message_io,
+        )
+        .await
+    }
+
+    #[hotpath::measure(label = "lsp_analyzer_client_refresh", impl_type = "StdioLspClient")]
     pub async fn collect_document_diagnostics(
         &mut self,
         project_root: &Path,
@@ -211,11 +818,11 @@ impl StdioLspClient {
         timeouts: LspRefreshTimeouts,
     ) -> Result<Vec<CodeDiagnostic>> {
         let mut uri_to_document = BTreeMap::new();
-        for document in &documents {
+        let mut expected_versions = BTreeMap::new();
+        for document in documents {
             let uri = file_uri(&project_root.join(&document.relative_path));
-            uri_to_document.insert(uri.clone(), document.clone());
-            let next_version = self.document_versions.get(&uri).copied().unwrap_or(0) + 1;
-            if next_version == 1 {
+            let current_version = self.document_versions.get(&uri).copied().unwrap_or(0);
+            let version = if current_version == 0 {
                 write_message_with_timeout(
                     &mut self.stdin,
                     json!({
@@ -225,7 +832,7 @@ impl StdioLspClient {
                             "textDocument": {
                                 "uri": uri,
                                 "languageId": document.language_id,
-                                "version": next_version,
+                                "version": 1,
                                 "text": document.text,
                             }
                         }
@@ -233,38 +840,50 @@ impl StdioLspClient {
                     timeouts.message_io,
                 )
                 .await?;
-            }
-            let change_version = next_version + 1;
-            write_message_with_timeout(
-                &mut self.stdin,
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/didChange",
-                    "params": {
-                        "textDocument": {
-                            "uri": uri,
-                            "version": change_version
-                        },
-                        "contentChanges": [{
-                            "text": document.text,
-                        }]
-                    }
-                }),
-                timeouts.message_io,
-            )
-            .await?;
-            self.document_versions.insert(uri, change_version);
+                1
+            } else {
+                let version = current_version + 1;
+                write_message_with_timeout(
+                    &mut self.stdin,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didChange",
+                        "params": {
+                            "textDocument": {
+                                "uri": uri,
+                                "version": version
+                            },
+                            "contentChanges": [{
+                                "text": document.text,
+                            }]
+                        }
+                    }),
+                    timeouts.message_io,
+                )
+                .await?;
+                version
+            };
+            self.document_versions.insert(uri.clone(), version);
+            expected_versions.insert(uri.clone(), version);
+            uri_to_document.insert(uri, document);
         }
 
+        if uri_to_document.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
-        let quiet_deadline = tokio::time::Instant::now() + timeouts.diagnostics_quiet;
+        let refresh_deadline = tokio::time::Instant::now() + timeouts.refresh;
+        let mut quiet_deadline = None;
         loop {
             let now = tokio::time::Instant::now();
-            if now >= quiet_deadline {
+            let deadline = quiet_deadline
+                .map_or(refresh_deadline, |deadline: tokio::time::Instant| {
+                    deadline.min(refresh_deadline)
+                });
+            if now >= deadline {
                 break;
             }
-            let Some(message) =
-                read_message_until(&mut self.reader, quiet_deadline, timeouts).await?
+            let Some(message) = read_message_until(&mut self.reader, deadline, timeouts).await?
             else {
                 break;
             };
@@ -277,31 +896,45 @@ impl StdioLspClient {
             let Ok(published) = serde_json::from_value::<PublishDiagnosticsParams>(params) else {
                 continue;
             };
-            let Some(document) = uri_to_document.get(&published.uri) else {
+            if !is_current_diagnostic_publication(&published, &expected_versions) {
+                continue;
+            }
+            let Some(document) = uri_to_document.get(published.uri.as_str()) else {
                 continue;
             };
             diagnostics_by_uri.insert(
-                published.uri,
+                published.uri.as_str().to_owned(),
                 published
                     .diagnostics
                     .into_iter()
-                    .map(|diagnostic| diagnostic.into_code_diagnostic(document, &self.command))
+                    .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
                     .collect(),
             );
+            quiet_deadline = Some(tokio::time::Instant::now() + timeouts.diagnostics_quiet);
         }
-        // Servers that publish empty diagnostics for clean files (rust-analyzer,
-        // tsserver) will produce one `publishDiagnostics` per requested URI, so a
-        // fully complete batch has `diagnostics_by_uri.len() == uri_to_document.len()`.
         // Servers that suppress empty publishes (only publishing for files WITH
-        // problems) never emit for clean files, so those batches look "partial"
-        // even though every dirty file reported. To avoid dropping real results in
-        // that case, only treat the batch as a genuine timeout when NOTHING arrived
-        // (matching the #237 behavior of not recording a genuine timeout as
-        // complete); otherwise return the diagnostics that were actually published.
+        // problems) never emit for clean files, so a fully-reported batch still
+        // looks partial here. Requiring every requested URI throws away the real
+        // diagnostics of the one file that did report. Only treat the batch as a
+        // genuine timeout when nothing arrived at all.
         if diagnostics_by_uri.is_empty() && !uri_to_document.is_empty() {
             return Err(refresh_timed_out(timeouts));
         }
         Ok(diagnostics_by_uri.into_values().flatten().collect())
+    }
+}
+
+fn is_current_diagnostic_publication(
+    published: &PublishDiagnosticsParams,
+    expected_versions: &BTreeMap<String, i32>,
+) -> bool {
+    // `version` is optional in the LSP spec and several servers omit it
+    // entirely. Rejecting a versionless publication discards every diagnostic
+    // those servers ever produce, so treat an absent version as current and
+    // reject only versions the server explicitly reports as stale.
+    match published.version {
+        Some(version) => expected_versions.get(published.uri.as_str()).copied() == Some(version),
+        None => true,
     }
 }
 
@@ -336,7 +969,7 @@ async fn captured_stderr(capture: &Arc<Mutex<Vec<u8>>>) -> String {
     String::from_utf8_lossy(&captured).trim().to_string()
 }
 
-fn enrich_start_error(command: &str, err: LspError, stderr: &str) -> LspError {
+fn enrich_start_error(command: &str, err: TraceDecayError, stderr: &str) -> TraceDecayError {
     if stderr.is_empty() {
         return err;
     }
@@ -345,57 +978,74 @@ fn enrich_start_error(command: &str, err: LspError, stderr: &str) -> LspError {
     }
 }
 
-async fn wait_for_initialize(reader: &mut BufReader<tokio::process::ChildStdout>) -> Result<()> {
+async fn wait_for_initialize(
+    reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
+    deadline: tokio::time::Instant,
+    command: &str,
+    timeout: Duration,
+) -> Result<Value> {
     loop {
-        let Some(message) = read_message(reader).await? else {
-            return Err(TraceDecayError::Config {
-                message: "LSP server closed before initialize response".to_string(),
-            });
+        let frame = match read_content_length_frame_until(reader, deadline).await {
+            Ok(FramePoll::Frame(frame)) => frame,
+            Ok(FramePoll::Pending) | Err(AsyncContentLengthError::DeadlineElapsed) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "LSP server '{command}' initialize timed out after {} ms",
+                        timeout.as_millis()
+                    ),
+                });
+            }
+            Ok(FramePoll::Closed) => {
+                return Err(TraceDecayError::Config {
+                    message: "LSP server closed before initialize response".to_string(),
+                });
+            }
+            Err(error) => return Err(frame_read_error(error)),
         };
+        let message = decode_message(&frame)?;
         if message.id == Some(json!(1)) {
-            return Ok(());
+            if let Some(error) = message.error {
+                let error = LspSemanticRequestError::Remote {
+                    code: error.code,
+                    message: error.message,
+                };
+                return Err(TraceDecayError::Config {
+                    message: format!("LSP server '{command}' rejected initialize: {error}"),
+                });
+            }
+            return message.result.ok_or_else(|| TraceDecayError::Config {
+                message: format!("LSP server '{command}' initialize response omitted result"),
+            });
         }
     }
 }
 
-async fn write_message(stdin: &mut tokio::process::ChildStdin, value: Value) -> Result<()> {
-    let body = serde_json::to_vec(&value).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to encode LSP message: {e}"),
-    })?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stdin
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to write LSP message: {e}"),
-        })?;
-    stdin
-        .write_all(&body)
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to write LSP message: {e}"),
-        })?;
-    stdin.flush().await.map_err(|e| TraceDecayError::Config {
-        message: format!("failed to flush LSP message: {e}"),
-    })
-}
-
+/// Send phase of one analyzer round-trip: JSON encoding plus the framed
+/// stdin write, including any backpressure wait, bounded by `timeout`.
+#[hotpath::measure(label = "lsp.analyzer.request_write")]
 async fn write_message_with_timeout(
-    stdin: &mut tokio::process::ChildStdin,
+    stdin: &mut FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
     value: Value,
     timeout: Duration,
 ) -> Result<()> {
-    tokio::time::timeout(timeout, write_message(stdin, value))
-        .await
-        .map_err(|_| TraceDecayError::Config {
-            message: format!(
-                "LSP message write timed out after {} ms",
-                timeout.as_millis()
-            ),
-        })?
+    let body = serde_json::to_vec(&value).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to encode LSP message: {e}"),
+    })?;
+    tokio::time::timeout_at(
+        tokio::time::Instant::now() + timeout,
+        stdin.send(body.as_slice()),
+    )
+    .await
+    .map_err(|_| TraceDecayError::Config {
+        message: format!(
+            "LSP message write timed out after {} ms",
+            timeout.as_millis()
+        ),
+    })?
+    .map_err(frame_write_error)
 }
 
-fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> LspError {
+fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
             "LSP diagnostics collection timed out after {} ms",
@@ -404,148 +1054,64 @@ fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> LspError {
     }
 }
 
-async fn read_message(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
-) -> Result<Option<JsonRpcMessage>> {
-    let mut content_length = None;
-    loop {
-        let mut line = String::new();
-        let bytes = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to read LSP header: {e}"),
-            })?;
-        if bytes == 0 {
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        let Some((name, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            content_length = value.trim().parse::<usize>().ok();
-        }
+fn semantic_transport_error(error: TraceDecayError) -> LspSemanticRequestError {
+    LspSemanticRequestError::Transport {
+        class: error.to_string(),
     }
-    let Some(length) = content_length else {
-        return Err(TraceDecayError::Config {
-            message: "LSP message missing Content-Length header".to_string(),
-        });
-    };
-    let mut body = vec![0_u8; length];
-    reader
-        .read_exact(&mut body)
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read LSP body: {e}"),
-        })?;
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to parse LSP message: {e}"),
-        })
 }
 
+fn cancel_request_message(request_id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "$/cancelRequest",
+        "params": { "id": request_id },
+    })
+}
+
+/// Wait phase of one analyzer round-trip: the futures lane separates time
+/// suspended on analyzer stdout from poll (frame-decode) time, which a wall
+/// span alone cannot distinguish.
+#[hotpath::measure(label = "lsp.analyzer.response_wait", future = true)]
 async fn read_message_until(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
+    reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
     deadline: tokio::time::Instant,
     timeouts: LspRefreshTimeouts,
 ) -> Result<Option<JsonRpcMessage>> {
-    let mut header = Vec::new();
-    while !header.ends_with(b"\r\n\r\n") && !header.ends_with(b"\n\n") {
-        let Some(byte) = read_byte_until(reader, deadline, !header.is_empty(), timeouts).await?
-        else {
-            return Ok(None);
-        };
-        header.push(byte);
-        if header.len() > 16 * 1024 {
-            return Err(TraceDecayError::Config {
-                message: "LSP message header exceeded 16 KiB".to_string(),
-            });
-        }
+    match read_content_length_frame_until(reader, deadline).await {
+        Ok(FramePoll::Frame(frame)) => decode_message(&frame).map(Some),
+        Ok(FramePoll::Pending | FramePoll::Closed) => Ok(None),
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(refresh_timed_out(timeouts)),
+        Err(error) => Err(frame_read_error(error)),
     }
-
-    let header = String::from_utf8_lossy(&header);
-    let content_length = header.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("content-length")
-            .then(|| value.trim().parse::<usize>().ok())
-            .flatten()
-    });
-    let Some(length) = content_length else {
-        return Err(TraceDecayError::Config {
-            message: "LSP message missing Content-Length header".to_string(),
-        });
-    };
-
-    let mut body = vec![0_u8; length];
-    let mut read = 0;
-    while read < length {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(refresh_timed_out(timeouts));
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let bytes_read = match tokio::time::timeout(remaining, reader.read(&mut body[read..])).await
-        {
-            Ok(Ok(bytes_read)) => bytes_read,
-            Ok(Err(err)) => {
-                return Err(TraceDecayError::Config {
-                    message: format!("failed to read LSP body: {err}"),
-                });
-            }
-            Err(_) => return Err(refresh_timed_out(timeouts)),
-        };
-        if bytes_read == 0 {
-            return Err(TraceDecayError::Config {
-                message: "LSP server closed before completing message body".to_string(),
-            });
-        }
-        read += bytes_read;
-    }
-
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to parse LSP message: {e}"),
-        })
 }
 
-async fn read_byte_until(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
-    deadline: tokio::time::Instant,
-    partial_message: bool,
-    timeouts: LspRefreshTimeouts,
-) -> Result<Option<u8>> {
-    let now = tokio::time::Instant::now();
-    if now >= deadline {
-        return if partial_message {
-            Err(refresh_timed_out(timeouts))
-        } else {
-            Ok(None)
-        };
-    }
-    let mut byte = [0_u8; 1];
-    match tokio::time::timeout(
-        deadline.saturating_duration_since(now),
-        reader.read(&mut byte),
-    )
-    .await
-    {
-        Ok(Ok(0)) if partial_message => Err(TraceDecayError::Config {
-            message: "LSP server closed before completing message header".to_string(),
-        }),
-        Ok(Ok(0)) => Ok(None),
-        Ok(Ok(_)) => Ok(Some(byte[0])),
-        Ok(Err(err)) => Err(TraceDecayError::Config {
-            message: format!("failed to read LSP header: {err}"),
-        }),
-        Err(_) if partial_message => Err(refresh_timed_out(timeouts)),
-        Err(_) => Ok(None),
-    }
+#[hotpath::measure(label = "lsp.analyzer.response_parse")]
+fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
+    serde_json::from_slice(body).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to parse LSP message: {e}"),
+    })
+}
+
+fn frame_read_error(error: AsyncContentLengthError) -> TraceDecayError {
+    let message = match error {
+        AsyncContentLengthError::Io(error) => format!("failed to read LSP frame: {error}"),
+        AsyncContentLengthError::Codec(error) => {
+            format!("failed to decode LSP Content-Length frame: {error:?}")
+        }
+        AsyncContentLengthError::DeadlineElapsed => "LSP frame read timed out".to_owned(),
+    };
+    TraceDecayError::Config { message }
+}
+
+fn frame_write_error(error: AsyncContentLengthError) -> TraceDecayError {
+    let message = match error {
+        AsyncContentLengthError::Io(error) => format!("failed to write LSP message: {error}"),
+        AsyncContentLengthError::Codec(error) => {
+            format!("failed to encode LSP Content-Length frame: {error:?}")
+        }
+        AsyncContentLengthError::DeadlineElapsed => "LSP message write timed out".to_owned(),
+    };
+    TraceDecayError::Config { message }
 }
 
 fn file_uri(path: &Path) -> String {
@@ -559,10 +1125,23 @@ fn file_uri(path: &Path) -> String {
     file_uri_from_path_text(&absolute.to_string_lossy())
 }
 
+fn lsp_initialization_options(command: &str) -> Value {
+    if Path::new(command)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        == Some("rust-analyzer")
+    {
+        // TraceDecay owns compiler diagnostics separately. Keep rust-analyzer's
+        // fast native diagnostics without launching a competing Cargo flycheck.
+        json!({ "checkOnSave": false })
+    } else {
+        json!({})
+    }
+}
+
 /// Build a `file://` URI from raw path text, normalizing `\` to `/` and
 /// percent-encoding. Handles POSIX paths, Windows drive paths (`C:/…`), and UNC
 /// (`//server/share`) prefixes. Shared with the Kiro installer.
-#[doc(hidden)]
 pub fn file_uri_from_path_text(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let encoded = percent_encode_file_uri_path(&normalized);
@@ -603,82 +1182,154 @@ struct JsonRpcMessage {
     method: Option<String>,
     #[serde(default)]
     params: Option<Value>,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<JsonRpcError>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PublishDiagnosticsParams {
-    uri: String,
-    diagnostics: Vec<LspDiagnostic>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LspDiagnostic {
-    range: LspRange,
-    #[serde(default)]
-    severity: Option<u8>,
-    #[serde(default)]
-    code: Option<Value>,
-    #[serde(default)]
-    source: Option<String>,
+struct JsonRpcError {
+    code: Option<i64>,
     message: String,
 }
 
-impl LspDiagnostic {
-    fn into_code_diagnostic(self, document: &LspDocument, command: &str) -> CodeDiagnostic {
-        CodeDiagnostic {
-            language: document.language.clone(),
-            source: self.source.unwrap_or_else(|| command.to_string()),
-            file: document.relative_path.clone(),
-            line_start: self.range.start.line + 1,
-            line_end: self.range.end.line + 1,
-            character_start: Some(self.range.start.character),
-            character_end: Some(self.range.end.character),
-            severity: match self.severity {
-                Some(1) => DiagnosticSeverity::Error,
-                Some(2) => DiagnosticSeverity::Warning,
-                Some(4) => DiagnosticSeverity::Hint,
-                _ => DiagnosticSeverity::Information,
-            },
-            code: self.code.and_then(code_to_string),
-            message: self.message,
-            // The LSP client has no code-graph handle; the enclosing symbol is
-            // resolved later via `DiagnosticBroker::resolve_enclosing_nodes`,
-            // which has access to the indexed nodes for the file.
-            enclosing_node: None,
-            updated_at: now_unix(),
-        }
+fn code_diagnostic(
+    diagnostic: StandardDiagnostic,
+    document: &LspDocument,
+    command: &str,
+) -> CodeDiagnostic {
+    CodeDiagnostic {
+        language: document.language.clone(),
+        source: diagnostic.source.unwrap_or_else(|| command.to_string()),
+        file: document.relative_path.clone(),
+        line_start: diagnostic.range.start.line + 1,
+        line_end: diagnostic.range.end.line + 1,
+        character_start: Some(diagnostic.range.start.character),
+        character_end: Some(diagnostic.range.end.character),
+        severity: match diagnostic.severity {
+            Some(StandardDiagnosticSeverity::ERROR) => DiagnosticSeverity::Error,
+            Some(StandardDiagnosticSeverity::WARNING) => DiagnosticSeverity::Warning,
+            Some(StandardDiagnosticSeverity::HINT) => DiagnosticSeverity::Hint,
+            _ => DiagnosticSeverity::Information,
+        },
+        code: diagnostic.code.map(code_to_string),
+        message: diagnostic.message,
+        // The LSP client has no code-graph handle; the enclosing symbol is
+        // resolved later via `DiagnosticBroker::resolve_enclosing_nodes`,
+        // which has access to the indexed nodes for the file.
+        enclosing_node: None,
+        updated_at: now_unix(),
     }
 }
 
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs() as i64)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
-fn code_to_string(value: Value) -> Option<String> {
+fn code_to_string(value: NumberOrString) -> String {
     match value {
-        Value::String(value) => Some(value),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
+        NumberOrString::String(value) => value,
+        NumberOrString::Number(value) => value.to_string(),
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct LspRange {
-    start: LspPosition,
-    end: LspPosition,
-}
-
-#[derive(Debug, Deserialize)]
-struct LspPosition {
-    line: u32,
-    character: u32,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::file_uri_from_path_text;
+    use std::collections::BTreeMap;
+
+    use lsp_types::PublishDiagnosticsParams;
+    use serde_json::json;
+
+    use super::{
+        LspSemanticRequestError, cancel_request_message, decode_semantic_request,
+        encode_semantic_request, file_uri_from_path_text, is_current_diagnostic_publication,
+        lsp_initialization_options,
+    };
+
+    #[test]
+    fn semantic_request_codec_round_trips_standard_wire_shape() {
+        let request = crate::lsp_semantic_request(&crate::SemanticRequest::WorkspaceSymbols {
+            query: "needle".to_owned(),
+        })
+        .expect("generic semantic request");
+        let method = request.method();
+        let params = request.params().clone();
+
+        let encoded =
+            encode_semantic_request(decode_semantic_request(request).expect("decode request"))
+                .expect("encode request");
+
+        assert_eq!(encoded.method(), method);
+        assert_eq!(encoded.params(), &params);
+    }
+
+    #[test]
+    fn semantic_error_coverage_ignores_free_form_error_text() {
+        let messages = [
+            "stale response: Bearer super-secret-token!",
+            "https://admin:hunter2@example.test/private?credential=yes",
+            "/home/alice/.aws/credentials: permission denied?!",
+            r"C:\Users\alice\secret.rs: unexpected !!!",
+        ];
+
+        for message in messages {
+            assert_eq!(
+                LspSemanticRequestError::Remote {
+                    code: Some(-32603),
+                    message: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-remote-error"
+            );
+            assert_eq!(
+                LspSemanticRequestError::Remote {
+                    code: None,
+                    message: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-remote-error"
+            );
+            assert_eq!(
+                LspSemanticRequestError::Transport {
+                    class: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-transport-failed"
+            );
+            assert_eq!(
+                LspSemanticRequestError::InvalidResponse {
+                    class: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-invalid-response"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_errors_render_present_and_missing_codes_unambiguously() {
+        assert_eq!(
+            LspSemanticRequestError::Remote {
+                code: Some(-32603),
+                message: "server failed".to_owned(),
+            }
+            .to_string(),
+            "analyzer returned error -32603: server failed"
+        );
+        assert_eq!(
+            LspSemanticRequestError::Remote {
+                code: None,
+                message: "server failed".to_owned(),
+            }
+            .to_string(),
+            "analyzer returned an error: server failed"
+        );
+    }
 
     #[test]
     fn file_uri_encodes_lsp_paths() {
@@ -694,5 +1345,55 @@ mod tests {
             file_uri_from_path_text("/tmp/100% real.rs"),
             "file:///tmp/100%25%20real.rs"
         );
+    }
+
+    #[test]
+    fn cancellation_uses_the_standard_json_rpc_notification() {
+        assert_eq!(
+            cancel_request_message(42),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": { "id": 42 },
+            })
+        );
+    }
+
+    #[test]
+    fn rust_analyzer_initialization_disables_competing_cargo_flycheck() {
+        assert_eq!(
+            lsp_initialization_options("/toolchains/stable/bin/rust-analyzer"),
+            json!({ "checkOnSave": false })
+        );
+        assert_eq!(lsp_initialization_options("clangd"), json!({}));
+    }
+
+    #[test]
+    fn diagnostics_require_the_exact_requested_document_version() {
+        let uri = "file:///workspace/src/lib.rs";
+        let expected = BTreeMap::from([(uri.to_owned(), 4)]);
+        let current: PublishDiagnosticsParams = serde_json::from_value(json!({
+            "uri": uri,
+            "version": 4,
+            "diagnostics": [],
+        }))
+        .expect("current diagnostics");
+        let stale: PublishDiagnosticsParams = serde_json::from_value(json!({
+            "uri": uri,
+            "version": 3,
+            "diagnostics": [],
+        }))
+        .expect("stale diagnostics");
+        let versionless: PublishDiagnosticsParams = serde_json::from_value(json!({
+            "uri": uri,
+            "diagnostics": [],
+        }))
+        .expect("versionless diagnostics");
+
+        assert!(is_current_diagnostic_publication(&current, &expected));
+        assert!(!is_current_diagnostic_publication(&stale, &expected));
+        // `version` is optional in the LSP spec; a server that omits it must
+        // not have all of its diagnostics discarded.
+        assert!(is_current_diagnostic_publication(&versionless, &expected));
     }
 }

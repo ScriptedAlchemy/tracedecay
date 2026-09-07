@@ -1,9 +1,0 @@
-{
-  "name": "settings",
-  "label": "Settings",
-  "description": "Project, user, and environment configuration.",
-  "icon": "Settings",
-  "version": "0.1.0",
-  "entry": "dist/index.js",
-  "css": "dist/style.css"
-}

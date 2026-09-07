@@ -1,0 +1,146 @@
+[package]
+name = "tracedecay-daemon-service"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Daemon invocation dispatch, project runtimes, and payload handlers for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-agent-hosts/hotpath",
+    "tracedecay-api/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-code-index-runtime/hotpath",
+    "tracedecay-configuration/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
+    "tracedecay-dashboard-api/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-graph-query/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-policy/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-semantic/hotpath",
+    "tracedecay-session-memory/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-agent-hosts/hotpath-alloc",
+    "tracedecay-api/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-code-index-runtime/hotpath-alloc",
+    "tracedecay-configuration/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
+    "tracedecay-dashboard-api/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-graph-query/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-agent-hosts/hotpath-cpu",
+    "tracedecay-api/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-code-index-runtime/hotpath-cpu",
+    "tracedecay-configuration/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
+    "tracedecay-dashboard-api/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-graph-query/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
+# Cross-crate fixture surface for composition-root invocation tests:
+# `DaemonInvocationService::invoke`, publication gates, and test constructors.
+# Production code is never gated by this feature.
+test-helpers = []
+
+[dependencies]
+futures-util = "0.3.33"
+getrandom = "0.2"
+hex = "0.4"
+hotpath.workspace = true
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

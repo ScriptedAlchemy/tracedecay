@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "provider": "claude",
+  "capture": {
+    "kind": "live_native_hook_capture",
+    "claude_code_version": "2.1.216",
+    "model_alias": "opus",
+    "invocation": "native subscription CLI in an isolated temporary git workspace",
+    "captured_on": "2026-07-21"
+  },
+  "fixtures": [
+    "post_tool_use_write.json",
+    "stop.json"
+  ],
+  "verification": {
+    "post_tool_use": "native callback with tool_input and tool_response",
+    "stop": "native callback with stop_hook_active",
+    "raw_payloads_committed": false,
+    "raw_payload_file_mode": "0600"
+  },
+  "sanitization": {
+    "paths": "replaced with deterministic /workspace paths",
+    "content": "replaced with deterministic harmless capture text",
+    "identifiers": "replaced with deterministic synthetic identifiers",
+    "timestamps": "replaced with deterministic timestamps",
+    "unknown_strings": "redacted while retaining keys and JSON value shape"
+  }
+}

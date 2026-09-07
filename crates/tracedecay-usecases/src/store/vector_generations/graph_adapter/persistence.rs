@@ -1,0 +1,112 @@
+use tracedecay_domain::{EmbeddingMetricV1, VectorGenerationIdV1};
+use tracedecay_graph_db::{
+    GraphCancellation, GraphDbError, GraphLabel, GraphPropertyName, VectorMetric,
+};
+
+use super::super::VectorGenerationStoreErrorV1;
+
+pub(super) fn generation_label(
+    generation: &VectorGenerationIdV1,
+) -> Result<GraphLabel, VectorGenerationStoreErrorV1> {
+    tracedecay_graph_db::semantic_vector_native::generation_label(generation.as_digest().as_str())
+        .map_err(map_graph_error)
+}
+
+pub(super) fn search_vector_property(
+    generation: &VectorGenerationIdV1,
+) -> Result<GraphPropertyName, VectorGenerationStoreErrorV1> {
+    tracedecay_graph_db::semantic_vector_native::vector_property(generation.as_digest().as_str())
+        .map_err(map_graph_error)
+}
+
+pub(super) const fn vector_metric(metric: EmbeddingMetricV1) -> VectorMetric {
+    match metric {
+        EmbeddingMetricV1::Cosine => VectorMetric::Cosine,
+        EmbeddingMetricV1::DotProduct => VectorMetric::DotProduct,
+        EmbeddingMetricV1::EuclideanL2 => VectorMetric::Euclidean,
+    }
+}
+
+pub(super) fn check_cancelled(
+    cancellation: &dyn GraphCancellation,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    if cancellation.is_cancelled() {
+        crate::hotpath_observe::vector_cancelled();
+        Err(VectorGenerationStoreErrorV1::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreErrorV1 {
+    match error {
+        GraphDbError::Cancelled => VectorGenerationStoreErrorV1::Cancelled,
+        GraphDbError::Conflict { context } => {
+            VectorGenerationStoreErrorV1::ConcurrentMutation(context)
+        }
+        GraphDbError::ProjectionMismatch { message, .. }
+        | GraphDbError::GenerationMismatch { message, .. } => {
+            VectorGenerationStoreErrorV1::ResetRequired(message)
+        }
+        GraphDbError::ResetRequired { message } => {
+            VectorGenerationStoreErrorV1::ResetRequired(message)
+        }
+        GraphDbError::Corrupt { message } => VectorGenerationStoreErrorV1::Corrupt(message),
+        GraphDbError::Unavailable { message } | GraphDbError::SealedStoreImmutable { message } => {
+            VectorGenerationStoreErrorV1::Unavailable(message)
+        }
+        GraphDbError::InvalidRequest { message } => {
+            VectorGenerationStoreErrorV1::InvalidPlan(message)
+        }
+        GraphDbError::DurabilityUncertain { message } => {
+            VectorGenerationStoreErrorV1::DurabilityUncertain(message)
+        }
+        GraphDbError::BudgetExhausted { kind, limit } => VectorGenerationStoreErrorV1::Unavailable(
+            format!("semantic vector graph {kind} budget is exhausted (limit {limit})"),
+        ),
+        GraphDbError::DeadlineExceeded => VectorGenerationStoreErrorV1::DeadlineExceeded,
+        GraphDbError::Closed => {
+            VectorGenerationStoreErrorV1::Unavailable("graph database is closed".to_owned())
+        }
+    }
+}
+
+pub(super) fn storage_error(error: impl std::fmt::Display) -> VectorGenerationStoreErrorV1 {
+    VectorGenerationStoreErrorV1::Corrupt(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_graph_db::{GraphBudgetKind, GraphDbError};
+
+    use super::map_graph_error;
+    use crate::store::vector_generations::VectorGenerationStoreErrorV1;
+
+    #[test]
+    fn map_graph_error_names_exhausted_budget_kind_and_limit() {
+        let error = map_graph_error(GraphDbError::budget_exhausted(
+            GraphBudgetKind::Mutation,
+            4_096,
+        ));
+        assert_eq!(
+            error.to_string(),
+            "semantic vector graph is unavailable: semantic vector graph mutation budget is exhausted (limit 4096)"
+        );
+    }
+
+    #[test]
+    fn stale_writer_conflict_keeps_its_guard_context() {
+        let error = map_graph_error(GraphDbError::conflict_observed(
+            "staging.resume_generation_stage",
+            "writer_fence=incarnation-1",
+            "writer_fence=incarnation-2",
+        ));
+        assert!(matches!(
+            error,
+            VectorGenerationStoreErrorV1::ConcurrentMutation(context)
+                if context.site == "staging.resume_generation_stage"
+                    && context.expected.as_deref() == Some("writer_fence=incarnation-1")
+                    && context.actual.as_deref() == Some("writer_fence=incarnation-2")
+        ));
+    }
+}

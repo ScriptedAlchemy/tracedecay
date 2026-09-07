@@ -11,19 +11,19 @@
 /// graph nodes for declarations, parented to the closest enclosing scope.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
 pub struct LeanExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
     /// `(qualified_prefix, parent_id)` — top is the active scope. The file
@@ -31,8 +31,8 @@ struct ExtractionState {
     scope_stack: Vec<(String, String)>,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -42,25 +42,60 @@ impl ExtractionState {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
             scope_stack: Vec::new(),
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl LeanExtractor {
     pub fn extract_lean(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+        let tree = match Self::parse(source) {
+            Ok(tree) => tree,
+            Err(_msg) => {
+                return Self::build_result(
+                    Self::initialize_state(file_path, source),
+                    Instant::now(),
+                );
+            }
+        };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = Self::initialize_state(file_path, source);
+
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit(&mut state, child);
+        });
+
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
+    }
+
+    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
+        let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
             kind: NodeKind::File,
@@ -90,11 +125,10 @@ impl LeanExtractor {
         state
             .scope_stack
             .push((file_path.to_string(), state.file_node_id.clone()));
+        state
+    }
 
-        if let Ok(tree) = Self::parse(source) {
-            Self::visit(&mut state, tree.root_node());
-        }
-
+    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
             nodes: state.nodes,
             edges: state.edges,
@@ -105,14 +139,7 @@ impl LeanExtractor {
     }
 
     fn parse(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("lean")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Lean grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("lean", "Lean", source)
     }
 
     fn visit(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -148,8 +175,7 @@ impl LeanExtractor {
             // `open`, `attribute`, `notation`, `mixfix`, `macro_rules`,
             // `variable`, `universe`, `prelude`, `elab`, `syntax`,
             // `hash_command`, `export`, `builtin_initialize` are out of
-            // scope for now — they don't define named graph entities we
-            // currently track.
+            // scope — they don't define named graph entities we track.
             _ => {}
         }
     }
@@ -174,7 +200,7 @@ impl LeanExtractor {
     /// the *surrounding* scope.
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = node.child_by_field_name("name").map(|n| state.node_text(n));
-        let pushed = if let Some(name) = name.as_deref() {
+        let pushed = if let Some(name) = name {
             let id = Self::emit_node(state, node, NodeKind::Module, name);
             let parent_qn = match state.scope_stack.last() {
                 Some((qn, _)) => qn.clone(),
@@ -212,7 +238,7 @@ impl LeanExtractor {
         // The `module` field on `import` holds the dotted module path.
         if let Some(n) = node.child_by_field_name("module") {
             let target = state.node_text(n);
-            Self::push_use_edge(state, node, &target);
+            Self::push_use_edge(state, node, target);
             return;
         }
         // Fallback: scan for an identifier child (older grammars / shapes).
@@ -221,7 +247,7 @@ impl LeanExtractor {
             loop {
                 if cursor.node().kind() == "identifier" {
                     let target = state.node_text(cursor.node());
-                    Self::push_use_edge(state, node, &target);
+                    Self::push_use_edge(state, node, target);
                     break;
                 }
                 if !cursor.goto_next_sibling() {
@@ -250,7 +276,7 @@ impl LeanExtractor {
     /// for nested content.
     fn emit_named(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) -> String {
         let name = match node.child_by_field_name("name") {
-            Some(n) => state.node_text(n),
+            Some(n) => state.node_text(n).to_string(),
             None => format!("<anonymous_{}>", node.kind()),
         };
         Self::emit_node(state, node, kind, &name)
@@ -261,7 +287,7 @@ impl LeanExtractor {
     fn emit_if_named(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         if let Some(name_node) = node.child_by_field_name("name") {
             let name = state.node_text(name_node);
-            Self::emit_node(state, node, kind, &name);
+            Self::emit_node(state, node, kind, name);
         }
     }
 
@@ -337,5 +363,15 @@ impl crate::LanguageExtractor for LeanExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_lean(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

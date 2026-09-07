@@ -1,0 +1,1417 @@
+//! Session-temporal projection, retrieval, and LCM hydration store.
+//!
+//! Extracted from `tracedecay-global-db` so wave-7 no longer compiles this
+//! cluster in the same crate as the project registry. This crate does not
+//! depend on `tracedecay-global-db`.
+
+#![deny(clippy::all)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+
+mod handle;
+mod schema_constants;
+mod support;
+#[cfg(test)]
+mod test_registered_impls;
+pub use handle::{
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalQuery, SessionTemporalRegisteredDb,
+    SessionTemporalWriteTxn,
+};
+pub use schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
+
+mod cursor_keys;
+mod direct;
+mod doctor_health;
+pub mod execution;
+mod expand;
+mod hydration;
+pub mod operations;
+mod participant_freeze;
+mod projection;
+pub use projection::SessionTemporalRefreshDiscoveryPage;
+mod query;
+mod rebuild;
+mod refresh;
+/// Released LCM response shaping over one canonical frozen-store snapshot. The
+/// DB-free shaping it applies is owned by [`self::render`].
+mod registered_lcm_render;
+mod relation_projection;
+mod relation_receipts;
+pub use relation_projection::{SessionRelationRecoveryPage, seed_session_relation_projection};
+pub use relation_receipts::{apply_relation_projection, record_relation_receipt};
+pub mod relations;
+pub mod render;
+mod retrieval;
+mod sql;
+pub mod store;
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
+use tracedecay_graph_db::GraphNamespace;
+
+use self::execution::{
+    AuthorizedTaskSessionExecutionRequestV1, AuthorizedTemporalExecutionRequest,
+    SessionDataFreshness, SessionTemporalExecutionError, SessionTemporalExecutionPort,
+    SessionTemporalExecutionReport, TaskSessionExecutionOmissionReasonV1,
+    TaskSessionExecutionOmissionV1, TaskSessionRankSelectorV1, TaskSessionReauthorizationStageV1,
+    TaskSessionSelectionCallbackErrorV1, TaskSessionTemporalExecutionFutureV1,
+    TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionPortV1,
+    TaskSessionTemporalExecutionReportV1, TemporalExecutionFuture,
+};
+use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
+use tracedecay_lcm::contracts::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
+    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
+};
+use tracedecay_query::retrieval::evidence_lanes::{
+    CanonicalTaskSessionCandidateExportPortV1, TaskSessionLaneRequestV1,
+    TaskSessionLaneRetrieverV1, TaskSessionPlan23BindingV1,
+};
+use tracedecay_runtime_core::db::engine::Error as EngineError;
+use tracedecay_sessions::runtime::git_correlation::{
+    GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
+    recover_git_evidence_projection,
+};
+use tracedecay_store::{SessionMessageRecord, SessionRecord};
+use tracedecay_temporal_query::context::VersionedTokenEstimator;
+use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
+use tracedecay_temporal_query::hydrate_temporal_candidate_selection;
+use tracedecay_temporal_query::hydration::hydrate_selected;
+use tracedecay_temporal_query::ports::{
+    BindingDigest, ExecutionControl, KernelVersions, TemporalExecutionSnapshot,
+    TemporalRetrievalScope,
+};
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::{execute_temporal_candidate_export, execute_temporal_kernel};
+
+pub use self::cursor_keys::{GlobalDbCursorKeyProvider, GlobalDbCursorKeyProviderError};
+pub use self::direct::ResolvedDirectAnchor;
+use self::hydration::GlobalDbTemporalHydrationPort;
+use self::participant_freeze::{
+    freeze_participants, freeze_prepared_candidate_participants, root_readiness,
+};
+use self::retrieval::{GlobalDbPreparedCandidatePort, GlobalDbTemporalReadPort};
+use self::sql::TemporalSqlRead;
+use tracedecay_lcm::payload::read_verified_payload_content_with_checkpoint;
+
+pub use doctor_health::{
+    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
+};
+pub use projection::record_canonical_observation_effect;
+pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+pub use store::GlobalDbSessionTemporalStore;
+
+impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
+    /// Resolves a Git filter through the verified Git-evidence graph.
+    ///
+    /// `None` means the request is unscoped. A non-empty filter always returns
+    /// `Some`, including an authoritative empty set when the graph has no
+    /// matching sessions.
+    pub fn git_scope_session_ids(
+        &self,
+        filter: &GitScopeFilter,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        if filter.is_empty() {
+            return Ok(None);
+        }
+        let runtime = self.project_graph_runtime().ok_or_else(|| {
+            GitCorrelationError::Unavailable(
+                "registered project graph runtime is not mounted".to_owned(),
+            )
+        })?;
+        let identity = git_evidence_projection_identity(GraphNamespace::new("project")?)?;
+        // Absence is not an authoritative empty projection. Until Git
+        // evidence has been published, callers cannot prove that no durable
+        // session holds a matching worktree.
+        let Some(projection) =
+            recover_git_evidence_projection(runtime, &identity, Arc::new(AtomicBool::new(false)))?
+        else {
+            return Err(GitCorrelationError::Unavailable(
+                "verified Git-evidence projection has not been published".to_owned(),
+            ));
+        };
+        let session_ids = projection.session_ids_for_scope(filter).ok_or_else(|| {
+            GitCorrelationError::Contract(
+                "Git scope resolution requires a non-empty filter".to_owned(),
+            )
+        })?;
+        Ok(Some(session_ids))
+    }
+
+    #[hotpath::measure(future = true, label = "session_temporal.txn.ensure_cursor_key")]
+    pub async fn ensure_active_session_cursor_key_result(
+        &self,
+    ) -> tracedecay_store::SessionStoreResult<SignedCursorKeyRefV1> {
+        const OPERATION: &str = "provision registered session cursor authentication key";
+        let transaction = hotpath::measure_block!("session_temporal.txn.begin", {
+            self.begin_write_transaction()
+                .await
+                .map_err(|error| query::storage(OPERATION, error))?
+        });
+        let key =
+            cursor_keys::ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+        hotpath::measure_block!("session_temporal.txn.commit", {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| query::storage(OPERATION, error))?
+        });
+        Ok(key)
+    }
+
+    #[hotpath::skip]
+    pub async fn load_session_cursor_key_provider_result(
+        &self,
+    ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+        let key = self
+            .ensure_active_session_cursor_key_result()
+            .await
+            .map_err(|source| cursor_keys::GlobalDbCursorKeyProviderError::Provision { source })?;
+        let read = self.read_snapshot().await.map_err(|source| {
+            cursor_keys::GlobalDbCursorKeyProviderError::Storage {
+                operation: "load registered session cursor authentication key",
+                source: EngineError::invalid_operation(source.to_string()),
+            }
+        })?;
+        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
+    }
+
+    #[hotpath::skip]
+    pub async fn load_preprovisioned_session_cursor_key_provider_result(
+        &self,
+    ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+        let read = self.read_snapshot().await.map_err(|source| {
+            cursor_keys::GlobalDbCursorKeyProviderError::Storage {
+                operation: "load pre-provisioned session cursor authentication key",
+                source: EngineError::invalid_operation(source.to_string()),
+            }
+        })?;
+        GlobalDbCursorKeyProvider::from_registered_active(&read).await
+    }
+}
+
+/// Registry-backed rendering adapter over one session shard.
+pub struct RegisteredGlobalDbSessionTemporalExecution<'db, D: SessionTemporalRegisteredDb> {
+    db: &'db D,
+}
+
+/// One page item whose owning session must be resolved from the same frozen
+/// registered read as its canonical content.
+pub enum SessionPageReconstructionRequest<'a> {
+    Occurrence {
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+        provider: &'a str,
+        session_id: &'a str,
+        content: &'a [u8],
+    },
+    Summary {
+        snapshot: &'a TemporalExecutionSnapshot,
+        provider: &'a str,
+        session_id: &'a str,
+    },
+}
+
+impl<'a> SessionPageReconstructionRequest<'a> {
+    #[hotpath::skip]
+    pub const fn occurrence(
+        snapshot: &'a TemporalExecutionSnapshot,
+        anchor_id: &'a RetrievalAnchorId,
+        provider: &'a str,
+        session_id: &'a str,
+        content: &'a [u8],
+    ) -> Self {
+        Self::Occurrence {
+            snapshot,
+            anchor_id,
+            provider,
+            session_id,
+            content,
+        }
+    }
+
+    #[hotpath::skip]
+    pub const fn summary(
+        snapshot: &'a TemporalExecutionSnapshot,
+        provider: &'a str,
+        session_id: &'a str,
+    ) -> Self {
+        Self::Summary {
+            snapshot,
+            provider,
+            session_id,
+        }
+    }
+
+    fn snapshot(&self) -> &TemporalExecutionSnapshot {
+        match self {
+            Self::Occurrence { snapshot, .. } | Self::Summary { snapshot, .. } => snapshot,
+        }
+    }
+}
+
+/// Canonical session metadata and, for occurrence entries, canonical message
+/// content reconstructed under one registered read snapshot.
+pub enum SessionPageReconstruction {
+    Occurrence {
+        session: SessionRecord,
+        message: Box<SessionMessageRecord>,
+    },
+    Summary {
+        session: SessionRecord,
+    },
+}
+
+impl<'db, D: SessionTemporalRegisteredDb + Sync>
+    RegisteredGlobalDbSessionTemporalExecution<'db, D>
+{
+    fn access(&self) -> SessionTemporalAccess<'_, D> {
+        SessionTemporalAccess::new(self.db)
+    }
+
+    #[hotpath::skip]
+    pub const fn new(db: &'db D) -> Self {
+        Self { db }
+    }
+
+    /// Resolves ordered page records under one frozen registered read snapshot.
+    /// Every request must carry the exact same authorized root; accepting a
+    /// mixed-root batch would make a registered shard an implicit cross-project
+    /// cache.
+    #[hotpath::skip]
+    pub async fn reconstruct_session_page<'a>(
+        &self,
+        requests: impl IntoIterator<Item = SessionPageReconstructionRequest<'a>>,
+    ) -> Result<
+        Vec<Result<SessionPageReconstruction, SessionTemporalExecutionError>>,
+        SessionTemporalExecutionError,
+    > {
+        let requests = requests.into_iter().collect::<Vec<_>>();
+        let Some(first) = requests.first() else {
+            return Ok(Vec::new());
+        };
+        let Some(authorized_root) = first.snapshot().request().authorized_root().cloned() else {
+            return Err(SessionTemporalExecutionError::WrongScope);
+        };
+        if requests
+            .iter()
+            .any(|request| request.snapshot().request().authorized_root() != Some(&authorized_root))
+        {
+            return Err(SessionTemporalExecutionError::WrongScope);
+        }
+        first
+            .snapshot()
+            .request()
+            .execution_control()
+            .checkpoint()
+            .map_err(map_control_error)?;
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let read = TemporalSqlRead::registered(&read);
+        let mut sessions = HashMap::<(String, String), Option<SessionRecord>>::new();
+        let mut reconstructed = Vec::with_capacity(requests.len());
+        for request in requests {
+            request
+                .snapshot()
+                .request()
+                .execution_control()
+                .checkpoint()
+                .map_err(map_control_error)?;
+            let (snapshot, provider, session_id) = match &request {
+                SessionPageReconstructionRequest::Occurrence {
+                    snapshot,
+                    provider,
+                    session_id,
+                    ..
+                }
+                | SessionPageReconstructionRequest::Summary {
+                    snapshot,
+                    provider,
+                    session_id,
+                } => (*snapshot, *provider, *session_id),
+            };
+            let session_key = (provider.to_owned(), session_id.to_owned());
+            let session = if let Some(session) = sessions.get(&session_key) {
+                Ok(session.clone())
+            } else {
+                let session = session_record_from_frozen_read(
+                    &read,
+                    authorized_root.project_key(),
+                    provider,
+                    session_id,
+                )
+                .await;
+                if let Ok(session) = &session {
+                    sessions.insert(session_key, session.clone());
+                }
+                session
+            };
+            let session = match session {
+                Ok(session) => session,
+                Err(error) => {
+                    reconstructed.push(Err(error));
+                    continue;
+                }
+            };
+            let Some(session) = session else {
+                reconstructed.push(Err(SessionTemporalExecutionError::Unavailable));
+                continue;
+            };
+            let result = match request {
+                SessionPageReconstructionRequest::Summary { .. } => {
+                    Ok(SessionPageReconstruction::Summary { session })
+                }
+                SessionPageReconstructionRequest::Occurrence {
+                    anchor_id, content, ..
+                } => hydration::session_message_from_hydrated_bytes(
+                    &read, snapshot, anchor_id, provider, session_id, content,
+                )
+                .await
+                .map_err(map_hydration_error)
+                .and_then(|message| {
+                    if message.provider != provider
+                        || message.session_id != session_id
+                        || session.provider != provider
+                        || session.session_id != session_id
+                        || session.project_key != authorized_root.project_key()
+                    {
+                        return Err(SessionTemporalExecutionError::Unavailable);
+                    }
+                    Ok(SessionPageReconstruction::Occurrence {
+                        session,
+                        message: Box::new(message),
+                    })
+                }),
+            };
+            match result {
+                Err(
+                    error @ (SessionTemporalExecutionError::Cancelled
+                    | SessionTemporalExecutionError::BudgetExhausted
+                    | SessionTemporalExecutionError::ResetRequired),
+                ) => return Err(error),
+                result => reconstructed.push(result),
+            }
+        }
+        Ok(reconstructed)
+    }
+
+    #[hotpath::skip]
+    pub async fn resolve_lcm_describe_target(
+        &self,
+        provider: &str,
+        session_id: &SessionId,
+        target: &LcmDescribeTarget,
+    ) -> Result<Option<ResolvedDirectAnchor>, SessionTemporalExecutionError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        direct::resolve_describe_target(
+            &TemporalSqlRead::registered(&read),
+            provider,
+            session_id,
+            target,
+        )
+        .await
+    }
+
+    #[hotpath::skip]
+    pub async fn resolve_lcm_expand_target(
+        &self,
+        provider: &str,
+        session_id: &SessionId,
+        target: &LcmExpandTarget,
+    ) -> Result<ResolvedDirectAnchor, SessionTemporalExecutionError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        direct::resolve_expand_target(
+            &TemporalSqlRead::registered(&read),
+            provider,
+            session_id,
+            target,
+        )
+        .await
+    }
+
+    #[hotpath::skip]
+    pub async fn render_lcm_describe(
+        &self,
+        request: LcmDescribeRequest,
+        control: Option<&ExecutionControl>,
+    ) -> Result<LcmDescribeResponse, SessionTemporalExecutionError> {
+        let snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let summary_ids = registered_lcm_render::describe_relation_summary_ids(&snapshot, &request)
+            .await
+            .map_err(map_lcm_error)?;
+        let relations = self
+            .lcm_summary_relations(&request.session_id, summary_ids, control)
+            .await?;
+        registered_lcm_render::describe(&snapshot, request, &relations)
+            .await
+            .map_err(map_lcm_error)
+    }
+
+    #[hotpath::skip]
+    pub async fn render_lcm_expand(
+        &self,
+        request: LcmExpandRequest,
+        canonical_content: &str,
+        control: &ExecutionControl,
+    ) -> Result<LcmExpandResponse, SessionTemporalExecutionError> {
+        let snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let summary_ids = registered_lcm_render::expand_relation_summary_ids(&request);
+        let relations = self
+            .lcm_summary_relations(&request.session_id, summary_ids, Some(control))
+            .await?;
+        registered_lcm_render::expand(&snapshot, request, canonical_content, &relations)
+            .await
+            .map_err(map_lcm_error)
+    }
+
+    #[hotpath::skip]
+    async fn lcm_summary_relations(
+        &self,
+        session_id: &str,
+        summary_ids: Vec<String>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Vec<relations::SummaryRelationRead>, SessionTemporalExecutionError> {
+        const MAX_RELATIONS: usize = 4_096;
+        if summary_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let control = control.ok_or(SessionTemporalExecutionError::Unavailable)?;
+        control.checkpoint().map_err(map_control_error)?;
+        let session_id =
+            SessionId::new(session_id).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let cancellation = store::execution_control_graph_cancellation(control);
+        let first = self
+            .access()
+            .active_session_summary_relations(
+                &session_id,
+                &summary_ids,
+                MAX_RELATIONS,
+                cancellation,
+            )
+            .await;
+        control.checkpoint().map_err(map_control_error)?;
+        let (_, mut relations) = first.map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+
+        let known = relations
+            .iter()
+            .map(|relation| relation.summary_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let child_ids = relations
+            .iter()
+            .flat_map(|relation| relation.sources.iter())
+            .filter_map(|source| match source {
+                relations::SummarySourceRef::Summary { summary_id }
+                    if !known.contains(summary_id.as_str()) =>
+                {
+                    Some(summary_id.clone())
+                }
+                relations::SummarySourceRef::Anchor { .. }
+                | relations::SummarySourceRef::Summary { .. } => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if child_ids.is_empty() {
+            return Ok(relations);
+        }
+        control.checkpoint().map_err(map_control_error)?;
+        let cancellation = store::execution_control_graph_cancellation(control);
+        let children = self
+            .access()
+            .active_session_summary_relations(&session_id, &child_ids, MAX_RELATIONS, cancellation)
+            .await;
+        control.checkpoint().map_err(map_control_error)?;
+        let (_, children) = children.map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        relations.extend(children);
+        Ok(relations)
+    }
+
+    #[hotpath::skip]
+    pub async fn hydrate_lcm_external_payload(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+        provider: &str,
+        session_id: &SessionId,
+        payload_ref: &str,
+        max_bytes: usize,
+    ) -> Result<String, SessionTemporalExecutionError> {
+        let read_snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let resolution = hydration::resolve_external_target(
+            &TemporalSqlRead::registered(&read_snapshot),
+            snapshot,
+            anchor_id,
+            provider,
+            session_id.as_str(),
+            payload_ref,
+        )
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let descriptor = match resolution {
+            hydration::HydrationResolution::Available(descriptor) => descriptor,
+            hydration::HydrationResolution::Unavailable(state) => {
+                return Err(match state {
+                    HydrationStateV1::Locked => SessionTemporalExecutionError::Locked,
+                    HydrationStateV1::Redacted => SessionTemporalExecutionError::Redacted,
+                    HydrationStateV1::Deleted | HydrationStateV1::RetentionExpired => {
+                        SessionTemporalExecutionError::Deleted
+                    }
+                    HydrationStateV1::Unauthorized => SessionTemporalExecutionError::Denied,
+                    HydrationStateV1::Available
+                    | HydrationStateV1::RetainedButUnavailable
+                    | HydrationStateV1::UnverifiableLegacy => {
+                        SessionTemporalExecutionError::Unavailable
+                    }
+                });
+            }
+        };
+        if descriptor.byte_count > max_bytes {
+            return Err(SessionTemporalExecutionError::BudgetExhausted);
+        }
+        let hydration::PayloadSource::External {
+            provider: descriptor_provider,
+            session_id: descriptor_session,
+            payload_ref: descriptor_ref,
+            char_count,
+        } = descriptor.source
+        else {
+            return Err(SessionTemporalExecutionError::Unavailable);
+        };
+        if descriptor_provider != provider
+            || descriptor_session != session_id.as_str()
+            || descriptor_ref != payload_ref
+        {
+            return Err(SessionTemporalExecutionError::Denied);
+        }
+        let storage_root = self
+            .db
+            .db_path()
+            .parent()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let control = snapshot.request().execution_control();
+        let mut checkpoint = || {
+            control.checkpoint().map_err(|error| match error {
+                tracedecay_temporal_query::ports::TemporalPortError::Cancelled => {
+                    LcmError::Cancelled
+                }
+                tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
+                    LcmError::DeadlineExceeded
+                }
+                tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
+                    LcmError::BudgetExhausted
+                }
+                _ => LcmError::Db("temporal verification control failed".to_string()),
+            })
+        };
+        read_verified_payload_content_with_checkpoint(
+            storage_root,
+            &descriptor_ref,
+            &descriptor.content_hash,
+            descriptor.byte_count,
+            char_count,
+            &mut checkpoint,
+        )
+        .map_err(map_lcm_error)
+    }
+
+    #[hotpath::skip]
+    pub async fn hydrate_lcm_summary_sources(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        provider: &str,
+        session_id: &SessionId,
+        slice: LcmContentSlice,
+        expansion: &mut LcmExpandResponse,
+    ) -> Result<(), SessionTemporalExecutionError> {
+        if expansion.summary_sources.is_empty() {
+            return Ok(());
+        }
+        let read_snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let read = TemporalSqlRead::registered(&read_snapshot);
+        let mut resolutions = Vec::with_capacity(expansion.summary_sources.len());
+        let mut anchors = Vec::with_capacity(expansion.summary_sources.len());
+        for source in &expansion.summary_sources {
+            let target = match &source.source_ref {
+                LcmSourceRef::RawMessage { store_id } => LcmExpandTarget::RawMessage {
+                    store_id: *store_id,
+                },
+                LcmSourceRef::SummaryNode { node_id } => LcmExpandTarget::SummaryNode {
+                    node_id: node_id.clone(),
+                },
+            };
+            let resolution =
+                direct::resolve_expand_target(&read, provider, session_id, &target).await;
+            match resolution {
+                Ok(resolved) if &resolved.owner_session_id == session_id => {
+                    anchors.push(resolved.anchor_id.clone());
+                    resolutions.push(Ok(resolved.anchor_id));
+                }
+                Ok(_)
+                | Err(
+                    SessionTemporalExecutionError::Denied
+                    | SessionTemporalExecutionError::WrongScope,
+                ) => {
+                    resolutions.push(Err(HydrationStateV1::Unauthorized));
+                }
+                Err(SessionTemporalExecutionError::Deleted) => {
+                    resolutions.push(Err(HydrationStateV1::Deleted));
+                }
+                Err(SessionTemporalExecutionError::Redacted) => {
+                    resolutions.push(Err(HydrationStateV1::Redacted));
+                }
+                Err(SessionTemporalExecutionError::Locked) => {
+                    resolutions.push(Err(HydrationStateV1::Locked));
+                }
+                Err(SessionTemporalExecutionError::BudgetExhausted) => {
+                    return Err(SessionTemporalExecutionError::BudgetExhausted);
+                }
+                Err(SessionTemporalExecutionError::Cancelled) => {
+                    return Err(SessionTemporalExecutionError::Cancelled);
+                }
+                Err(_) => {
+                    resolutions.push(Err(HydrationStateV1::RetainedButUnavailable));
+                }
+            }
+        }
+        let storage_root = self
+            .db
+            .db_path()
+            .parent()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let (relation_scope, relation_store) = self
+            .db
+            .session_relation_store()
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authority = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
+            &read_snapshot,
+            storage_root,
+            &relation_scope,
+            relation_store,
+        );
+        let batch = hydrate_selected(&authority, snapshot, &anchors)
+            .await
+            .map_err(|error| {
+                map_kernel_execution_error(
+                    tracedecay_temporal_query::TemporalKernelError::Hydration(error),
+                )
+            })?;
+        let available = batch
+            .available
+            .iter()
+            .filter_map(|payload| {
+                String::from_utf8(payload.bytes().to_vec())
+                    .ok()
+                    .map(|content| (payload.anchor_id().clone(), content))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let unavailable = batch
+            .unavailable
+            .iter()
+            .map(|denial| (denial.anchor_id().clone(), denial.state()))
+            .collect::<BTreeMap<_, _>>();
+        let hydration = expansion
+            .summary_sources
+            .iter()
+            .zip(resolutions)
+            .map(|(source, resolution)| {
+                let (state, content) = match resolution {
+                    Ok(anchor_id) => {
+                        if let Some(content) = available.get(&anchor_id) {
+                            (HydrationStateV1::Available, Some(content.clone()))
+                        } else {
+                            (
+                                unavailable
+                                    .get(&anchor_id)
+                                    .copied()
+                                    .unwrap_or(HydrationStateV1::RetainedButUnavailable),
+                                None,
+                            )
+                        }
+                    }
+                    Err(state) => (state, None),
+                };
+                CanonicalLcmSourceHydration {
+                    source_ref: source.source_ref.clone(),
+                    state,
+                    content,
+                }
+            })
+            .collect::<Vec<_>>();
+        apply_canonical_summary_source_content(expansion, slice, &hydration)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)
+    }
+
+    #[hotpath::skip]
+    pub async fn encode_lcm_source_cursor(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        binding: &str,
+        next_source_offset: usize,
+    ) -> Result<String, SessionTemporalExecutionError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authenticator = GlobalDbCursorKeyProvider::from_registered_snapshot(&read, snapshot)
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        encode_cursor(
+            snapshot,
+            &lcm_source_cursor_sort_key(binding, next_source_offset),
+            &authenticator,
+        )
+        .map_err(map_lcm_cursor_error)
+    }
+
+    #[hotpath::skip]
+    pub async fn decode_lcm_source_cursor(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        binding: &str,
+        encoded: &str,
+    ) -> Result<usize, SessionTemporalExecutionError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let authenticator = GlobalDbCursorKeyProvider::from_registered_snapshot(&read, snapshot)
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let sort_key =
+            verify_cursor(encoded, snapshot, &authenticator).map_err(map_lcm_cursor_error)?;
+        parse_lcm_source_cursor_offset(binding, &sort_key)
+    }
+
+    #[hotpath::measure(future = true, label = "session_temporal.execution.freeze")]
+    async fn freeze(
+        &self,
+        request: &AuthorizedTemporalExecutionRequest,
+    ) -> Result<
+        (
+            tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+            TemporalExecutionSnapshot,
+            Option<SessionDataFreshness>,
+        ),
+        SessionTemporalExecutionError,
+    > {
+        let control = request.snapshot_request().execution_control();
+        control.checkpoint().map_err(map_control_error)?;
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let temporal_read = TemporalSqlRead::registered(&read);
+        let (participants, watermarks, cursor_key, prepared, readiness) =
+            match request.snapshot_request().retrieval_scope() {
+                TemporalRetrievalScope::Session(_) => {
+                    let (participants, watermarks, cursor_key) =
+                        freeze_participants(&temporal_read, request).await?;
+                    (participants, watermarks, cursor_key, None, None)
+                }
+                TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+                    let relation_authority = self.db.session_relation_store().ok();
+                    let candidate_read = match &relation_authority {
+                        Some((relation_scope, relation_store)) => {
+                            GlobalDbTemporalReadPort::new_registered_with_relations(
+                                &read,
+                                relation_scope,
+                                relation_store.clone(),
+                            )
+                        }
+                        None => GlobalDbTemporalReadPort::new_registered(&read),
+                    };
+                    let plan = tracedecay_temporal_query::plan_temporal_candidates(
+                        request.query(),
+                        request.direct_anchor(),
+                        request.snapshot_request().semantic_filter().goals,
+                    );
+                    let preparation = GlobalDbPreparedCandidatePort::new(
+                        &candidate_read,
+                        request.snapshot_request(),
+                        &plan,
+                    );
+                    let prepared =
+                        tracedecay_temporal_query::ports::prepare_temporal_candidate_cohort(
+                            request.snapshot_request(),
+                            &preparation,
+                        )
+                        .await
+                        .map_err(map_control_error)?;
+                    let readiness = root_readiness(&temporal_read, request).await?;
+                    if prepared.candidates().is_empty() {
+                        return Err(SessionTemporalExecutionError::Empty {
+                            freshness: readiness,
+                        });
+                    }
+                    let (participants, watermarks, cursor_key) =
+                        freeze_prepared_candidate_participants(&temporal_read, request, &prepared)
+                            .await?;
+                    (
+                        participants,
+                        watermarks,
+                        cursor_key,
+                        Some(prepared),
+                        Some(readiness),
+                    )
+                }
+            };
+        control.checkpoint().map_err(map_control_error)?;
+        let mut snapshot = TemporalExecutionSnapshot::new_authorized(
+            request.snapshot_request().clone(),
+            watermarks,
+            KernelVersions {
+                schema: request.schema_version(),
+                ranking: request.ranking_version(),
+                configuration_digest: BindingDigest::new(
+                    "configuration_digest",
+                    request.configuration_digest(),
+                )
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+            },
+            cursor_key,
+            ValidatedAuthorization::Authorized,
+        )
+        .and_then(|snapshot| snapshot.with_participant_manifest(participants))
+        .map_err(map_control_error)?;
+        if let Some(prepared) = prepared {
+            snapshot = snapshot
+                .with_prepared_candidate_cohort(prepared)
+                .map_err(map_control_error)?;
+        }
+        Ok((read, snapshot, readiness))
+    }
+
+    #[hotpath::measure(future = true, label = "session_temporal.execution.execute")]
+    async fn execute<E>(
+        &self,
+        request: AuthorizedTemporalExecutionRequest,
+        estimator: &E,
+    ) -> Result<SessionTemporalExecutionReport, SessionTemporalExecutionError>
+    where
+        E: VersionedTokenEstimator + Sync,
+    {
+        hotpath::gauge!("session_temporal.execution").inc(1u32);
+        let (read_snapshot, snapshot, root_readiness) = self.freeze(&request).await?;
+        let authenticator =
+            GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
+                .await
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let storage_root = self
+            .db
+            .db_path()
+            .parent()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let (relation_scope, relation_store) = self
+            .db
+            .session_relation_store()
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let kernel_request = request.into_kernel_request(snapshot);
+        let read = GlobalDbTemporalReadPort::new_registered_with_relations(
+            &read_snapshot,
+            &relation_scope,
+            relation_store.clone(),
+        );
+        let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
+            &read_snapshot,
+            storage_root,
+            &relation_scope,
+            relation_store,
+        );
+        let result = execute_temporal_kernel(
+            &kernel_request,
+            &read,
+            &hydration,
+            &authenticator,
+            estimator,
+        )
+        .await
+        .map_err(map_kernel_execution_error)?;
+        if let Some(readiness) = root_readiness {
+            Ok(SessionTemporalExecutionReport::new(result, readiness))
+        } else {
+            let source_coverage = result
+                .snapshot
+                .source_coverage()
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            Ok(SessionTemporalExecutionReport::from_source_coverage(
+                result,
+                source_coverage,
+            ))
+        }
+    }
+}
+
+impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalExecutionPort
+    for RegisteredGlobalDbSessionTemporalExecution<'_, D>
+{
+    fn execute<'a, E>(
+        &'a self,
+        request: AuthorizedTemporalExecutionRequest,
+        estimator: &'a E,
+    ) -> TemporalExecutionFuture<'a>
+    where
+        E: VersionedTokenEstimator + Sync + 'a,
+    {
+        Box::pin(self.execute(request, estimator))
+    }
+}
+
+impl<D: SessionTemporalRegisteredDb + Sync> TaskSessionTemporalExecutionPortV1
+    for RegisteredGlobalDbSessionTemporalExecution<'_, D>
+{
+    fn execute_task_session<'a, E>(
+        &'a self,
+        request: AuthorizedTaskSessionExecutionRequestV1,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+        estimator: &'a E,
+    ) -> TaskSessionTemporalExecutionFutureV1<'a>
+    where
+        E: VersionedTokenEstimator + Sync + 'a,
+    {
+        Box::pin(async move {
+            hotpath::gauge!("session_temporal.execution").inc(1u32);
+            let (read_snapshot, snapshot, _) = self.freeze(request.temporal()).await?;
+            let authenticator =
+                GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
+                    .await
+                    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            let storage_root = self
+                .db
+                .db_path()
+                .parent()
+                .ok_or(SessionTemporalExecutionError::Unavailable)?;
+            let relation_authority = self.db.session_relation_store().ok();
+            let kernel_request = request.temporal().clone().into_kernel_request(snapshot);
+            let read = match &relation_authority {
+                Some((scope, store)) => GlobalDbTemporalReadPort::new_registered_with_relations(
+                    &read_snapshot,
+                    scope,
+                    store.clone(),
+                ),
+                None => GlobalDbTemporalReadPort::new_registered(&read_snapshot),
+            };
+            let hydration = match &relation_authority {
+                Some((scope, store)) => {
+                    GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
+                        &read_snapshot,
+                        storage_root,
+                        scope,
+                        store.clone(),
+                    )
+                }
+                None => GlobalDbTemporalHydrationPort::for_registered_snapshot(
+                    &read_snapshot,
+                    storage_root,
+                ),
+            };
+            let export = execute_temporal_candidate_export(&kernel_request, &read, &authenticator)
+                .await
+                .map_err(map_kernel_execution_error)?;
+            let plan23 = TaskSessionPlan23BindingV1::from_export(&export)
+                .map_err(|error| task_session_callback_contract(error.to_string()))?;
+            let candidate_port = CanonicalTaskSessionCandidateExportPortV1::new(
+                &export,
+                request.retriever_revision().clone(),
+                request.score_domain().clone(),
+                request.policy_revision().clone(),
+            );
+            let lane_request = TaskSessionLaneRequestV1::new(
+                request.retrieval(),
+                request.query(),
+                request.binding(),
+                &plan23,
+                request.control(),
+            );
+            let lane_outcome = TaskSessionLaneRetrieverV1::new(&candidate_port)
+                .execute(&lane_request)
+                .map_err(|error| task_session_callback_contract(error.to_string()))?;
+
+            if let Some(omission) = task_session_reauthorize(
+                selector,
+                request.binding(),
+                TaskSessionReauthorizationStageV1::BeforeSelection,
+            )? {
+                return Ok(TaskSessionTemporalExecutionOutcomeV1::Omitted(omission));
+            }
+            let selection = match selector.select(
+                request.binding(),
+                request.retrieval(),
+                request.query(),
+                &lane_outcome,
+            ) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    if let Some(omission) = task_session_callback_omission(
+                        TaskSessionReauthorizationStageV1::BeforeSelection,
+                        error,
+                    )? {
+                        return Ok(TaskSessionTemporalExecutionOutcomeV1::Omitted(omission));
+                    }
+                    return Err(task_session_callback_contract(
+                        "task/session selector returned no outcome".to_owned(),
+                    ));
+                }
+            };
+            if selection.selected_anchors().len()
+                > request.retrieval().budget.max_hydrated_results as usize
+            {
+                return Err(SessionTemporalExecutionError::BudgetExhausted);
+            }
+            if let Some(omission) = task_session_reauthorize(
+                selector,
+                request.binding(),
+                TaskSessionReauthorizationStageV1::BeforeHydration,
+            )? {
+                return Ok(TaskSessionTemporalExecutionOutcomeV1::Omitted(omission));
+            }
+            let result = hydrate_temporal_candidate_selection(
+                &kernel_request,
+                export,
+                selection.selected_anchors(),
+                &hydration,
+                estimator,
+            )
+            .await
+            .map_err(map_kernel_execution_error)?;
+            let source_coverage = result
+                .snapshot
+                .source_coverage()
+                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+            Ok(TaskSessionTemporalExecutionOutcomeV1::Complete(Box::new(
+                TaskSessionTemporalExecutionReportV1 {
+                    binding: request.binding().clone(),
+                    selection,
+                    temporal: SessionTemporalExecutionReport::from_source_coverage(
+                        result,
+                        source_coverage,
+                    ),
+                },
+            )))
+        })
+    }
+}
+
+fn task_session_reauthorize(
+    selector: &dyn TaskSessionRankSelectorV1,
+    binding: &tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1,
+    stage: TaskSessionReauthorizationStageV1,
+) -> Result<Option<TaskSessionExecutionOmissionV1>, SessionTemporalExecutionError> {
+    match selector.reauthorize(binding, stage) {
+        Ok(()) => Ok(None),
+        Err(error) => task_session_callback_omission(stage, error),
+    }
+}
+
+fn task_session_callback_omission(
+    stage: TaskSessionReauthorizationStageV1,
+    error: TaskSessionSelectionCallbackErrorV1,
+) -> Result<Option<TaskSessionExecutionOmissionV1>, SessionTemporalExecutionError> {
+    let reason = match error {
+        TaskSessionSelectionCallbackErrorV1::Denied => TaskSessionExecutionOmissionReasonV1::Denied,
+        TaskSessionSelectionCallbackErrorV1::Stale => TaskSessionExecutionOmissionReasonV1::Stale,
+        TaskSessionSelectionCallbackErrorV1::Unavailable => {
+            TaskSessionExecutionOmissionReasonV1::Unavailable
+        }
+        TaskSessionSelectionCallbackErrorV1::Invalid(detail) => {
+            return Err(task_session_callback_contract(detail));
+        }
+    };
+    Ok(Some(TaskSessionExecutionOmissionV1 { stage, reason }))
+}
+
+fn task_session_callback_contract(detail: String) -> SessionTemporalExecutionError {
+    SessionTemporalExecutionError::Kernel(
+        tracedecay_temporal_query::TemporalKernelError::CandidateExportContract(detail),
+    )
+}
+
+fn map_kernel_execution_error(
+    error: tracedecay_temporal_query::TemporalKernelError,
+) -> SessionTemporalExecutionError {
+    use tracedecay_temporal_query::TemporalKernelError;
+    use tracedecay_temporal_query::context::ContextError;
+    use tracedecay_temporal_query::hydration::HydrationError;
+    use tracedecay_temporal_query::ports::TemporalPortError;
+
+    if matches!(
+        &error,
+        TemporalKernelError::Port(TemporalPortError::ResetRequired { .. })
+            | TemporalKernelError::Hydration(HydrationError::ResetRequired { .. })
+            | TemporalKernelError::Hydration(HydrationError::Interrupted(
+                TemporalPortError::ResetRequired { .. }
+            ))
+            | TemporalKernelError::Context(ContextError::Interrupted(
+                TemporalPortError::ResetRequired { .. }
+            ))
+    ) {
+        SessionTemporalExecutionError::ResetRequired
+    } else {
+        SessionTemporalExecutionError::Kernel(error)
+    }
+}
+
+fn map_hydration_error(
+    error: tracedecay_temporal_query::hydration::HydrationError,
+) -> SessionTemporalExecutionError {
+    match error {
+        tracedecay_temporal_query::hydration::HydrationError::Unavailable
+        | tracedecay_temporal_query::hydration::HydrationError::InvalidDenial => {
+            SessionTemporalExecutionError::Unavailable
+        }
+        tracedecay_temporal_query::hydration::HydrationError::ResetRequired { .. } => {
+            SessionTemporalExecutionError::ResetRequired
+        }
+        tracedecay_temporal_query::hydration::HydrationError::BudgetExceeded { .. } => {
+            SessionTemporalExecutionError::BudgetExhausted
+        }
+        tracedecay_temporal_query::hydration::HydrationError::Interrupted(error) => {
+            map_control_error(error)
+        }
+    }
+}
+
+async fn session_record_from_frozen_read(
+    read: &TemporalSqlRead<'_>,
+    project_key: &str,
+    provider: &str,
+    session_id: &str,
+) -> Result<Option<SessionRecord>, SessionTemporalExecutionError> {
+    let mut rows = read
+        .query(
+            "SELECT provider, session_id, project_key, project_path, title, started_at,
+                    ended_at, transcript_path, metadata_json, parent_session_id,
+                    is_subagent, agent_id, parent_tool_use_id
+             FROM sessions
+             WHERE project_key = ?1 AND provider = ?2 AND session_id = ?3",
+            tracedecay_runtime_core::db::engine::params![project_key, provider, session_id],
+        )
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SessionRecord {
+        provider: row
+            .get(0)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        session_id: row
+            .get(1)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        project_key: row
+            .get(2)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        project_path: row
+            .get(3)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?,
+        title: row.get(4).ok(),
+        started_at: row.get(5).ok(),
+        ended_at: row.get(6).ok(),
+        transcript_path: row.get(7).ok(),
+        metadata_json: row.get(8).ok(),
+        parent_session_id: row.get(9).ok(),
+        is_subagent: row.get::<i64>(10).unwrap_or_default() != 0,
+        agent_id: row.get(11).ok(),
+        parent_tool_use_id: row.get(12).ok(),
+    }))
+}
+
+fn map_control_error(
+    error: tracedecay_temporal_query::ports::TemporalPortError,
+) -> SessionTemporalExecutionError {
+    match error {
+        tracedecay_temporal_query::ports::TemporalPortError::Cancelled
+        | tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
+            SessionTemporalExecutionError::Cancelled
+        }
+        tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
+            SessionTemporalExecutionError::BudgetExhausted
+        }
+        tracedecay_temporal_query::ports::TemporalPortError::ResetRequired { .. } => {
+            SessionTemporalExecutionError::ResetRequired
+        }
+        error @ (tracedecay_temporal_query::ports::TemporalPortError::ParticipantLimitExceeded {
+            ..
+        } | tracedecay_temporal_query::ports::TemporalPortError::ParticipantManifestBytesExceeded {
+            ..
+        }) => SessionTemporalExecutionError::Kernel(
+            tracedecay_temporal_query::TemporalKernelError::Port(error),
+        ),
+        // The caller distinguishes a genuinely source-free root from sources
+        // that exist but have not published a searchable generation.
+        tracedecay_temporal_query::ports::TemporalPortError::EmptyParticipantManifest => {
+            SessionTemporalExecutionError::Unavailable
+        }
+        _ => SessionTemporalExecutionError::Unavailable,
+    }
+}
+
+fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
+    match error {
+        LcmError::SummaryNodeNotFound
+        | LcmError::PayloadNotFound
+        | LcmError::PayloadMissing
+        | LcmError::PayloadGcd => SessionTemporalExecutionError::Deleted,
+        LcmError::PayloadLocked => SessionTemporalExecutionError::Locked,
+        LcmError::PayloadNotOwnedBySession | LcmError::SummarySourceNotOwnedBySession => {
+            SessionTemporalExecutionError::Denied
+        }
+        LcmError::Cancelled | LcmError::DeadlineExceeded => {
+            SessionTemporalExecutionError::Cancelled
+        }
+        LcmError::BudgetExhausted => SessionTemporalExecutionError::BudgetExhausted,
+        _ => SessionTemporalExecutionError::Unavailable,
+    }
+}
+
+fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> StableSortKey {
+    StableSortKey {
+        normalized_score_micros: 0,
+        knowledge_at_micros: 0,
+        stable_id: format!("lcm-source:{binding}:{next_source_offset}"),
+    }
+}
+
+fn parse_lcm_source_cursor_offset(
+    binding: &str,
+    sort_key: &StableSortKey,
+) -> Result<usize, SessionTemporalExecutionError> {
+    if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
+        return Err(SessionTemporalExecutionError::Denied);
+    }
+    let prefix = format!("lcm-source:{binding}:");
+    let offset = sort_key
+        .stable_id
+        .strip_prefix(&prefix)
+        .ok_or(SessionTemporalExecutionError::Denied)?;
+    offset
+        .parse()
+        .map_err(|_| SessionTemporalExecutionError::Denied)
+}
+
+fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
+    match error {
+        CursorError::RootMismatch
+        | CursorError::SessionMismatch
+        | CursorError::WrongAccess
+        | CursorError::TemporalModeMismatch
+        | CursorError::GrainMismatch => SessionTemporalExecutionError::WrongScope,
+        CursorError::Malformed
+        | CursorError::Tampered
+        | CursorError::WrongRequest
+        | CursorError::FilterMismatch
+        | CursorError::SortKeyMismatch => SessionTemporalExecutionError::Denied,
+        CursorError::Expired
+        | CursorError::UnknownOrExpiredKey
+        | CursorError::SchemaMismatch
+        | CursorError::RankingMismatch
+        | CursorError::ConfigurationMismatch
+        | CursorError::GenerationMismatch
+        | CursorError::ParticipantManifestMismatch
+        | CursorError::EpochMismatch
+        | CursorError::CandidateCohortMismatch
+        | CursorError::SourceWatermarkMismatch
+        | CursorError::ProjectionWatermarkMismatch
+        | CursorError::IndexWatermarkMismatch
+        | CursorError::SummaryWatermarkMismatch
+        | CursorError::KeyIdMismatch
+        | CursorError::KeyVersionMismatch
+        | CursorError::KeyUnavailable
+        | CursorError::InvalidKeyMaterial => SessionTemporalExecutionError::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod cursor_access_tests {
+    use super::*;
+
+    #[test]
+    fn request_rebinding_is_denied_while_missing_key_authority_is_unavailable() {
+        assert!(matches!(
+            map_lcm_cursor_error(CursorError::WrongRequest),
+            SessionTemporalExecutionError::Denied
+        ));
+        assert!(matches!(
+            map_lcm_cursor_error(CursorError::KeyUnavailable),
+            SessionTemporalExecutionError::Unavailable
+        ));
+    }
+
+    #[test]
+    fn rank_final_revocation_is_a_typed_hydration_omission() {
+        let omission = task_session_callback_omission(
+            TaskSessionReauthorizationStageV1::BeforeHydration,
+            TaskSessionSelectionCallbackErrorV1::Denied,
+        )
+        .expect("typed callback outcome")
+        .expect("revocation omission");
+        assert_eq!(
+            omission,
+            TaskSessionExecutionOmissionV1 {
+                stage: TaskSessionReauthorizationStageV1::BeforeHydration,
+                reason: TaskSessionExecutionOmissionReasonV1::Denied,
+            },
+        );
+
+        let unavailable = task_session_callback_omission(
+            TaskSessionReauthorizationStageV1::BeforeHydration,
+            TaskSessionSelectionCallbackErrorV1::Unavailable,
+        )
+        .expect("typed callback outcome")
+        .expect("unavailable omission");
+        assert_eq!(
+            unavailable.reason,
+            TaskSessionExecutionOmissionReasonV1::Unavailable,
+        );
+
+        let stale = task_session_callback_omission(
+            TaskSessionReauthorizationStageV1::BeforeSelection,
+            TaskSessionSelectionCallbackErrorV1::Stale,
+        )
+        .expect("typed callback outcome")
+        .expect("stale graph omission");
+        assert_eq!(
+            stale,
+            TaskSessionExecutionOmissionV1 {
+                stage: TaskSessionReauthorizationStageV1::BeforeSelection,
+                reason: TaskSessionExecutionOmissionReasonV1::Stale,
+            },
+        );
+    }
+}

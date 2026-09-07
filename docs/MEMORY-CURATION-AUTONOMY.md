@@ -1,156 +1,123 @@
-# Autonomous Memory Curation Operator Guide
+# Final-V2 Agent-Managed Memory Curation
 
 ## Purpose
 
-This guide turns the autonomous memory curation design into an operator runbook.
-It applies to TraceDecay project memory, the standalone dashboard curation UI,
-the `tracedecay memory curate` CLI, and automation backends that submit
-validated operations through TraceDecay curation contracts.
+This guide describes the single final-V2 memory-curation authority. It applies
+to project and profile memory, the automation runner, its dashboard
+observation, its transport adapters, and its durable terminal receipts.
 
-The operating principle is conservative and autonomous: agents may mine,
-explain, cluster, score, validate, and apply accepted curation operations.
-Durable mutation is gated by evidence, risk tier, apply policy, logs, and
-telemetry rather than a dashboard preview/review form. Memory deletion is
-permanent by design. There is no archive, soft-delete state, restore flow, undo
-flow, or recycle-bin behavior.
+The curator mines bounded canonical facts, asks the configured agent backend
+for supported operations, validates them, and automatically commits only
+policy-valid results. Durable evidence, receipts, telemetry, and typed partial
+effects are the public boundary. Human surfaces may launch a run and inspect
+its terminal state; they do not select its operations or settle its effects.
 
 ## Current Curation Surfaces
 
-Destructive memory curation is automation-owned. Subagents may inspect,
-classify, and draft proposed actions within their assigned scope, but durable
-store mutation must flow through the configured automation/apply policy so runs
-produce ledger records, activity events, artifacts, and post-action telemetry.
+Memory curation is automation-owned and policy-governed. Subagents may inspect
+and classify evidence within their assigned scope, but the curator alone may
+select, validate, and commit supported policy-valid operations through the
+configured curation contract. Those operations include destructive merge and
+remove effects only when their reviewed-event CAS and policy checks succeed;
+callers cannot request or approve them individually. Each run produces a
+ledger record, activity events, post-action telemetry, and, when present,
+advertised artifacts.
 
+This is a breaking public-surface cutover. The duplicate launchers
+`POST /api/automation/run/memory-curator`, `tracedecay_memory_automation_run`,
+and `tracedecay automation run memory-curation` were removed. They are not
+aliases: every caller must use `fact_store_curate`, while the existing
+automation run list, view, and artifact reads remain unchanged.
+
+`fact_store_curate` is one public semantic launcher. MCP, generic CLI, and HTTP
+are adapters for that same retained application operation, not three launchers.
+Its request accepts only `fact_review_limit` and
+`min_confidence_millionths`; callers cannot supply task, run identity,
+operations, validation, policy, or effect authority.
 
 Use existing TraceDecay surfaces before inventing a new plan format:
 
-- `tracedecay_fact_store`: direct fact get/search/list/probe/related/reason,
-  add, update, remove, and contradiction checks.
-- `tracedecay_memory_status`: memory health and vector/bank repair; use only
-  when health/counts are part of the task because it may mutate derived state.
-- Dashboard automation:
-  `POST /api/automation/run/memory-curator` queues an autonomous app-server
-  memory-curator run. Accepted operations are applied according to automation
+- Canonical fact tools: direct reads through `tracedecay_fact_store_get`,
+  `tracedecay_fact_store_search`, `tracedecay_fact_store_list`,
+  `tracedecay_fact_store_probe`, `tracedecay_fact_store_related`,
+  `tracedecay_fact_store_reason`, and `tracedecay_fact_store_contradict`;
+  separate exact administration through `tracedecay_fact_store_add`,
+  `tracedecay_fact_store_update`, `tracedecay_fact_store_supersede`, and
+  `tracedecay_fact_store_remove`.
+- `tracedecay_memory_status`: read-only memory authority and coverage health;
+  use only when health/counts are part of the task. Similarity and dedupe
+  evidence comes from the bounded verified Grafeo projection, not an alternate
+  derived structure.
+- HTTP adapter:
+  `POST /api/application/retained/fact_store_curate` runs the autonomous app-server
+  memory curator. Accepted operations are committed according to automation
   policy and every phase is logged to the run ledger and curation activity
   stream.
-- Generic apply:
-  `POST /api/plugins/holographic/curate/apply` with `{"ops": [...]}` applies
-  explicit `delete` and `merge` operations and reports per-op results.
-- CLI dry-run:
-  `tracedecay memory curate` prints the same deterministic dry-run plan without
-  requiring the dashboard server.
-- CLI LLM review request:
-  `tracedecay memory curate --llm` emits bounded clusters, hygiene candidates,
-  allowed fact ids, confidence floor, and chat messages for an external LLM
-  owner.
-- CLI validated LLM ops:
-  `tracedecay memory curate --llm-ops <file>` validates external
-  `{"ops": [...]}` against freshly recomputed evidence and remains dry-run
-  unless `--apply` is also passed.
+- Generic CLI adapter: `tracedecay tool fact_store_curate --args
+  '{"fact_review_limit":24,"min_confidence_millionths":720000}'` invokes the
+  same retained application operation as HTTP and MCP.
+- MCP adapter: `tracedecay_fact_store_curate` accepts only
+  `fact_review_limit` and `min_confidence_millionths` bounds. The daemon owns run identity,
+  task selection, operations, validation, and effect settlement.
+- Read-only inspection: `tracedecay_automation_run_list`,
+  `tracedecay_automation_run_view`, and
+  `tracedecay_automation_run_artifact_view` expose the ledger and only the
+  artifact kinds advertised by a run. CLI equivalents are `tracedecay
+  automation runs list --json`, `tracedecay automation runs view <run_id>
+  --json`, and `tracedecay automation runs artifact <run_id> <kind> --json`.
+- Read-only HTTP inspection: `GET /api/automation/runs?limit=<limit>` lists
+  terminal rows, `GET /api/automation/runs/{run_id}/artifacts` lists and
+  verifies that run's published artifact chain, and `GET
+  /api/automation/runs/{run_id}/artifacts/{kind}` reads one verified advertised
+  artifact. HTTP does not expose a separate exact-run record route.
+- Terminal evidence: the exact run record, its advertised artifacts, and
+  committed curation receipts are the settled outcomes. A typed partial effect
+  carries its committed receipt and requires reconciliation; it is never safe
+  to replay blindly.
 
-## Native Dry-Run Report Shape
+## Runner Contract
 
-The deterministic dry-run report is the baseline input for any autonomous
-curation workflow:
-
-```json
-{
-  "ran": true,
-  "dry_run": true,
-  "actions": [
-    {
-      "op": "delete",
-      "fact_id": 102,
-      "duplicate_of": 101
-    }
-  ],
-  "hygiene_candidates": {
-    "secret_like": [],
-    "transient": [],
-    "supersession": []
-  },
-  "counts": {
-    "delete": 1
-  },
-  "applied_counts": null,
-  "llm_calls": 0,
-  "coverage": {
-    "scanned": 3,
-    "active_total": 3,
-    "due_remaining": 0
-  },
-  "provider": "tracedecay",
-  "mode": "similarity_dedup"
-}
-```
-
-Operator notes:
-
-- `actions` are executable deterministic similarity-dedup operations. Today
-  they are delete plans for likely duplicate loser facts.
-- `hygiene_candidates` are review evidence only. They may flag `secret_like`,
-  `transient`, and `supersession` facts, but they are not deterministic apply
-  operations.
-- `counts` describes the proposed plan. `applied_counts` is `null` in dry-run
-  mode and populated only after apply.
-- `coverage.scanned` and `coverage.active_total` give the active fact count
-  considered by the plan.
-- `provider` stays `tracedecay` for standalone deterministic curation.
-- `mode` is currently `similarity_dedup`.
-
-For `tracedecay memory curate --llm`, the report may additionally include
-`llm_review`:
-
-```json
-{
-  "llm_review": {
-    "status": "needs_llm_review",
-    "clusters_reviewed": 2,
-    "clusters": [],
-    "hygiene_candidates": {},
-    "allowed_fact_ids": [101, 102],
-    "min_confidence": 0.5,
-    "messages": [
-      { "role": "system", "content": "..." },
-      { "role": "user", "content": "..." }
-    ],
-    "next_step": "run the messages through an LLM and pass its {\"ops\": [...]} JSON back via: tracedecay memory curate --llm-ops <file> [--apply]"
-  }
-}
-```
-
-External LLM output must be strict JSON with an `ops` array. Each op includes
-`op`, `confidence`, `reason`, and the required ids for that operation. The
-TraceDecay validator rejects ops below the confidence floor or referencing fact
-ids outside the recomputed clusters and hygiene candidates.
-
-## Apply Contract
-
-Use the generic apply contract only after review:
+The backend sees a bounded canonical-fact context and returns strict JSON:
 
 ```json
 {
   "ops": [
     {
-      "op": "delete",
-      "fact_id": 102,
-      "reason": "near-exact duplicate of fact 101"
-    },
-    {
-      "op": "merge",
-      "winner_id": 101,
-      "loser_ids": [102],
-      "merged_content": "Optional consolidated durable fact."
+      "op": "normalize_tags",
+      "target": {
+        "fact_id": "fact...",
+        "expected_last_event_id": "event..."
+      },
+      "tags": ["memory"],
+      "evidence_facts": [{
+        "fact_id": "fact...",
+        "expected_last_event_id": "event..."
+      }],
+      "confidence": 0.92
     }
   ]
 }
 ```
 
-Apply responses return per-op results plus aggregate counts. Per-op failures do
-not make the whole request fail; malformed bodies are the whole-request failure
-case. Merge may rewrite the winner content and then hard-delete losers. Delete
-hard-deletes the target fact. Both paths write oplog entries, and delete oplog
-details carry hashes rather than deleted content.
+Operator notes:
+
+- Supported automatic operations are canonical add, update, merge, remove,
+  normalize-tags, and link-facts effects. Every operation is bound to the
+  reviewed fact event snapshots and passes policy/privacy validation before
+  the atomic curation batch is committed; unsupported or stale shapes are
+  rejected without exposing an approval/apply lane.
+- Every fact id must come from the bounded canonical context, every confidence
+  must meet the configured floor, and timestamps are not truth evidence.
+- The runner owns validation repair and commits accepted operations within the
+  same terminal run.
+
+## Terminal Contract
+
+Successful operations carry canonical commit receipts. A failure before any
+commit is an ordinary typed application failure. A failure after a commit is a
+typed `partial_effect` with the committed `EffectReceipt`, retry `never`, and
+legal action `reconcile`. That receipt must survive HTTP, MCP, CLI, SDK, and
+daemon restart boundaries unchanged.
 
 ## Operator Workflow
 
@@ -159,64 +126,55 @@ details carry hashes rather than deleted content.
 2. **Start read-mostly.** Prefer TraceDecay MCP graph/context tools, then
    fact-store `get`, `contradict`, `search`, `list`, `probe`, `related`, or
    `reason`. Note that some recall-style tools may update access metadata.
-3. **Run a native dry-run.** Use dashboard preview or `tracedecay memory
-   curate`. Save the report, preview timestamp, command/API shape, and project
-   scope in your notes.
-4. **Inventory candidates.** Split findings into `adds`, `updates`, `merges`,
-   `deletes`, and `skipped`. Preserve fact ids, source/provenance, trust, tags,
-   entities, similarity evidence, source spans, and counterevidence.
-5. **Use subagents for evidence only.** Assign disjoint read-only research
+3. **Run the canonical curator.** Use `tracedecay_fact_store_curate`,
+   `tracedecay tool fact_store_curate`, or the retained application HTTP
+   endpoint. The runner validates and commits supported backend output in one
+   bounded operation.
+4. **Use subagents for evidence only.** Assign disjoint read-only research
    scopes such as session mining, duplicate review, or skeptic review.
-   Subagents must not call add/update/remove/feedback tools or dashboard apply.
-6. **Run the skeptic pass.** Reject unsupported, secret-like, local-only,
+   Subagents must not call add/update/remove/feedback tools.
+5. **Run the skeptic pass.** Reject unsupported, secret-like, local-only,
    transient, stale-but-uncertain, and ambiguous same-topic findings. Do not
    lower trust solely because a fact is old.
-7. **Produce a dry-run curation report.** Include every proposed operation,
-   every skipped candidate, and the apply-policy state for any destructive action.
-8. **Gate mutation by risk tier.** Add/update/merge follow the configured apply
-   policy. Delete requires an explicit user request immediately before apply,
-   showing fact id, content/source summary, reason, and permanent-delete warning.
-9. **Apply narrowly.** Use fact-store add/update only for directly supported
-   facts. Use `--llm-ops <file> --apply` or `/curate/apply` only for validated
-   ops. Avoid `POST /curate {"dry_run": false}` unless the operator explicitly
-   requested the deterministic duplicate-deletion plan.
-10. **Verify read-only.** Re-run targeted get/search/list/contradict checks and
-    inspect apply results/oplog. Report changed, skipped, rejected, and still
-    ambiguous facts.
+6. **Inspect the terminal result read-only.** Use
+   `tracedecay_automation_run_list` to find the run,
+   `tracedecay_automation_run_view` for its exact ledger record, and
+   `tracedecay_automation_run_artifact_view` only for an artifact kind named by
+   that record. Report every committed receipt, rejection, and reconciliation
+   requirement. A `partial_effect` is terminal evidence of a committed mutation
+   and must not be retried as if nothing happened.
+7. **Use direct fact operations only for exact administration.** Fact-store
+   add, update, and remove remain independent retained operations and never
+   continue a curator run. Removal requires an exact user instruction because
+   it is permanent; if the target is ambiguous, resolve and confirm only that
+   exact target.
+8. **Verify read-only.** Re-run targeted get/search/list/contradict checks and
+   inspect the oplog or receipt projection. Report changed, skipped, rejected,
+   and still ambiguous facts.
 
 ## Required Operator Report
 
-Before any mutation, produce this compact report:
+For each completed run, produce this compact report:
 
-- `scope`: project root, store/scope, tool/API used, dry-run timestamp, and
-  whether memory health repair or dashboard start/stop was invoked.
-- `native_plan`: `mode`, `provider`, `coverage`, `counts`, `actions` count, and
-  hygiene-candidate counts.
-- `adds`: durable candidate facts with source spans, category, entities, trust,
-  duplicate-search result, and why they should be stored.
-- `updates`: fact ids, old summary, new summary, evidence, confidence, and why
-  update beats add.
-- `merges`: winner id, loser ids, similarity evidence, retained provenance,
-  optional `merged_content`, and why separate facts are redundant.
-- `deletes`: fact ids, content/source summary, permanent-delete reason, risk,
-  surviving fact if any, and apply-policy status.
-- `skipped`: rejected transient, secret-like, unsupported, stale-but-uncertain,
-  same-topic-not-duplicate, out-of-scope, or duplicate candidates.
-- `verification_plan`: exact read-only checks to run after apply.
+- `scope`: project/profile identity and the launcher adapter used.
+- `evidence`: bounded coverage, unavailable facts, and counterevidence.
+- `terminal`: committed receipts, rejections, or typed partial
+  effect with reconciliation action.
+- `verification`: exact read-only checks and the resulting canonical fact
+  state.
 
 ## Risk Tiers
 
 | Tier | Operations | Default |
 | --- | --- | --- |
-| Read-mostly | MCP context/search, fact get/contradict/search/list/probe/related/reason, dry-run preview | allowed |
-| Draft | propose add, update, merge, delete, retag-like notes, LLM review request | allowed |
-| Low-risk apply | add clearly durable facts with source links | auto-apply when `auto_apply_memory_ops=true` |
-| Medium-risk apply | update or merge facts with retained source evidence | policy-gated |
-| High-risk apply | hard-delete facts or merge losers | explicit user request only |
+| Read-mostly | MCP context/search and canonical fact reads | allowed |
+| Automatic curation | add, update, merge, remove, normalize-tags, and link-facts selected from reviewed evidence | the runner validates exact reviewed-event CAS and policy, commits atomically, and records a durable receipt |
+| Exact administration | direct fact add, update, or remove | requires an exact caller instruction and its own retained-operation receipt |
 
-Deletion and merge loser removal remain high risk because they remove rows from
-`memory_facts`; entity links cascade and FTS rows drop. There is no recovery
-path other than independently reconstructing a fact from outside evidence.
+Deletion remains high risk because it permanently removes canonical memory.
+The automatic curator may select remove or merge only inside its closed,
+policy-validated batch; a caller cannot force that choice. A direct removal is
+a separate exact-administration request and requires an exact user instruction.
 
 ## Subagent Roles
 
@@ -226,55 +184,50 @@ When subagents participate, give each one an explicit project selector and a non
 - **Session Scout**: mines bounded recent sessions and summaries for durable
   facts, explicit "remember" language, superseded facts, repeated pain points,
   and source spans.
-- **Memory Curator**: clusters candidates against existing facts, similarity
-  pairs, hygiene candidates, trust/access signals, and recall evidence.
+- **Memory Curator**: inspects bounded canonical facts, trust/access signals,
+  and recall evidence.
 - **Skeptic Reviewer**: tries to disprove each candidate by checking scope,
   contradictions, secret exposure, transient state, and same-topic false
   positives.
 - **Telemetry Analyst**: measures hint uptake, accepted/rejected candidates,
   false positives, and audited net token deltas from real transcript data.
-- **Apply Operator**: the parent/operator role only. It invokes mutating APIs
-  after policy checks pass and any required explicit user request is present.
+- **Run Observer**: inspects terminal receipts and verifies resulting canonical
+  state without effect authority.
 
 For multi-agent runs, each role owns separate notes or database rows. Writers
-do not share editable artifacts. The apply role consumes finalized plans only.
+do not share editable artifacts. The automation runner alone validates and
+commits automatic curation output.
 
 ## Standalone And Wrapper Boundaries
 
-- Standalone TraceDecay must remain deterministic and useful without Hermes or
-  any LLM dependency.
-- Hermes or another wrapper may own the LLM call, but it must build against the
-  TraceDecay plan/apply contract and pass reviewed ids only.
-- Wrapper planners operate on bounded clusters and hygiene candidates, never on
-  the full unfiltered session corpus.
-- Strict JSON is required for external ops. Unknown operations, low-confidence
-  operations, and ids outside the evidence guard are rejected.
-- Stock TraceDecay contracts must stay usable by the Hermes plugin; wrapper-only
-  extras cannot become required server behavior.
+- Standalone TraceDecay retains one automation contract regardless of which
+  configured backend performs the model call.
+- Backends receive only bounded canonical facts, never an unfiltered session
+  corpus or a stored holographic-vector bank.
+- Strict JSON is required. Unknown operations, low-confidence operations, and
+  ids outside the evidence guard are rejected.
+- Host wrappers may launch or observe the run but cannot supply operations or
+  settle effects.
 
 ## Permanent-Delete Guardrails
 
 - Never promise archive, restore, undo, recycle-bin, or soft-delete behavior.
-- Prefer update or merge-with-retained-provenance over delete when the old fact
-  still carries useful history.
-- Treat hygiene candidates as evidence for review, not as automatic deletes.
-- Show content/source summaries before delete approval; avoid copying secrets
-  verbatim into reports.
-- Require explicit manual approval immediately before every hard delete or merge
-  loser removal unless a future documented policy narrows a lower-risk case.
-- Record partial failures and do not retry in a way that hides uncertainty.
-- After apply, verify the resulting fact set and report any failed or skipped
-  operation.
+- Automatic curation never hard-deletes a fact.
+- Direct deletion requires an exact user instruction and a canonical retained
+  operation receipt; avoid copying secret content into reports.
+- Record partial effects and do not retry in a way that hides uncertainty.
+- After any mutation, verify the resulting fact set and report failed or
+  skipped operations.
 
 ## Telemetry To Capture
 
 Telemetry should measure usefulness without overstating savings:
 
 - Hint emitted/followed/ignored, category match, latency, and dedupe status.
-- Candidate lifecycle: mined, clustered, rejected, reviewed, accepted, applied,
-  failed, or manually overridden.
-- Operation risk: add, update, merge, delete, hygiene-only, or
-  needs-human-review.
+- Candidate lifecycle: mined, rejected, validated, committed, failed, or
+  reconciled.
+- Operation kind: normalize tags, link facts, or independent direct
+  administration.
 - Outcome quality: later recall helpful/unhelpful feedback, duplicate
   recurrence, manual corrections, and rejected-candidate reasons.
 - Token accounting: audited net token delta using real transcript and usage
@@ -282,12 +235,9 @@ Telemetry should measure usefulness without overstating savings:
 
 ## Verification Targets
 
-Existing code already covers core dry-run/apply behavior. When curation logic
-changes, run the focused tests that match the touched surface:
-
-- `cargo nextest run curation_delete_lifecycle`
-- `cargo nextest run curate_apply_merge_with_missing_loser_is_atomic`
-- `cargo nextest run validate_llm_ops_allows_delete_and_merge_with_candidate_evidence`
+When curation logic changes, run the focused agent-host automation and public
+journey tests that cover validation, application, partial effects, restart
+projection, cancellation, and exact project/profile isolation.
 
 For docs-only changes, at minimum inspect the scoped diff and run a Markdown or
 spell/style check if the project has one. Do not skip flaky tests to make CI

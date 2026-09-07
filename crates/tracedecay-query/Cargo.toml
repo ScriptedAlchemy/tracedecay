@@ -1,0 +1,119 @@
+[package]
+name = "tracedecay-query"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+description = "TraceDecay code retrieval query kernel and search-quality candidate/profile inputs"
+include = ["/src/**", "/assets/**"]
+
+[dependencies]
+flate2 = "1"
+fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
+gix = { version = "=0.86.0", default-features = false, features = [
+    "revision",
+    "blob-diff",
+    "parallel",
+    "sha1",
+    "sha256",
+    "status",
+] }
+hex = "0.4"
+hmac = "0.13.0"
+hotpath.workspace = true
+rayon = "1"
+roaring = { version = "=0.11.4", default-features = false }
+# Lexical artifact finalization installs a SQLite progress_handler, and
+# receipt-verification tests install an authorizer. Both APIs live behind
+# rusqlite's `hooks` feature and must be selected here; they are not part
+# of the workspace rusqlite baseline.
+rusqlite = { workspace = true, features = ["functions", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+zeroize = "1.9.0"
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
+# Explicit opt-in (same policy as `test-transport` on the runtime crate):
+# exposes `*_for_test` constructors to dependent crates' test builds only.
+test-helpers = ["tracedecay-temporal-query/test-helpers"]
+# The grammar tier the shipped product indexes with, forwarded exactly as
+# `tracedecay-cli`'s `production` forwards `tracedecay/production`. Only the
+# `tracedecay-index-bench` binary needs it: a profiling run must parse the
+# same languages production parses, or it measures a workload no user has.
+production = ["tracedecay-code-index/lite", "tracedecay-code-index/full"]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+static_assertions = "1.1.0"
+tempfile = "3"
+# Test-only: the relocated search-quality suites build lexical/exact fixtures
+# through the code-index intake and the extracted language registry, which
+# needs the bundled lite grammar tier (Rust).
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lang-markdown", "lite"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite", "test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+
+# Profiling bench: built only under the opt-in `hotpath` feature so a
+# default `cargo bench` / `cargo test --all-targets` never compiles hotpath
+# instrumentation. Run with `cargo bench -p tracedecay-query
+# --features hotpath --bench code_lexical_catchup`.
+[[bench]]
+name = "code_lexical_catchup"
+harness = false
+required-features = ["hotpath"]
+
+[[bench]]
+name = "semantic_flat_scan"
+harness = false
+
+# Daemon-free indexing workload profiled by `.github/workflows/hotpath-profile.yml`.
+[[bin]]
+name = "tracedecay-index-bench"
+path = "src/bin/tracedecay_index_bench.rs"
+test = false
+
+# Daemon-free search-lane query latency workload over a published artifact.
+[[bin]]
+name = "tracedecay-search-bench"
+path = "src/bin/tracedecay_search_bench.rs"
+test = false

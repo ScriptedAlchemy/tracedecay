@@ -1,0 +1,65 @@
+[package]
+name = "tracedecay-configuration"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Transport-neutral configuration control plane and runtime pin surfaces"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-policy/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-session-memory/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+]
+
+[dependencies]
+hotpath.workspace = true
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+
+[dev-dependencies]
+hex = "0.4"
+tempfile = "3"
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

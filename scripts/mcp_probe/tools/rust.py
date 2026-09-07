@@ -63,6 +63,7 @@ def probes_for(d):
         "tracedecay_module_api":        [{"path": f} for f in files],
         "tracedecay_simplify_scan":     [{"files": [f]} for f in files],
         "tracedecay_unused_imports":    [{}, {"limit": 10}, {"path": "src"}, {"path": "crates"}, {"path": "tests"}],
+        "tracedecay_unmounted_files":   [{}, {"limit": 10}, {"path": "src"}, {"path": "crates"}, {"path": "tests"}],
         "tracedecay_test_map":          [{"file": f} for f in files],
         "tracedecay_test_risk":         [{}, {"limit": 10}, {"path": "src"}, {"path": "crates"}, {"path": "tests"}],
         "tracedecay_todos":             [{}, {"limit": 10}, {"path": "src"}, {"path": "crates"}, {"path": "tests"}],

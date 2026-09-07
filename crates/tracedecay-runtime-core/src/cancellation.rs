@@ -1,0 +1,235 @@
+//! Monotonic deadlines and the cooperative cancellation token.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use tokio_util::sync::CancellationToken as TokioCancellationToken;
+
+/// A deadline expressed on the monotonic clock.
+///
+/// Monotonic on purpose: wall-clock jumps must never shorten or extend a
+/// request budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonotonicDeadline(Instant);
+
+impl MonotonicDeadline {
+    #[must_use]
+    #[hotpath::skip]
+    pub const fn at(deadline: Instant) -> Self {
+        Self(deadline)
+    }
+
+    #[must_use]
+    #[hotpath::skip]
+    pub const fn instant(self) -> Instant {
+        self.0
+    }
+
+    #[must_use]
+    pub fn is_elapsed_at(self, now: Instant) -> bool {
+        now >= self.0
+    }
+}
+
+/// Cooperative cancellation shared by every worker serving one request.
+#[derive(Clone, Debug)]
+pub struct CancellationToken {
+    token_id: Option<Arc<str>>,
+    inner: TokioCancellationToken,
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self {
+            token_id: None,
+            inner: TokioCancellationToken::new(),
+        }
+    }
+}
+
+impl CancellationToken {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates the live cancellation authority for an application request.
+    ///
+    /// Takes the request id as a plain string so the kernel carries no
+    /// dependency on the application contract crate.
+    #[must_use]
+    pub fn for_application_request(request_id: &str) -> Self {
+        static NEXT_TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let sequence = NEXT_TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        Self {
+            token_id: Some(Arc::from(format!("cancellation.{request_id}.{sequence}"))),
+            ..Self::default()
+        }
+    }
+
+    /// Adopts the exact cancellation identity from an already-admitted
+    /// application context.
+    ///
+    /// Unlike [`Self::for_application_request`], this does not mint a new
+    /// identity. The application boundary has already validated the token, but
+    /// the kernel repeats the bounded-string invariant before retaining it.
+    #[must_use]
+    pub fn for_admitted_application_request(token_id: &str) -> Option<Self> {
+        if token_id.is_empty()
+            || token_id.trim() != token_id
+            || token_id.len() > 512
+            || token_id.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(Self {
+            token_id: Some(Arc::from(token_id)),
+            ..Self::default()
+        })
+    }
+
+    #[must_use]
+    pub fn application_token_id(&self) -> Option<&str> {
+        self.token_id.as_deref()
+    }
+
+    /// Creates a cancellation scope for work performed on behalf of this token.
+    ///
+    /// The child retains the admitted request identity, observes cancellation
+    /// from this token, and can be cancelled independently without revoking
+    /// the parent request.
+    #[must_use]
+    pub fn child_token(&self) -> Self {
+        Self {
+            token_id: self.token_id.clone(),
+            inner: self.inner.child_token(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+
+    /// Whether two handles observe the same underlying cancellation state.
+    #[must_use]
+    pub fn is_same_token(&self, other: &Self) -> bool {
+        self.token_id == other.token_id && self.inner == other.inner
+    }
+
+    /// Resolves once the token is cancelled.
+    #[hotpath::skip]
+    pub async fn cancelled(&self) {
+        self.inner.cancelled().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::CancellationToken;
+
+    #[test]
+    fn application_identity_is_stable_only_across_clones() {
+        let token = CancellationToken::for_application_request("request-7");
+        let clone = token.clone();
+        let independent = CancellationToken::for_application_request("request-7");
+
+        assert_eq!(token.application_token_id(), clone.application_token_id());
+        assert!(token.is_same_token(&clone));
+        assert_ne!(
+            token.application_token_id(),
+            independent.application_token_id()
+        );
+        assert!(!token.is_same_token(&independent));
+    }
+
+    #[test]
+    fn admitted_application_identity_is_preserved_exactly() {
+        let token =
+            CancellationToken::for_admitted_application_request("cancellation.already-admitted")
+                .expect("valid admitted cancellation identity");
+
+        assert_eq!(
+            token.application_token_id(),
+            Some("cancellation.already-admitted")
+        );
+        assert!(CancellationToken::for_admitted_application_request("").is_none());
+        assert!(
+            CancellationToken::for_admitted_application_request(" cancellation.invalid").is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_current_and_future_clone_waiters() {
+        let token = CancellationToken::new();
+        let first = token.clone();
+        let second = token.clone();
+        let first_waiter = tokio::spawn(async move { first.cancelled().await });
+        let second_waiter = tokio::spawn(async move { second.cancelled().await });
+
+        token.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), first_waiter)
+            .await
+            .expect("first waiter should wake")
+            .expect("first waiter should finish");
+        tokio::time::timeout(Duration::from_secs(1), second_waiter)
+            .await
+            .expect("second waiter should wake")
+            .expect("second waiter should finish");
+        tokio::time::timeout(Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("future waiter should complete");
+    }
+
+    #[tokio::test]
+    async fn child_cancellation_preserves_identity_and_observes_parent_cancellation() {
+        let parent =
+            CancellationToken::for_admitted_application_request("cancellation.request.semantic")
+                .expect("valid admitted cancellation identity");
+        let child = parent.child_token();
+
+        assert_eq!(
+            child.application_token_id(),
+            parent.application_token_id(),
+            "child work remains attributed to the admitted request"
+        );
+        assert!(
+            !parent.is_same_token(&child),
+            "a child must be independently cancellable"
+        );
+
+        parent.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), child.cancelled())
+            .await
+            .expect("parent cancellation should wake the child");
+    }
+
+    #[tokio::test]
+    async fn child_cancellation_does_not_cancel_the_parent() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+
+        child.cancel();
+
+        assert!(child.is_cancelled());
+        assert!(
+            !parent.is_cancelled(),
+            "cancelling child work must not revoke the parent request"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), parent.cancelled())
+                .await
+                .is_err(),
+            "the parent cancellation waiter must stay pending"
+        );
+    }
+}

@@ -1,24 +1,39 @@
 /target
-/node_modules/
+/node_modules
 .DS_Store
 .codegraph
 .tracedecay
-.mcp.json
 !plugin/.mcp.json
 .claude/settings.local.json
 .cursor/
-docs/superpowers/plans/
 /local-only
 .worktrees
+.codex-worktrees
 .agents/
 .rtk/
 .sentrux/
 cache/
+# Vendored crate sources are immutable upstream trees; the transient-cache
+# pattern above must never swallow their in-tree `cache` modules.
+!vendor/**/cache/
 generated-illustrations/
+dashboard/app-dist/
 *.log
 __pycache__/
 *~
 *#
 
-# transient fact-store eval baseline (written by eval/hermetic corpus setup_cmd)
+# transient fact-store eval baseline (written by evals/hermetic corpus setup_cmd)
 .factstore_baseline_count
+
+# transient Playwright/axe verification output (screenshots and findings).
+# Shipped-state baselines live in dashboard/audit-baselines/ and stay tracked.
+dashboard/.*-axe/
+.superpowers/
+
+# mockup screenshot output; regenerate with each mockup's shoot.mjs / qa-drive.mjs
+mockups/**/shots/
+
+# standalone lockfiles cargo writes when a vendored grafeo crate is tested
+# from inside its own directory; the workspace lock is the one that matters
+vendor/grafeo/*/Cargo.lock

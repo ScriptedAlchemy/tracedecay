@@ -1,9 +1,45 @@
 //! Parser for the `SKILL.md` frontmatter subset used by plugin and managed
 //! skills: fenced `key: value` scalars plus indented block values.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
 
-use crate::error::{Result, config_error};
+use crate::{Result, config_error};
+
+/// Why a quoted YAML scalar could not be decoded.
+#[derive(Debug)]
+pub enum YamlScalarError {
+    /// A `'`-quoted scalar is unterminated or contains an unescaped quote.
+    MalformedSingleQuoted,
+    /// A `"`-quoted scalar is not valid JSON string syntax. The cause names
+    /// the offending escape or position, which a caller reporting the failure
+    /// to a user needs and cannot reconstruct from the variant alone.
+    MalformedDoubleQuoted(serde_json::Error),
+}
+
+impl fmt::Display for YamlScalarError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedSingleQuoted => {
+                formatter.write_str("malformed single-quoted YAML scalar")
+            }
+            Self::MalformedDoubleQuoted(error) => {
+                write!(formatter, "malformed double-quoted YAML scalar: {error}")
+            }
+        }
+    }
+}
+
+impl Error for YamlScalarError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::MalformedSingleQuoted => None,
+            Self::MalformedDoubleQuoted(error) => Some(error),
+        }
+    }
+}
 
 /// One parsed frontmatter value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +79,7 @@ impl SkillFrontmatterValue {
 }
 
 /// Parses leading `---`-fenced frontmatter, normalizing LF and CRLF input.
+#[hotpath::measure(label = "automation.skill.parse_frontmatter")]
 pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillFrontmatterValue>> {
     let mut lines = contents.lines();
     if lines.next().map(str::trim_end) != Some("---") {
@@ -106,20 +143,123 @@ pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillF
     Ok(fields)
 }
 
+/// Strips one level of YAML quoting from an inline scalar.
+///
+/// Plain scalars and the borrowed interior of a simple `'`-quoted scalar are
+/// returned without allocating. Applies no schema or policy — a caller decides
+/// what the decoded text means.
+pub fn decode_yaml_scalar(value: &str) -> std::result::Result<Cow<'_, str>, YamlScalarError> {
+    if let Some(quoted) = value.strip_prefix('\'') {
+        let Some(inner) = quoted.strip_suffix('\'') else {
+            return Err(YamlScalarError::MalformedSingleQuoted);
+        };
+
+        let mut chars = inner.chars().peekable();
+        let mut has_doubled_quote = false;
+        while let Some(ch) = chars.next() {
+            if ch == '\'' {
+                if chars.next() != Some('\'') {
+                    return Err(YamlScalarError::MalformedSingleQuoted);
+                }
+                has_doubled_quote = true;
+            }
+        }
+
+        return Ok(if has_doubled_quote {
+            Cow::Owned(inner.replace("''", "'"))
+        } else {
+            Cow::Borrowed(inner)
+        });
+    }
+
+    if value.starts_with('"') {
+        return serde_json::from_str::<String>(value)
+            .map(Cow::Owned)
+            .map_err(YamlScalarError::MalformedDoubleQuoted);
+    }
+
+    Ok(Cow::Borrowed(value))
+}
+
 fn unquote_scalar(value: &str) -> String {
-    if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
-        inner.replace("''", "'")
-    } else if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
-        serde_json::from_str(value).unwrap_or_else(|_| inner.to_string())
-    } else {
-        value.to_string()
+    match decode_yaml_scalar(value) {
+        Ok(decoded) => decoded.into_owned(),
+        Err(YamlScalarError::MalformedSingleQuoted) => value
+            .strip_prefix('\'')
+            .and_then(|quoted| quoted.strip_suffix('\''))
+            .map_or_else(|| value.to_string(), |inner| inner.replace("''", "'")),
+        Err(YamlScalarError::MalformedDoubleQuoted(_)) => value
+            .strip_prefix('"')
+            .and_then(|quoted| quoted.strip_suffix('"'))
+            .unwrap_or(value)
+            .to_string(),
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{SkillFrontmatterValue, parse_skill_frontmatter};
+    use std::borrow::Cow;
+
+    use super::{
+        SkillFrontmatterValue, YamlScalarError, decode_yaml_scalar, parse_skill_frontmatter,
+        unquote_scalar,
+    };
+
+    #[test]
+    fn borrows_plain_scalars_without_applying_policy() {
+        assert!(matches!(
+            decode_yaml_scalar("plain value"),
+            Ok(Cow::Borrowed("plain value"))
+        ));
+        assert!(matches!(decode_yaml_scalar(""), Ok(Cow::Borrowed(""))));
+        assert!(matches!(
+            decode_yaml_scalar(" users'"),
+            Ok(Cow::Borrowed(" users'"))
+        ));
+    }
+
+    #[test]
+    fn decodes_single_quoted_scalars_and_doubled_quotes() {
+        assert!(matches!(
+            decode_yaml_scalar("'plain'"),
+            Ok(Cow::Borrowed("plain"))
+        ));
+        let decoded = decode_yaml_scalar("'it''s YAML'").expect("valid single-quoted scalar");
+        assert_eq!(decoded, "it's YAML");
+    }
+
+    #[test]
+    fn decodes_json_compatible_double_quoted_scalars() {
+        let decoded = decode_yaml_scalar(r#""line\n☺""#).expect("valid double-quoted scalar");
+        assert_eq!(decoded, "line\n☺");
+    }
+
+    #[test]
+    fn rejects_malformed_single_quoted_scalars() {
+        for value in ["'", "'unterminated", "'isn't valid'", "'triple'''quote'"] {
+            assert!(matches!(
+                decode_yaml_scalar(value),
+                Err(YamlScalarError::MalformedSingleQuoted)
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_double_quoted_scalars_and_keeps_the_cause() {
+        for value in [
+            r#""unterminated"#,
+            r#""bad\xescape""#,
+            r#""value" trailing"#,
+        ] {
+            let error = decode_yaml_scalar(value).expect_err("malformed double-quoted scalar");
+            assert!(matches!(error, YamlScalarError::MalformedDoubleQuoted(_)));
+            assert!(
+                std::error::Error::source(&error).is_some(),
+                "the serde cause is what a reporting caller shows the user"
+            );
+        }
+    }
 
     #[test]
     fn parses_scalars_blocks_and_quoting() {
@@ -147,6 +287,31 @@ mod tests {
     }
 
     #[test]
+    fn shared_decoder_parity_preserves_successful_quote_mechanics() {
+        for (value, expected) in [
+            ("'plain'", "plain"),
+            ("'it''s YAML'", "it's YAML"),
+            (r#""line\n☺""#, "line\n☺"),
+        ] {
+            assert_eq!(unquote_scalar(value), expected);
+        }
+    }
+
+    #[test]
+    fn preserves_malformed_quote_and_plain_scalar_policy() {
+        for (value, expected) in [
+            (r#""bad\xescape""#, r"bad\xescape"),
+            (r#""unterminated"#, r#""unterminated"#),
+            ("'isn't valid'", "isn't valid"),
+            ("'unterminated", "'unterminated"),
+            ("", ""),
+            ("plain value", "plain value"),
+        ] {
+            assert_eq!(unquote_scalar(value), expected);
+        }
+    }
+
+    #[test]
     fn parses_json_escaped_double_quoted_scalars() {
         let doc = concat!(
             "---\n",
@@ -168,9 +333,6 @@ mod tests {
         );
     }
 
-    /// GitHub Windows runners check out with `core.autocrlf=true`, so every
-    /// SKILL.md arrives with CRLF line endings; parsing must not depend on
-    /// exact `---\n` byte sequences.
     #[test]
     fn parses_crlf_documents_identically_to_lf() {
         let lf = "---\nname: my-skill\ndescription: Use when testing.\npaths:\n  - \"**/*.rs\"\n---\n\n# Body\n";

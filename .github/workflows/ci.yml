@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +21,80 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
+  # Single source of truth for the fork/base-branch guard: heavy jobs run on
+  # pushes, on PRs from this repository, and on fork PRs that target an
+  # integration branch. Guarded jobs `needs:`-check this job's output instead
+  # of each repeating the expression, so the branch list lives in one place.
+  scope-gate:
+    name: Scope gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-heavy: ${{ steps.decide.outputs.run-heavy }}
+    steps:
+      - name: Decide whether guarded jobs run
+        id: decide
+        run: echo "run-heavy=${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}" >> "$GITHUB_OUTPUT"
+
+  pr-dogfood:
+    name: PR checkout dogfood
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-pr-dogfood
+          cache-on-failure: true
+
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+      - name: Build checked-out TraceDecay CLI
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+
+      - name: Test dogfood harnesses
+        run: |
+          python3 scripts/test-check-pr-dogfood-output.py
+          python3 scripts/test-efficiency-scorecard.py
+          python3 scripts/test-pr-dogfood-portability.py
+
+      - name: Initialize checkout and exercise CLI tools
+        run: scripts/ci-pr-dogfood-smoke.sh
+        env:
+          TRACEDECAY_BIN: target/debug/tracedecay
+          TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
@@ -40,18 +114,15 @@ jobs:
       - name: Reject tracked ignored files
         run: scripts/check-release-pr-integrity.sh HEAD HEAD
 
+      - name: Test bounded commit range linting
+        run: python3 scripts/test-lint-commit-range.py
+
       - name: Validate PR commit messages
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          commit_shas=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
-          while IFS= read -r commit_sha; do
-            [[ -n "$commit_sha" ]] || continue
-            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
-          done <<<"$commit_shas"
+        run: scripts/lint-commit-range.sh "$BASE_SHA" "$HEAD_SHA"
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
@@ -62,19 +133,15 @@ jobs:
           set -euo pipefail
           if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
             if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              range="${HEAD_SHA}^..${HEAD_SHA}"
+              base_sha="${HEAD_SHA}^"
             else
               git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
               exit 0
             fi
           else
-            range="$BEFORE_SHA..$HEAD_SHA"
+            base_sha="$BEFORE_SHA"
           fi
-          commit_shas=$(git rev-list --no-merges "$range")
-          while IFS= read -r commit_sha; do
-            [[ -n "$commit_sha" ]] || continue
-            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
-          done <<<"$commit_shas"
+          scripts/lint-commit-range.sh "$base_sha" "$HEAD_SHA"
 
   release-version-drift:
     name: Release Version Drift
@@ -90,21 +157,37 @@ jobs:
       - name: Test release version drift guard
         run: bash tests/release_drift_check_test.sh
 
-      - name: Test release workflow contract
-        run: bash tests/release_workflow_contract_test.sh
+      # The workflow-contract pin scripts were replaced by the safety-guard
+      # assertions (f3b065545) and the dogfood surface was retired (b73a8a396);
+      # this job keeps the guards that protect the shipped release flow.
+      - name: Check release safety guards
+        run: bash tests/release_safety_test.sh
 
       - name: Test GitHub release installer
         run: bash tests/install_script_test.sh
 
-      - name: Test local dogfood command contract
-        run: bash tests/dogfood_command_test.sh
+      # These two sat unwired: they are the tests for
+      # `scripts/check-release-pr-integrity.sh` and
+      # `scripts/check-dashboard-bundle.py`, both of which CI does run. So the
+      # guards were enforced while the tests proving the guards work were not,
+      # which is the shape that let a `test-transport` target rot until it
+      # stopped compiling. Three of the five `tests/*_test.sh` gates were wired;
+      # these are the other two.
+      - name: Test release PR integrity guard
+        run: bash tests/release_pr_integrity_test.sh
+
+      - name: Test dashboard bundle check
+        run: bash tests/dashboard_bundle_check_test.sh
 
       - name: Check release version drift
         run: scripts/check-release-drift.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   test:
     name: Test ${{ matrix.name }}
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
@@ -116,9 +199,29 @@ jobs:
             runner: '"macos-14"'
 
     steps:
+      # Full history: the search-quality workload fixture pins a
+      # `source_repository_commit`, and `validate_source_bindings` resolves that
+      # object out of this checkout to prove the checked-in corpus really is the
+      # product source at that commit. A depth-1 checkout carries only the tip,
+      # so every candidate_output/report test fails with "resolve fixture source
+      # commit: An object with id ... could not be found".
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
+      # `rust-analyzer` is a test dependency of this lane, not a convenience.
+      # `runtime_surface_acceptance::production_lsp_negotiates_and_projects_\
+      # canonical_context` asserts that a routed analyzer negotiates the
+      # standard methods the client declared, and the upstream `initialize`
+      # response is the only authority for those. Without the component the
+      # runner still has rustup's `rust-analyzer` proxy on PATH, so the daemon
+      # routes the language and only the spawn fails — the test would then
+      # measure a missing component instead of the negotiation contract. This
+      # action exports `RUSTUP_TOOLCHAIN`, so the component has to be installed
+      # here rather than through `rust-toolchain.toml`, which it overrides.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
 
       - uses: ./.github/actions/setup-linux-mold
 
@@ -131,9 +234,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -144,38 +247,139 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+      # Every `crates/tracedecay` integration target declares
+      # `required-features = ["test-helpers"]`, because the fixture surface it
+      # gates is used by `tests/common/mod.rs`. Those targets are selected here
+      # today only as a side effect of dev-dependency feature unification
+      # (`tracedecay-cli` dev-depends on `tracedecay` with that feature), which
+      # is not a property this lane should depend on: it would evaporate the
+      # moment that dev-dependency changes, and nextest would then silently
+      # select zero of them and report green having run nothing. Asking for the
+      # feature explicitly makes the selection independent of that accident.
+      # `tracedecay-search-eval` ships two binaries and has no test target of
+      # its own, and cargo only links a package's bins for a test build when
+      # that same package has a test or bench selected. `cargo nextest run`
+      # therefore never produced them, and the acceptance tests that execute
+      # them out of the profile directory
+      # (`runtime_acceptance_suite::search_eval_cli_test`,
+      # `product_surface_suite::packaged_semantic_evaluator`) failed closed.
+      #
+      # The package selection and features must match the test lane below
+      # exactly. `tracedecay-search-eval` depends on `tracedecay-code-index`
+      # with `default-features = false`, so a `-p tracedecay-search-eval` build
+      # resolves without the language tiers and produces an evaluator that
+      # cannot parse Rust ("no bundled Tree-sitter grammar is available for
+      # language rust", exit 2 where the contract is exit 1). Only the same
+      # `--workspace --features tracedecay/test-helpers` resolution turns the
+      # tiers back on, and it makes these artifacts a cache hit for the run
+      # that follows rather than a second, differently-featured build.
+      - name: Build workspace binaries for the test lane
+        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+
+      # This parity test must execute separate feature-off/on binaries. Copy
+      # each result immediately so the second Cargo resolution cannot replace
+      # the first executable in target/debug/examples.
+      - name: Build controlled-workload hotpath parity executables
+        shell: bash
+        run: python3 scripts/build-controlled-workload-hotpath-helpers.py --profile test
+
+      - name: Verify controlled-workload hotpath parity
+        run: |
+          cargo nextest run -p tracedecay-search-eval --locked \
+            --run-ignored only \
+            -E 'test(=controlled_workloads::tests::hotpath_off_vs_on_durable_results_are_identical)' \
+            --no-tests=fail
+
+      # `nested_chunk_fanout_admits_stolen_workers_without_exceeding_width`
+      # installs the process-global background CPU authority at width 2, and
+      # that authority is a set-once `OnceLock` with no uninstall. Inside the
+      # shared `tracedecay-code-index` lib binary every later test that nests
+      # `with_background_cpu_permit` then queues behind a width-2 gate, which
+      # deadlocked the binary under libtest fan-out. It is therefore `#[ignore]`d
+      # and run here on its own, single-threaded, so the coverage is kept
+      # without letting one test's process-global install decide the width for
+      # every sibling.
+      - name: Run isolated background-CPU width test
+        run: |
+          cargo test -p tracedecay-code-index --locked --lib \
+            nested_chunk_fanout_admits_stolen_workers_without_exceeding_width \
+            -- --ignored --test-threads=1
+
       - name: Run tests
-        run: cargo nextest run --workspace --profile ci --locked
+        run: cargo nextest run --workspace --profile ci --locked --features tracedecay/test-helpers
+
+      # Compile-only gate for the features this lane does not enable. Both are
+      # otherwise built for the first time at release (`--all-features`), so
+      # anything that breaks them merges green and is discovered at tag time.
+      # That is not hypothetical: `tests/mcp_suite/support.rs` called
+      # `fs::create_dir_all` without importing `std::fs`, which made ten
+      # `required-features = ["test-transport"]` targets unbuildable, and
+      # nothing reported it.
+      #
+      # `check --all-targets` rather than `nextest run`: the point is that the
+      # code still compiles, and the acceptance suites behind `test-transport`
+      # spawn daemons, so running them here would change this lane's cost and
+      # flakiness profile. Enable them as a real test lane separately once
+      # they are confirmed green.
+      - name: Check feature-gated surfaces compile
+        run: |
+          cargo check --workspace --all-targets --features test-transport --locked
+          cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
+
+      - name: Upload ${{ matrix.name }} nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.name }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
   windows-build:
     name: Build Windows tests
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    # Build every Windows test once, then shard execution from the archive.
+    # Keep a bounded guard around the hosted build; Cargo timings are retained
+    # below so a slow or failed archive can be attributed instead of treating
+    # the timeout itself as the defect. Measured 2026-09-05 (run 33954670866,
+    # no parity rebuild): portability compile 31 min, archive still compiling
+    # the root crate's test targets at the 75-minute bound, so the archive
+    # never completed and the compiler caches never seeded. The bound is
+    # widened so one archive can finish and seed them; shrink it back once a
+    # warm run's timings show the real cost.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
 
       - name: Tune Windows runner for build I/O
+        uses: ./.github/actions/tune-windows-runner
+
+      # Install only the toolchain pinned by rust-toolchain.toml. Installing
+      # `stable` as well makes Swatinem/rust-cache include an unused compiler
+      # in its environment key, fragmenting the cache whenever stable moves.
+      - name: Install pinned toolchain
         shell: pwsh
         run: |
-          # Defender real-time scanning taxes the compiler's many short-lived
-          # object/incremental files; hosted runners are elevated, so turn it
-          # off and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
-
-      - uses: dtolnay/rust-toolchain@stable
+          rustup toolchain install
+          rustup show active-toolchain
 
       - name: Use lld-link linker
         shell: pwsh
@@ -201,9 +405,59 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+
+      # Compile this portable historical-artifact journey before the large
+      # root test binaries monopolize the hosted runner. The workspace and
+      # feature selection match the archive, so Cargo reuses the result below.
+      - name: Compile Windows search-quality portability target
+        shell: pwsh
+        run: cargo test --no-run --workspace --locked --features tracedecay/test-helpers --test search_quality_suite
+
+      # `runtime_acceptance_suite::search_eval_cli_test` and
+      # `product_surface_suite::packaged_semantic_evaluator` execute the
+      # ordinary `tracedecay-search-eval` binaries out of the profile directory,
+      # and `cargo nextest archive` never links them (the package has no test
+      # target). Build them with the archive's exact package and feature
+      # selection so Cargo reuses the artifacts and the evaluator keeps the
+      # default language tiers; `archive.include` in `.config/nextest.toml`
+      # then carries them to every shard.
+      - name: Build workspace binaries for the Windows test lane
+        shell: pwsh
+        run: cargo build --workspace --bins --locked --features tracedecay/test-helpers
+
+      # The controlled-workload Hotpath parity helpers are provisioned and
+      # verified on the Linux test lane only. Building them here would put a
+      # second, feature-on resolution of the search-eval dependency graph
+      # inside this job's bound (18 of its 62 minutes before it was cancelled),
+      # and the parity property does not depend on the platform.
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+
+      - name: Upload Windows archive build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nextest-build-timings
+          path: target/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload nextest archive
         uses: actions/upload-artifact@v4
@@ -223,34 +477,17 @@ jobs:
       matrix:
         partition: [1, 2, 3, 4, 5]
     steps:
+      # Full history for the same reason as the Linux/macOS test job: the
+      # shards run the workspace suite remapped onto this checkout, so the
+      # pinned search-quality fixture commit must be resolvable here too.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Tune Windows runner for test I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the many short-lived SQLite/tempdir
-          # files these tests create; hosted runners are elevated, so turn it off
-          # and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
-          # Default user TEMP is on the slow C: drive; RUNNER_TEMP shares the
-          # faster workspace drive. Point TMP/TEMP there so tempfile::TempDir in
-          # the nextest test processes follows.
-          $fastTemp = Join-Path $env:RUNNER_TEMP "tmp"
-          New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
-          "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        uses: ./.github/actions/tune-windows-runner
+        with:
+          redirect-temp: "true"
 
       - uses: actions/setup-node@v4
         with:
@@ -261,10 +498,45 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
+
+      # The architecture tests exec `cargo metadata` at runtime, and they run
+      # concurrently under nextest: without the pinned toolchain installed,
+      # each test process's rustup shim races to self-install it and the
+      # concurrent downloads corrupt each other's partial files. Install the
+      # rust-toolchain.toml pin serially up front.
+      - name: Install pinned toolchain
         shell: pwsh
         run: |
-          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
-          ast-grep --version
+          rustup toolchain install
+          rustup show active-toolchain
+
+      # `tracedecay-cli::source_provenance_test` drives a nested `cargo
+      # generate-lockfile --offline` / `cargo build --offline` on a fixture
+      # crate whose build-dependency mirrors this crate's own (`serde_json =
+      # "1"`, see `CargoFixture::new`). The Linux/macOS lanes resolve that
+      # from the registry cache their own build just filled; a shard runner
+      # only receives the archive and starts with an empty Cargo home, so the
+      # offline resolution finds no index at all. Fetch that one dependency
+      # graph here so the fixture stays offline and hermetic.
+      - name: Seed the Cargo registry for the source-provenance fixture
+        shell: pwsh
+        run: |
+          $seed = Join-Path $env:RUNNER_TEMP "source-provenance-seed"
+          New-Item -ItemType Directory -Force -Path (Join-Path $seed "src") | Out-Null
+          Set-Content -Path (Join-Path $seed "Cargo.toml") -Value @'
+          [package]
+          name = "source-provenance-seed"
+          version = "0.1.0"
+          edition = "2024"
+
+          [build-dependencies]
+          serde_json = "1"
+          '@
+          Set-Content -Path (Join-Path $seed "src/main.rs") -Value "fn main() {}"
+          cargo fetch --manifest-path (Join-Path $seed "Cargo.toml")
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -331,8 +603,8 @@ jobs:
 
   windows-test:
     name: Test Windows
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: windows-test-shard
+    if: ${{ !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: [windows-test-shard, scope-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Check Windows shards
@@ -345,7 +617,8 @@ jobs:
 
   clippy:
     name: Clippy
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -361,37 +634,127 @@ jobs:
         with:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Check lean build
+        run: cargo check -p tracedecay --no-default-features --locked
+
+  # Additive visibility lint. Not a required check yet — introduce Hawk, then
+  # promote once the workspace is clean under `-D warnings`.
+  hawk:
+    name: Hawk
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      # renovate: datasource=github-releases depName=astral-sh/hawk
+      HAWK_VERSION: 0.1.12
+      RUSTUP_MAX_RETRIES: 10
+      TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/hawk"
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1
+
+      - name: Install Hawk
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
+
+      # Hawk compiles every workspace member, so the tracedecay-cli build
+      # script runs here. Skip mode requires a validatable bundle plus its
+      # digest, so the seed must pass scripts/check-dashboard-bundle.py.
+      - name: Seed dashboard app-dist for the CLI build script
+        run: |
+          set -euo pipefail
+          mkdir -p dashboard/app-dist/static/js
+          printf '%s\n' '{"allFiles":["index.html","static/js/index.js"]}' > dashboard/app-dist/asset-manifest.json
+          printf '%s\n' '<!doctype html><title>hawk</title><script src="/static/js/index.js"></script>' > dashboard/app-dist/index.html
+          head -c 1024 /dev/zero | tr '\0' ';' > dashboard/app-dist/static/js/index.js
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      - name: Hawk
+        # Reports, does not gate. The job header above states Hawk is not a
+        # required check until the workspace is clean under `-D warnings`, but
+        # the step hard-failed anyway, so Hawk showed as a red required check
+        # while the workspace carries ~9k visibility findings. Keep `-D
+        # warnings` so the report stays honest, and drop the gate until the
+        # backlog is burned down and this line can be removed.
+        continue-on-error: true
+        run: cargo +1.97.1 hawk check --target-dir target/hawk -D warnings
+
   fmt:
     name: Format
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
+      # whatever `stable` is on the runner. rustfmt's output changes between
+      # releases — 1.98.1 breaks a `.unwrap_or_else(|err| { ... })` chain that
+      # 1.97.1 keeps inline — so a `stable` rustfmt rejects a tree the pinned
+      # rustfmt developers run formats exactly, and every contributor sees a
+      # red lane they cannot reproduce. `dtolnay/rust-toolchain@stable` also
+      # exports `RUSTUP_TOOLCHAIN`, which overrides the toolchain file rather
+      # than deferring to it. Installing through rustup with no override keeps
+      # the pin in one place: the toolchain file, components included.
+      - name: Install the repository's pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all -- --check
 
   dashboard:
     name: Dashboard
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      DASHBOARD_DIST_FILES: >-
-        shell/dist/shell.js
-        shell/dist/shell.css
-        holographic/dist/index.js
-        holographic/dist/style.css
-        lcm/dist/index.js
-        lcm/dist/style.css
-        graph/dist/index.js
-        graph/dist/style.css
-        savings/dist/index.js
-        savings/dist/style.css
     steps:
       - uses: actions/checkout@v7
 
@@ -413,29 +776,27 @@ jobs:
         working-directory: dashboard
         run: npm test
 
+      # The dashboard is one rsbuild app emitting `app-dist/` (the legacy
+      # shell/holographic/lcm/graph/savings bundle split no longer exists), so
+      # the bundle validator is the artifact authority and the determinism
+      # check hashes whatever the build actually produced.
       - name: Verify embedded dist artifacts
         working-directory: dashboard
         run: |
           set -euo pipefail
-          for f in $DASHBOARD_DIST_FILES; do
-            if [ ! -s "$f" ]; then
-              echo "missing or empty dist artifact: $f" >&2
-              exit 1
-            fi
-          done
-          # shellcheck disable=SC2086
-          sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
+          python3 ../scripts/check-dashboard-bundle.py app-dist
+          (cd app-dist && find . -type f | sort | xargs sha256sum) > /tmp/dashboard-dist.sha
           npm run build
-          sha256sum -c /tmp/dashboard-dist.sha
+          (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -446,58 +807,29 @@ jobs:
           shared-key: ci-dashboard-full-${{ runner.os }}
           cache-on-failure: true
 
-      - name: Run dashboard integration tests
-        run: cargo nextest run --test dashboard_api_test --no-fail-fast --locked
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
         with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('dashboard/package-lock.json') }}
-          restore-keys: |
-            playwright-${{ runner.os }}-
-
-      - name: Install Playwright Chromium
-        working-directory: dashboard
-        run: npx playwright install --with-deps chromium
-
-      - name: Prebuild dashboard binary for smoke
-        run: cargo build --bin tracedecay --locked
-
-      - name: Run dashboard smoke (empty LCM)
-        working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-empty.db
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          attempts=0
-          max_attempts=3
-          until [ "$attempts" -ge "$max_attempts" ]; do
-            attempts=$((attempts + 1))
-            echo "Smoke attempt ${attempts}/${max_attempts}..."
-            if npm run smoke -- --expect-lcm=empty; then
-              exit 0
-            fi
-            if [ "$attempts" -lt "$max_attempts" ]; then
-              sleep 10
-            fi
-          done
-          echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
-          exit 1
-
-      - name: Run dashboard mobile smoke
-        working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-mobile.db
-        run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          npm run smoke:mobile -- --expect-lcm=empty
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+      - name: Run dashboard integration tests
+        run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
 
   hermes-integration:
     name: Hermes integration (stock)
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -514,9 +846,9 @@ jobs:
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        run: |
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
@@ -524,8 +856,24 @@ jobs:
           shared-key: ci-hermes-integration-full-${{ runner.os }}
           cache-on-failure: true
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Build tracedecay binary
-        run: cargo build --bin tracedecay --locked
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py
@@ -553,3 +901,64 @@ jobs:
           TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
           HERMES_UPSTREAM_DIR: ${{ runner.temp }}/hermes-upstream
         run: scripts/hermes_stock_integration.sh
+
+  host-stock-integration:
+    name: Claude Code + OpenCode integration (stock)
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Stock host pins — the installed bundle must keep working against these
+      # exact host releases. Bump deliberately after rerunning
+      # scripts/claude_stock_integration.sh and
+      # scripts/opencode_stock_integration.sh against the new versions locally.
+      CLAUDE_CODE_VERSION: 2.1.224
+      OPENCODE_VERSION: 1.18.4
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-host-stock-integration-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+      - name: Build tracedecay binary
+        run: cargo build -p tracedecay-cli --bin tracedecay --locked
+
+      - name: Install stock Claude Code and OpenCode at pinned versions
+        run: |
+          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
+          claude --version
+          opencode --version
+
+      - name: Run stock Claude Code integration checks
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/claude_stock_integration.sh
+
+      - name: Run stock OpenCode integration checks
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/opencode_stock_integration.sh

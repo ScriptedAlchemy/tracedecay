@@ -1,53 +1,48 @@
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
-#![cfg_attr(not(test), deny(clippy::expect_used))]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::wildcard_imports)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::single_match)]
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::redundant_closure)]
-#![allow(clippy::redundant_closure_for_method_calls)]
-#![allow(clippy::format_push_string)]
+//! Automation contracts, deterministic policies, and state models.
+//!
+//! Runtime adapters and persistence remain outside this crate.
+//! Opt-in `hotpath` spans cover backend invocation and managed-skill
+//! parse/validation only. Scheduler ticks, run-ledger writes, and host
+//! orchestration stay with their owning crates.
 
-//! Root-free automation parsing primitives.
+#![forbid(unsafe_code)]
 
-pub mod apply_policy;
+pub mod analytics;
 pub mod artifact_policy;
 pub mod backend;
 pub mod config;
 mod error;
+pub mod evidence_budget;
+#[doc(hidden)]
 pub mod managed_skill_format;
-pub mod managed_skill_model;
-pub mod managed_skill_validation;
-pub mod retention;
+mod managed_skill_model;
+mod managed_skill_validation;
+mod ports;
+pub mod run_labels;
 pub mod skill_frontmatter;
 pub mod text;
 
-pub use config::{
-    AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
-    AutomationTaskConfig, AutomationTaskPatch, AutomationTaskSet, DEFAULT_SCHEDULER_TICK_SECS,
-};
-pub use error::{AutomationError, Result};
-pub use retention::{DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, RetentionConfig, RetentionTable};
+pub mod managed_skills {
+    pub use crate::managed_skill_model::{
+        MATERIALIZED_SKILL_MANAGED_BY, MAX_MANAGED_SKILL_BODY_BYTES,
+        MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES, ManagedSkill, ManagedSkillDraft,
+        ManagedSkillMaterializationScope, ManagedSkillMetadata, ManagedSkillProvenance,
+        ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile,
+        SkillInstallTarget, current_metadata_timestamp, default_managed_skill_targets,
+        legacy_managed_skill_routing_description,
+    };
+    pub use crate::managed_skill_validation::{
+        validate_managed_skill, validate_managed_skill_update, validate_managed_support_files,
+        validate_skill_id,
+    };
+}
+
+pub use error::{AutomationError, BoxError, Result};
+pub use ports::AutomationRunRecord;
+
+pub(crate) fn config_error(message: impl Into<String>) -> AutomationError {
+    AutomationError::config(message)
+}
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn truncates_prompts_on_character_boundaries() {
-        assert_eq!(super::text::truncate_chars_for_prompt("a🦀bc", 2), "a🦀");
-    }
-}
+mod contract_tests;

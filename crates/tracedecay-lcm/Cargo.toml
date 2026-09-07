@@ -1,0 +1,73 @@
+[package]
+name = "tracedecay-lcm"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Lossless context memory engine: contracts, raw ingest, summary DAG, payload authority, retrieval, GC, and retention"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+include = ["/src/**", "/tests/**"]
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
+# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
+# surfaces to dependent crates' test builds only. Never gates production code.
+test-helpers = []
+
+[dependencies]
+hotpath.workspace = true
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tracing = "0.1"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+
+[dev-dependencies]
+# The maintenance backup test verifies snapshots through a raw SQLite handle.
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+# This crate's own test target needs the kernel's `db::engine::TestConnection`.
+# Declaring the same path dependency with the feature keeps it out of the lib
+# build while feature unification supplies it to every test target here.
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

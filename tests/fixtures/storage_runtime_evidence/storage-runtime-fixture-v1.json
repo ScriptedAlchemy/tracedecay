@@ -1,0 +1,28 @@
+{
+  "fts_queries": {
+    "graph": "needle",
+    "session": "needle"
+  },
+  "profile_root": ".",
+  "project_root": ".",
+  "s11": {
+    "binding": {
+      "authority_epoch": 19,
+      "incarnation": 7,
+      "shard_id": {
+        "brain_id": "brain.s11.evidence",
+        "profile_id": "profile.s11.evidence",
+        "scope": {
+          "kind": "project",
+          "project_id": "project.s11.evidence"
+        }
+      }
+    },
+    "database": "online-backup-source.sqlite3",
+    "evidence_tables": [
+      "evidence_rows",
+      "facts"
+    ]
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,1862 @@
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use std::time::Duration;
+
+use serde_json::json;
+use tempfile::{TempDir, tempdir};
+use tokio::sync::Notify;
+use tracedecay_domain::{
+    Confidence, FactCategoryV1, FactCurationActionV1, FactEventId, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, ProjectMemoryGraphRelationKindV1, ProvenanceId, UtcMicros,
+};
+use tracedecay_graph_db::{
+    GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
+    NeverCancelled, VerifiedGraphSnapshot,
+};
+use tracedecay_store::{
+    FactCommitOutcome, FactCurrentQuery, FactLineageQuery, FactReadControl, FactStore,
+    FactStoreError, FactWriteBatch, FactWriteControl, ProjectMemoryAutomaticFactApplyDispositionV1,
+    ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    ProjectMemoryFactAddMaterialV1, ProjectMemoryFactCurationAddV1,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationEvidenceV1,
+    ProjectMemoryFactCurationMutationKindV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReviewRefV1, ProjectMemoryFactFeedbackActionV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeTargetV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchKindV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdatePatchV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore,
+    ProjectMemoryGraphTargetV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    derive_project_memory_fact_curation_child_operation_id,
+};
+
+use crate::db::{
+    Database, DatabaseAuthority, MemoryGraphReconciliationCancelErrorV1,
+    ProjectMemoryReconciliationTelemetryObserverV1, TestDatabaseRuntimeMode,
+};
+use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
+use crate::store::memory::automatic_facts::project_memory_record_automatic_fact_receipt_tx;
+use crate::store::memory::crud::{initial_batch, sanitize_payload};
+use crate::store::memory::{DatabaseFactStore, ProjectMemoryGraphReconciliationScheduleV1};
+use crate::store_runtime::VerifiedGraphRuntimePortV1;
+
+struct RecordingGraphRuntime {
+    binding: StoreRuntimeBindingV1,
+    locator: VerifiedStoreLocatorV1,
+    block_reconciliation: bool,
+    /// Failure the verified-graph runtime reports for every generation access,
+    /// on both the reconcile and the snapshot-read entry points. The read path
+    /// reaches the verified graph through `reconcile_verified_manifest`, so a
+    /// fixture that failed only `verified_snapshot` would no longer exercise
+    /// the read path's error mapping at all.
+    verified_error: Option<GraphDbError>,
+    reconciliation_cancelled: AtomicBool,
+    reconciliation_started: AtomicBool,
+    reconciliation_finished: AtomicBool,
+    reconciliation_observed: AtomicBool,
+    reconciliation_notify: Notify,
+    hold_reconcile_armed: AtomicBool,
+    hold_reconcile_entered: AtomicBool,
+    hold_reconcile_release: AtomicBool,
+    /// Last successfully reconciled snapshot, served back on the read path so
+    /// `project_memory_graph` journeys run against settled generations.
+    served_snapshot: Mutex<Option<VerifiedGraphSnapshot>>,
+    publish_calls: AtomicUsize,
+    reconcile_calls: AtomicUsize,
+    snapshot_calls: AtomicUsize,
+}
+
+impl RecordingGraphRuntime {
+    fn new(database: &Database) -> Self {
+        Self {
+            binding: database.registered_binding().clone(),
+            locator: database.registered_verified_locator().clone(),
+            block_reconciliation: false,
+            verified_error: None,
+            reconciliation_cancelled: AtomicBool::new(false),
+            reconciliation_started: AtomicBool::new(false),
+            reconciliation_finished: AtomicBool::new(false),
+            reconciliation_observed: AtomicBool::new(false),
+            reconciliation_notify: Notify::new(),
+            hold_reconcile_armed: AtomicBool::new(false),
+            hold_reconcile_entered: AtomicBool::new(false),
+            hold_reconcile_release: AtomicBool::new(false),
+            served_snapshot: Mutex::new(None),
+            publish_calls: AtomicUsize::new(0),
+            reconcile_calls: AtomicUsize::new(0),
+            snapshot_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Parks the next reconcile inside the verified-graph runtime until
+    /// [`Self::release_held_reconcile`], so a test can land a canonical
+    /// source mutation between a publication's source load and its
+    /// settlement decision.
+    fn arm_reconcile_hold(&self) {
+        self.hold_reconcile_armed.store(true, Ordering::Release);
+    }
+
+    fn release_held_reconcile(&self) {
+        self.hold_reconcile_release.store(true, Ordering::Release);
+    }
+
+    async fn wait_for_held_reconcile(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !self.hold_reconcile_entered.load(Ordering::Acquire) {
+                self.reconciliation_notify.notified().await;
+            }
+        })
+        .await
+        .expect("armed publication never reached the verified-graph reconcile");
+    }
+
+    fn blocking(database: &Database) -> Self {
+        Self {
+            block_reconciliation: true,
+            ..Self::new(database)
+        }
+    }
+
+    fn reset_required(database: &Database) -> Self {
+        Self {
+            verified_error: Some(GraphDbError::ResetRequired {
+                message: "verified profile-memory graph generation mismatch".to_owned(),
+            }),
+            ..Self::new(database)
+        }
+    }
+}
+
+impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
+    fn relational_binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn relational_verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.locator
+    }
+
+    fn cancel_reconciliation(&self) {
+        self.reconciliation_cancelled.store(true, Ordering::Release);
+    }
+
+    fn publish_verified_manifest(
+        &self,
+        _manifest: &GraphGenerationManifest,
+        _idempotency_key: GraphIdempotencyKey,
+        _cancelled: Arc<AtomicBool>,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.publish_calls.fetch_add(1, Ordering::SeqCst);
+        Err(GraphDbError::invalid(
+            "memory graph reads must not publish a generation",
+        ))
+    }
+
+    fn reconcile_verified_manifest(
+        &self,
+        manifest: &GraphGenerationManifest,
+        _idempotency_key: GraphIdempotencyKey,
+    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = &self.verified_error {
+            return Err(error.clone());
+        }
+        if self.hold_reconcile_armed.swap(false, Ordering::AcqRel) {
+            self.hold_reconcile_entered.store(true, Ordering::Release);
+            self.reconciliation_notify.notify_one();
+            // Bounded: if the test panics before releasing the hold, this
+            // parked blocking-pool thread must fail loudly instead of
+            // spinning forever and hanging the runtime drop.
+            let hold_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !self.hold_reconcile_release.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < hold_deadline,
+                    "held reconcile was never released within 30s; \
+                     a test assertion likely failed while the hold was parked"
+                );
+                std::thread::yield_now();
+            }
+        }
+        if self.block_reconciliation {
+            self.reconciliation_started.store(true, Ordering::Release);
+            self.reconciliation_observed.store(true, Ordering::Release);
+            self.reconciliation_notify.notify_one();
+            while !self.reconciliation_cancelled.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            self.reconciliation_finished.store(true, Ordering::Release);
+            return Err(GraphDbError::Cancelled);
+        }
+        let snapshot = VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
+        *self
+            .served_snapshot
+            .lock()
+            .expect("serve reconciled snapshot") = Some(snapshot.clone());
+        self.reconciliation_observed.store(true, Ordering::Release);
+        self.reconciliation_notify.notify_one();
+        Ok(snapshot)
+    }
+
+    fn verified_snapshot(
+        &self,
+        _projection: &GraphProjectionIdentity,
+        read_control: FactReadControl,
+    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        if read_control.interrupted() {
+            return Err(GraphDbError::Cancelled);
+        }
+        self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = &self.verified_error {
+            return Err(error.clone());
+        }
+        Ok(self
+            .served_snapshot
+            .lock()
+            .expect("read served snapshot")
+            .clone())
+    }
+}
+
+async fn database(label: &str) -> (TempDir, Database) {
+    let directory = tempdir().expect("create graph reconciliation fixture directory");
+    let path = directory.path().join(format!("{label}.db"));
+    let authority = DatabaseAuthority::acquire_test(&path, "graph reconciliation test authority")
+        .expect("acquire graph reconciliation fixture authority");
+    let (database, _) = Database::publish_profile_memory_test_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("publish graph reconciliation fixture runtime");
+    (directory, database)
+}
+
+fn bind_runtime(database: &Database) -> Arc<RecordingGraphRuntime> {
+    let runtime = Arc::new(RecordingGraphRuntime::new(database));
+    let port: Arc<dyn VerifiedGraphRuntimePortV1> = runtime.clone();
+    database
+        .bind_memory_graph_runtime(port)
+        .expect("bind recording graph runtime");
+    runtime
+}
+
+fn bind_blocking_runtime(database: &Database) -> Arc<RecordingGraphRuntime> {
+    let runtime = Arc::new(RecordingGraphRuntime::blocking(database));
+    let port: Arc<dyn VerifiedGraphRuntimePortV1> = runtime.clone();
+    database
+        .bind_memory_graph_runtime(port)
+        .expect("bind blocking graph runtime");
+    runtime
+}
+
+fn bind_reset_required_runtime(database: &Database) -> Arc<RecordingGraphRuntime> {
+    let runtime = Arc::new(RecordingGraphRuntime::reset_required(database));
+    let port: Arc<dyn VerifiedGraphRuntimePortV1> = runtime.clone();
+    database
+        .bind_memory_graph_runtime(port)
+        .expect("bind reset-required graph runtime");
+    runtime
+}
+
+fn write_control() -> FactWriteControl {
+    FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
+}
+
+async fn wait_for_reconciliation(runtime: &RecordingGraphRuntime) {
+    if !runtime.reconciliation_observed.load(Ordering::Acquire) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !runtime.reconciliation_observed.load(Ordering::Acquire) {
+                runtime.reconciliation_notify.notified().await;
+            }
+        })
+        .await
+        .expect("scheduled graph reconciliation did not reach the mounted runtime");
+    }
+    assert!(
+        runtime.reconciliation_observed.load(Ordering::Acquire),
+        "scheduled graph reconciliation did not reach the mounted runtime"
+    );
+}
+
+async fn wait_for_completed_reconciliation_pass(
+    observer: &ProjectMemoryReconciliationTelemetryObserverV1,
+    expected_reconciliation_passes: u64,
+) {
+    for _ in 0..256 {
+        let snapshot = observer.snapshot();
+        if snapshot.reconciliation_passes == expected_reconciliation_passes
+            && snapshot.active_reconciliation_pass_count == 0
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("project memory reconciliation did not complete its full pass");
+}
+
+fn non_graph_write_fixture_batch(label: &str) -> FactWriteBatch {
+    let content = format!("canonical {label} fact without a graph source change");
+    let sanitized = sanitize_payload(
+        &content,
+        FactCategoryV1::General,
+        &[],
+        &[],
+        &json!({"fixture": label}),
+        None,
+    )
+    .expect("sanitize non-graph write fixture payload")
+    .expect("non-graph write fixture remains durable");
+    initial_batch(
+        &FactOwnerV1::Profile,
+        &ProvenanceId::new(format!("graph.reconciliation.{label}.seed"))
+            .expect("non-graph write seed operation id"),
+        sanitized.payload,
+        sanitized.access,
+        Confidence::new(0.8).expect("non-graph write fixture confidence"),
+        None,
+        UtcMicros(1_000_000),
+    )
+    .expect("non-graph write fact batch")
+}
+
+async fn seed_fact_for_non_graph_write(
+    store: &DatabaseFactStore<'_>,
+    runtime: &RecordingGraphRuntime,
+    label: &str,
+) -> ProjectMemoryFactIdV1 {
+    let batch = non_graph_write_fixture_batch(label);
+    let target = ProjectMemoryFactIdV1::new(FactOwnerV1::Profile, batch.fact_id().clone())
+        .expect("non-graph write target");
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit non-graph write fixture");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+    wait_for_reconciliation(runtime).await;
+    runtime.reconcile_calls.store(0, Ordering::SeqCst);
+    runtime
+        .reconciliation_observed
+        .store(false, Ordering::Release);
+    target
+}
+
+struct HighLevelFactSeed {
+    target: ProjectMemoryFactIdV1,
+    last_event_id: FactEventId,
+    content: String,
+}
+
+fn accepted_add_command(operation_id: &str, content: &str) -> ProjectMemoryFactAddCommandV1 {
+    let material = json!({
+        "content": content,
+        "category": "project",
+        "tags": ["graph-reconciliation"],
+        "entities": ["TraceDecay"],
+        "metadata": {"fixture": "graph-reconciliation"},
+    });
+    let receipt = match sanitize_memory_fact_payload(material.clone())
+        .expect("sanitize graph reconciliation add fixture")
+    {
+        MemoryFactSanitizationV1::Durable { payload, receipt } => {
+            assert_eq!(payload, material);
+            receipt
+        }
+        MemoryFactSanitizationV1::Quarantined => {
+            panic!("graph reconciliation add fixture must remain durable")
+        }
+    };
+    ProjectMemoryFactAddMaterialV1::new(
+        FactOwnerV1::Profile,
+        content.to_owned(),
+        FactCategoryV1::Project,
+        None,
+        vec!["graph-reconciliation".to_owned()],
+        vec!["TraceDecay".to_owned()],
+        json!({"fixture": "graph-reconciliation"}),
+        receipt,
+        None,
+        Confidence::new(0.8).expect("graph reconciliation add confidence"),
+        None,
+    )
+    .and_then(|material| {
+        material.into_command(
+            ProvenanceId::new(operation_id.to_owned())
+                .expect("graph reconciliation add operation id"),
+        )
+    })
+    .expect("graph reconciliation add command")
+}
+
+fn reset_reconciliation(runtime: &RecordingGraphRuntime) {
+    runtime.reconcile_calls.store(0, Ordering::SeqCst);
+    runtime
+        .reconciliation_observed
+        .store(false, Ordering::Release);
+}
+
+fn assert_no_reconciliation(runtime: &RecordingGraphRuntime) {
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+async fn add_high_level_source_fact(
+    store: &DatabaseFactStore<'_>,
+    label: &str,
+    content: &str,
+) -> HighLevelFactSeed {
+    let outcome = store
+        .add_project_memory_fact(
+            accepted_add_command(&format!("graph.reconciliation.{label}.seed"), content),
+            &write_control(),
+        )
+        .await
+        .expect("seed graph reconciliation source fact");
+    assert_eq!(
+        outcome.disposition(),
+        ProjectMemoryFactAddDispositionV1::Added
+    );
+    assert!(!outcome.commit_replayed());
+    let receipt = outcome
+        .commit_receipt()
+        .expect("seed graph reconciliation source fact commit receipt");
+    let target = ProjectMemoryFactIdV1::new(FactOwnerV1::Profile, outcome.fact().fact_id().clone())
+        .expect("seed graph reconciliation source target");
+    HighLevelFactSeed {
+        target,
+        last_event_id: receipt.last_event_id().clone(),
+        content: content.to_owned(),
+    }
+}
+
+async fn seed_high_level_fact(
+    store: &DatabaseFactStore<'_>,
+    runtime: &RecordingGraphRuntime,
+    label: &str,
+    content: &str,
+) -> HighLevelFactSeed {
+    let seed = add_high_level_source_fact(store, label, content).await;
+    wait_for_reconciliation(runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    reset_reconciliation(runtime);
+    seed
+}
+
+fn curation_add_batch(
+    seed: &HighLevelFactSeed,
+    outer_operation_id: &str,
+    content: &str,
+) -> ProjectMemoryFactCurationBatchV1 {
+    let outer_operation_id =
+        ProvenanceId::new(outer_operation_id.to_owned()).expect("curation outer operation id");
+    let child_operation_id = derive_project_memory_fact_curation_child_operation_id(
+        &outer_operation_id,
+        0,
+        ProjectMemoryFactCurationMutationKindV1::Add,
+    )
+    .expect("curation add child operation id");
+    let evidence = ProjectMemoryFactCurationEvidenceV1::new(
+        &FactOwnerV1::Profile,
+        vec![ProjectMemoryFactCurationReviewRefV1::new(
+            seed.target.clone(),
+            seed.last_event_id.clone(),
+        )],
+        Confidence::new(0.8).expect("curation evidence confidence"),
+        "canonical graph reconciliation review".to_owned(),
+    )
+    .expect("curation add evidence");
+    let add = ProjectMemoryFactCurationAddV1::new(
+        accepted_add_command(child_operation_id.as_str(), content),
+        evidence,
+    )
+    .expect("curation add operation");
+    ProjectMemoryFactCurationBatchV1::new(
+        FactOwnerV1::Profile,
+        outer_operation_id,
+        None,
+        Confidence::new(0.8).expect("curation minimum confidence"),
+        vec![ProjectMemoryFactCurationOperationV1::Add(add)],
+    )
+    .expect("curation add batch")
+}
+
+fn merge_command(
+    operation_id: &str,
+    winner: &HighLevelFactSeed,
+    loser: &HighLevelFactSeed,
+) -> ProjectMemoryFactMergeCommandV1 {
+    ProjectMemoryFactMergeCommandV1::new(
+        FactOwnerV1::Profile,
+        ProvenanceId::new(operation_id.to_owned()).expect("merge operation id"),
+        ProjectMemoryFactMergeTargetV1::new(winner.target.clone(), winner.last_event_id.clone())
+            .expect("merge winner target"),
+        vec![
+            ProjectMemoryFactMergeTargetV1::new(loser.target.clone(), loser.last_event_id.clone())
+                .expect("merge loser target"),
+        ],
+        None,
+        None,
+    )
+    .expect("merge command")
+}
+
+fn automatic_evidence(label: &str) -> ProjectMemoryAutomaticFactEvidenceV1 {
+    ProjectMemoryAutomaticFactEvidenceV1::new(
+        Some(format!("graph-reconciliation.{label}.evidence")),
+        Some(json!({"candidate": label})),
+        Some(json!({"validated": true})),
+    )
+    .expect("automatic fact evidence")
+}
+
+async fn seed_quarantined_automatic_fact(
+    database: &Database,
+    apply_id: &ProvenanceId,
+    request: &ProjectMemoryFactAddCommandV1,
+    evidence: &ProjectMemoryAutomaticFactEvidenceV1,
+) {
+    let transaction = database
+        .begin_memory_write_transaction("seed quarantined automatic fact")
+        .await
+        .expect("begin quarantined automatic fact transaction");
+    project_memory_record_automatic_fact_receipt_tx(
+        &transaction,
+        apply_id,
+        request,
+        request.input_digest(),
+        evidence,
+        &ProjectMemoryAutomaticFactEffectV1::Quarantined {
+            reason: "canonical graph reconciliation quarantine".to_owned(),
+        },
+        UtcMicros(3_000_000),
+    )
+    .await
+    .expect("record quarantined automatic fact receipt");
+    transaction
+        .commit()
+        .await
+        .expect("commit quarantined automatic fact receipt");
+}
+
+#[tokio::test]
+async fn superseded_fact_leaves_current_retrieval_but_stays_in_history() {
+    let (_directory, database) = database("superseded-current-retrieval").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let old = seed_high_level_fact(
+        &store,
+        &runtime,
+        "superseded-old",
+        "retrievalmarker compiler rust memory lineage architecture",
+    )
+    .await;
+    let successor = seed_high_level_fact(
+        &store,
+        &runtime,
+        "superseded-successor",
+        "retrievalmarker gardening tomatoes irrigation rainfall soil",
+    )
+    .await;
+    let old_projection = store
+        .get_project_memory_fact(
+            old.target.clone(),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load old fact before supersession")
+        .expect("old fact exists before supersession");
+    let ProjectMemoryFactProjectionV1::Available(old_fact) = old_projection else {
+        panic!("old fact is available before supersession");
+    };
+    let occurred_at = UtcMicros(
+        old_fact
+            .projected_as_of()
+            .0
+            .checked_add(1)
+            .expect("supersession event time"),
+    );
+    let event = FactLineageEventV1::new(
+        old.target.fact_id().clone(),
+        FactOwnerV1::Profile,
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::SupersededBy {
+                fact_id: successor.target.fact_id().clone(),
+            },
+            evidence_ids: Vec::new(),
+        },
+        occurred_at,
+        None,
+    )
+    .expect("superseded lineage event");
+    let batch = FactWriteBatch::new(
+        old.target.fact_id().clone(),
+        FactOwnerV1::Profile,
+        None,
+        vec![event],
+        Vec::new(),
+        Vec::new(),
+        Some(old.last_event_id.clone()),
+    )
+    .expect("superseded lineage batch");
+
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit superseded lineage event");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+    wait_for_reconciliation(&runtime).await;
+
+    let lineage = store
+        .query_fact_lineage(
+            FactLineageQuery::new(FactOwnerV1::Profile, old.target.fact_id().clone(), None, 64)
+                .expect("old fact lineage query"),
+        )
+        .await
+        .expect("load old fact lineage");
+    assert!(lineage.iter().any(|event| {
+        matches!(
+            event.kind(),
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::SupersededBy { fact_id },
+                evidence_ids,
+            } if fact_id == successor.target.fact_id() && evidence_ids.is_empty()
+        )
+    }));
+
+    let graph = store
+        .project_memory_graph(
+            ProjectMemoryGraphQueryV1::new(
+                FactOwnerV1::Profile,
+                vec![successor.target.fact_id().clone()],
+                64,
+            )
+            .expect("supersession graph query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load supersession graph");
+    assert!(graph.relations().iter().any(|relation| {
+        relation.kind() == ProjectMemoryGraphRelationKindV1::Supersedes
+            && relation.source() == &ProjectMemoryGraphTargetV1::Fact(successor.target.clone())
+            && relation.target() == &ProjectMemoryGraphTargetV1::Fact(old.target.clone())
+    }));
+
+    let list = store
+        .list_project_memory_facts(
+            ProjectMemoryFactListQueryV1::new(FactOwnerV1::Profile, None, None, None, 64)
+                .expect("current fact list query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load current fact list");
+    // #727: the default list surface drops the superseded fact and keeps
+    // the successor current.
+    assert!(
+        !list
+            .facts()
+            .iter()
+            .any(|fact| fact.fact_id() == old.target.fact_id()),
+        "current list must not return a superseded fact"
+    );
+    assert!(
+        list.facts()
+            .iter()
+            .any(|fact| fact.fact_id() == successor.target.fact_id()),
+        "the successor stays in the current list"
+    );
+
+    let search = store
+        .search_project_memory_facts(
+            ProjectMemoryFactSearchQuery::new(
+                FactOwnerV1::Profile,
+                ProjectMemoryFactSearchKindV1::Search,
+                Some("retrievalmarker".to_owned()),
+                None,
+                64,
+            )
+            .expect("current fact search query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("search current facts");
+    assert!(
+        !search
+            .hits()
+            .iter()
+            .any(|hit| hit.fact().fact_id() == old.target.fact_id()),
+        "current search must not return a superseded fact"
+    );
+    assert!(
+        search
+            .hits()
+            .iter()
+            .any(|hit| hit.fact().fact_id() == successor.target.fact_id()),
+        "the successor stays searchable"
+    );
+
+    // The explicit historical path still serves the retired projection with
+    // its payload and trust as stored.
+    let history = store
+        .project_memory_fact_history(
+            ProjectMemoryFactHistoryQueryV1::new(old.target.clone(), None, 64)
+                .expect("history query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load superseded fact history");
+    let retired = history
+        .retired_fact()
+        .expect("history carries the projection as of the supersession event");
+    assert_eq!(retired.fact_id(), old.target.fact_id());
+    assert!(
+        retired.payload().is_some(),
+        "the retired projection keeps its payload"
+    );
+    assert!(
+        store
+            .get_project_memory_fact(
+                old.target.clone(),
+                &FactReadControl::new(Arc::new(|| false)),
+            )
+            .await
+            .expect("load superseded fact by id")
+            .is_none(),
+        "the default get surface no longer projects the superseded fact"
+    );
+}
+
+#[tokio::test]
+async fn graph_read_reconciles_on_demand_without_publishing() {
+    let (_directory, database) = database("on-demand-read").await;
+    let runtime = bind_runtime(&database);
+    let query =
+        ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 8).expect("graph query");
+
+    let page = super::graph::project_memory_graph(
+        &database,
+        query,
+        &FactReadControl::new(Arc::new(|| false)),
+    )
+    .await
+    .expect("read reconciles the canonical source on demand");
+
+    // Verified graph engines hibernate after their last operation lease, so a
+    // read can no longer assume a resident published head to inspect: it
+    // reconciles the generation its own source watermark names and reads that.
+    // The invariant the read still owes is that it never *publishes* a
+    // generation, which `publish_verified_manifest` refuses outright.
+    assert!(page.facts().is_empty());
+    assert!(page.relations().is_empty());
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+    // The verified-snapshot read is now only the generation-conflict fallback,
+    // which a settled reconcile never reaches.
+    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn graph_read_observes_live_cancellation_before_snapshot_access() {
+    let (_directory, database) = database("live-cancelled-read").await;
+    let runtime = bind_runtime(&database);
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&interrupted);
+    let read_control = FactReadControl::new(Arc::new(move || observed.load(Ordering::Acquire)));
+    interrupted.store(true, Ordering::Release);
+    let query =
+        ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 8).expect("graph query");
+
+    let result = super::graph::project_memory_graph(&database, query, &read_control).await;
+
+    assert!(matches!(result, Err(FactStoreError::GraphCancelled)));
+    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn graph_read_preserves_reset_required_from_the_verified_graph() {
+    let (_directory, database) = database("reset-required-read").await;
+    let runtime = bind_reset_required_runtime(&database);
+    let query =
+        ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 8).expect("graph query");
+
+    let result = super::graph::project_memory_graph(
+        &database,
+        query,
+        &FactReadControl::new(Arc::new(|| false)),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(FactStoreError::GraphResetRequired {
+            owner: FactOwnerV1::Profile,
+            reason,
+        }) if reason == "verified profile-memory graph generation mismatch"
+    ));
+    // The read reaches the verified graph through its on-demand reconcile, so
+    // that is where the runtime reports the reset. `ResetRequired` must stay a
+    // typed owner-scoped refusal instead of collapsing into `GraphUnavailable`
+    // or an untyped storage error.
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn successful_project_memory_transaction_schedules_lifecycle_reconciliation() {
+    let (_directory, database) = database("write-side-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+
+    store
+        .project_memory_write(
+            &write_control(),
+            |()| true,
+            |_transaction| Box::pin(async { Ok::<(), FactStoreError>(()) }),
+        )
+        .await
+        .expect("commit project-memory transaction");
+    wait_for_reconciliation(&runtime).await;
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn committed_low_level_fact_batch_schedules_lifecycle_reconciliation() {
+    let (_directory, database) = database("low-level-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let sanitized = sanitize_payload(
+        "canonical low-level graph reconciliation fact",
+        FactCategoryV1::General,
+        &[],
+        &[],
+        &json!({"fixture": "low-level-reconciliation"}),
+        None,
+    )
+    .expect("sanitize low-level reconciliation payload")
+    .expect("low-level reconciliation payload remains durable");
+    let batch = initial_batch(
+        &FactOwnerV1::Profile,
+        &ProvenanceId::new("graph.reconciliation.low-level".to_owned())
+            .expect("low-level operation id"),
+        sanitized.payload,
+        sanitized.access,
+        Confidence::new(0.8).expect("low-level fixture confidence"),
+        None,
+        UtcMicros(1_000_000),
+    )
+    .expect("low-level fact batch");
+
+    let outcome = DatabaseFactStore::new(&database)
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit low-level fact batch");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+    wait_for_reconciliation(&runtime).await;
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+async fn seed_large_payload_fact(store: &DatabaseFactStore<'_>, label: &str, index: i64) {
+    let sanitized = sanitize_payload(
+        &format!("canonical {label} large payload source fact {index}"),
+        FactCategoryV1::General,
+        &[],
+        &[],
+        &json!({"filler": "x".repeat(16 * 1024), "index": index}),
+        None,
+    )
+    .expect("sanitize large payload source fixture")
+    .expect("large payload source fixture remains durable");
+    let batch = initial_batch(
+        &FactOwnerV1::Profile,
+        &ProvenanceId::new(format!("graph.reconciliation.{label}.{index}"))
+            .expect("large payload fixture operation id"),
+        sanitized.payload,
+        sanitized.access,
+        Confidence::new(0.8).expect("large payload fixture confidence"),
+        None,
+        UtcMicros(1_000_000 + index),
+    )
+    .expect("large payload fixture batch");
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit large payload fixture fact");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+}
+
+async fn wait_for_settled_passes(
+    observer: &ProjectMemoryReconciliationTelemetryObserverV1,
+    expected_passes: u64,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = observer.snapshot();
+            if snapshot.reconciliation_passes >= expected_passes
+                && snapshot.active_reconciliation_pass_count == 0
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("scheduled republication did not settle");
+    assert_eq!(
+        observer.snapshot().reconciliation_passes,
+        expected_passes,
+        "reconciliation ran more passes than the journey scheduled"
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_pass_loads_large_payload_source_once() {
+    let (_directory, database) = database("single-pass-source-load").await;
+    let store = DatabaseFactStore::new(&database);
+    // Seed with no graph runtime bound: each write-side publication pass
+    // stops as unavailable at the graph mount, after its source load and
+    // before any settlement work, and its follow-up schedule is NotMounted.
+    for index in 0..8 {
+        seed_large_payload_fact(&store, "single-pass-source-load", index).await;
+    }
+
+    // Baseline: one unmounted publication pass records exactly one canonical
+    // source load through the same telemetry a settled pass records.
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let before_single = observer.snapshot();
+    super::graph::publish_project_memory_graph_after_write(database.clone()).await;
+    let single = observer.snapshot();
+    assert_eq!(
+        single.reconciliation_passes,
+        before_single.reconciliation_passes + 1
+    );
+    assert_eq!(
+        single.publication_attempts,
+        before_single.publication_attempts + 1
+    );
+    let single_rows = single.source_rows_loaded - before_single.source_rows_loaded;
+    let single_bytes = single.source_bytes_loaded - before_single.source_bytes_loaded;
+    assert!(
+        single_bytes > 8 * 16 * 1024,
+        "seeded payload_json must dominate one source load ({single_bytes} bytes)"
+    );
+
+    let runtime = bind_runtime(&database);
+    let before_pass = observer.snapshot();
+    super::graph::publish_project_memory_graph_after_write(database.clone()).await;
+    let after_pass = observer.snapshot();
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        after_pass.reconciliation_passes,
+        before_pass.reconciliation_passes + 1
+    );
+    assert_eq!(
+        after_pass.publication_attempts,
+        before_pass.publication_attempts + 1
+    );
+    assert_eq!(
+        after_pass.active_reconciliation_pass_count, 0,
+        "publication pass must settle before its work is measured"
+    );
+    assert_eq!(
+        after_pass.source_rows_loaded - before_pass.source_rows_loaded,
+        single_rows,
+        "a settled reconciliation pass must load the canonical source exactly once"
+    );
+    assert_eq!(
+        after_pass.source_bytes_loaded - before_pass.source_bytes_loaded,
+        single_bytes,
+        "a settled reconciliation pass must parse each payload_json exactly once"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_mutation_during_publication_conflicts_and_republishes() {
+    let (_directory, database) = database("mid-publication-source-mutation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    seed_large_payload_fact(&store, "mid-publication-source-mutation", 0).await;
+    wait_for_reconciliation(&runtime).await;
+    reset_reconciliation(&runtime);
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let start = observer.snapshot();
+
+    // Park the next publication inside the verified-graph reconcile so a
+    // canonical source mutation can land between its source load and its
+    // settlement decision.
+    runtime.arm_reconcile_hold();
+    let publisher_database = database.clone();
+    let held_publisher = tokio::spawn(async move {
+        super::graph::publish_project_memory_graph_after_write(publisher_database).await;
+    });
+    runtime.wait_for_held_reconcile().await;
+    let held = observer.snapshot();
+    assert_eq!(held.reconciliation_passes, start.reconciliation_passes + 1);
+    assert!(
+        held.source_rows_loaded > start.source_rows_loaded,
+        "the held publication must have loaded its source before parking"
+    );
+
+    // A second fact settles through the ordinary write journey while the
+    // first publication is parked: exactly one source load, no reload.
+    seed_large_payload_fact(&store, "mid-publication-source-mutation", 1).await;
+    let settled_write = observer.snapshot();
+    assert_eq!(
+        settled_write.reconciliation_passes,
+        held.reconciliation_passes + 1
+    );
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 2);
+    let mutated_source_rows = settled_write.source_rows_loaded - held.source_rows_loaded;
+    let mutated_source_bytes = settled_write.source_bytes_loaded - held.source_bytes_loaded;
+    assert!(mutated_source_rows > 0);
+    assert!(
+        !database.memory_graph_reconciliation_pending(),
+        "no follow-up publication is queued before the held pass resumes"
+    );
+
+    // Releasing the held pass exposes a stale stamp and a stale watermark
+    // with nothing pending: its finish must reload the canonical source,
+    // surface the conflict, and its publisher must schedule the follow-up
+    // pass that republishes the mutated source. The tail is therefore
+    // exactly two loads of the mutated source — the conflicted finish's
+    // fallback reload plus the scheduled republication's own load.
+    runtime.release_held_reconcile();
+    held_publisher
+        .await
+        .expect("held publication task completes");
+    wait_for_settled_passes(&observer, settled_write.reconciliation_passes + 1).await;
+    let republished = observer.snapshot();
+    assert_eq!(
+        runtime.reconcile_calls.load(Ordering::SeqCst),
+        3,
+        "the conflicted publication must schedule exactly one republication"
+    );
+    assert!(!database.memory_graph_reconciliation_pending());
+    assert_eq!(
+        republished.source_rows_loaded - settled_write.source_rows_loaded,
+        2 * mutated_source_rows,
+        "the conflicted finish reloads the mutated source once and the \
+         scheduled republication loads it once"
+    );
+    assert_eq!(
+        republished.source_bytes_loaded - settled_write.source_bytes_loaded,
+        2 * mutated_source_bytes
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_read_source_mutation_never_serves_a_stale_page() {
+    let (_directory, database) = database("mid-read-source-mutation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    seed_high_level_fact(
+        &store,
+        &runtime,
+        "mid-read-stale-page-seed",
+        "The verified read path serves settled generations from the recording runtime.",
+    )
+    .await;
+
+    // Park the read inside the on-demand reconcile it drives, after its source
+    // load captured the source watermark and before its settlement decision,
+    // so a canonical mutation lands while the read still holds the settled
+    // pre-mutation generation.
+    runtime.arm_reconcile_hold();
+    let read_database = database.clone();
+    let held_read = tokio::spawn(async move {
+        super::graph::project_memory_graph(
+            &read_database,
+            ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 64)
+                .expect("stale-page graph query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+    });
+    runtime.wait_for_held_reconcile().await;
+
+    // Mutate the canonical source while the read is parked.
+    let mutation = add_high_level_source_fact(
+        &store,
+        "mid-read-stale-page-mutation",
+        "A canonical source mutation landed while a verified graph read was parked.",
+    )
+    .await;
+    wait_for_reconciliation(&runtime).await;
+
+    runtime.release_held_reconcile();
+    match held_read.await.expect("held graph read task completes") {
+        Err(FactStoreError::GraphConflict) => {}
+        Ok(page) => assert!(
+            page.facts()
+                .iter()
+                .any(|fact| fact.fact_id() == mutation.target.fact_id()),
+            "held read must surface the mutation instead of the stale page"
+        ),
+        Err(other) => panic!("held read must conflict or serve a fresh page: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn retrieval_telemetry_does_not_reconcile_unchanged_memory_graph() {
+    let (_directory, database) = database("retrieval-telemetry-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let target = seed_fact_for_non_graph_write(&store, &runtime, "retrieval-telemetry").await;
+
+    store
+        .record_project_memory_fact_retrieval(
+            ProjectMemoryFactRetrievalCommandV1::new(
+                FactOwnerV1::Profile,
+                ProvenanceId::new("graph.reconciliation.retrieval.record".to_owned())
+                    .expect("retrieval record operation id"),
+                vec![target],
+                true,
+            )
+            .expect("retrieval telemetry command"),
+            &write_control(),
+        )
+        .await
+        .expect("record retrieval telemetry");
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn idempotent_fact_replay_does_not_reconcile_unchanged_memory_graph() {
+    let (_directory, database) = database("idempotent-replay-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let batch = non_graph_write_fixture_batch("idempotent-replay");
+    let replay = batch.clone();
+
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit idempotent replay fixture");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+    wait_for_reconciliation(&runtime).await;
+    runtime.reconcile_calls.store(0, Ordering::SeqCst);
+    runtime
+        .reconciliation_observed
+        .store(false, Ordering::Release);
+
+    let outcome = store
+        .commit_fact(replay, &write_control())
+        .await
+        .expect("replay idempotent fact commit");
+    assert!(matches!(outcome, FactCommitOutcome::IdempotentReplay(_)));
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn high_level_remove_source_change_replays_and_noops_without_reconciliation() {
+    let (_directory, database) = database("high-level-remove-replay-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let target = seed_fact_for_non_graph_write(&store, &runtime, "high-level-remove-replay").await;
+
+    let removed = store
+        .remove_project_memory_fact(
+            ProjectMemoryFactRemoveCommandV1::new(
+                target.clone(),
+                ProvenanceId::new("graph.reconciliation.remove.changed".to_owned())
+                    .expect("changed remove operation id"),
+                None,
+                None,
+            )
+            .expect("changed remove command"),
+            &write_control(),
+        )
+        .await
+        .expect("remove fact");
+    assert!(removed.was_removed());
+    assert!(!removed.commit_replayed());
+    wait_for_reconciliation(&runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    runtime.reconcile_calls.store(0, Ordering::SeqCst);
+    runtime
+        .reconciliation_observed
+        .store(false, Ordering::Release);
+
+    let replay = store
+        .remove_project_memory_fact(
+            ProjectMemoryFactRemoveCommandV1::new(
+                target.clone(),
+                ProvenanceId::new("graph.reconciliation.remove.changed".to_owned())
+                    .expect("replayed remove operation id"),
+                None,
+                None,
+            )
+            .expect("replayed remove command"),
+            &write_control(),
+        )
+        .await
+        .expect("replay remove fact");
+    assert!(replay.was_removed());
+    assert!(replay.commit_replayed());
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+
+    let no_op = store
+        .remove_project_memory_fact(
+            ProjectMemoryFactRemoveCommandV1::new(
+                target,
+                ProvenanceId::new("graph.reconciliation.remove.no-op".to_owned())
+                    .expect("no-op remove operation id"),
+                None,
+                None,
+            )
+            .expect("no-op remove command"),
+            &write_control(),
+        )
+        .await
+        .expect("remove already removed fact");
+    assert!(!no_op.was_removed());
+    assert!(!no_op.commit_replayed());
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn high_level_add_reconciles_committed_not_replayed_or_duplicate_outcomes() {
+    let (_directory, database) = database("high-level-add-outcomes-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let content = "canonical high-level add graph source outcome";
+    let command = accepted_add_command("graph.reconciliation.add.changed", content);
+
+    let committed = store
+        .add_project_memory_fact(command.clone(), &write_control())
+        .await
+        .expect("commit high-level add");
+    assert_eq!(
+        committed.disposition(),
+        ProjectMemoryFactAddDispositionV1::Added
+    );
+    assert!(committed.commit_receipt().is_some());
+    assert!(!committed.commit_replayed());
+    wait_for_reconciliation(&runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    reset_reconciliation(&runtime);
+
+    let replayed = store
+        .add_project_memory_fact(command, &write_control())
+        .await
+        .expect("replay high-level add");
+    assert!(replayed.commit_replayed());
+    assert!(replayed.commit_receipt().is_some());
+    assert_no_reconciliation(&runtime);
+
+    let duplicate = store
+        .add_project_memory_fact(
+            accepted_add_command("graph.reconciliation.add.duplicate", content),
+            &write_control(),
+        )
+        .await
+        .expect("commit high-level add duplicate");
+    assert_eq!(
+        duplicate.disposition(),
+        ProjectMemoryFactAddDispositionV1::NearDuplicate
+    );
+    assert!(duplicate.commit_receipt().is_none());
+    assert!(!duplicate.commit_replayed());
+    assert_no_reconciliation(&runtime);
+}
+
+#[tokio::test]
+async fn high_level_update_reconciles_committed_not_replayed_outcomes() {
+    let (_directory, database) = database("high-level-update-outcomes-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let seed = seed_high_level_fact(
+        &store,
+        &runtime,
+        "update-outcomes",
+        "The durable runner preserves exact acknowledgements across interrupted writes.",
+    )
+    .await;
+    let command = ProjectMemoryFactUpdateCommandV1::new(
+        seed.target,
+        ProvenanceId::new("graph.reconciliation.update.changed".to_owned())
+            .expect("update operation id"),
+        None,
+        ProjectMemoryFactUpdatePatchV1::new(
+            Some("canonical high-level update graph source outcome".to_owned()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Confidence::new(0.9).expect("updated fact confidence")),
+        )
+        .expect("update patch"),
+        None,
+    )
+    .expect("update command");
+
+    let committed = store
+        .update_project_memory_fact(command.clone(), &write_control())
+        .await
+        .expect("commit high-level update");
+    assert!(!committed.commit_replayed());
+    wait_for_reconciliation(&runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    reset_reconciliation(&runtime);
+
+    let replayed = store
+        .update_project_memory_fact(command, &write_control())
+        .await
+        .expect("replay high-level update");
+    assert!(replayed.commit_replayed());
+    assert_no_reconciliation(&runtime);
+}
+
+#[tokio::test]
+async fn high_level_curation_reconciles_changed_not_replayed_or_noop_outcomes() {
+    let (_directory, database) = database("high-level-curation-outcomes-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let seed = seed_high_level_fact(
+        &store,
+        &runtime,
+        "curation-outcomes",
+        "A per-project lease distinguishes reconciliation responsibilities during recovery.",
+    )
+    .await;
+    let changed = curation_add_batch(
+        &seed,
+        "graph.reconciliation.curation.changed",
+        "canonical high-level curation graph source outcome",
+    );
+
+    let committed = store
+        .apply_project_memory_fact_curation(changed.clone(), &write_control())
+        .await
+        .expect("commit high-level curation");
+    assert!(!committed.replayed());
+    assert!(!committed.changed_facts().is_empty());
+    wait_for_reconciliation(&runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    reset_reconciliation(&runtime);
+
+    let replayed = store
+        .apply_project_memory_fact_curation(changed, &write_control())
+        .await
+        .expect("replay high-level curation");
+    assert!(replayed.replayed());
+    assert!(!replayed.changed_facts().is_empty());
+    assert_no_reconciliation(&runtime);
+
+    let no_op = store
+        .apply_project_memory_fact_curation(
+            curation_add_batch(&seed, "graph.reconciliation.curation.no-op", &seed.content),
+            &write_control(),
+        )
+        .await
+        .expect("commit no-op high-level curation");
+    assert!(!no_op.replayed());
+    assert!(no_op.changed_facts().is_empty());
+    assert_no_reconciliation(&runtime);
+}
+
+#[tokio::test]
+async fn high_level_merge_reconciles_committed_not_replayed_outcomes() {
+    let (_directory, database) = database("high-level-merge-outcomes-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let winner = seed_high_level_fact(
+        &store,
+        &runtime,
+        "merge-winner",
+        "Cascading schema improvements require a reliable migration journal before repair.",
+    )
+    .await;
+    let loser = seed_high_level_fact(
+        &store,
+        &runtime,
+        "merge-loser",
+        "Hummingbird field recordings were tagged as audio evidence during dry-run testing.",
+    )
+    .await;
+    let command = merge_command("graph.reconciliation.merge.changed", &winner, &loser);
+
+    let committed = store
+        .merge_project_memory_facts(command.clone(), &write_control())
+        .await
+        .expect("commit high-level merge");
+    assert!(!committed.replayed());
+    wait_for_reconciliation(&runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    reset_reconciliation(&runtime);
+
+    let replayed = store
+        .merge_project_memory_facts(command, &write_control())
+        .await
+        .expect("replay high-level merge");
+    assert!(replayed.replayed());
+    assert_no_reconciliation(&runtime);
+}
+
+#[tokio::test]
+async fn high_level_automatic_fact_reconciles_applied_not_terminal_non_sources() {
+    let (_directory, database) = database("high-level-automatic-outcomes-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let apply_id = ProvenanceId::new("graph.reconciliation.automatic.applied".to_owned())
+        .expect("applied automatic fact id");
+    let command = accepted_add_command(
+        "graph.reconciliation.automatic.applied.operation",
+        "canonical high-level automatic graph source outcome",
+    );
+    let evidence = automatic_evidence("applied");
+
+    let applied = store
+        .apply_project_memory_automatic_fact(
+            apply_id.clone(),
+            command.clone(),
+            evidence.clone(),
+            &write_control(),
+        )
+        .await
+        .expect("apply high-level automatic fact");
+    assert_eq!(
+        applied.disposition(),
+        ProjectMemoryAutomaticFactApplyDispositionV1::Applied
+    );
+    wait_for_reconciliation(&runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    reset_reconciliation(&runtime);
+
+    let already_applied = store
+        .apply_project_memory_automatic_fact(apply_id, command, evidence, &write_control())
+        .await
+        .expect("replay high-level automatic fact");
+    assert_eq!(
+        already_applied.disposition(),
+        ProjectMemoryAutomaticFactApplyDispositionV1::AlreadyApplied
+    );
+    assert_no_reconciliation(&runtime);
+
+    let quarantined_apply_id =
+        ProvenanceId::new("graph.reconciliation.automatic.quarantined".to_owned())
+            .expect("quarantined automatic fact id");
+    let quarantined_command = accepted_add_command(
+        "graph.reconciliation.automatic.quarantined.operation",
+        "canonical high-level automatic quarantine outcome",
+    );
+    let quarantined_evidence = automatic_evidence("quarantined");
+    seed_quarantined_automatic_fact(
+        &database,
+        &quarantined_apply_id,
+        &quarantined_command,
+        &quarantined_evidence,
+    )
+    .await;
+
+    let quarantined = store
+        .apply_project_memory_automatic_fact(
+            quarantined_apply_id,
+            quarantined_command,
+            quarantined_evidence,
+            &write_control(),
+        )
+        .await
+        .expect("observe quarantined high-level automatic fact");
+    assert_eq!(
+        quarantined.disposition(),
+        ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined
+    );
+    assert_no_reconciliation(&runtime);
+}
+
+#[tokio::test]
+async fn feedback_telemetry_does_not_reconcile_unchanged_memory_graph() {
+    let (_directory, database) = database("feedback-telemetry-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let target = seed_fact_for_non_graph_write(&store, &runtime, "feedback-telemetry").await;
+
+    store
+        .record_project_memory_fact_feedback(
+            ProjectMemoryFactFeedbackCommandV1::new(
+                target,
+                ProvenanceId::new("graph.reconciliation.feedback.record".to_owned())
+                    .expect("feedback record operation id"),
+                None,
+                ProjectMemoryFactFeedbackActionV1::Helpful,
+                None,
+                Some("graph reconciliation regression".to_owned()),
+                Some("feedback does not change graph source rows".to_owned()),
+            )
+            .expect("feedback telemetry command"),
+            &write_control(),
+        )
+        .await
+        .expect("record feedback telemetry");
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn settled_workload_telemetry_stays_flat_until_exact_source_mutation() {
+    let (_directory, database) = database("settled-workload-telemetry").await;
+    let _runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let expected_seed_passes = observer.snapshot().reconciliation_passes + 1;
+    let seed = add_high_level_source_fact(
+        &store,
+        "settled-workload",
+        "A settled memory graph must not reconcile for retrieval or feedback telemetry.",
+    )
+    .await;
+    wait_for_completed_reconciliation_pass(&observer, expected_seed_passes).await;
+    let seeded = observer.snapshot();
+    assert_eq!(seeded.reconciliation_passes, expected_seed_passes);
+
+    store
+        .record_project_memory_fact_retrieval(
+            ProjectMemoryFactRetrievalCommandV1::new(
+                FactOwnerV1::Profile,
+                ProvenanceId::new("graph.reconciliation.settled.retrieval".to_owned())
+                    .expect("settled retrieval operation id"),
+                vec![seed.target.clone()],
+                true,
+            )
+            .expect("settled retrieval command"),
+            &write_control(),
+        )
+        .await
+        .expect("record settled retrieval telemetry");
+    store
+        .record_project_memory_fact_feedback(
+            ProjectMemoryFactFeedbackCommandV1::new(
+                seed.target.clone(),
+                ProvenanceId::new("graph.reconciliation.settled.feedback".to_owned())
+                    .expect("settled feedback operation id"),
+                None,
+                ProjectMemoryFactFeedbackActionV1::Helpful,
+                None,
+                Some("settled workload telemetry".to_owned()),
+                Some("feedback does not change graph source rows".to_owned()),
+            )
+            .expect("settled feedback command"),
+            &write_control(),
+        )
+        .await
+        .expect("record settled feedback telemetry");
+    let settled = observer.snapshot();
+
+    assert_eq!(settled.reconciliation_passes, seeded.reconciliation_passes);
+    assert_eq!(settled.source_rows_loaded, seeded.source_rows_loaded);
+    assert_eq!(settled.source_bytes_loaded, seeded.source_bytes_loaded);
+    assert_eq!(settled.publication_attempts, seeded.publication_attempts);
+    assert_eq!(
+        settled.retained_reconciliation_task_count,
+        seeded.retained_reconciliation_task_count
+    );
+    assert_eq!(
+        settled.retained_graph_owner_count,
+        seeded.retained_graph_owner_count
+    );
+
+    store
+        .record_project_memory_fact_retrieval(
+            ProjectMemoryFactRetrievalCommandV1::new(
+                FactOwnerV1::Profile,
+                ProvenanceId::new("graph.reconciliation.settled.retrieval".to_owned())
+                    .expect("replayed settled retrieval operation id"),
+                vec![seed.target.clone()],
+                true,
+            )
+            .expect("replayed settled retrieval command"),
+            &write_control(),
+        )
+        .await
+        .expect("replay settled retrieval telemetry");
+    store
+        .record_project_memory_fact_feedback(
+            ProjectMemoryFactFeedbackCommandV1::new(
+                seed.target,
+                ProvenanceId::new("graph.reconciliation.settled.feedback".to_owned())
+                    .expect("replayed settled feedback operation id"),
+                None,
+                ProjectMemoryFactFeedbackActionV1::Helpful,
+                None,
+                Some("settled workload telemetry".to_owned()),
+                Some("feedback does not change graph source rows".to_owned()),
+            )
+            .expect("replayed settled feedback command"),
+            &write_control(),
+        )
+        .await
+        .expect("replay settled feedback telemetry");
+    let repeated = observer.snapshot();
+
+    assert_eq!(
+        repeated.reconciliation_passes,
+        settled.reconciliation_passes
+    );
+    assert_eq!(repeated.source_rows_loaded, settled.source_rows_loaded);
+    assert_eq!(repeated.source_bytes_loaded, settled.source_bytes_loaded);
+    assert_eq!(repeated.publication_attempts, settled.publication_attempts);
+    assert_eq!(
+        repeated.retained_reconciliation_task_count,
+        settled.retained_reconciliation_task_count
+    );
+    assert_eq!(
+        repeated.retained_graph_owner_count,
+        settled.retained_graph_owner_count
+    );
+
+    let expected_reconciliation_passes = repeated.reconciliation_passes + 1;
+    add_high_level_source_fact(
+        &store,
+        "settled-workload-source-mutation",
+        "A real graph source mutation must reconcile exactly once after settlement.",
+    )
+    .await;
+    wait_for_completed_reconciliation_pass(&observer, expected_reconciliation_passes).await;
+    let source_mutated = observer.snapshot();
+
+    assert_eq!(
+        source_mutated.reconciliation_passes,
+        repeated.reconciliation_passes + 1
+    );
+    assert_eq!(
+        source_mutated.publication_attempts,
+        repeated.publication_attempts + 1
+    );
+    assert!(source_mutated.source_rows_loaded > repeated.source_rows_loaded);
+    assert!(source_mutated.source_bytes_loaded > repeated.source_bytes_loaded);
+    assert_eq!(
+        source_mutated.retained_reconciliation_task_count,
+        repeated.retained_reconciliation_task_count
+    );
+    assert_eq!(
+        source_mutated.retained_graph_owner_count,
+        repeated.retained_graph_owner_count
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn caller_drop_after_high_level_remove_commit_start_cannot_lose_reconciliation() {
+    let (_directory, database) = database("dropped-high-level-remove-caller").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let seed = seed_high_level_fact(
+        &store,
+        &runtime,
+        "dropped-high-level-remove",
+        "A detached high-level remove must preserve its durable graph source mutation.",
+    )
+    .await;
+    let target = seed.target;
+    let fact_id = target.fact_id().clone();
+    let commit_started = Arc::new(AtomicBool::new(false));
+    let commit_observed = Arc::new(Notify::new());
+    let release_commit = Arc::new(AtomicBool::new(false));
+    let observed_start = Arc::clone(&commit_started);
+    let observed_commit = Arc::clone(&commit_observed);
+    let observed_release = Arc::clone(&release_commit);
+    let control = FactWriteControl::new(
+        Arc::new(|| false),
+        Arc::new(move || {
+            observed_start.store(true, Ordering::Release);
+            observed_commit.notify_one();
+            while !observed_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            true
+        }),
+    );
+    let caller_database = database.clone();
+    let caller = tokio::spawn(async move {
+        DatabaseFactStore::new(&caller_database)
+            .remove_project_memory_fact(
+                ProjectMemoryFactRemoveCommandV1::new(
+                    target,
+                    ProvenanceId::new("graph.reconciliation.dropped-high-level-remove".to_owned())
+                        .expect("dropped high-level remove operation id"),
+                    None,
+                    None,
+                )
+                .expect("dropped high-level remove command"),
+                &control,
+            )
+            .await
+    });
+    if !commit_started.load(Ordering::Acquire) {
+        tokio::time::timeout(Duration::from_secs(1), commit_observed.notified())
+            .await
+            .expect("fact commit never reached the caller-owned commit-start gate");
+    }
+    assert!(
+        commit_started.load(Ordering::Acquire),
+        "fact commit never reached the caller-owned commit-start gate"
+    );
+
+    caller.abort();
+    release_commit.store(true, Ordering::Release);
+    assert!(
+        caller
+            .await
+            .expect_err("caller task must be aborted")
+            .is_cancelled(),
+        "caller future must be dropped while the owned commit remains live"
+    );
+    wait_for_reconciliation(&runtime).await;
+    let current = DatabaseFactStore::new(&database)
+        .query_fact_current(
+            FactCurrentQuery::new(FactOwnerV1::Profile, fact_id)
+                .expect("dropped-caller current-fact query"),
+        )
+        .await
+        .expect("query fact committed after caller drop");
+    assert!(
+        current.is_none(),
+        "owned high-level remove must leave no current fact after caller drop"
+    );
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn concurrent_schedule_triggers_coalesce_before_spawning_more_work() {
+    let (_directory, database) = database("coalesced-reconciliation").await;
+    let runtime = bind_runtime(&database);
+
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        ProjectMemoryGraphReconciliationScheduleV1::Scheduled
+    );
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
+    );
+    wait_for_reconciliation(&runtime).await;
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn unmounted_reconciliation_is_a_truthful_schedule_state() {
+    let (_directory, database) = database("unmounted-reconciliation").await;
+
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database),
+        ProjectMemoryGraphReconciliationScheduleV1::NotMounted
+    );
+}
+
+#[tokio::test]
+async fn retired_lifecycle_refuses_new_reconciliation_work() {
+    let (_directory, database) = database("retired-reconciliation").await;
+    let _runtime = bind_runtime(&database);
+    database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner")
+        .cancel()
+        .expect("cancel bound reconciler");
+
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database),
+        ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_owner_does_not_retain_the_weak_bound_runtime() {
+    let (_directory, database) = database("weak-owner-runtime").await;
+    let runtime = bind_runtime(&database);
+    let runtime_weak = Arc::downgrade(&runtime);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+
+    drop(runtime);
+    assert!(
+        runtime_weak.upgrade().is_none(),
+        "neither the database nor its reconciliation owner may retain the bound graph runtime"
+    );
+    drop(database);
+    assert_eq!(
+        owner.cancel(),
+        Err(MemoryGraphReconciliationCancelErrorV1::RuntimeUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn retirement_reservation_reports_a_distinct_schedule_outcome_and_drops_cleanly() {
+    let (_directory, database) = database("reserved-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+
+    let reservation = owner
+        .reserve_retirement()
+        .expect("idle reconciler retirement reservation");
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        ProjectMemoryGraphReconciliationScheduleV1::Retiring
+    );
+    drop(reservation);
+
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        ProjectMemoryGraphReconciliationScheduleV1::Scheduled
+    );
+    wait_for_reconciliation(&runtime).await;
+    owner.shutdown().await.expect("join reconciler worker");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_waits_for_blocking_graph_publication_to_observe_cancellation() {
+    let (_directory, database) = database("blocking-reconciliation-shutdown").await;
+    let runtime = bind_blocking_runtime(&database);
+    let owner = database
+        .memory_graph_reconciliation_task_owner()
+        .expect("bound runtime has reconciliation owner");
+
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        ProjectMemoryGraphReconciliationScheduleV1::Scheduled
+    );
+    wait_for_reconciliation(&runtime).await;
+    assert!(
+        runtime.reconciliation_started.load(Ordering::Acquire),
+        "blocking publication never started"
+    );
+
+    owner
+        .shutdown()
+        .await
+        .expect("cancel and join blocking graph publication");
+
+    assert!(runtime.reconciliation_cancelled.load(Ordering::Acquire));
+    assert!(
+        runtime.reconciliation_finished.load(Ordering::Acquire),
+        "shutdown returned before blocking publication exited"
+    );
+    assert!(
+        owner.reserve_retirement().is_err(),
+        "shutdown must leave reconciliation retirement closed"
+    );
+    assert_eq!(
+        super::schedule_project_memory_graph_reconciliation(database),
+        ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
+    );
+}

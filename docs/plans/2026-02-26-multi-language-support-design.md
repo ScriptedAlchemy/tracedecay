@@ -1,5 +1,12 @@
 # Multi-Language Support Design: Go & Java
 
+> **Archived record — not implementation authority.** This document preserves
+> historical intent and evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
+> checks, branch/commit/worktree choreography, snapshots, receipts,
+> attestations, PR packets, and gate matrices below are not rebuild
+> instructions; validate current parser, runtime, and product behavior directly.
+
 **Date:** 2026-02-26
 **Status:** Approved
 

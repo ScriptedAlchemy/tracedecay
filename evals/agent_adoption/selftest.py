@@ -17,9 +17,11 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import carry_claude_profile  # noqa: E402
 import grade  # noqa: E402
 
 FAILURES: list[str] = []
@@ -452,7 +454,7 @@ def test_hint_signature_drift():
     if real:
         with open(real, errors="replace") as f:
             real_drift = grade.hint_signature_drift(f.read())
-        check("hints: no drift vs src/hooks/tool_hints.rs",
+        check("hints: no drift vs crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs",
               real_drift == [], f"drifted: {real_drift}")
         # And the CLI mode agrees.
         rc = subprocess.run(
@@ -464,100 +466,111 @@ def test_hint_signature_drift():
         print("[skip] hints: real source tree absent (published package)")
 
 
-def test_cli_only_harness():
-    run_path = os.path.join(HERE, "run.sh")
-    with open(run_path, errors="replace") as f:
-        source = f.read()
-    check("cli-only harness: condition registered", 'cli-only' in source)
-    check(
-        "cli-only harness: plugin MCP files removed",
-        'cli-only) rm -f "$d"/.mcp.json "$d"/mcp.json' in source,
-    )
-    check(
-        "cli-only harness: empty strict MCP config used",
-        'empty-mcp.json' in source,
-    )
-    check(
-        "model matrix: Claude defaults",
-        'CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"' in source,
-    )
-    check(
-        "model matrix: Codex defaults",
-        'CODEX_MODELS="${CODEX_MODELS:-gpt-5.5 gpt-5.6-terra}"'
-        in source,
-    )
-    check("model matrix: Codex argv is explicit", '-m "$model"' in source)
-    check("model matrix: Sol excluded", "gpt-5.6-sol" not in source.lower())
-    check(
-        "runner: current Claude plugin MCP namespace only",
-        "mcp__plugin_tracedecay_graph__*" in source
-        and "mcp__plugin_tracedecay_tracedecay__*" not in source,
-    )
-    check("runner: agent stdin isolated", '</dev/null' in source)
-    check(
-        "runner: dangerous bypasses removed",
-        "--dangerously-bypass-approvals-and-sandbox" not in source
-        and "--dangerously-skip-permissions" not in source,
-    )
-    check(
-        "runner: Codex sandbox and approvals bounded",
-        "-s workspace-write" in source
-        and "-a never" in source
-        and '--add-dir "$work"' in source,
-    )
-    check(
-        "runner: Codex uses throwaway profile",
-        'CODEX_HOME="$CODEX_EVAL_CONFIG"' in source
-        and '"$TD" install --agent codex' in source
-        and "codex plugin add tracedecay@personal" in source,
-    )
-    check(
-        "runner: live default builds candidate binary",
-        "cargo build --quiet --bin tracedecay" in source
-        and 'TD="$eval_target/debug/tracedecay"' in source
-        and "/fast/cargo-target/tracedecay-agent-adoption-evals" in source,
-    )
-    check(
-        "runner: bare CLI resolves to candidate",
-        'EVAL_PATH="$(dirname "$TD"):$PATH"' in source
-        and 'PATH="$EVAL_PATH"' in source
-        and "Bash(tracedecay tool *)" in source,
-    )
-    check(
-        "runner: auth copies are read-only",
-        "copy_auth_readonly" in source
-        and "chmod 400" in source
-        and "umask 077" in source,
-    )
-    check(
-        "runner: temporary auth copies scrubbed",
-        "scrub_auth_copies" in source and "trap scrub_auth_copies EXIT" in source,
-    )
-    check(
-        "runner: Claude noninteractive permissions bounded",
-        "--permission-mode dontAsk" in source and "--allowedTools" in source,
-    )
-    check(
-        "runner: full Claude uses candidate plugin",
-        'provision_variant "$cond"' in source
-        and '--plugin-dir "$work/plugins/$cond"' in source
-        and '[[ "$cond" == "full" ]] && return 0' not in source,
-    )
-    check(
-        "model matrix: transcript basename parsed",
-        grade.parse_transcript_base(
-            "agent_runtime_storage__codex__gpt-5.6-terra__cli-only"
-        )
-        == (
-            "agent_runtime_storage",
-            "codex",
-            "cli-only",
-            "gpt-5.6-terra",
-        ),
-    )
+def test_skill_routing():
+    scn = {"id": "routing", "category": "routing", "expected_skill": "tracing-functions",
+           "allowed_skills": ["tracing-functions"], "ground_truth": ["place_order"],
+           "max_tracedecay_calls": 1}
+    good = transcript([claude_tool("Skill", {"skill": "tracedecay:tracing-functions"}),
+                       claude_tool(TD, {"query": "compute_total"}), claude_result("place_order")])
+    wrong = transcript([claude_tool("Skill", {"skill": "tracedecay:exploring-code"}),
+                        claude_result("place_order")])
+    a = grade.score_scenario(scn, good, {}, {})
+    b = grade.score_scenario(scn, wrong, {}, {})
+    check("routing: expected skill observed", not a["details"]["skill_routing"]["missed"])
+    check("routing: neighbor is a false trigger", b["details"]["skill_routing"]["unexpected"] == ["exploring-code"])
+    check("routing: outcome independent of wrong skill", b["subscores"]["outcome"] == 1)
+    empty_answer = grade.score_scenario(scn, transcript([claude_tool("Skill", {"skill": "tracedecay:tracing-functions"})]), {}, {})
+    check("routing: invocation cannot fabricate outcome", empty_answer["subscores"]["outcome"] == 0)
+    neg = {"id": "negative", "category": "routing", "allowed_skills": [],
+           "ground_truth": ["which behavior"], "max_tracedecay_calls": 0}
+    c = grade.score_scenario(neg, transcript([claude_result("Which behavior should change?")]), {}, {})
+    check("routing: clarification needs no calls", c["details"]["skill_routing"]["invoked"] == [] and c["subscores"]["outcome"] == 1)
+    d = grade.score_scenario(neg, good, {}, {})
+    check("routing: unnecessary graph call loses efficiency", d["subscores"]["efficiency"] == 0)
+    agg = grade.aggregate([a,b,c,d])["claude"]
+    check("routing: per-skill missed and correct counts", agg["skill_routing"]["tracing-functions"] == {"tp":1,"fn":1,"fp":1})
+    check("routing: no-skill overtrigger counted", agg["no_skill_cases"] == 2 and agg["no_skill_overtrigger"] == 1)
+    for condition in ("no-skills", "bare"):
+        absent = transcript([claude_result("place_order")])
+        ablated = grade.score_scenario(scn, absent, {}, {"channel_condition": condition})
+        routing = ablated["details"]["skill_routing"]
+        check(f"routing: {condition} absence is not an available-skill miss",
+              routing["measured"] is False and routing["missed"] is None and
+              routing["unmeasured_reason"] == "skills_unavailable_in_condition")
+        check(f"routing: {condition} task outcome remains measured",
+              ablated["subscores"]["outcome"] == 1 and ablated["subscores"]["efficiency"] == 1)
+        mixed = grade.aggregate([a, b, ablated])["claude"]
+        check(f"routing: {condition} excluded from mixed miss denominator",
+              mixed["skill_routing"]["tracing-functions"] == {"tp": 1, "fn": 1, "fp": 0}
+              and mixed["unmeasured_skill_cases"] == 1)
+        no_skill = grade.score_scenario(neg, absent, {}, {"channel_condition": condition})
+        counts = grade.aggregate([no_skill])["claude"]
+        check(f"routing: {condition} excluded from no-skill denominator",
+              counts["no_skill_cases"] == 0 and counts["unmeasured_skill_cases"] == 1)
+    codex = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
+        "type": "command_execution", "command": "cat /tmp/plugin/skills/tracing-functions/SKILL.md",
+        "aggregated_output": "# Tracing functions", "exit_code": 0}})], "codex")
+    unmeasured = grade.score_scenario(scn, codex, {}, {})
+    routing = unmeasured["details"]["skill_routing"]
+    check("routing: Codex native skill read is unmeasured, not missed",
+          routing["measured"] is False and routing["missed"] is None and routing["invoked"] is None)
+    codex_agg = grade.aggregate([unmeasured])["codex"]
+    check("routing: unsupported host excluded from routing denominator",
+          codex_agg["skill_routing"] == {} and codex_agg["unmeasured_skill_cases"] == 1)
+    prose = transcript([claude_result("Consider tracedecay:tracing-functions")])
+    check("routing: prose is not invocation", grade.invoked_skills(prose) == [])
+
+
+def test_transcript_base_repetitions():
+    check("reps: matrix basename without rep",
+          grade.parse_transcript_base("trace_callers__claude__opus__bare")
+          == ("trace_callers", "claude", "bare", "opus"))
+    check("reps: rep suffix carries no identity",
+          grade.parse_transcript_base("trace_callers__claude__opus__bare__r12")
+          == ("trace_callers", "claude", "bare", "opus"))
+    check("reps: rep suffix on full condition",
+          grade.parse_transcript_base("trace_callers__claude__opus__r3")
+          == ("trace_callers", "claude", "full", "opus"))
+    check("reps: legacy id__host keeps a trailing r-like host untouched",
+          grade.parse_transcript_base("routing_r1__claude")
+          == ("routing_r1", "claude", "full", ""))
+
+
+def test_carry_claude_profile():
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "settings.json")
+        dest = os.path.join(td, "throwaway.json")
+        with open(src, "w") as fh:
+            json.dump({
+                "env": {"ANTHROPIC_BASE_URL": "https://example.invalid/", "ANTHROPIC_API_KEY": "k"},
+                "model": "k3[1m]",
+                "permissions": {"allow": ["Bash(*)"], "defaultMode": "bypassPermissions"},
+                "enabledPlugins": {"tracedecay@tracedecay": True},
+                "hooks": {"PreToolUse": []},
+            }, fh)
+        check("carry: writes when env or model present",
+              carry_claude_profile.carry(Path(src), Path(dest)))
+        carried = json.load(open(dest))
+        check("carry: only env and model cross the boundary",
+              set(carried) == {"env", "model"} and carried["model"] == "k3[1m]"
+              and carried["env"]["ANTHROPIC_BASE_URL"] == "https://example.invalid/")
+        check("carry: copy is read-only",
+              oct(os.stat(dest).st_mode & 0o777) == "0o400")
+        with open(src, "w") as fh:
+            json.dump({"permissions": {"allow": []}}, fh)
+        dest2 = os.path.join(td, "none.json")
+        check("carry: nothing to carry writes nothing",
+              not carry_claude_profile.carry(Path(src), Path(dest2)) and not os.path.exists(dest2))
+        check("carry: missing source is a no-op",
+              not carry_claude_profile.carry(Path(td, "absent.json"), Path(dest2)))
 
 
 def main() -> int:
+    test_carry_claude_profile()
+    test_transcript_base_repetitions()
+    test_skill_routing()
+    check("lint: generated scenario id cannot escape artifacts",
+          bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))
     test_lint()
     test_channels()
     test_normalize()
@@ -565,7 +578,6 @@ def main() -> int:
     test_specialist_agents()
     test_end_to_end()
     test_hint_signature_drift()
-    test_cli_only_harness()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURE(S):")

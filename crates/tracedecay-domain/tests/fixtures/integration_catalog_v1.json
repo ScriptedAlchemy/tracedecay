@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "capabilities": [
+    {
+      "capability_id": "capability.integration.observation.capture",
+      "effect_class": "daemon_write",
+      "privacy_class": "sensitive_input_sanitized_by_daemon",
+      "required_daemon": {
+        "api": "host_admission",
+        "action": "capture_observation"
+      },
+      "hosts": [
+        {
+          "integration_id": "claude",
+          "profile_binding": "user"
+        },
+        {
+          "integration_id": "codex",
+          "profile_binding": "user"
+        },
+        {
+          "integration_id": "cursor",
+          "profile_binding": "user"
+        },
+        {
+          "integration_id": "hermes",
+          "profile_binding": "user"
+        },
+        {
+          "integration_id": "kiro",
+          "profile_binding": "user"
+        }
+      ]
+    }
+  ]
+}

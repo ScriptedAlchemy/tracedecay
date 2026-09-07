@@ -1,0 +1,67 @@
+[package]
+name = "tracedecay-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+autobins = false
+license = "MIT"
+description = "Native Rust lifecycle client for canonical TraceDecay operations"
+readme = "README.md"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-api/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-api/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-api/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+]
+
+[dependencies]
+hotpath.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+# `build.rs` renders `src/operations.rs` from the canonical registry through
+# `src/codegen.rs`. These mirror the runtime dependencies the descriptors are
+# projected from; no crate here depends on this one, so there is no cycle.
+[build-dependencies]
+serde_json = "1"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tempfile = "3"
+
+# The TypeScript codegen binary is compiled by sdks/codegen via a [[bin]] path
+# reference; it is intentionally not a target of this crate (autobins = false).
+[package.metadata.cargo-shear]
+ignored-paths = ["src/bin/generate.rs"]

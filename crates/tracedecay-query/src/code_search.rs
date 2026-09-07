@@ -1,0 +1,611 @@
+//! Code-index search boundary contracts.
+//!
+//! These are the pure request/outcome value types exchanged across the
+//! MCP/daemon code-index search boundary. They carry no transport, storage, or
+//! policy behavior: the daemon-owned executor authenticates the admission
+//! envelope and produces the terminal outcome, while the MCP tool layer only
+//! renders it. Keeping the family in the query kernel lets both sides depend on
+//! the retrieval crate instead of on each other.
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::retrieval::lexical::{LexicalRouteReceiptV1, LexicalRoutingV1};
+
+/// Search policy crossing the MCP/daemon boundary. The daemon owns profile,
+/// generation, query-MAC, and semantic calibration authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexSearchModeV1 {
+    FallbackAllowed,
+    StrictSemantic,
+}
+
+/// Existing route admission required before MCP may invoke retrieval.
+/// Neither value may be derived from paths, profile labels, or query bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexSearchAuthorityV1 {
+    pub principal: tracedecay_domain::PrincipalId,
+    pub authorization_revision: tracedecay_domain::AuthorizationRevision,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexSearchRequestV1 {
+    pub project_root: PathBuf,
+    pub query: String,
+    /// Exact Git commit whose published code generation must answer. `None`
+    /// selects the current admitted generation.
+    pub source_revision: Option<tracedecay_domain::GitOidV1>,
+    pub source_tree: Option<tracedecay_domain::GitOidV1>,
+    pub source_reference: Option<tracedecay_domain::RefId>,
+    pub limit: usize,
+    pub cursor: Option<tracedecay_domain::RetrievalCursor>,
+    pub mode: CodeIndexSearchModeV1,
+    /// Additive lexical routes (caller anchors, preferred-symbol route). A
+    /// cursor continuation must repeat the routing that produced its frozen
+    /// candidate set; a different routing is a typed cursor set mismatch.
+    pub lexical_routing: LexicalRoutingV1,
+    /// MCP→executor admission envelope. The type-erased
+    /// [`CodeIndexSearchExecutor`] authenticates this value; keep it on the
+    /// request even when local analysis cannot see through `Arc<dyn Fn…>`.
+    pub authority: Option<CodeIndexSearchAuthorityV1>,
+    pub deadline: Option<tracedecay_application::Deadline>,
+    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexSemanticStatusV1 {
+    Complete,
+    Unavailable { reason: &'static str },
+}
+
+/// Internal scheduler probe used by the daemon search executor while semantic
+/// calibration remains unavailable. This is status data, not a second MCP
+/// callback surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexSemanticAbstentionV1 {
+    pub code_generation: Option<String>,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexSearchUnavailableReasonV1 {
+    CapabilityUnavailable,
+    AuthorityUnavailable,
+    LinkedWorktreeDisabled,
+    Cancelled,
+    TimedOut,
+    CapacityUnavailable,
+    GenerationUnavailable,
+    GenerationUnverified,
+    SemanticUnavailable,
+    InvalidRequest,
+    CorruptionResetRequired,
+    Internal,
+}
+
+impl CodeIndexSearchUnavailableReasonV1 {
+    #[hotpath::skip]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CapabilityUnavailable => "code_index_unavailable",
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::LinkedWorktreeDisabled => "linked_worktree_disabled",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::CapacityUnavailable => "search_capacity_unavailable",
+            Self::GenerationUnavailable => "generation_unavailable",
+            Self::GenerationUnverified => "generation_unverified",
+            Self::SemanticUnavailable => "semantic_unavailable",
+            Self::InvalidRequest => "invalid_request",
+            Self::CorruptionResetRequired => "index_corruption_reset_required",
+            Self::Internal => "search_failed",
+        }
+    }
+}
+
+/// Stable machine tokens for why one retrieval lane could not serve.
+///
+/// They are `&'static str` for the same reason [`CodeIndexSemanticStatusV1`]
+/// is: a lane reason is a closed vocabulary the daemon emits and the MCP layer
+/// renders, never free-form text derived from a query or a path.
+pub mod lane_reason {
+    /// A newer code-index generation is being built and the current one is not
+    /// yet admitted. A previously published generation may still be servable.
+    pub const GENERATION_REBUILDING: &str = "generation_rebuilding";
+    /// No complete code-index generation exists at all for this scope.
+    pub const GENERATION_UNAVAILABLE: &str = "generation_unavailable";
+    /// The authenticated fallback payload reports that this retriever could
+    /// not serve the request.
+    pub const RETRIEVER_UNAVAILABLE: &str = "retriever_unavailable";
+}
+
+/// Per-lane serving status for one search response.
+///
+/// Serving never couples to indexing recency: a lane that can answer from an
+/// older complete generation reports [`Self::Stale`] and still returns
+/// results, rather than collapsing the whole query into a failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexLaneStatusV1 {
+    /// The lane served from the current complete code generation.
+    Complete,
+    /// The lane served from an older complete generation while a newer one is
+    /// still being built. Recall is sound for that generation; freshness is
+    /// not, and the caller is told which generation answered.
+    Stale { generation: String },
+    /// The lane served some evidence, but its authenticated retriever outcome
+    /// says recall is incomplete. `generation` is present when the whole
+    /// request also served an older complete code generation.
+    Partial { generation: Option<String> },
+    /// The lane could not run at all for this request.
+    Unavailable { reason: &'static str },
+}
+
+impl CodeIndexLaneStatusV1 {
+    /// Whether this lane contributed results to the response.
+    #[hotpath::skip]
+    pub const fn is_servable(&self) -> bool {
+        matches!(
+            self,
+            Self::Complete | Self::Stale { .. } | Self::Partial { .. }
+        )
+    }
+
+    #[hotpath::skip]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Stale { .. } => "stale",
+            Self::Partial { .. } => "partial",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+}
+
+/// Explicit recall marker carried by every search outcome.
+///
+/// Agents cannot distinguish "no matches" from "the lane that would have
+/// matched was not running" unless the response says so. This is that
+/// statement, and it is populated on the success path as well as the failure
+/// path so a degraded answer is never mistaken for a complete one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexSearchCoverageV1 {
+    pub exact: CodeIndexLaneStatusV1,
+    pub lexical: CodeIndexLaneStatusV1,
+    pub graph: CodeIndexLaneStatusV1,
+    pub semantic: CodeIndexLaneStatusV1,
+}
+
+impl CodeIndexSearchCoverageV1 {
+    /// Every lane served the current generation.
+    #[hotpath::skip]
+    pub const fn warm() -> Self {
+        Self {
+            exact: CodeIndexLaneStatusV1::Complete,
+            lexical: CodeIndexLaneStatusV1::Complete,
+            graph: CodeIndexLaneStatusV1::Complete,
+            semantic: CodeIndexLaneStatusV1::Complete,
+        }
+    }
+
+    /// The generation-bound fusion path: exact, lexical, and graph all ran
+    /// against the admitted generation, and the semantic lane reports whatever
+    /// the semantic runtime independently decided.
+    pub fn fused(semantic: &CodeIndexSemanticStatusV1) -> Self {
+        Self {
+            semantic: match semantic {
+                CodeIndexSemanticStatusV1::Complete => CodeIndexLaneStatusV1::Complete,
+                CodeIndexSemanticStatusV1::Unavailable { reason } => {
+                    CodeIndexLaneStatusV1::Unavailable { reason }
+                }
+            },
+            ..Self::warm()
+        }
+    }
+
+    /// The generation-bound lanes answered from an older complete generation.
+    pub fn fused_stale(generation: &str, semantic: &CodeIndexSemanticStatusV1) -> Self {
+        let stale = CodeIndexLaneStatusV1::Stale {
+            generation: generation.to_owned(),
+        };
+        Self {
+            exact: stale.clone(),
+            lexical: stale.clone(),
+            graph: stale,
+            ..Self::fused(semantic)
+        }
+    }
+
+    /// Build response coverage from the authenticated exact/lexical/graph
+    /// fallback receipt instead of assuming every admitted lane completed.
+    pub fn from_fallback_lane_coverage(
+        fallback: &BTreeMap<
+            tracedecay_domain::RetrieverKind,
+            tracedecay_domain::PublicRetrieverStatus,
+        >,
+        generation: &str,
+        served_stale: bool,
+        semantic: &CodeIndexSemanticStatusV1,
+    ) -> Self {
+        fn lane(
+            fallback: &BTreeMap<
+                tracedecay_domain::RetrieverKind,
+                tracedecay_domain::PublicRetrieverStatus,
+            >,
+            kind: tracedecay_domain::RetrieverKind,
+            generation: &str,
+            served_stale: bool,
+        ) -> CodeIndexLaneStatusV1 {
+            match fallback
+                .get(&kind)
+                .copied()
+                .unwrap_or(tracedecay_domain::PublicRetrieverStatus::Unavailable)
+            {
+                tracedecay_domain::PublicRetrieverStatus::Complete if served_stale => {
+                    CodeIndexLaneStatusV1::Stale {
+                        generation: generation.to_owned(),
+                    }
+                }
+                tracedecay_domain::PublicRetrieverStatus::Complete => {
+                    CodeIndexLaneStatusV1::Complete
+                }
+                tracedecay_domain::PublicRetrieverStatus::Partial => {
+                    CodeIndexLaneStatusV1::Partial {
+                        generation: served_stale.then(|| generation.to_owned()),
+                    }
+                }
+                tracedecay_domain::PublicRetrieverStatus::Stale => CodeIndexLaneStatusV1::Stale {
+                    generation: generation.to_owned(),
+                },
+                tracedecay_domain::PublicRetrieverStatus::Unavailable => {
+                    CodeIndexLaneStatusV1::Unavailable {
+                        reason: lane_reason::RETRIEVER_UNAVAILABLE,
+                    }
+                }
+            }
+        }
+
+        Self {
+            exact: lane(
+                fallback,
+                tracedecay_domain::RetrieverKind::ExactLiteral,
+                generation,
+                served_stale,
+            ),
+            lexical: lane(
+                fallback,
+                tracedecay_domain::RetrieverKind::Lexical,
+                generation,
+                served_stale,
+            ),
+            graph: lane(
+                fallback,
+                tracedecay_domain::RetrieverKind::Graph,
+                generation,
+                served_stale,
+            ),
+            semantic: Self::fused(semantic).semantic,
+        }
+    }
+
+    /// No lane can serve this request.
+    #[hotpath::skip]
+    pub const fn unavailable(reason: &'static str) -> Self {
+        Self {
+            exact: CodeIndexLaneStatusV1::Unavailable { reason },
+            lexical: CodeIndexLaneStatusV1::Unavailable { reason },
+            graph: CodeIndexLaneStatusV1::Unavailable { reason },
+            semantic: CodeIndexLaneStatusV1::Unavailable { reason },
+        }
+    }
+
+    #[hotpath::skip]
+    pub const fn lanes(&self) -> [&CodeIndexLaneStatusV1; 4] {
+        [&self.exact, &self.lexical, &self.graph, &self.semantic]
+    }
+
+    /// At least one lane produced results, so the response is worth returning.
+    pub fn any_servable(&self) -> bool {
+        self.lanes().iter().any(|lane| lane.is_servable())
+    }
+
+    /// Some lane is missing, so recall is partial and callers must be told.
+    pub fn is_degraded(&self) -> bool {
+        !self
+            .lanes()
+            .iter()
+            .all(|lane| **lane == CodeIndexLaneStatusV1::Complete)
+    }
+
+    /// The progressive-degradation gate in one place: keep serving while any
+    /// lane is ready, and surface the typed failure only when none is. It
+    /// never blocks — the decision is made from already-resolved lane state.
+    pub fn degraded_or_fail(
+        self,
+        reason: CodeIndexSearchUnavailableReasonV1,
+    ) -> std::result::Result<Self, CodeIndexSearchUnavailableReasonV1> {
+        if self.any_servable() {
+            Ok(self)
+        } else {
+            Err(reason)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexSearchDisplayV1 {
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    /// Repository-relative logical path of the declaring file within the
+    /// generation that answered. Savings accounting reads it: the raw-file
+    /// counterfactual needs the referenced files on every serving route.
+    pub path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexSearchCompletedV1 {
+    pub code_generation: String,
+    /// Visible result page: canonical bytes when semantic abstains, separately
+    /// recomposed accepted-profile candidates when semantic augments.
+    pub ordered_candidates: Vec<tracedecay_domain::RankedCandidate>,
+    /// Exact canonical object produced under the mounted query authority.
+    /// Optional semantic work may report status but cannot mutate these bytes.
+    pub query_fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
+    /// Authorized generation-bound display metadata, kept outside the
+    /// canonical bytes so presentation cannot mutate ranking identity.
+    pub display_by_anchor: HashMap<tracedecay_domain::RetrievalAnchorId, CodeIndexSearchDisplayV1>,
+    pub semantic: CodeIndexSemanticStatusV1,
+    pub next_cursor: Option<tracedecay_domain::RetrievalCursor>,
+    /// Which lanes actually answered. Additive metadata only: it never
+    /// participates in ranking identity, so a warm response carries the same
+    /// candidates, fallback bytes, and cursor it always did.
+    pub coverage: CodeIndexSearchCoverageV1,
+    /// Which lexical routes ran and, when additive routes were requested,
+    /// which route ranked each candidate. Presentation metadata outside the
+    /// canonical bytes, like `display_by_anchor`.
+    pub lexical_routes: LexicalRouteReceiptV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexSearchUnavailableV1 {
+    pub code_generation: Option<String>,
+    pub reason: CodeIndexSearchUnavailableReasonV1,
+    pub semantic: CodeIndexSemanticStatusV1,
+    /// Lane state at the point the request was abandoned. Every lane is
+    /// unavailable here by construction; a response with any servable lane is
+    /// a [`CodeIndexSearchOutcomeV1::Complete`] instead.
+    pub coverage: CodeIndexSearchCoverageV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // typed search terminal states; avoid heap on Unavailable
+pub enum CodeIndexSearchOutcomeV1 {
+    Complete(CodeIndexSearchCompletedV1),
+    Unavailable(CodeIndexSearchUnavailableV1),
+}
+
+pub type CodeIndexSearchFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = CodeIndexSearchOutcomeV1> + Send + 'static>>;
+
+/// Type-erased production search bridge. Direct servers leave it absent and
+/// fail capability-closed instead of substituting the legacy graph search.
+pub type CodeIndexSearchExecutor =
+    Arc<dyn Fn(CodeIndexSearchRequestV1) -> CodeIndexSearchFuture + Send + Sync + 'static>;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct CodeIndexBranchSymbolV1 {
+    pub symbol_identity: tracedecay_domain::SymbolIdentityDigest,
+    pub symbol_occurrence_id: tracedecay_domain::SymbolOccurrenceId,
+    pub file_identity: tracedecay_domain::FileIdentityDigest,
+    pub file_occurrence_id: tracedecay_domain::FileOccurrenceId,
+    pub qualified_name: String,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub content_digest: String,
+}
+
+pub const CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1: usize = 256;
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexBranchDiffRequestV1 {
+    pub project_root: PathBuf,
+    pub base_reference: tracedecay_domain::RefId,
+    pub base_revision: tracedecay_domain::GitOidV1,
+    pub head_reference: tracedecay_domain::RefId,
+    pub head_revision: tracedecay_domain::GitOidV1,
+    pub base_tree: tracedecay_domain::GitOidV1,
+    pub head_tree: tracedecay_domain::GitOidV1,
+    pub file_filter: Option<String>,
+    pub kind_filter: Option<String>,
+    pub limit: usize,
+    pub cursor: Option<String>,
+    pub authority: Option<CodeIndexSearchAuthorityV1>,
+    pub deadline: Option<tracedecay_application::Deadline>,
+    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexBranchDiffPartialReasonV1 {
+    ResultLimit,
+}
+
+impl CodeIndexBranchDiffPartialReasonV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ResultLimit => "result_limit",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum CodeIndexBranchChangeV1 {
+    Added {
+        symbol: CodeIndexBranchSymbolV1,
+    },
+    Removed {
+        symbol: CodeIndexBranchSymbolV1,
+    },
+    Changed {
+        base: CodeIndexBranchSymbolV1,
+        head: CodeIndexBranchSymbolV1,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffCompletedV1 {
+    pub base_generation: String,
+    pub head_generation: String,
+    pub total_changes: usize,
+    pub changes: Vec<CodeIndexBranchChangeV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffPartialV1 {
+    pub base_generation: String,
+    pub head_generation: String,
+    pub reason: CodeIndexBranchDiffPartialReasonV1,
+    pub total_changes: usize,
+    pub changes: Vec<CodeIndexBranchChangeV1>,
+    pub next_cursor: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffUnavailableV1 {
+    pub base_generation: Option<String>,
+    pub head_generation: Option<String>,
+    pub reason: CodeIndexSearchUnavailableReasonV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexBranchDiffOutcomeV1 {
+    Complete(CodeIndexBranchDiffCompletedV1),
+    Partial(CodeIndexBranchDiffPartialV1),
+    Unavailable(CodeIndexBranchDiffUnavailableV1),
+}
+
+pub type CodeIndexBranchDiffFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = CodeIndexBranchDiffOutcomeV1> + Send + 'static>,
+>;
+
+pub type CodeIndexBranchDiffExecutor =
+    Arc<dyn Fn(CodeIndexBranchDiffRequestV1) -> CodeIndexBranchDiffFuture + Send + Sync + 'static>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warm_fusion_reports_no_degradation() {
+        let coverage = CodeIndexSearchCoverageV1::fused(&CodeIndexSemanticStatusV1::Complete);
+
+        assert_eq!(coverage, CodeIndexSearchCoverageV1::warm());
+        assert!(!coverage.is_degraded());
+        assert!(coverage.any_servable());
+        assert!(
+            coverage
+                .clone()
+                .degraded_or_fail(CodeIndexSearchUnavailableReasonV1::Internal)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn fallback_lane_coverage_preserves_unavailable_and_partial_states() {
+        let fallback = std::collections::BTreeMap::from([
+            (
+                tracedecay_domain::RetrieverKind::ExactLiteral,
+                tracedecay_domain::PublicRetrieverStatus::Complete,
+            ),
+            (
+                tracedecay_domain::RetrieverKind::Lexical,
+                tracedecay_domain::PublicRetrieverStatus::Complete,
+            ),
+            (
+                tracedecay_domain::RetrieverKind::Graph,
+                tracedecay_domain::PublicRetrieverStatus::Unavailable,
+            ),
+        ]);
+        let unavailable = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+            &fallback,
+            "generation.current",
+            false,
+            &CodeIndexSemanticStatusV1::Complete,
+        );
+        assert_eq!(
+            unavailable.graph,
+            CodeIndexLaneStatusV1::Unavailable {
+                reason: lane_reason::RETRIEVER_UNAVAILABLE,
+            }
+        );
+        assert_eq!(unavailable.exact, CodeIndexLaneStatusV1::Complete);
+        assert_eq!(unavailable.lexical, CodeIndexLaneStatusV1::Complete);
+
+        let mut partial_fallback = fallback;
+        partial_fallback.insert(
+            tracedecay_domain::RetrieverKind::Graph,
+            tracedecay_domain::PublicRetrieverStatus::Partial,
+        );
+        let partial = CodeIndexSearchCoverageV1::from_fallback_lane_coverage(
+            &partial_fallback,
+            "generation.previous",
+            true,
+            &CodeIndexSemanticStatusV1::Complete,
+        );
+        assert_eq!(
+            partial.graph,
+            CodeIndexLaneStatusV1::Partial {
+                generation: Some("generation.previous".to_owned()),
+            }
+        );
+        assert!(partial.graph.is_servable());
+    }
+
+    #[test]
+    fn a_ready_lane_keeps_serving_while_the_generation_rebuilds() {
+        let stale = CodeIndexSearchCoverageV1::fused_stale(
+            "generation.previous",
+            &CodeIndexSemanticStatusV1::Unavailable {
+                reason: "semantic_indexing",
+            },
+        );
+        assert!(stale.any_servable());
+        assert!(stale.is_degraded());
+        assert_eq!(
+            stale.exact,
+            CodeIndexLaneStatusV1::Stale {
+                generation: "generation.previous".to_owned(),
+            }
+        );
+        assert!(stale.exact.is_servable());
+        assert_eq!(
+            stale.semantic,
+            CodeIndexLaneStatusV1::Unavailable {
+                reason: "semantic_indexing",
+            }
+        );
+    }
+
+    #[test]
+    fn every_lane_down_fails_fast_with_the_typed_reason() {
+        let coverage = CodeIndexSearchCoverageV1::unavailable(lane_reason::GENERATION_UNAVAILABLE);
+
+        assert!(!coverage.any_servable());
+        assert!(coverage.is_degraded());
+        assert_eq!(
+            coverage.degraded_or_fail(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable),
+            Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
+        );
+    }
+
+    #[test]
+    fn cold_activation_is_distinct_from_an_absent_generation() {
+        let reason = CodeIndexSearchUnavailableReasonV1::GenerationUnverified;
+        assert_eq!(reason.as_str(), "generation_unverified");
+        let coverage = CodeIndexSearchCoverageV1::unavailable(lane_reason::GENERATION_REBUILDING);
+        assert_eq!(coverage.degraded_or_fail(reason), Err(reason));
+    }
+}

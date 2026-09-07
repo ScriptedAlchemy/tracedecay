@@ -1,0 +1,660 @@
+//! Codex CLI hook handlers.
+//!
+//! Codex emits its own hook output shape.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+#[cfg(test)]
+use tracedecay_hooks::{DaemonHookEvent, HookAgent};
+
+use crate::ports::hook_runtime::HookRuntimeV1;
+
+use super::claude::is_code_research_prompt;
+use super::steering::{HookWorkspaceStatus, index_status_line};
+use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
+use super::{
+    additional_context_json, append_tool_hint, compact_daemon_args, deduped_project_hint_with_id,
+    event_cwd_from_parsed, event_project_root, event_project_root_from_json,
+    event_project_root_with_identity, event_session_id, format_tool_hint,
+    is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
+    record_hint_analytics, record_hook_analytics, record_hook_invoked_parsed,
+    record_workspace_status_analytics, rel_under_root, text_field,
+};
+
+const CODEX_SUBAGENT_START_CONTEXT: &str = "tracedecay MCP tools subagent context: this looks \
+like a new/no-history subagent or code-research subagent. Use the matching TraceDecay \
+workflow before broad file reads: `tracedecay:exploring-code` with \
+`tracedecay_context` for code exploration, `tracedecay_grep` for literal/regex code search, \
+`tracedecay_search` for symbol names, `tracedecay_outline` or `tracedecay_body` before \
+whole-file reads, `tracedecay:tracing-functions` with `tracedecay_find_exact_symbol`, \
+`tracedecay_callers`, and `tracedecay_callees` when asked to trace functions, find callers, \
+or inspect setup/helper/fixture dependencies, `tracedecay:assessing-impact` with \
+`tracedecay_affected` and `tracedecay_test_map` before guessing affected tests, \
+`tracedecay:fixing-build-and-type-errors` before running `cargo check`/`tsc`/`clippy` \
+in the shell or when shell output shows compile errors — paste captured output into \
+`tracedecay_diagnose`, or run `tracedecay_diagnostics` for fresh structured errors \
+mapped to symbols, `tracedecay:project-memory` when project decisions/preferences matter, and \
+`tracedecay:managing-session-context` with `tracedecay_message_search`, \
+`tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` when prior conversation context \
+may be missing.";
+
+/// Shipped Codex compatibility name for the shared Claude/Codex
+/// `hookSpecificOutput.additionalContext` stdout shape.
+pub fn codex_additional_context_json(event_name: &str, additional_context: &str) -> String {
+    super::additional_context_json(event_name, additional_context)
+}
+
+/// Codex `SessionStart` hook handler.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.session_start")]
+pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
+    let event = read_hook_event!();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
+        root.as_deref(),
+        HintAgent::Codex,
+        "SessionStart",
+        &event,
+        &parsed,
+    );
+    let guidance = super::dispatch::dispatch_for_scope(
+        runtime,
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten();
+    let output = guidance.map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| additional_context_json("SessionStart", &guidance),
+    );
+    if !super::write_hook_output(
+        runtime,
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        &output,
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
+    0
+}
+
+#[cfg(test)]
+fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
+    event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Codex, cwd))
+}
+
+/// Codex `UserPromptSubmit` hook handler.
+///
+/// Resets the local counter and injects steering context for the new turn.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.user_prompt_submit")]
+pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
+    let event = read_hook_event!();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
+        root.as_deref(),
+        HintAgent::Codex,
+        "UserPromptSubmit",
+        &event,
+        &parsed,
+    );
+    if let Some(root) = root.as_deref() {
+        super::reset_counter_for_project(runtime, root, Some(&hook_telemetry)).await;
+    }
+    let session_id = event_session_id(&parsed);
+    if root.is_none() {
+        // Keep recall current, but wait for the native Stop receipt before
+        // reflection so one completed turn schedules one review rather than a
+        // prompt-only review followed immediately by a final-turn review.
+        let _ = ingest_user_codex_session(runtime, session_id, Some(&hook_telemetry)).await;
+    }
+    let context = Box::pin(codex_user_prompt_submit_context_with_root(
+        &parsed,
+        root.as_deref(),
+    ))
+    .await;
+    // A turn-local prompt with nothing to say emits no `hookSpecificOutput` at
+    // all, exactly as `hook_codex_session_start` does for guidance-free
+    // admission. An `additionalContext: ""` envelope is not "no context": Codex
+    // treats it as an injected empty context block.
+    let output = if context.is_empty() {
+        serde_json::json!({}).to_string()
+    } else {
+        additional_context_json("UserPromptSubmit", &context)
+    };
+    if !super::write_hook_output(
+        runtime,
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        &output,
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
+    0
+}
+
+pub async fn codex_user_prompt_submit_context_for_event(
+    runtime: &HookRuntimeV1,
+    event: &str,
+) -> String {
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    codex_user_prompt_submit_context_with_root(&parsed, root.as_deref()).await
+}
+
+/// [`codex_user_prompt_submit_context_for_event`] for handlers that already
+/// resolved the identity-aware project root, so the registry probe runs once
+/// per event.
+async fn codex_user_prompt_submit_context_with_root(parsed: &Value, root: Option<&Path>) -> String {
+    let cwd = event_cwd_from_parsed(parsed);
+    let session_id = event_session_id(parsed);
+    let status = codex_workspace_status(root, cwd.as_deref());
+    record_workspace_status_analytics(root, status, session_id.as_deref());
+    let mut context = if matches!(status, HookWorkspaceStatus::UnindexedProject) {
+        index_status_line(false, None)
+    } else {
+        String::new()
+    };
+    if !matches!(status, HookWorkspaceStatus::Generic)
+        && let Some(hint) = codex_prompt_hint(parsed)
+    {
+        append_tool_hint(&mut context, &hint);
+    }
+    context
+}
+
+/// Codex `PostToolUse` hook handler.
+///
+/// The native event enters the canonical V2 admission/replay journey. Only
+/// daemon-approved ready guidance is rendered in Codex's documented
+/// `additionalContext` shape; unavailable or guidance-free admission is silent.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.post_tool_use")]
+pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
+    let event = read_hook_event!();
+    // One parse supplies exact scope and analytics attribution.
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
+        root.as_deref(),
+        HintAgent::Codex,
+        "PostToolUse",
+        &event,
+        &parsed,
+    );
+    let guidance = super::dispatch::dispatch_for_scope(
+        runtime,
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten();
+    if let Some(guidance) = guidance
+        && !super::write_hook_output(
+            runtime,
+            root.as_deref(),
+            tracedecay_hooks::HookHostV1::Codex,
+            &event,
+            &additional_context_json("PostToolUse", &guidance),
+            Some(&hook_telemetry),
+        )
+        .await
+    {
+        return 1;
+    }
+    0
+}
+
+/// Codex `PostCompact` hook handler.
+///
+/// Codex exposes a pressure boundary but no authenticated compacted payload.
+/// The daemon lands the session's rollout through the canonical transcript
+/// ingest route and then runs the daemon-owned compression journey; the hook
+/// itself only forwards the boundary and fails open.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.post_compact")]
+pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
+    let event = read_hook_event!();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(runtime, &parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        runtime,
+        root.as_deref(),
+        HintAgent::Codex,
+        "PostCompact",
+        &event,
+        &parsed,
+    );
+    if std::env::var_os(tracedecay_sessions::runtime::codex_app_server::CODEX_SUMMARY_CHILD_ENV)
+        .is_none()
+    {
+        codex_post_compact(runtime, &event, Some(&hook_telemetry)).await;
+    }
+    if !super::write_hook_output(
+        runtime,
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
+    0
+}
+
+/// Pure decision logic for Codex `SubagentStart` events.
+pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let agent_type = parsed
+        .get("agent_type")
+        .or_else(|| parsed.get("subagent_type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let task = parsed
+        .get("prompt")
+        .or_else(|| parsed.get("task"))
+        .or_else(|| parsed.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let is_explore = agent_type.eq_ignore_ascii_case("explore");
+    let is_research = is_explore || is_code_research_prompt(task);
+    let needs_context = codex_subagent_needs_context(&parsed);
+    if is_research || needs_context {
+        let hint = ToolHint {
+            category: if is_research {
+                HintCategory::ExploreSubagent
+            } else {
+                HintCategory::SubagentStartContext
+            },
+            message: "For Codex subagents, add compact TraceDecay context before isolated work."
+                .to_string(),
+            context: CODEX_SUBAGENT_START_CONTEXT.to_string(),
+            nonblocking: true,
+        };
+        let root = event_project_root(&parsed);
+        let hint_id = mint_hint_id();
+        record_hint_analytics(
+            root.as_deref(),
+            "hint_candidate",
+            HintAgent::Codex,
+            event_session_id(&parsed).as_deref(),
+            &hint_id,
+            &hint,
+        );
+        let _ = deduped_codex_hint(&parsed, &hint_id, hint.clone())?;
+        let context = codex_subagent_start_context(Some(hint), needs_context);
+        return Some(additional_context_json("SubagentStart", &context));
+    }
+    None
+}
+
+/// Records a Codex `SubagentStart` and returns the session-local count.
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.record_subagent_start")]
+pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &str) -> Option<u64> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    let root = event_project_root_with_identity(runtime, &parsed).await?;
+    let layout = runtime.resolve_store_layout(&root).await.ok()?;
+    let path = layout.data_root.join("codex_subagent_starts.json");
+    let analytics_session_id = event_session_id(&parsed);
+    let session_id = analytics_session_id
+        .clone()
+        .unwrap_or_else(|| "unknown-codex-session".to_string());
+    let mut counts = read_codex_subagent_start_counts(&path);
+    let count = counts.entry(session_id).or_insert(0);
+    *count = count.saturating_add(1);
+    let next = *count;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&counts) {
+        let _ = std::fs::write(path, format!("{json}\n"));
+    }
+    let agent_type = parsed
+        .get("agent_type")
+        .or_else(|| parsed.get("subagent_type"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    record_hook_analytics(
+        Some(&root),
+        "codex_subagent_start",
+        serde_json::json!({
+            "agent": HintAgent::Codex.as_key(),
+            "session_id": analytics_session_id.as_deref(),
+            "agent_type": agent_type,
+            "count": next,
+        }),
+    );
+    Some(next)
+}
+
+pub fn codex_subagent_start_log_line(
+    event_json: &str,
+    count: Option<u64>,
+    emitted_context: bool,
+) -> String {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let agent_type = parsed
+        .get("agent_type")
+        .or_else(|| parsed.get("subagent_type"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let session_id = event_session_id(&parsed).unwrap_or_else(|| "unknown".to_string());
+    let count = count.map_or_else(|| "#?".to_string(), |value| format!("#{value}"));
+    format!(
+        "tracedecay Codex SubagentStart {count}: session_id={session_id} agent_type={agent_type} additional_context={emitted_context}"
+    )
+}
+
+fn read_codex_subagent_start_counts(path: &Path) -> BTreeMap<String, u64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn codex_subagent_start_context(hint: Option<ToolHint>, no_history: bool) -> String {
+    let mut context = String::new();
+    if no_history {
+        context.push_str("new/no-history subagent: recover only relevant project memory or prior-session context before assuming missing decisions.\n");
+    }
+    context.push_str(CODEX_SUBAGENT_START_CONTEXT);
+    context.push('\n');
+    if let Some(hint) = hint {
+        context.push('\n');
+        context.push_str(&format_tool_hint(&hint));
+        context.push('\n');
+    }
+    context
+}
+
+fn codex_subagent_needs_context(parsed: &Value) -> bool {
+    bool_field(
+        parsed,
+        &["is_new", "new_subagent", "fresh_subagent", "no_history"],
+    ) == Some(true)
+        || bool_field(
+            parsed,
+            &[
+                "has_history",
+                "history_included",
+                "receives_history",
+                "conversation_history_included",
+            ],
+        ) == Some(false)
+        || text_field(
+            parsed,
+            &[
+                "history_mode",
+                "context_mode",
+                "conversation_history",
+                "source",
+                "reason",
+            ],
+        )
+        .is_some_and(|value| matches_no_history_marker(&value))
+        || empty_array_field(parsed, &["history", "messages", "conversation"])
+}
+
+fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_bool))
+}
+
+fn empty_array_field(value: &Value, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    })
+}
+
+fn matches_no_history_marker(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "new" | "fresh" | "none" | "empty" | "nohistory" | "withoutconversationhistory"
+    )
+}
+
+/// Resolves the tracedecay project root for a Codex event from its `cwd`.
+///
+/// Kept as the published Codex-named entry point; the resolution itself is the
+/// host-neutral [`super::event_project_root`] every `cwd`-carrying host shares.
+pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
+    event_project_root_from_json(event_json)
+}
+
+fn codex_workspace_status(root: Option<&Path>, cwd: Option<&Path>) -> HookWorkspaceStatus {
+    if root.is_some() {
+        return HookWorkspaceStatus::Initialized;
+    }
+    if cwd.is_some_and(is_project_like_workspace) {
+        HookWorkspaceStatus::UnindexedProject
+    } else {
+        HookWorkspaceStatus::Generic
+    }
+}
+
+pub fn codex_workspace_status_from_event(event_json: &str) -> HookWorkspaceStatus {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let root = event_project_root(&parsed);
+    let cwd = event_cwd_from_parsed(&parsed);
+    codex_workspace_status(root.as_deref(), cwd.as_deref())
+}
+
+/// Codex `apply_patch` envelope prefixes that name a target file path.
+const CODEX_APPLY_PATCH_PATH_PREFIXES: [&str; 4] = [
+    "*** Add File:",
+    "*** Update File:",
+    "*** Delete File:",
+    "*** Move to:",
+];
+
+/// Extracts the project-relative paths touched by a Codex `apply_patch` command.
+pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Path) -> Vec<String> {
+    let mut rels: Vec<String> = Vec::new();
+    for line in command.lines() {
+        let line = line.trim();
+        for prefix in CODEX_APPLY_PATCH_PATH_PREFIXES {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let raw = rest.trim();
+                if raw.is_empty() {
+                    continue;
+                }
+                let candidate = Path::new(raw);
+                let abs = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    cwd.join(candidate)
+                };
+                if let Some(rel) = rel_under_root(project_root, &abs)
+                    && !rels.contains(&rel)
+                {
+                    rels.push(rel);
+                }
+            }
+        }
+    }
+    rels
+}
+
+#[hotpath::measure(future = true, label = "hosts.hooks.codex.compact_daemon")]
+async fn codex_post_compact(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let Some(root) = event_project_root_with_identity(runtime, &parsed).await else {
+        return;
+    };
+    let session_id = event_session_id(&parsed);
+    let args = compact_daemon_args(
+        "codex_compact",
+        "codex",
+        false,
+        event_json,
+        session_id.as_deref(),
+    );
+    if let Err(error) = super::daemon_hook_action(runtime, Some(&root), args, telemetry).await {
+        tracing::warn!(%error, "Codex PostCompact daemon call failed");
+    }
+}
+
+async fn ingest_user_codex_session(
+    runtime: &HookRuntimeV1,
+    session_id: Option<String>,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> bool {
+    super::ingest_user_session(runtime, "Codex", session_id, telemetry).await
+}
+
+fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
+    deduped_project_hint_with_id(
+        event_project_root(parsed).as_deref(),
+        HintAgent::Codex,
+        event_session_id(parsed),
+        hint_id,
+        hint,
+    )
+}
+
+fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
+    let hint = decide_hint(&ToolHintInput {
+        agent: HintAgent::Codex,
+        session_id: event_session_id(parsed),
+        tool_name: None,
+        command: None,
+        prompt: prompt_like_text(parsed),
+        subagent_type: None,
+        file_path: None,
+        captured_output: None,
+        trusted_failure: false,
+        edit_text: None,
+        hints_enabled: true,
+    })?;
+    let root = event_project_root(parsed);
+    let hint_id = mint_hint_id();
+    record_hint_analytics(
+        root.as_deref(),
+        "hint_candidate",
+        HintAgent::Codex,
+        event_session_id(parsed).as_deref(),
+        &hint_id,
+        &hint,
+    );
+    deduped_codex_hint(parsed, &hint_id, hint)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::config::USER_DATA_DIR_ENV;
+
+    #[test]
+    fn codex_session_start_event_signals_daemon_with_real_cwd() {
+        let event = codex_session_start_hook_event(&serde_json::json!({
+            "cwd": "/workspace/codex-session"
+        }))
+        .unwrap();
+
+        assert_eq!(event.agent, HookAgent::Codex.as_wire());
+        assert_eq!(event.event, "sessionStart");
+        assert_eq!(
+            event.cwd.as_deref(),
+            Some(Path::new("/workspace/codex-session"))
+        );
+    }
+
+    #[test]
+    fn codex_subagent_start_context_carries_diagnostics_moment() {
+        // Subagents must route the shell compile/type-check moment to tracedecay
+        // diagnostics and name the fixing-build skill, matching session steering.
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("fixing-build-and-type-errors"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnose"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnostics"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("cargo check"));
+        // The consolidated skill ladder and grep routing stay intact.
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_grep"));
+        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("exploring-code"));
+    }
+
+    #[test]
+    fn codex_prompt_hints_dedupe_by_session_and_category() {
+        let _lock = crate::hooks::lock_test_env();
+        let project = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = crate::hooks::EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        crate::storage::pin_fixture_repository_identity(&project_root, "proj_hook_codex_prompt")
+            .unwrap();
+        let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        std::fs::create_dir_all(&layout.data_root).unwrap();
+        let event = serde_json::json!({
+            "session_id": "codex-session-1",
+            "cwd": project_root,
+            "prompt": "Please explain the impact of changing parse_user"
+        });
+
+        let first = codex_prompt_hint(&event).unwrap();
+        assert_eq!(first.category, HintCategory::Impact);
+
+        assert!(
+            codex_prompt_hint(&event).is_none(),
+            "Codex should use shared per-session hint dedupe for prompt hints"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_context_does_not_repeat_the_session_bootstrap() {
+        let project = tempfile::tempdir().unwrap();
+        let event = serde_json::json!({
+            "session_id": "codex-prompt-compact-context",
+            "cwd": project.path(),
+            "prompt": "continue"
+        });
+
+        let context =
+            codex_user_prompt_submit_context_with_root(&event, Some(project.path())).await;
+
+        assert!(!context.contains("Agents:"));
+        assert!(!context.contains("Before `cargo check`"));
+        assert!(!context.contains("tracedecay tool <name>"));
+        assert!(
+            context.len() < 1_024,
+            "turn-local hints must stay smaller than session bootstrap: {} bytes",
+            context.len()
+        );
+    }
+}

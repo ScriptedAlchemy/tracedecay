@@ -1,54 +1,6 @@
 {
   "command": "scripts/run-session-temporal-benchmark.sh --run",
-  "file_inventory": [
-    {
-      "path": "benches/session_temporal.rs",
-      "sha256": "e5c8477b50da6eb7e9ab05dac2c4ab9dc7147cf23ccab57d93860805de988e92"
-    },
-    {
-      "path": "src/session_temporal_benchmark.rs",
-      "sha256": "1d8d5d573c346b981c4df9007d9f203311571a448f528f6a3084b45c56082db3"
-    },
-    {
-      "path": "src/session_temporal_benchmark/root_relation_fixture.rs",
-      "sha256": "0a425aaabe0fe0f89795453aba3603a182b0e2ae9d098fd0ca53a4615c9709fb"
-    },
-    {
-      "path": "scripts/run-session-temporal-benchmark.sh",
-      "sha256": "a3a9fe3a17e63d601ec91bcfc875de6539007de6e9f3042f7f4ff7ab39c13888"
-    },
-    {
-      "path": "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json",
-      "sha256": "70c352258bcf78bd84c0955a784bb1cc89107ed95145d7f6f984f725fd8c65fd"
-    },
-    {
-      "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
-      "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
-    },
-    {
-      "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
-      "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
-    },
-    {
-      "path": "tests/fixtures/provider_normalization/codex/README.md",
-      "sha256": "848cc877145a60c95a093cac1d19f51fc54ba68ce00bdcca60c3649699446b80"
-    },
-    {
-      "path": "benchmark_data/session-temporal/README.md",
-      "sha256": "d59a05426a926268b34641c5e0e1269f1fb91b89a150a917f3be0a6eb7b5547c"
-    }
-  ],
   "fixture_evidence": {
-    "files": [
-      {
-        "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
-        "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
-      },
-      {
-        "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
-        "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
-      }
-    ],
     "format": "checked_in_native_bounded_copy_v1",
     "independently_sourced": true,
     "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
@@ -57,8 +9,7 @@
     "status": "accepted_for_harness"
   },
   "implementation": {
-    "path": "src/session_temporal_benchmark.rs",
-    "sha256": "1d8d5d573c346b981c4df9007d9f203311571a448f528f6a3084b45c56082db3"
+    "path": "crates/tracedecay/src/session_temporal_benchmark.rs"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -104,13 +55,11 @@
     "debug_assertions": false,
     "incremental": false,
     "manifest_path": "Cargo.toml",
-    "manifest_sha256": "a3a167f00b94dd789c198056de4946d3f12bb20ea0dccdaabe517ae90d3dc693",
     "opt_level": 3,
     "overflow_checks": false
   },
   "runner": {
-    "path": "scripts/run-session-temporal-benchmark.sh",
-    "sha256": "a3a9fe3a17e63d601ec91bcfc875de6539007de6e9f3042f7f4ff7ab39c13888"
+    "path": "scripts/run-session-temporal-benchmark.sh"
   },
   "schema_version": 2,
   "statistics": {

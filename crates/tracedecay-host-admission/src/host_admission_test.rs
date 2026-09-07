@@ -1,0 +1,218 @@
+use tracedecay_domain::{
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
+};
+use tracedecay_sessions::admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
+};
+use tracedecay_store::{
+    CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, ObservationCoverageReason,
+    ObservationCoverageV1, ObservationStoreError,
+};
+
+use super::*;
+
+#[test]
+fn probe_distinguishes_unknown_provider_and_unbound_project_authority() {
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
+    let unknown = facade.probe("other", HostAdmissionScope::Project);
+    assert_eq!(unknown.status, HostAdmissionStatus::Unknown);
+    assert_eq!(unknown.reason_code, Some("unknown_provider"));
+    assert!(!unknown.retryable);
+
+    let unavailable = facade.probe("claude", HostAdmissionScope::Project);
+    assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(unavailable.reason_code, Some("project_authority_unbound"));
+    assert!(!unavailable.retryable);
+}
+
+#[test]
+fn all_production_provider_ids_are_supported() {
+    for provider in tracedecay_sessions::runtime::SessionProvider::ALL
+        .into_iter()
+        .filter(|provider| provider.supports_host_admission())
+    {
+        assert!(
+            supported_provider(provider.id()),
+            "unsupported provider {}",
+            provider.id()
+        );
+    }
+    assert!(!supported_provider("roo"));
+    assert!(!supported_provider("vibe"));
+}
+
+#[test]
+fn replay_statuses_serialize_without_provider_content() {
+    for (outcome, expected_status) in [
+        (
+            HostAdmissionOutcome::replay_completed(false, false),
+            "accepted_for_replay",
+        ),
+        (
+            HostAdmissionOutcome::replay_completed(false, true),
+            "exact_duplicate",
+        ),
+        (
+            HostAdmissionOutcome::replay_completed(true, false),
+            "committed",
+        ),
+    ] {
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            serde_json::json!({
+                "status": expected_status,
+                "retryable": false,
+            })
+        );
+    }
+}
+
+#[test]
+fn pending_external_source_projection_is_a_typed_durable_success() {
+    let outcome = external_source_projection_pending();
+    assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
+    assert_eq!(
+        outcome.reason_code,
+        Some("external_source_projection_pending")
+    );
+    assert!(!outcome.retryable);
+}
+
+#[test]
+fn quarantine_outcomes_serialize_as_static_payload_free_dispositions() {
+    for outcome in [
+        HostAdmissionOutcome::quarantine_full(),
+        HostAdmissionOutcome::quarantine_corrupted(),
+        HostAdmissionOutcome::quarantine_recovery_required(),
+    ] {
+        let rendered = serde_json::to_string(&outcome).unwrap();
+        assert!(rendered.contains("spool_quarantine_"));
+        assert!(!rendered.contains("provider-private-payload"));
+        assert!(!matches!(
+            outcome.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+        ));
+    }
+}
+
+#[test]
+fn application_errors_map_to_bounded_static_outcomes() {
+    assert_eq!(
+        classify_error(&ObservationApplicationError::Cancelled),
+        admission_outcome(
+            HostAdmissionStatus::Backpressured,
+            true,
+            Some("admission_cancelled"),
+        )
+    );
+    let storage = classify_error(&ObservationApplicationError::Store(
+        ObservationStoreError::Storage {
+            operation: "write",
+            source: Box::new(std::io::Error::other("provider content must not escape")),
+        },
+    ));
+    assert_eq!(storage.status, HostAdmissionStatus::Unavailable);
+    assert!(storage.retryable);
+    assert_eq!(storage.reason_code, Some("authority_write_failed"));
+    assert_eq!(
+        storage.storage_cause.as_deref(),
+        Some("write: provider content must not escape")
+    );
+    let serialized = serde_json::to_string(&storage).unwrap();
+    assert!(
+        !serialized.contains("provider content must not escape"),
+        "storage cause must not escape onto the host-admission wire: {serialized}"
+    );
+    assert!(
+        !serialized.contains("\"write\""),
+        "storage operation must not escape onto the host-admission wire: {serialized}"
+    );
+    for error in [
+        tracedecay_runtime_core::privacy::PrivacySanitizerError::DetectorUnavailable,
+        tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,
+    ] {
+        assert_eq!(
+            classify_error(&ObservationApplicationError::Privacy(error)),
+            admission_outcome(
+                HostAdmissionStatus::Unavailable,
+                true,
+                Some("privacy_authority_unavailable"),
+            )
+        );
+    }
+}
+
+#[test]
+fn observation_store_failures_keep_privacy_safe_static_reason_codes() {
+    for (error, reason_code) in [
+        (
+            ObservationStoreError::CursorCoverageMismatch,
+            "observation_cursor_coverage_mismatch",
+        ),
+        (
+            ObservationStoreError::SanitizationReceiptCollision,
+            "observation_sanitization_receipt_collision",
+        ),
+        (
+            ObservationStoreError::RetrievalAnchorCollision,
+            "observation_retrieval_anchor_collision",
+        ),
+        (
+            ObservationStoreError::RepositoryProvenanceBindingMismatch,
+            "observation_repository_provenance_binding_mismatch",
+        ),
+        (
+            ObservationStoreError::InvalidReplayLimit { limit: 0, max: 512 },
+            "observation_replay_limit_invalid",
+        ),
+    ] {
+        let outcome = classify_error(&ObservationApplicationError::Store(error));
+        assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.reason_code, Some(reason_code));
+
+        let serialized = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(serialized.matches(reason_code).count(), 1);
+        assert!(!serialized.contains("provider-private-payload"));
+    }
+}
+
+#[test]
+fn immutable_cursor_ledger_disagreement_is_a_permanent_bounded_admission_failure() {
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor").unwrap(),
+        SessionId::new("session.fixture").unwrap(),
+    )
+    .unwrap();
+    let coverage = ObservationCoverageV1::new(
+        ObservationSourceGenerationV1::new(7).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationSourceRangeV1::new(10, 20).unwrap(),
+    );
+    let disagreement = CursorAdvanceLedgerDisagreementV1::new(
+        source,
+        ObservationScopeV1::Profile,
+        coverage,
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::BlankFrame, None),
+        CursorAdvanceLedgerIdentityV1::new(ObservationCoverageReason::OutOfScope, None),
+    );
+
+    let outcome = classify_error(&ObservationApplicationError::Store(
+        ObservationStoreError::CursorAdvanceLedgerDisagreement {
+            disagreement: Box::new(disagreement),
+        },
+    ));
+
+    assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
+    assert!(!outcome.retryable);
+    assert_eq!(
+        outcome.reason_code,
+        Some("observation_cursor_advance_ledger_disagreement")
+    );
+    assert!(
+        !serde_json::to_string(&outcome)
+            .unwrap()
+            .contains("session.fixture")
+    );
+}

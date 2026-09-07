@@ -1,0 +1,727 @@
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tracedecay_rusqlite_runtime::repository::{
+    RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
+    RepositoryRuntimePhysicalAttachment, RepositoryRuntimePhysicalSnapshot,
+};
+use tracedecay_store::{
+    AdmissionConfigV1, RuntimeMaintenanceStateV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
+    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StoreRuntimeBindingV1,
+    StoreShardScopeV1, VerifiedStoreLocatorV1,
+};
+
+use super::{
+    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot,
+    PublishedShardRuntime, StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode,
+    StoreRuntimeRegistryFailure,
+};
+use crate::store_runtime::shard::{ShardRuntime, ShardRuntimeError};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedStoreLocator {
+    verified: VerifiedStoreLocatorV1,
+    path: PathBuf,
+    prospective: bool,
+}
+
+impl ResolvedStoreLocator {
+    pub fn new(verified: VerifiedStoreLocatorV1, path: PathBuf) -> Self {
+        Self {
+            verified,
+            path,
+            prospective: false,
+        }
+    }
+
+    pub fn prospective(verified: VerifiedStoreLocatorV1, path: PathBuf) -> Self {
+        Self {
+            verified,
+            path,
+            prospective: true,
+        }
+    }
+
+    pub fn verified(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    #[hotpath::skip]
+    pub(crate) const fn is_prospective(&self) -> bool {
+        self.prospective
+    }
+
+    pub(super) fn matches(&self, key: &StoreRuntimeKey) -> bool {
+        self.verified.shard_id == *key.shard_id() && self.verified.incarnation == key.incarnation()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeLocatorRecord {
+    key: StoreRuntimeKey,
+    locator: ResolvedStoreLocator,
+}
+
+impl RuntimeLocatorRecord {
+    pub(super) fn new(key: StoreRuntimeKey, locator: ResolvedStoreLocator) -> Self {
+        Self { key, locator }
+    }
+
+    pub fn key(&self) -> &StoreRuntimeKey {
+        &self.key
+    }
+
+    pub fn verified(&self) -> &VerifiedStoreLocatorV1 {
+        self.locator.verified()
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        self.locator.path()
+    }
+
+    #[hotpath::skip]
+    pub(crate) const fn is_prospective(&self) -> bool {
+        self.locator.is_prospective()
+    }
+}
+
+pub type StoreRuntimeRegistryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait StoreRuntimeResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+        mode: StoreRuntimeOpenMode,
+        database_authority: Option<&'a crate::db::DatabaseAuthority>,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>;
+
+    fn resolve_graph<'a>(
+        &'a self,
+        _key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async { Err(StoreRuntimeRegistryFailure::UnsupportedShardScope) })
+    }
+}
+
+pub trait ShardRuntimePublisher: Send + Sync {
+    fn publish(
+        &self,
+        request: ShardRuntimeBuildRequest,
+    ) -> StoreRuntimeRegistryFuture<'_, Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LifecycleShardRuntimePublisher;
+
+impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
+    fn publish(
+        &self,
+        request: ShardRuntimeBuildRequest,
+    ) -> StoreRuntimeRegistryFuture<'_, Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async move {
+            let admission = AdmissionConfigV1::default();
+            let pinned_profile =
+                matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile);
+            let runtime = ShardRuntime::new(request.binding.clone(), pinned_profile);
+            runtime
+                .transition(RuntimeMaintenanceStateV1::Opening)
+                .map_err(runtime_lifecycle_failure)?;
+            let attachment =
+                LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory);
+            let physical = attachment.attach(&request, admission)?;
+            publish_lifecycle_runtime(request, runtime, physical).await
+        })
+    }
+}
+
+async fn publish_lifecycle_runtime(
+    request: ShardRuntimeBuildRequest,
+    runtime: ShardRuntime,
+    attachment: LifecyclePhysicalAttachment,
+) -> Result<PublishedShardRuntime, StoreRuntimeRegistryFailure> {
+    if request.mode == StoreRuntimeOpenMode::Initialize
+        && let Err(error) =
+            install_final_schema_before_publication(&request, attachment.as_physical()).await
+    {
+        attachment.abort(request.locator.is_prospective());
+        return Err(error);
+    }
+    if request.mode == StoreRuntimeOpenMode::Existing
+        && runtime_core_final_schema_applies(&request.binding.shard_id.scope)
+    {
+        if let Err(error) =
+            step_final_schema_before_existing_publication(&request, attachment.as_physical()).await
+        {
+            attachment.abort(request.locator.is_prospective());
+            return Err(error);
+        }
+        if let Err(error) =
+            verify_final_schema_before_existing_publication(&request, attachment.as_physical())
+                .await
+        {
+            attachment.abort(request.locator.is_prospective());
+            return Err(error);
+        }
+    }
+    if let Err(error) = runtime.transition(RuntimeMaintenanceStateV1::Ready) {
+        attachment.abort(request.locator.is_prospective());
+        return Err(runtime_lifecycle_failure(error));
+    }
+    if request.locator.is_prospective()
+        && let Err(error) = attachment.commit_initialization()
+    {
+        attachment.abort(true);
+        return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "commit initialized SQLite runtime",
+            message: error,
+        });
+    }
+    Ok(PublishedShardRuntime::new(runtime, attachment.into_box()))
+}
+
+fn runtime_core_final_schema_applies(scope: &StoreShardScopeV1) -> bool {
+    matches!(
+        scope,
+        StoreShardScopeV1::Code { .. }
+            | StoreShardScopeV1::ProfileMemory
+            | StoreShardScopeV1::Project { .. }
+    )
+}
+
+async fn verify_final_schema_before_existing_publication(
+    request: &ShardRuntimeBuildRequest,
+    attachment: &dyn PhysicalRuntimeAttachment,
+) -> Result<(), StoreRuntimeRegistryFailure> {
+    let handle = attachment.exact_sql_handle().map_err(|message| {
+        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "read exact SQLite schema for existing-runtime admission",
+            message,
+        }
+    })?;
+    if handle.binding() != &request.binding
+        || handle.verified_locator() != request.locator.verified()
+    {
+        return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "verify exact SQLite schema for existing-runtime admission",
+            message: "existing-runtime schema handle identity does not match build request"
+                .to_owned(),
+        });
+    }
+    let connection = crate::db::engine::Connection::attach(handle);
+    crate::db::migrations::verify_final_schema_connection(&connection)
+        .await
+        .map_err(|error| match error {
+            tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } => {
+                StoreRuntimeRegistryFailure::ResetRequired { authority, reason }
+            }
+            error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "verify exact SQLite schema for existing-runtime admission",
+                message: error.to_string(),
+            },
+        })
+}
+
+struct LifecyclePhysicalAttachment(RepositoryRuntimePhysicalAttachment);
+
+struct LifecycleShardRuntimeAttachment {
+    repository: RepositoryPhysicalAttachmentFactory,
+}
+
+impl LifecycleShardRuntimeAttachment {
+    #[hotpath::skip]
+    const fn new(repository: RepositoryPhysicalAttachmentFactory) -> Self {
+        Self { repository }
+    }
+
+    fn attach(
+        &self,
+        request: &ShardRuntimeBuildRequest,
+        admission: AdmissionConfigV1,
+    ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
+        if request.locator.is_prospective() && request.mode != StoreRuntimeOpenMode::Initialize {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "open prospective SQLite runtime",
+                message: "prospective locators require explicit initialization".to_owned(),
+            });
+        }
+        let attachment = if request.locator.is_prospective() {
+            self.repository.initialize(
+                request.binding.clone(),
+                request.locator.verified().clone(),
+                request.locator.path().to_path_buf(),
+                admission,
+            )
+        } else if request.access == StoreRuntimeAccessMode::ReadOnly {
+            self.repository.attach_read_only(
+                request.binding.clone(),
+                request.locator.verified().clone(),
+                request.locator.path().to_path_buf(),
+                admission,
+            )
+        } else {
+            self.repository.attach(
+                request.binding.clone(),
+                request.locator.verified().clone(),
+                request.locator.path().to_path_buf(),
+                admission,
+            )
+        }
+        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "attach rusqlite repository runtime",
+            message: error.to_string(),
+        })?;
+        Ok(LifecyclePhysicalAttachment(attachment))
+    }
+}
+
+impl LifecyclePhysicalAttachment {
+    fn as_physical(&self) -> &dyn PhysicalRuntimeAttachment {
+        &self.0
+    }
+
+    fn commit_initialization(&self) -> Result<(), String> {
+        self.0.commit_initialization()
+    }
+
+    fn abort(&self, created: bool) {
+        if created {
+            let _ = self.0.abort_initialization();
+        } else {
+            let _ = self.0.drain();
+            let _ = self.0.close_and_join();
+        }
+    }
+
+    fn into_box(self) -> Box<dyn PhysicalRuntimeAttachment> {
+        Box::new(self.0)
+    }
+}
+
+struct InitializingSchemaAuthority {
+    authority: crate::db::DatabaseAuthority,
+    canonical_path: PathBuf,
+    opened_file_identity: u64,
+}
+
+impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
+    for InitializingSchemaAuthority
+{
+    fn verify(
+        &self,
+        _intent: tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent,
+    ) -> Result<(), tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> {
+        self.authority
+            .require_active_write_scope("install final schema for initialized SQLite runtime")
+            .map_err(|error| {
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
+                    error.to_string(),
+                )
+            })?;
+        let identity =
+            crate::db::sqlite_generation_identity(&self.canonical_path).map_err(|source| {
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
+                    super::sqlite_file_identity_authority_denial(
+                        "install final schema for initialized SQLite runtime",
+                        source,
+                    ),
+                )
+            })?;
+        if identity != self.opened_file_identity {
+            return Err(
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
+                    "initialized SQLite file identity changed".to_owned(),
+                ),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A write-authorized exact-SQL connection on the attached store for schema
+/// work, bound to the originating database authority and the opened file
+/// identity so the authority cannot outlive the file it was issued for.
+async fn authorized_schema_connection(
+    request: &ShardRuntimeBuildRequest,
+    attachment: &dyn PhysicalRuntimeAttachment,
+    operation: &'static str,
+) -> Result<crate::db::engine::Connection, StoreRuntimeRegistryFailure> {
+    let authority = request.database_authority.clone().ok_or_else(|| {
+        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation,
+            message: "initialization requires originating database authority".to_owned(),
+        }
+    })?;
+    authority
+        .require_active_write_scope(operation)
+        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation,
+            message: error.to_string(),
+        })?;
+    if authority.canonical_database_path() != request.locator.path() {
+        return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation,
+            message: "originating database authority does not match initialized locator".to_owned(),
+        });
+    }
+    let opened_file_identity = attachment.opened_file_identity().map_err(|message| {
+        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { operation, message }
+    })?;
+    let handle = attachment.exact_sql_handle().map_err(|message| {
+        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { operation, message }
+    })?;
+    if handle.binding() != &request.binding
+        || handle.verified_locator() != request.locator.verified()
+    {
+        return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation,
+            message: "initialized schema handle identity does not match build request".to_owned(),
+        });
+    }
+    let authority = InitializingSchemaAuthority {
+        canonical_path: authority.canonical_database_path().to_path_buf(),
+        authority,
+        opened_file_identity,
+    };
+    let handle = handle
+        .with_write_authority(Arc::new(authority))
+        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "authorize initialized SQLite final-schema installation",
+            message: error.to_string(),
+        })?;
+    Ok(crate::db::engine::Connection::attach(handle))
+}
+
+/// Steps an existing runtime-core store that is exactly one sanctioned step
+/// behind the final shape before admission verifies it. Only a request that
+/// carries an active write authority may step; a read-only mount falls
+/// through to the verifier, which names this writer-side remedy.
+async fn step_final_schema_before_existing_publication(
+    request: &ShardRuntimeBuildRequest,
+    attachment: &dyn PhysicalRuntimeAttachment,
+) -> Result<(), StoreRuntimeRegistryFailure> {
+    const OPERATION: &str = "step final schema for existing SQLite runtime";
+    let Some(authority) = request.database_authority.as_ref() else {
+        return Ok(());
+    };
+    if authority.require_active_write_scope(OPERATION).is_err() {
+        return Ok(());
+    }
+    let connection = authorized_schema_connection(request, attachment, OPERATION).await?;
+    crate::db::migrations::step_schema_if_pending(&connection)
+        .await
+        .map(|_stepped| ())
+        .map_err(|error| match error {
+            tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } => {
+                StoreRuntimeRegistryFailure::ResetRequired { authority, reason }
+            }
+            error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: OPERATION,
+                message: error.to_string(),
+            },
+        })
+}
+
+async fn install_final_schema_before_publication(
+    request: &ShardRuntimeBuildRequest,
+    attachment: &dyn PhysicalRuntimeAttachment,
+) -> Result<(), StoreRuntimeRegistryFailure> {
+    let connection = authorized_schema_connection(
+        request,
+        attachment,
+        "install final schema for initialized SQLite runtime",
+    )
+    .await?;
+    match &request.binding.shard_id.scope {
+        StoreShardScopeV1::Code { .. }
+        | StoreShardScopeV1::ProfileMemory
+        | StoreShardScopeV1::Project { .. } => {
+            crate::db::migrations::create_schema_connection(&connection)
+                .await
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "create initialized graph schema",
+                    message: error.to_string(),
+                })?;
+        }
+        StoreShardScopeV1::Profile
+        | StoreShardScopeV1::ProfileSessions
+        | StoreShardScopeV1::ProjectSessions { .. } => {
+            crate::ports::registered_schema::install_from_authorized_connection(connection)
+                .await
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "create initialized global/session schema",
+                    message: error.to_string(),
+                })?;
+        }
+        StoreShardScopeV1::RemoteNode { .. } => {
+            connection
+                .execute_batch(tracedecay_rusqlite_runtime::remote::REMOTE_NODE_LOCAL_SCHEMA)
+                .await
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "create initialized remote-node schema",
+                    message: error.to_string(),
+                })?;
+        }
+    }
+    Ok(())
+}
+
+impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
+    fn writer_telemetry_snapshot(&self) -> Option<RepositoryRuntimePhysicalSnapshot> {
+        Some(RepositoryRuntimePhysicalAttachment::snapshot(self))
+    }
+
+    fn snapshot(&self) -> PhysicalRuntimeSnapshot {
+        let snapshot = RepositoryRuntimePhysicalAttachment::snapshot(self);
+        PhysicalRuntimeSnapshot {
+            healthy: snapshot.healthy,
+            writer_present: snapshot.writer_present,
+            reader_handles: snapshot.reader_handles,
+            general_reader_waiters: snapshot.general_reader_waiters,
+            health_reader_waiters: snapshot.health_reader_waiters,
+            queued_operations: snapshot.queued_operations,
+            queued_bytes: snapshot.queued_bytes,
+            writer_busy_events: snapshot.writer_busy_events,
+            writer: snapshot.writer.map(|writer| PhysicalWriterRuntimeSnapshot {
+                offered_operations: writer.operations.offered_operations,
+                admitted_operations: writer.operations.admitted_operations,
+                completed_operations: writer.operations.completed_operations,
+                shed_operations: writer.operations.shed_operations,
+                retried_operations: writer.operations.retried_operations,
+                cancelled_operations: writer.operations.cancelled_operations,
+                deadline_exceeded_operations: writer.operations.deadline_exceeded_operations,
+                conflicted_operations: writer.operations.conflicted_operations,
+                committed_batches: writer.batches.committed_batches,
+                queue_wait_micros: writer.batches.queue_wait_micros,
+                transaction_micros: writer.batches.transaction_micros,
+                error_events: writer.error_events,
+                health_lane_services: writer.health_lane_services,
+                commit_sequence: writer.commit_sequence,
+                checkpoint_status: writer.checkpoint_status,
+                checkpoint_pressure: writer.checkpoint_pressure,
+                checkpoint_hard_retry_wakes: writer.wal.hard_retry_wakes,
+            }),
+            wal_bytes: snapshot.wal_bytes,
+            memory_estimate_bytes: None,
+        }
+    }
+
+    fn opened_file_identity(&self) -> Result<u64, String> {
+        Ok(RepositoryRuntimePhysicalAttachment::opened_file_identity(
+            self,
+        ))
+    }
+
+    fn drain(&self) -> Result<(), String> {
+        RepositoryRuntimePhysicalAttachment::drain(self)
+    }
+
+    fn close_and_join(&self) -> Result<(), String> {
+        RepositoryRuntimePhysicalAttachment::close_and_join(self)
+    }
+
+    fn exact_sql_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, String> {
+        RepositoryRuntimePhysicalAttachment::exact_sql_handle(self)
+            .map_err(|error| error.to_string())
+    }
+
+    fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
+        retained_storage_page_counts(
+            RepositoryRuntimePhysicalAttachment::exact_sql_handle(self)
+                .map_err(|error| error.to_string())?,
+            reader_wait,
+        )
+    }
+
+    fn run_bounded_incremental_compaction(
+        &self,
+        max_pages: u32,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> StoreRuntimeRegistryFuture<'_, Result<(), StoreRuntimeRegistryFailure>> {
+        Box::pin(async move {
+            RepositoryRuntimePhysicalAttachment::run_bounded_incremental_compaction(
+                self, max_pages, authority,
+            )
+            .await
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "run bounded repository compaction",
+                message: error.to_string(),
+            })
+        })
+    }
+
+    fn run_checkpoint(
+        &self,
+        request: tracedecay_rusqlite_runtime::CheckpointRequest,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> StoreRuntimeRegistryFuture<
+        '_,
+        Result<tracedecay_rusqlite_runtime::CheckpointOutcome, StoreRuntimeRegistryFailure>,
+    > {
+        Box::pin(async move {
+            RepositoryRuntimePhysicalAttachment::run_checkpoint(self, request, authority)
+                .await
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "run repository checkpoint",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn snapshot_to(
+        &self,
+        destination: PathBuf,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> StoreRuntimeRegistryFuture<
+        '_,
+        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure>,
+    > {
+        Box::pin(async move {
+            RepositoryRuntimePhysicalAttachment::snapshot_to(self, destination, authority)
+                .await
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "snapshot repository database",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn snapshot_to_interruptible(
+        &self,
+        destination: PathBuf,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> StoreRuntimeRegistryFuture<
+        '_,
+        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure>,
+    > {
+        Box::pin(async move {
+            RepositoryRuntimePhysicalAttachment::snapshot_to_interruptible(
+                self,
+                destination,
+                probe,
+                authority,
+            )
+            .await
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "snapshot repository database",
+                message: error.to_string(),
+            })
+        })
+    }
+
+    fn dispatch_submit(
+        &self,
+        request: RuntimeSubmitRequestV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> StoreRuntimeRegistryFuture<'_, Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async move {
+            RepositoryRuntimePhysicalAttachment::dispatch_submit(self, request, probe, authority)
+                .await
+                .map_err(|error| match error {
+                    RepositoryDispatchError::WriterRuntime(error) => {
+                        StoreRuntimeRegistryFailure::StorageRuntime(Box::new(error))
+                    }
+                    error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "dispatch repository submit",
+                        message: error.to_string(),
+                    },
+                })
+        })
+    }
+
+    fn dispatch_read(
+        &self,
+        request: RuntimeReadRequestV1,
+        probe: &dyn RuntimeRequestProbeV1,
+    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
+        RepositoryRuntimePhysicalAttachment::dispatch_read(self, request, probe).map_err(|error| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "dispatch repository read",
+                message: error.to_string(),
+            }
+        })
+    }
+}
+
+fn retained_storage_page_counts(
+    handle: tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
+    reader_wait: Duration,
+) -> Result<(u64, u64, u64), String> {
+    let sample = handle
+        .read_only_clone()
+        .store_size_telemetry(reader_wait, || None)
+        .map_err(|error| error.to_string())?;
+    Ok((
+        u64::from(sample.page_size_bytes),
+        sample.page_count,
+        sample.freelist_pages,
+    ))
+}
+
+#[derive(Clone, Debug)]
+pub struct ShardRuntimeBuildRequest {
+    pub(super) binding: StoreRuntimeBindingV1,
+    locator: RuntimeLocatorRecord,
+    mode: StoreRuntimeOpenMode,
+    access: StoreRuntimeAccessMode,
+    database_authority: Option<crate::db::DatabaseAuthority>,
+}
+
+impl ShardRuntimeBuildRequest {
+    pub(super) fn new(
+        binding: StoreRuntimeBindingV1,
+        locator: RuntimeLocatorRecord,
+        mode: StoreRuntimeOpenMode,
+        access: StoreRuntimeAccessMode,
+        database_authority: Option<crate::db::DatabaseAuthority>,
+    ) -> Self {
+        Self {
+            binding,
+            locator,
+            mode,
+            access,
+            database_authority,
+        }
+    }
+
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    pub fn locator(&self) -> &RuntimeLocatorRecord {
+        &self.locator
+    }
+
+    #[hotpath::skip]
+    pub const fn mode(&self) -> StoreRuntimeOpenMode {
+        self.mode
+    }
+
+    #[hotpath::skip]
+    pub const fn access(&self) -> StoreRuntimeAccessMode {
+        self.access
+    }
+
+    pub fn database_authority(&self) -> Option<&crate::db::DatabaseAuthority> {
+        self.database_authority.as_ref()
+    }
+}
+
+fn runtime_lifecycle_failure(error: ShardRuntimeError) -> StoreRuntimeRegistryFailure {
+    StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+        message: error.to_string(),
+    }
+}

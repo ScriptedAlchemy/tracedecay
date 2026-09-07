@@ -1,0 +1,1373 @@
+use super::*;
+
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LcmLineageFaultForTest {
+    CorruptCompatibilitySummaryText {
+        node_id: String,
+        text: String,
+    },
+    ShiftRawMessageTimestamp {
+        store_id: i64,
+        delta: i64,
+    },
+    DeleteGeneration {
+        session_id: String,
+        generation: i64,
+    },
+    ReplaceGenerationWatermarks {
+        session_id: String,
+        generation: i64,
+        json: String,
+    },
+    DeleteAvailability {
+        session_id: String,
+        generation: i64,
+        summary_id: String,
+    },
+    ReplaceAvailabilityHorizon {
+        session_id: String,
+        generation: i64,
+        summary_id: String,
+        source_horizon_json: String,
+    },
+    SetAvailability {
+        session_id: String,
+        generation: i64,
+        summary_id: String,
+        availability: String,
+        reason: Option<String>,
+    },
+    SetGenerationFailed {
+        session_id: String,
+        generation: i64,
+    },
+    CorruptRetrievalAnchorOwner {
+        summary_id: String,
+    },
+    ReplacePublicationReceipt {
+        receipt_id: String,
+        sanitizer_version: String,
+        payload_digest: String,
+        receipt_json: String,
+    },
+    ReplaceOccurrenceProvider {
+        session_id: String,
+        message_id: String,
+        source_provider: String,
+    },
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LcmLineageCountsForTest {
+    pub active_generations: i64,
+    pub total_generations: i64,
+    pub summary_nodes: i64,
+    pub summary_sources: i64,
+    pub summary_successors: i64,
+    pub cursor_keys: i64,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LcmExternalPayloadManifestTestRecord {
+    pub payload_ref: String,
+    pub session_id: String,
+    pub payload_digest: String,
+    pub manifest_json: String,
+    pub receipt_id: String,
+    pub receipt_sanitizer_version: String,
+    pub receipt_payload_digest: String,
+    pub receipt_json: String,
+    pub created_at: i64,
+    pub external_created_at: i64,
+}
+
+impl HostAdmissionTestRuntimeV1 {
+    fn primary_lcm_fixture_database_for_test(&self) -> &RegisteredGlobalDb {
+        self.project_registered
+            .as_deref()
+            .unwrap_or(self.profile_registered.as_ref())
+    }
+
+    #[doc(hidden)]
+    pub async fn poison_lcm_raw_projection_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        store_id: i64,
+        poison: &str,
+    ) -> Result<()> {
+        let transaction = self
+            .session_database_for_test(scope)?
+            .begin_write_transaction()
+            .await?;
+        transaction
+            .execute(
+                "UPDATE lcm_raw_messages
+                 SET content = ?2, snippet_text = ?2, index_text = ?2
+                 WHERE store_id = ?1",
+                tracedecay_runtime_core::db::engine::params![store_id, poison],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "poison lcm raw projection fixture".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "poison lcm raw projection fixture".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn set_lcm_schema_migration_version_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        version: i64,
+    ) -> Result<()> {
+        let transaction = self
+            .session_database_for_test(scope)?
+            .begin_write_transaction()
+            .await?;
+        transaction
+            .execute(
+                "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
+                [version],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "set lcm schema migration fixture version".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "set lcm schema migration fixture version".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_schema_migration_version_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<Option<i64>> {
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query lcm schema migration fixture version".to_owned(),
+                message: error.to_string(),
+            })?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read lcm schema migration fixture version".to_owned(),
+                message: error.to_string(),
+            })?
+        else {
+            return Ok(None);
+        };
+        row.get::<i64>(0)
+            .map(Some)
+            .map_err(|error| TraceDecayError::Database {
+                operation: "decode lcm schema migration fixture version".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn set_lcm_schema_migration_applied_at_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        applied_at: i64,
+    ) -> Result<()> {
+        let transaction = self
+            .session_database_for_test(scope)?
+            .begin_write_transaction()
+            .await?;
+        transaction
+            .execute(
+                "UPDATE session_schema_migrations
+                 SET applied_at = ?1
+                 WHERE name = 'lcm'",
+                [applied_at],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "set lcm schema migration fixture applied_at".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "set lcm schema migration fixture applied_at".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_schema_migration_applied_at_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<Option<i64>> {
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT applied_at
+                 FROM session_schema_migrations
+                 WHERE name = 'lcm'",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query lcm schema migration fixture applied_at".to_owned(),
+                message: error.to_string(),
+            })?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read lcm schema migration fixture applied_at".to_owned(),
+                message: error.to_string(),
+            })?
+        else {
+            return Ok(None);
+        };
+        row.get::<i64>(0)
+            .map(Some)
+            .map_err(|error| TraceDecayError::Database {
+                operation: "decode lcm schema migration fixture applied_at".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn set_lcm_compression_debt_insert_failure_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        enabled: bool,
+    ) -> Result<()> {
+        let statement = if enabled {
+            "CREATE TRIGGER abort_compression_debt_insert
+             BEFORE INSERT ON lcm_maintenance_debt
+             BEGIN
+                SELECT RAISE(ABORT, 'forced maintenance debt failure');
+             END;"
+        } else {
+            "DROP TRIGGER IF EXISTS abort_compression_debt_insert;"
+        };
+        let transaction = self
+            .session_database_for_test(scope)?
+            .begin_write_transaction()
+            .await?;
+        transaction
+            .execute_batch(statement)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "configure LCM compression-debt failure".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "configure LCM compression-debt failure".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn set_lcm_late_summary_projection_failure_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        enabled: bool,
+    ) -> Result<()> {
+        let statement = if enabled {
+            "CREATE TRIGGER abort_late_summary_projection
+             BEFORE INSERT ON lcm_summary_nodes
+             BEGIN
+                SELECT RAISE(ABORT, 'forced late summary projection failure');
+             END;"
+        } else {
+            "DROP TRIGGER IF EXISTS abort_late_summary_projection;"
+        };
+        let transaction = self
+            .session_database_for_test(scope)?
+            .begin_write_transaction()
+            .await?;
+        transaction
+            .execute_batch(statement)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "configure late LCM summary projection failure".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "configure late LCM summary projection failure".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn replace_lcm_summary_source_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        node_id: &str,
+        source_node_id: &str,
+    ) -> Result<()> {
+        let database = self.session_database_for_test(scope)?;
+        let transaction = database.begin_write_transaction().await?;
+        transaction
+            .execute(
+                "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
+                (node_id,),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "delete LCM summary source fixture".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "delete LCM summary source fixture".to_owned(),
+                message: error.to_string(),
+            })?;
+
+        let transaction = database.begin_write_transaction().await?;
+        transaction
+            .execute(
+                "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+                 VALUES (?1, 'summary_node', ?2, 0)",
+                (node_id, source_node_id),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "replace LCM summary source fixture".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "replace LCM summary source fixture".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    async fn lcm_session_row_count_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        table: &'static str,
+        session_id: &str,
+    ) -> Result<i64> {
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "open LCM session row-count snapshot".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut rows = snapshot
+            .query(
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
+                (session_id,),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query LCM session row count".to_owned(),
+                message: error.to_string(),
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read LCM session row count".to_owned(),
+                message: error.to_string(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "read LCM session row count".to_owned(),
+                message: "count query returned no row".to_owned(),
+            })?;
+        row.get::<i64>(0)
+            .map_err(|error| TraceDecayError::Database {
+                operation: "decode LCM session row count".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn session_summary_node_count_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        session_id: &str,
+    ) -> Result<i64> {
+        self.lcm_session_row_count_for_test(scope, "session_summary_nodes", session_id)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_raw_message_count_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        session_id: &str,
+    ) -> Result<i64> {
+        self.lcm_session_row_count_for_test(scope, "lcm_raw_messages", session_id)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_raw_store_id_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        message_id: &str,
+    ) -> Result<Option<i64>> {
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "open registered lcm raw store id snapshot".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query registered lcm raw store id".to_owned(),
+                message: error.to_string(),
+            })?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read registered lcm raw store id".to_owned(),
+                message: error.to_string(),
+            })?
+        else {
+            return Ok(None);
+        };
+        row.get::<i64>(0)
+            .map(Some)
+            .map_err(|error| TraceDecayError::Database {
+                operation: "decode registered lcm raw store id".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_insert_summary_node_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        draft: tracedecay_lcm::LcmSummaryNodeDraft,
+    ) -> std::result::Result<tracedecay_lcm::LcmSummaryNode, tracedecay_lcm::LcmError> {
+        let database = self
+            .session_database_for_test(scope)
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let summary_hash =
+            tracedecay_lcm::retrieval_content::projected_content_hash(&draft.summary_text);
+        let summary_id = tracedecay_lcm::dag::summary_node_id(
+            &draft.provider,
+            &draft.session_id,
+            draft.depth,
+            &draft.source_refs,
+            &summary_hash,
+        );
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        database
+            .lcm_publish_immutable_summary_guarded(
+                tracedecay_lcm::types::LcmImmutableSummaryPublication {
+                    summary_id,
+                    predecessor_summary_id: None,
+                    draft,
+                },
+                &control,
+                || Ok(()),
+            )
+            .await
+            .map(|receipt| receipt.summary)
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_update_lifecycle_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        update: tracedecay_lcm::LcmLifecycleUpdate,
+    ) -> std::result::Result<tracedecay_lcm::LcmLifecycleState, tracedecay_lcm::LcmError> {
+        let database = self
+            .session_database_for_test(scope)
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let transaction = database
+            .begin_write_transaction()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let state = tracedecay_lcm::compression::update_lifecycle(&transaction, update).await?;
+        transaction.commit().await?;
+        Ok(state)
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_publish_immutable_summary_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        publication: tracedecay_lcm::types::LcmImmutableSummaryPublication,
+    ) -> std::result::Result<
+        tracedecay_lcm::types::LcmSummaryPublicationReceipt,
+        tracedecay_lcm::LcmError,
+    > {
+        let database = self
+            .session_database_for_test(scope)
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        database
+            .lcm_publish_immutable_summary_guarded(publication, &control, || Ok(()))
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn apply_lcm_lineage_fault_for_test(
+        &self,
+        fault: LcmLineageFaultForTest,
+    ) -> Result<()> {
+        let fault = match fault {
+            LcmLineageFaultForTest::DeleteGeneration {
+                session_id,
+                generation,
+            } => {
+                return self
+                    .delete_lcm_generation_out_of_band_for_test(&session_id, generation)
+                    .await;
+            }
+            fault => fault,
+        };
+        self.apply_lcm_lineage_fault_prelude_for_test(&fault)
+            .await?;
+        let transaction = self
+            .primary_lcm_fixture_database_for_test()
+            .begin_write_transaction()
+            .await?;
+        let result = match fault {
+            LcmLineageFaultForTest::CorruptCompatibilitySummaryText { node_id, text } => {
+                transaction
+                    .execute(
+                        "UPDATE lcm_summary_nodes SET summary_text = ?2 WHERE node_id = ?1",
+                        tracedecay_runtime_core::db::engine::params![node_id, text],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::ShiftRawMessageTimestamp { store_id, delta } => {
+                transaction
+                    .execute(
+                        "UPDATE lcm_raw_messages
+                         SET timestamp = timestamp + ?2
+                         WHERE store_id = ?1",
+                        tracedecay_runtime_core::db::engine::params![store_id, delta],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::DeleteGeneration { .. } => unreachable!(),
+            LcmLineageFaultForTest::ReplaceGenerationWatermarks {
+                session_id,
+                generation,
+                json,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE session_temporal_generations
+                         SET frozen_watermarks_json = ?3
+                         WHERE session_id = ?1 AND generation = ?2",
+                        tracedecay_runtime_core::db::engine::params![session_id, generation, json],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::DeleteAvailability {
+                session_id,
+                generation,
+                summary_id,
+            } => {
+                transaction
+                    .execute(
+                        "DELETE FROM session_summary_availability
+                         WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
+                        tracedecay_runtime_core::db::engine::params![session_id, generation, summary_id],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::ReplaceAvailabilityHorizon {
+                session_id,
+                generation,
+                summary_id,
+                source_horizon_json,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE session_summary_availability
+                         SET source_horizon_json = ?4
+                         WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
+                        tracedecay_runtime_core::db::engine::params![
+                            session_id,
+                            generation,
+                            summary_id,
+                            source_horizon_json
+                        ],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::SetAvailability {
+                session_id,
+                generation,
+                summary_id,
+                availability,
+                reason,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE session_summary_availability
+                         SET source_horizon_json = (
+                                SELECT source_horizon_json FROM session_summary_nodes
+                                WHERE summary_id = ?3
+                             ),
+                             availability = ?4,
+                             reason = ?5
+                         WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
+                        tracedecay_runtime_core::db::engine::params![
+                            session_id,
+                            generation,
+                            summary_id,
+                            availability,
+                            reason
+                        ],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::SetGenerationFailed {
+                session_id,
+                generation,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE session_temporal_generations
+                         SET state = 'failed',
+                             completed_at = COALESCE(completed_at, activated_at, ready_at, created_at)
+                         WHERE session_id = ?1 AND generation = ?2",
+                        tracedecay_runtime_core::db::engine::params![session_id, generation],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::CorruptRetrievalAnchorOwner { summary_id } => {
+                transaction
+                    .execute(
+                        "UPDATE retrieval_anchors
+                         SET owner_json =
+                               '{\"kind\":\"session\",\"provider\":\"wrong\",\"session_id\":\"wrong\"}',
+                             anchor_json = json_set(
+                                 anchor_json,
+                                 '$.owner',
+                                 json(
+                                     '{\"kind\":\"session\",\"provider\":\"wrong\",\"session_id\":\"wrong\"}'
+                                 )
+                             )
+                         WHERE anchor_id = (
+                             SELECT summary_anchor_id FROM session_summary_nodes
+                             WHERE summary_id = ?1
+                         )",
+                        [summary_id],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::ReplacePublicationReceipt {
+                receipt_id,
+                sanitizer_version,
+                payload_digest,
+                receipt_json,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE sanitization_receipts
+                         SET sanitizer_version = ?2,
+                             payload_digest = ?3,
+                             receipt_json = ?4
+                         WHERE receipt_id = ?1",
+                        tracedecay_runtime_core::db::engine::params![
+                            receipt_id,
+                            sanitizer_version,
+                            payload_digest,
+                            receipt_json
+                        ],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::ReplaceOccurrenceProvider {
+                session_id,
+                message_id,
+                source_provider,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE session_occurrences
+                         SET source_provider = ?3
+                         WHERE session_id = ?1 AND message_id = ?2",
+                        tracedecay_runtime_core::db::engine::params![session_id, message_id, source_provider],
+                    )
+                    .await
+            }
+        };
+        result.map_err(|error| TraceDecayError::Database {
+            operation: "apply bounded lcm lineage fault fixture".to_owned(),
+            message: error.to_string(),
+        })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "apply bounded lcm lineage fault fixture".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    async fn apply_lcm_lineage_fault_prelude_for_test(
+        &self,
+        fault: &LcmLineageFaultForTest,
+    ) -> Result<()> {
+        let (statement, operation) = match fault {
+            LcmLineageFaultForTest::ReplaceGenerationWatermarks { .. } => (
+                "DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1",
+                "prepare changed lcm watermarks fixture",
+            ),
+            LcmLineageFaultForTest::SetGenerationFailed { .. } => (
+                "DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1",
+                "prepare failed lcm generation fixture",
+            ),
+            LcmLineageFaultForTest::CorruptRetrievalAnchorOwner { .. } => (
+                "DROP TRIGGER IF EXISTS retrieval_anchors_immutable_update;
+                 DROP TRIGGER IF EXISTS observation_retrieval_anchors_immutable_update;",
+                "prepare corrupt lcm retrieval owner fixture",
+            ),
+            LcmLineageFaultForTest::ReplacePublicationReceipt { .. } => (
+                "DROP TRIGGER IF EXISTS sanitization_receipts_immutable_update_v1",
+                "prepare corrupt lcm publication receipt fixture",
+            ),
+            _ => return Ok(()),
+        };
+        let transaction = self
+            .primary_lcm_fixture_database_for_test()
+            .begin_write_transaction()
+            .await?;
+        transaction
+            .execute_batch(statement)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: operation.to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: operation.to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    async fn delete_lcm_generation_out_of_band_for_test(
+        &self,
+        session_id: &str,
+        generation: i64,
+    ) -> Result<()> {
+        let database = self.primary_lcm_fixture_database_for_test();
+        let transaction = database.begin_write_transaction().await?;
+        transaction
+            .execute(
+                "DROP TRIGGER IF EXISTS session_temporal_generations_delete_guard_v1",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "prepare missing lcm generation fixture".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "prepare missing lcm generation fixture".to_owned(),
+                message: error.to_string(),
+            })?;
+
+        let connection = rusqlite::Connection::open(database.db_path()).map_err(|error| {
+            TraceDecayError::Database {
+                operation: "prepare missing lcm generation fixture".to_owned(),
+                message: error.to_string(),
+            }
+        })?;
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .map_err(|error| TraceDecayError::Database {
+                operation: "prepare missing lcm generation fixture".to_owned(),
+                message: error.to_string(),
+            })?;
+        connection
+            .execute(
+                "DELETE FROM session_temporal_generations
+                 WHERE session_id = ?1 AND generation = ?2",
+                (session_id, generation),
+            )
+            .map(|_| ())
+            .map_err(|error| TraceDecayError::Database {
+                operation: "apply bounded lcm lineage fault fixture".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_lineage_counts_for_test(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<LcmLineageCountsForTest> {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "open lcm lineage count snapshot".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut rows = snapshot
+            .query(
+                "SELECT
+                    (SELECT COUNT(*) FROM session_temporal_generations
+                     WHERE state = 'active' AND (?1 IS NULL OR session_id = ?1)),
+                    (SELECT COUNT(*) FROM session_temporal_generations
+                     WHERE ?1 IS NULL OR session_id = ?1),
+                    (SELECT COUNT(*) FROM session_summary_nodes
+                     WHERE ?1 IS NULL OR session_id = ?1),
+                    (SELECT COUNT(*) FROM session_query_cursor_keys)",
+                [session_id],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query lcm lineage counts".to_owned(),
+                message: error.to_string(),
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read lcm lineage counts".to_owned(),
+                message: error.to_string(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "read lcm lineage counts".to_owned(),
+                message: "count query returned no row".to_owned(),
+            })?;
+        let value = |index| {
+            row.get::<i64>(index)
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "decode lcm lineage counts".to_owned(),
+                    message: error.to_string(),
+                })
+        };
+        let relations = self.lcm_relation_reads_for_test(session_id).await?;
+        Ok(LcmLineageCountsForTest {
+            active_generations: value(0)?,
+            total_generations: value(1)?,
+            summary_nodes: value(2)?,
+            summary_sources: i64::try_from(
+                relations
+                    .iter()
+                    .map(|relation| relation.sources.len())
+                    .sum::<usize>(),
+            )
+            .map_err(|error| TraceDecayError::Database {
+                operation: "count native lcm summary sources".to_owned(),
+                message: error.to_string(),
+            })?,
+            summary_successors: i64::try_from(
+                relations
+                    .iter()
+                    .filter(|relation| relation.predecessor_summary_id.is_some())
+                    .count(),
+            )
+            .map_err(|error| TraceDecayError::Database {
+                operation: "count native lcm summary successors".to_owned(),
+                message: error.to_string(),
+            })?,
+            cursor_keys: value(3)?,
+        })
+    }
+
+    async fn lcm_relation_reads_for_test(
+        &self,
+        session_filter: Option<&str>,
+    ) -> Result<Vec<tracedecay_session_temporal_store::relations::SummaryRelationRead>> {
+        let database = self.primary_lcm_fixture_database_for_test();
+        let snapshot =
+            database
+                .read_snapshot()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "open native lcm relation fixture snapshot".to_owned(),
+                    message: error.to_string(),
+                })?;
+        let mut rows = snapshot
+            .query(
+                "SELECT session_id, summary_id
+                 FROM session_summary_nodes
+                 WHERE ?1 IS NULL OR session_id = ?1
+                 ORDER BY session_id, created_at, summary_id",
+                [session_filter],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query native lcm relation fixture identities".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut grouped = std::collections::BTreeMap::<String, Vec<String>>::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read native lcm relation fixture identity".to_owned(),
+                message: error.to_string(),
+            })?
+        {
+            grouped
+                .entry(
+                    row.get::<String>(0)
+                        .map_err(|error| TraceDecayError::Database {
+                            operation: "decode native lcm relation session".to_owned(),
+                            message: error.to_string(),
+                        })?,
+                )
+                .or_default()
+                .push(
+                    row.get::<String>(1)
+                        .map_err(|error| TraceDecayError::Database {
+                            operation: "decode native lcm relation summary".to_owned(),
+                            message: error.to_string(),
+                        })?,
+                );
+        }
+        drop(rows);
+        drop(snapshot);
+        let mut relations = Vec::new();
+        for (session, summary_ids) in grouped {
+            let session_id = tracedecay_domain::SessionId::new(session).map_err(|error| {
+                TraceDecayError::Database {
+                    operation: "decode native lcm relation session".to_owned(),
+                    message: error.to_string(),
+                }
+            })?;
+            let (_, mut session_relations) = database
+                .active_session_summary_relations(
+                    &session_id,
+                    &summary_ids,
+                    100_000,
+                    Arc::new(tracedecay_graph_db::NeverCancelled),
+                )
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read native lcm relation fixture".to_owned(),
+                    message: error.to_string(),
+                })?;
+            relations.append(&mut session_relations);
+        }
+        Ok(relations)
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_raw_message_search_fields_for_test(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> std::result::Result<Option<(String, String)>, tracedecay_lcm::LcmError> {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT snippet_text, index_text
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some((row.get(0)?, row.get(1)?)))
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_raw_message_fts_count_for_test(
+        &self,
+        query: &str,
+    ) -> std::result::Result<i64, tracedecay_lcm::LcmError> {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*)
+                 FROM lcm_raw_messages_fts
+                 WHERE lcm_raw_messages_fts MATCH ?1",
+                [query],
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| tracedecay_lcm::LcmError::Db("COUNT(*) returned no row".to_owned()))?;
+        Ok(row.get(0)?)
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_raw_message_metadata_json_for_test(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> std::result::Result<Option<Option<String>>, tracedecay_lcm::LcmError> {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT metadata_json
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(row.get(0)?))
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_delete_external_payload_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        payload_ref: &str,
+        opts: &tracedecay_lcm::payload::DeleteOpts,
+    ) -> std::result::Result<tracedecay_lcm::payload::DeleteOutcome, tracedecay_lcm::LcmError> {
+        let database = self
+            .session_database_for_test(scope)
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let storage_root = database.db_path().parent().ok_or_else(|| {
+            tracedecay_lcm::LcmError::Db(
+                "registered session database has no storage root".to_owned(),
+            )
+        })?;
+        let transaction = database
+            .begin_write_transaction()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let prepared = tracedecay_lcm::payload::delete_external_payload_in_transaction(
+            &transaction,
+            storage_root,
+            payload_ref,
+            opts,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        let mut outcome = prepared.outcome;
+        if prepared.pending_removal_bytes.is_some() {
+            let transaction = database
+                .begin_write_transaction()
+                .await
+                .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+            let drained = tracedecay_lcm::gc::drain_pending_payload_delete_in_transaction(
+                &transaction,
+                storage_root,
+                payload_ref,
+            )
+            .await;
+            match drained {
+                Ok(removed) => {
+                    transaction.commit().await?;
+                    outcome.file_removed = removed.is_some();
+                    outcome.bytes_freed = removed.unwrap_or_default();
+                }
+                Err(error) => {
+                    let _ = transaction.rollback().await;
+                    tracing::warn!(
+                        payload_ref,
+                        %error,
+                        "payload metadata deletion committed; deferred payload file removal remains pending"
+                    );
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_external_payload_manifest_for_test(
+        &self,
+        payload_ref: &str,
+    ) -> std::result::Result<Option<LcmExternalPayloadManifestTestRecord>, tracedecay_lcm::LcmError>
+    {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT manifest.payload_ref, manifest.session_id,
+                        manifest.payload_digest, manifest.manifest_json,
+                        receipt.receipt_id, manifest.created_at, external.created_at,
+                        receipt.sanitizer_version, receipt.payload_digest, receipt.receipt_json
+                 FROM session_external_payload_manifests manifest
+                 JOIN sanitization_receipts receipt
+                   ON receipt.receipt_id = manifest.receipt_id
+                 JOIN lcm_external_payloads external
+                   ON external.payload_ref = manifest.payload_ref
+                 WHERE manifest.payload_ref = ?1",
+                [payload_ref],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(LcmExternalPayloadManifestTestRecord {
+            payload_ref: row.get(0)?,
+            session_id: row.get(1)?,
+            payload_digest: row.get(2)?,
+            manifest_json: row.get(3)?,
+            receipt_id: row.get(4)?,
+            created_at: row.get(5)?,
+            external_created_at: row.get(6)?,
+            receipt_sanitizer_version: row.get(7)?,
+            receipt_payload_digest: row.get(8)?,
+            receipt_json: row.get(9)?,
+        }))
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_summary_publication_receipt_id_for_test(
+        &self,
+        summary_id: &str,
+    ) -> std::result::Result<Option<String>, tracedecay_lcm::LcmError> {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT json_extract(publication_json, '$.receipt_id')
+                 FROM session_summary_nodes
+                 WHERE summary_id = ?1",
+                [summary_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(row.get(0)?)
+    }
+
+    #[doc(hidden)]
+    pub async fn replace_lcm_external_payload_manifest_for_test(
+        &self,
+        payload_ref: &str,
+        replacement: &LcmExternalPayloadManifestTestRecord,
+    ) -> std::result::Result<(), tracedecay_lcm::LcmError> {
+        let transaction = self
+            .primary_lcm_fixture_database_for_test()
+            .begin_write_transaction()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        transaction
+            .execute_batch("DROP TRIGGER session_external_payload_manifests_immutable_update_v1;")
+            .await?;
+        transaction
+            .execute(
+                "UPDATE session_external_payload_manifests
+                 SET session_id = ?2, payload_digest = ?3, manifest_json = ?4,
+                     receipt_id = ?5, created_at = ?6
+                 WHERE payload_ref = ?1",
+                tracedecay_runtime_core::db::engine::params![
+                    payload_ref,
+                    replacement.session_id.as_str(),
+                    replacement.payload_digest.as_str(),
+                    replacement.manifest_json.as_str(),
+                    replacement.receipt_id.as_str(),
+                    replacement.created_at,
+                ],
+            )
+            .await?;
+        transaction
+            .execute_batch(
+                "CREATE TRIGGER session_external_payload_manifests_immutable_update_v1
+                 BEFORE UPDATE ON session_external_payload_manifests BEGIN
+                     SELECT RAISE(ABORT, 'session external payload manifests are immutable');
+                 END;",
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_lifecycle_state_for_test(
+        &self,
+        provider: &str,
+        conversation_id: &str,
+    ) -> std::result::Result<tracedecay_lcm::LcmLifecycleState, tracedecay_lcm::LcmError> {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
+        tracedecay_lcm::compression::lifecycle_state(&snapshot, provider, conversation_id).await
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_summary_successor_edges_for_test(&self) -> Result<Vec<(String, String)>> {
+        let mut edges = self
+            .lcm_relation_reads_for_test(None)
+            .await?
+            .into_iter()
+            .filter_map(|relation| {
+                relation
+                    .predecessor_summary_id
+                    .map(|predecessor| (predecessor, relation.summary_id))
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        Ok(edges)
+    }
+
+    #[doc(hidden)]
+    pub async fn lcm_active_summary_availability_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let snapshot = self
+            .primary_lcm_fixture_database_for_test()
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "open registered LCM availability snapshot".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut rows = snapshot
+            .query(
+                "SELECT availability.summary_id, availability.availability
+                 FROM session_summary_availability AS availability
+                 JOIN session_temporal_generations AS generation
+                   ON generation.session_id = availability.session_id
+                  AND generation.generation = availability.generation
+                 WHERE availability.session_id = ?1
+                   AND generation.state = 'active'
+                 ORDER BY availability.summary_id",
+                tracedecay_runtime_core::db::engine::params![session_id],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query registered LCM active summary availability".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut labels = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read registered LCM active summary availability".to_owned(),
+                message: error.to_string(),
+            })?
+        {
+            labels.push((
+                row.get(0).map_err(|error| TraceDecayError::Database {
+                    operation: "decode registered LCM availability summary".to_owned(),
+                    message: error.to_string(),
+                })?,
+                row.get(1).map_err(|error| TraceDecayError::Database {
+                    operation: "decode registered LCM availability label".to_owned(),
+                    message: error.to_string(),
+                })?,
+            ));
+        }
+        Ok(labels)
+    }
+
+    #[doc(hidden)]
+    pub async fn install_lcm_summary_insert_abort_trigger_for_test(&self) -> Result<()> {
+        self.set_lcm_summary_insert_abort_trigger_for_test(true)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn remove_lcm_summary_insert_abort_trigger_for_test(&self) -> Result<()> {
+        self.set_lcm_summary_insert_abort_trigger_for_test(false)
+            .await
+    }
+
+    async fn set_lcm_summary_insert_abort_trigger_for_test(&self, enabled: bool) -> Result<()> {
+        let statement = if enabled {
+            "CREATE TRIGGER fail_codex_summary_successor
+             BEFORE INSERT ON lcm_summary_nodes
+             BEGIN
+                SELECT RAISE(ABORT, 'forced summary successor failure');
+             END;"
+        } else {
+            "DROP TRIGGER IF EXISTS fail_codex_summary_successor;"
+        };
+        let transaction = self
+            .primary_lcm_fixture_database_for_test()
+            .begin_write_transaction()
+            .await?;
+        transaction
+            .execute_batch(statement)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "configure registered LCM summary failure".to_owned(),
+                message: error.to_string(),
+            })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "configure registered LCM summary failure".to_owned(),
+                message: error.to_string(),
+            })
+    }
+}

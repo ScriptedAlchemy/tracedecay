@@ -1,77 +1,87 @@
-pub mod claude;
-pub mod cline_like;
-pub mod codex;
-pub mod codex_app_server;
-pub mod cursor;
-pub mod cursor_agent;
-pub mod cursor_composer;
+use serde::{Deserialize, Serialize};
+
+pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
+
+// Runtime modules are public because the root composition crate mounts these
+// concrete provider and storage authorities directly.
+mod hosts;
+pub use hosts::{
+    claude, claude_observation, cline_like, codex, codex_app_server, cursor, cursor_composer,
+    hermes, kimi, kiro, opencode, vibe,
+};
+pub(in crate::runtime) use hosts::{opencode_frontier, opencode_part_scan, opencode_snapshot};
 pub mod git_correlation;
-pub mod hermes;
+mod host_scan;
 pub mod ingest;
-pub mod kiro;
-pub mod lcm;
+mod observation;
+pub use observation::snapshot_observation;
+pub(in crate::runtime) use observation::{ingest_byte_budget, jsonl_observation_admission};
+mod pipeline_metrics;
+pub mod registered_db;
 pub mod shared;
 pub mod source;
-pub mod transcript_backfill;
-pub mod vibe;
-pub mod workflow_index;
-pub mod workflow_ingest;
-pub mod workflow_state;
+pub mod store_access;
+pub mod store_port;
+mod workflow;
+pub use workflow::{workflow_index, workflow_ingest, workflow_state};
 
-pub fn home_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
-        .map(std::path::PathBuf::from)
-        .or_else(dirs::home_dir)
+pub use crate::{ProviderScope, SessionProvider};
+// Shared full-text/LCM retrieval filters are owned by the LCM engine crate;
+// the session search surface re-imports them so both sides filter identically.
+pub use ingest::{
+    IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestDisposition,
+    TranscriptIngestOutcome, classify_claude_observation_failure,
+    classify_transcript_ingest_disposition, classify_transcript_ingest_failure, home_dir,
+    ingest_project_sources_for_provider, ingest_project_sources_for_provider_with_cancellation,
+    ingest_project_sources_for_provider_with_cancellation_and_codex_state,
+    ingest_user_global_sources_for_provider_with_authorities,
+    ingest_user_global_sources_for_provider_with_authorities_and_cancellation,
+    ingest_user_global_sources_for_startup_with_db,
+    ingest_user_global_sources_for_startup_with_db_and_codex_state, registered_project_roots_from,
+    try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_home,
+};
+pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
+pub use registered_db::{
+    SessionExec, SessionQuery, SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn,
+};
+pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+/// Public because the snapshot capture entry points that return it are public.
+pub use snapshot_observation::SnapshotCaptureOutcome;
+pub use store_access::{
+    SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    TranscriptBatch, TranscriptGitEvidence, TranscriptPersistenceError,
+};
+pub use tracedecay_lcm::{SessionMessageType, SessionSearchScope};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMessageSearchResult {
+    pub session: SessionRecord,
+    pub message: SessionMessageRecord,
+    pub score: f64,
 }
 
-pub(crate) fn vscode_data_dir(home: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support/Code")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".config/Code")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_path = std::path::PathBuf::from(&appdata);
-            if appdata_path.starts_with(home) {
-                return appdata_path.join("Code");
-            }
-        }
-        home.join("AppData/Roaming/Code")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        home.join(".config/Code")
-    }
+/// Inclusive timestamp bounds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchTimeRange {
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
 }
 
-pub(crate) fn kiro_data_dir(home: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support/Kiro")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".config/Kiro")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_path = std::path::PathBuf::from(&appdata);
-            if appdata_path.starts_with(home) {
-                return appdata_path.join("Kiro");
-            }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSearchFilters<'a> {
+    pub scope: SessionSearchScope,
+    pub message_type: SessionMessageType,
+    pub parent_session_id: Option<&'a str>,
+    pub time_range: SessionSearchTimeRange,
+}
+
+impl Default for SessionSearchFilters<'_> {
+    fn default() -> Self {
+        Self {
+            scope: SessionSearchScope::All,
+            message_type: SessionMessageType::All,
+            parent_session_id: None,
+            time_range: SessionSearchTimeRange::default(),
         }
-        home.join("AppData/Roaming/Kiro")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        home.join(".config/Kiro")
     }
 }

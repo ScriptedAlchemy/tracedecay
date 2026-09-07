@@ -3,10 +3,10 @@
 /// Parses Nix source files and emits nodes and edges for the code graph.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::complexity::{ComplexityMetrics, NIX_COMPLEXITY, count_complexity};
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -14,7 +14,7 @@ use tracedecay_domain::code_intelligence::{
 pub struct NixExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -22,12 +22,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -39,18 +39,23 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -59,10 +64,8 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -72,18 +75,33 @@ impl NixExtractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     /// `source` is the Nix source code to parse.
     pub fn extract_nix(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
-        // Create the File root node.
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -113,25 +131,22 @@ impl NixExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("nix")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Nix grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("nix", "Nix", source)
     }
 
     /// Visit all children of a node.
@@ -169,9 +184,7 @@ impl NixExtractor {
         }
     }
 
-    /// Visit a let expression. Process bindings inside `binding_set` and the body.
     fn visit_let_expression(state: &mut ExtractionState, node: TsNode<'_>) {
-        // Process binding_set for definitions
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -187,22 +200,20 @@ impl NixExtractor {
 
         // Process the body field (the expression after `in`).
         // If it's an attrset, extract its bindings and inherits.
-        if let Some(body) = node.child_by_field_name("body") {
-            if body.kind() == "attrset_expression" {
-                Self::visit_attrset_bindings(state, body);
-            }
+        if let Some(body) = node.child_by_field_name("body")
+            && body.kind() == "attrset_expression"
+        {
+            Self::visit_attrset_bindings(state, body);
         }
     }
 
     /// Visit a binding node. Classify as Function, Module, or Const based on the value.
     fn visit_binding(state: &mut ExtractionState, node: TsNode<'_>) {
-        // Extract name from attrpath child
         let name = Self::extract_binding_name(state, node);
         let Some(name) = name else {
             return;
         };
 
-        // Get the expression (value) child
         let expr = node.child_by_field_name("expression");
 
         let docstring = Self::extract_docstring(state, node);
@@ -211,19 +222,12 @@ impl NixExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
 
-        // Enhancement 3: Flake output schema awareness.
         // In flake.nix files, known output attrs are forced to Module classification.
         let force_module = Self::is_flake_file(state) && Self::is_flake_output_attr(&name);
 
-        // Enhancement 1: Check if the expression is a builder call (derivation).
-        // We store the builder info before classifying to avoid borrow issues.
-        let builder_info: Option<(String, usize)> = expr.and_then(|e| {
-            Self::is_builder_call(state, e).map(|(_callee, attrset)| {
-                // Store the attrset node id so we can find it again
-                (String::new(), attrset.id())
-            })
-        });
-        let is_builder = builder_info.is_some();
+        // Whether the expression is a builder call (derivation). The attrset
+        // argument is re-resolved below when extracting derivation fields.
+        let is_builder = expr.is_some_and(|e| Self::is_builder_call(state, e).is_some());
 
         // Classify based on value expression type
         let classification = if force_module {
@@ -240,7 +244,7 @@ impl NixExtractor {
                 let signature = Self::extract_function_signature(state, node);
                 let metrics = if let Some(expr_node) = expr {
                     if expr_node.child_count() > 0 {
-                        count_complexity(expr_node, &NIX_COMPLEXITY, &state.source)
+                        count_complexity(expr_node, &NIX_COMPLEXITY, state.source)
                     } else {
                         ComplexityMetrics::default()
                     }
@@ -410,22 +414,17 @@ impl NixExtractor {
                     });
                 }
 
-                // Enhancement 1: If this is a builder call, extract derivation fields.
+                // If this is a builder call, extract derivation fields.
                 if is_builder {
-                    if let Some(expr_node) = expr {
-                        if let Some((_callee, attrset_node)) =
+                    if let Some(expr_node) = expr
+                        && let Some((_callee, attrset_node)) =
                             Self::is_builder_call(state, expr_node)
-                        {
-                            let parent_id_for_fields = id;
-                            Self::extract_derivation_fields(
-                                state,
-                                attrset_node,
-                                &parent_id_for_fields,
-                            );
-                        }
+                    {
+                        let parent_id_for_fields = id;
+                        Self::extract_derivation_fields(state, attrset_node, &parent_id_for_fields);
                     }
                 } else {
-                    // Enhancement 2: Check for import paths in non-function bindings.
+                    // Check for import paths in non-function bindings.
                     if let Some(expr_node) = expr {
                         Self::check_import_in_expr(state, expr_node);
                     }
@@ -491,7 +490,7 @@ impl NixExtractor {
                                 let id = generate_node_id(
                                     &state.file_path,
                                     &kind,
-                                    &attr_name,
+                                    attr_name,
                                     start_line,
                                 );
                                 let attr_line = attr.start_position().row as u32;
@@ -499,7 +498,7 @@ impl NixExtractor {
                                 let graph_node = Node {
                                     id: id.clone(),
                                     kind,
-                                    name: attr_name.clone(),
+                                    name: attr_name.to_string(),
                                     qualified_name,
                                     file_path: state.file_path.clone(),
                                     start_line: attr_line,
@@ -535,7 +534,7 @@ impl NixExtractor {
                                 // Also create an unresolved Uses ref
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: id,
-                                    reference_name: attr_name,
+                                    reference_name: attr_name.to_string(),
                                     reference_kind: EdgeKind::Uses,
                                     line: start_line,
                                     column: start_column,
@@ -618,7 +617,6 @@ impl NixExtractor {
                 Self::visit_children_for_defs(state, node);
             }
             "let_expression" => {
-                // Process bindings and body
                 Self::visit_let_expression(state, node);
             }
             "attrset_expression" => {
@@ -631,7 +629,6 @@ impl NixExtractor {
         }
     }
 
-    /// Helper to recurse into children looking for definitions.
     fn visit_children_for_defs(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -645,7 +642,6 @@ impl NixExtractor {
         }
     }
 
-    /// Check if the file path ends with `flake.nix`.
     fn is_flake_file(state: &ExtractionState) -> bool {
         state.file_path.ends_with("flake.nix")
     }
@@ -695,63 +691,63 @@ impl NixExtractor {
                     if inner.goto_first_child() {
                         loop {
                             let item = inner.node();
-                            if item.kind() == "binding" {
-                                if let Some(field_name) = Self::extract_binding_name(state, item) {
-                                    let start_line = item.start_position().row as u32;
-                                    let end_line = item.end_position().row as u32;
-                                    let start_column = item.start_position().column as u32;
-                                    let end_column = item.end_position().column as u32;
-                                    let kind = NodeKind::Field;
-                                    let qualified_name =
-                                        format!("{}::{}", state.qualified_prefix(), field_name);
-                                    let id = generate_node_id(
-                                        &state.file_path,
-                                        &kind,
-                                        &field_name,
-                                        start_line,
-                                    );
+                            if item.kind() == "binding"
+                                && let Some(field_name) = Self::extract_binding_name(state, item)
+                            {
+                                let start_line = item.start_position().row as u32;
+                                let end_line = item.end_position().row as u32;
+                                let start_column = item.start_position().column as u32;
+                                let end_column = item.end_position().column as u32;
+                                let kind = NodeKind::Field;
+                                let qualified_name =
+                                    format!("{}::{}", state.qualified_prefix(), field_name);
+                                let id = generate_node_id(
+                                    &state.file_path,
+                                    &kind,
+                                    &field_name,
+                                    start_line,
+                                );
 
-                                    let text = state.node_text(item);
-                                    let signature = text
-                                        .lines()
-                                        .next()
-                                        .map(|l| l.trim().to_string())
-                                        .filter(|l| !l.is_empty());
+                                let text = state.node_text(item);
+                                let signature = text
+                                    .lines()
+                                    .next()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|l| !l.is_empty());
 
-                                    let graph_node = Node {
-                                        id: id.clone(),
-                                        kind,
-                                        name: field_name,
-                                        qualified_name,
-                                        file_path: state.file_path.clone(),
-                                        start_line,
-                                        attrs_start_line: start_line,
-                                        end_line,
-                                        start_column,
-                                        end_column,
-                                        signature,
-                                        docstring: None,
-                                        visibility: Visibility::Pub,
-                                        is_async: false,
-                                        branches: 0,
-                                        loops: 0,
-                                        returns: 0,
-                                        max_nesting: 0,
-                                        unsafe_blocks: 0,
-                                        unchecked_calls: 0,
-                                        assertions: 0,
-                                        updated_at: state.timestamp,
-                                        parent_id: None,
-                                    };
-                                    state.nodes.push(graph_node);
+                                let graph_node = Node {
+                                    id: id.clone(),
+                                    kind,
+                                    name: field_name,
+                                    qualified_name,
+                                    file_path: state.file_path.clone(),
+                                    start_line,
+                                    attrs_start_line: start_line,
+                                    end_line,
+                                    start_column,
+                                    end_column,
+                                    signature,
+                                    docstring: None,
+                                    visibility: Visibility::Pub,
+                                    is_async: false,
+                                    branches: 0,
+                                    loops: 0,
+                                    returns: 0,
+                                    max_nesting: 0,
+                                    unsafe_blocks: 0,
+                                    unchecked_calls: 0,
+                                    assertions: 0,
+                                    updated_at: state.timestamp,
+                                    parent_id: None,
+                                };
+                                state.nodes.push(graph_node);
 
-                                    state.edges.push(Edge {
-                                        source: parent_id.to_string(),
-                                        target: id,
-                                        kind: EdgeKind::Contains,
-                                        line: Some(start_line),
-                                    });
-                                }
+                                state.edges.push(Edge {
+                                    source: parent_id.to_string(),
+                                    target: id,
+                                    kind: EdgeKind::Contains,
+                                    line: Some(start_line),
+                                });
                             }
                             if !inner.goto_next_sibling() {
                                 break;
@@ -780,7 +776,7 @@ impl NixExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "identifier" {
-                        return Some(state.node_text(child));
+                        return Some(state.node_text(child).to_string());
                     }
                     if !cursor.goto_next_sibling() {
                         break;
@@ -815,12 +811,11 @@ impl NixExtractor {
         // If no previous sibling at this level, check the parent's previous sibling.
         // This handles cases where the comment is a child of `let_expression` or
         // `attrset_expression` but the binding is inside `binding_set`.
-        if prev.is_none() {
-            if let Some(parent) = node.parent() {
-                if parent.kind() == "binding_set" {
-                    prev = parent.prev_named_sibling();
-                }
-            }
+        if prev.is_none()
+            && let Some(parent) = node.parent()
+            && parent.kind() == "binding_set"
+        {
+            prev = parent.prev_named_sibling();
         }
 
         while let Some(prev_node) = prev {
@@ -841,7 +836,7 @@ impl NixExtractor {
     }
 
     /// Recursively find call nodes (`apply_expression`) and create unresolved Calls references.
-    /// Also handles Enhancement 2: import path resolution.
+    /// Also handles import path resolution.
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -866,16 +861,15 @@ impl NixExtractor {
                             });
                         }
 
-                        // Enhancement 2: Import path resolution.
+                        // Import path resolution.
                         // When the callee is `import` and the argument is a path_expression,
                         // emit a Use node and an unresolved Uses ref for cross-file tracking.
-                        if callee_name.as_deref() == Some("import") {
-                            if let Some(arg) = child.child_by_field_name("argument") {
-                                if arg.kind() == "path_expression" {
-                                    let path_text = state.node_text(arg);
-                                    Self::emit_import_use_node(state, &path_text, child);
-                                }
-                            }
+                        if callee_name.as_deref() == Some("import")
+                            && let Some(arg) = child.child_by_field_name("argument")
+                            && arg.kind() == "path_expression"
+                        {
+                            let path_text = state.node_text(arg);
+                            Self::emit_import_use_node(state, path_text, child);
                         }
 
                         // Recurse into the apply_expression for nested calls.
@@ -900,13 +894,12 @@ impl NixExtractor {
             let callee_name = node
                 .child_by_field_name("function")
                 .and_then(|func_node| Self::extract_callee_name(state, func_node));
-            if callee_name.as_deref() == Some("import") {
-                if let Some(arg) = node.child_by_field_name("argument") {
-                    if arg.kind() == "path_expression" {
-                        let path_text = state.node_text(arg);
-                        Self::emit_import_use_node(state, &path_text, node);
-                    }
-                }
+            if callee_name.as_deref() == Some("import")
+                && let Some(arg) = node.child_by_field_name("argument")
+                && arg.kind() == "path_expression"
+            {
+                let path_text = state.node_text(arg);
+                Self::emit_import_use_node(state, path_text, node);
             }
         }
         // Recurse into children
@@ -982,19 +975,20 @@ impl NixExtractor {
         match node.kind() {
             "variable_expression" => {
                 // variable_expression has a `name` field (identifier)
-                node.child_by_field_name("name").map(|n| state.node_text(n))
+                node.child_by_field_name("name")
+                    .map(|n| state.node_text(n).to_string())
             }
             "select_expression" => {
                 // select_expression: expression.attrpath
                 // Extract the full dotted path for the callee name.
-                Some(state.node_text(node))
+                Some(state.node_text(node).to_string())
             }
             "apply_expression" => {
                 // Curried call: (f x) y — extract the innermost function name
                 node.child_by_field_name("function")
                     .and_then(|f| Self::extract_callee_name(state, f))
             }
-            _ => Some(state.node_text(node)),
+            _ => Some(state.node_text(node).to_string()),
         }
     }
 
@@ -1051,5 +1045,15 @@ impl crate::LanguageExtractor for NixExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_nix(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

@@ -1,0 +1,1773 @@
+use std::collections::HashMap;
+
+use serde::Deserialize;
+use tracedecay_domain::{
+    CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
+    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError,
+    ObservationScopeV1,
+};
+use tracedecay_store::{
+    ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectionSkipReason,
+    ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
+    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
+    WorkflowFactRecord, derive_canonical_projection, workflow_semantic_kind,
+};
+
+use tracedecay_lcm::contracts::LcmError;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_sessions::runtime::claude::{
+    ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
+};
+use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
+
+use super::state::{
+    canonicalize_session_project_paths, read_message, read_output_state, read_session,
+    reconcile_session_rows, storage, storage_message, verify_output_state,
+};
+use super::transition::{
+    MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
+    message_transition, write_workflow_fact_transition,
+};
+
+fn decode_canonical_envelope(
+    payload: &serde_json::Value,
+) -> Result<CanonicalObservationEnvelopeV1, serde_json::Error> {
+    CanonicalObservationEnvelopeV1::deserialize(payload)
+}
+
+#[hotpath::measure(label = "global_db.observation_apply.derive")]
+pub(in super::super) fn derive_projection(
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    match observation.source().provider().as_str() {
+        "claude" if decode_canonical_envelope(observation.payload()).is_ok() => {
+            derive_canonical_projection(observation)
+        }
+        "claude" => derive_claude_projection(observation),
+        _ => derive_canonical_projection(observation),
+    }
+}
+
+fn derive_claude_projection(
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    let session_id = observation.source().session_id().as_str();
+    let payload = observation.payload();
+    let durable_message_id = payload
+        .pointer("/message/id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| payload.get("uuid").and_then(serde_json::Value::as_str))
+        .filter(|id| !id.is_empty());
+    let durable_tool_event_ids = payload
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item.get("id")
+                .or_else(|| item.get("tool_use_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let (project_key, project_path) = match observation.scope() {
+        ObservationScopeV1::Profile => ("user", "user"),
+        ObservationScopeV1::Project { project_id } => (project_id.as_str(), project_id.as_str()),
+    };
+    let source_path = (observation.source().source_key() != observation.source().session_id())
+        .then(|| observation.source().source_key().as_str());
+    let context = ClaudeRecordContext {
+        session_id,
+        project_key,
+        project_path,
+        file_generation: observation.identity().generation().file_id(),
+        offset: observation.identity().position().start(),
+        session_cwd: None,
+        source_path,
+        raw_message_id: durable_message_id,
+        raw_tool_event_ids: &durable_tool_event_ids,
+        raw_hook_tool_use_id: None,
+    };
+
+    match map_sanitized_claude_record(payload, &context) {
+        ClaudeRecordDisposition::Message { draft, message } => {
+            let draft = *draft;
+            let message = *message;
+            let timestamp = message.timestamp;
+            let session = SessionRecord {
+                provider: "claude".to_string(),
+                session_id: draft.session_id,
+                project_key: draft.project_key,
+                project_path: draft.project_path,
+                title: draft.title,
+                started_at: timestamp,
+                ended_at: timestamp,
+                transcript_path: None,
+                metadata_json: draft.metadata_json,
+                parent_session_id: draft.parent_session_id,
+                is_subagent: draft.is_subagent,
+                agent_id: draft.agent_id,
+                parent_tool_use_id: draft.parent_tool_use_id,
+            };
+            ObservationProjection::for_message(observation, session, message)
+        }
+        ClaudeRecordDisposition::NonConversational => ObservationProjection::for_skip(
+            observation,
+            ProjectionSkipReason::NonConversationalRecord,
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectionOutputAlias {
+    provider: String,
+    message_id: String,
+}
+
+async fn read_projection_alias(
+    conn: &impl QueryExecutor,
+    observation_id: &CanonicalObservationIdV1,
+    rebuild_generation: Option<&str>,
+) -> ProjectionStoreResult<Option<ProjectionOutputAlias>> {
+    let mut rows = if let Some(generation) = rebuild_generation {
+        conn.query(
+            "SELECT output_provider, output_message_id
+             FROM observation_projection_rebuild_aliases
+             WHERE projector_version = ?1 AND generation = ?2 AND observation_id = ?3",
+            (
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                observation_id.as_str(),
+            ),
+        )
+        .await
+    } else {
+        conn.query(
+            "SELECT output_provider, output_message_id
+             FROM observation_projection_aliases
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id.as_str()),
+        )
+        .await
+    }
+    .map_err(|error| storage("read projection output alias", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection output alias", error))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ProjectionOutputAlias {
+        provider: row
+            .get(0)
+            .map_err(|error| storage("read projection output alias", error))?,
+        message_id: row
+            .get(1)
+            .map_err(|error| storage("read projection output alias", error))?,
+    }))
+}
+
+pub(in super::super) async fn derive_projection_with_alias(
+    conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    derive_projection_with_alias_from_generation(conn, observation, None).await
+}
+
+pub(super) async fn derive_projection_for_rebuild(
+    conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+    generation: &str,
+) -> ProjectionStoreResult<ObservationProjection> {
+    derive_projection_with_alias_from_generation(conn, observation, Some(generation)).await
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.alias")]
+async fn derive_projection_with_alias_from_generation(
+    conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+    rebuild_generation: Option<&str>,
+) -> ProjectionStoreResult<ObservationProjection> {
+    if let Some(reason) =
+        durable_projection_disposition(conn, observation.observation_id().as_str()).await?
+        && matches!(
+            reason,
+            ProjectionSkipReason::OutputCollision
+                | ProjectionSkipReason::InvalidContract
+                | ProjectionSkipReason::SanitizationRefused
+        )
+    {
+        return Ok(ObservationProjection::Skipped(reason));
+    }
+    let projection = derive_projection(observation)?;
+    // Collapse Codex-style token/time goal ticks at projection time so every
+    // raw observation stays durable while current goal state follows the
+    // established (thread, objective, status) transition semantics.
+    let projection =
+        collapse_consecutive_goal_ticks(conn, observation, projection, rebuild_generation).await?;
+    let Some(alias) =
+        read_projection_alias(conn, observation.observation_id(), rebuild_generation).await?
+    else {
+        return Ok(projection);
+    };
+    let (projection, derived_messages, workflow_facts) = match projection {
+        ObservationProjection::Message(projection) => (projection, Vec::new(), Vec::new()),
+        ObservationProjection::Composite {
+            message: Some(projection),
+            derived_messages,
+            workflow_facts,
+        } => (projection, derived_messages, workflow_facts),
+        ObservationProjection::Composite { message: None, .. }
+        | ObservationProjection::Skipped(_) => {
+            return Err(ProjectionStoreError::ProvenanceCollision);
+        }
+    };
+    let mut session = projection.session().clone();
+    let mut message = projection.message().clone();
+    session.provider.clone_from(&alias.provider);
+    message.provider = alias.provider;
+    message.message_id = alias.message_id;
+    let mut messages = vec![(session, message)];
+    messages.extend(
+        derived_messages
+            .into_iter()
+            .map(|projection| (projection.session().clone(), projection.message().clone())),
+    );
+    ObservationProjection::for_outputs(
+        observation,
+        messages,
+        workflow_facts
+            .into_iter()
+            .map(|projection| (projection.session().clone(), projection.fact().clone()))
+            .collect(),
+    )
+}
+
+/// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
+/// else the already-extracted `content_text`.
+fn goal_objective_from_content(content: Option<&serde_json::Value>, content_text: &str) -> String {
+    content
+        .and_then(|content| content.get("objective"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|objective| !objective.is_empty())
+        .map_or_else(|| content_text.to_owned(), str::to_owned)
+}
+
+fn goal_dedupe_objective(fact: &WorkflowFactRecord) -> String {
+    goal_objective_from_content(fact.content.as_ref(), &fact.content_text)
+}
+
+fn goal_dedupe_key(fact: &WorkflowFactRecord) -> (String, Option<String>) {
+    (goal_dedupe_objective(fact), fact.status.clone())
+}
+
+async fn read_latest_goal_dedupe_key(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    session_id: &str,
+    provider_reference: Option<&str>,
+    before_observation_id: &str,
+    rebuild_generation: Option<&str>,
+) -> ProjectionStoreResult<Option<(String, Option<String>)>> {
+    let mut rows = if let Some(generation) = rebuild_generation {
+        conn.query(
+            "SELECT status, content_json, content_text
+             FROM observation_projection_rebuild_workflow_facts
+             WHERE projector_version = ?1 AND generation = ?2
+               AND semantic_kind = 'goal'
+               AND provider = ?3
+               AND session_id = ?4
+               AND (
+                    (?5 IS NULL AND provider_reference IS NULL)
+                    OR provider_reference = ?5
+               )
+               AND observation_sequence < (
+                    SELECT sequence FROM observations WHERE observation_id = ?6
+               )
+             ORDER BY observation_sequence DESC, fact_ordinal DESC
+             LIMIT 1",
+            (
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                provider,
+                session_id,
+                provider_reference,
+                before_observation_id,
+            ),
+        )
+        .await
+    } else {
+        conn.query(
+            "SELECT status, content_json, content_text
+             FROM observation_workflow_facts
+             WHERE projector_version = ?1
+               AND semantic_kind = 'goal'
+               AND provider = ?2
+               AND session_id = ?3
+               AND (
+                    (?4 IS NULL AND provider_reference IS NULL)
+                    OR provider_reference = ?4
+               )
+               AND observation_sequence < (
+                    SELECT sequence FROM observations WHERE observation_id = ?5
+               )
+             ORDER BY observation_sequence DESC, fact_ordinal DESC
+             LIMIT 1",
+            (
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                provider,
+                session_id,
+                provider_reference,
+                before_observation_id,
+            ),
+        )
+        .await
+    }
+    .map_err(|error| storage("read latest projected goal state", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read latest projected goal state", error))?
+    else {
+        return Ok(None);
+    };
+    let status: Option<String> = row
+        .get(0)
+        .map_err(|error| storage("read latest projected goal state", error))?;
+    let content_json: Option<String> = row
+        .get(1)
+        .map_err(|error| storage("read latest projected goal state", error))?;
+    let content_text: String = row
+        .get(2)
+        .map_err(|error| storage("read latest projected goal state", error))?;
+    let content = content_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    Ok(Some((
+        goal_objective_from_content(content.as_ref(), &content_text),
+        status,
+    )))
+}
+
+/// Drop Codex Goal rows that only advance tokens/time while retaining the raw
+/// observation. Meaningful objective or status transitions still project.
+#[hotpath::measure(future = true, label = "global_db.observation_apply.derive.collapse")]
+async fn collapse_consecutive_goal_ticks(
+    conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+    projection: ObservationProjection,
+    rebuild_generation: Option<&str>,
+) -> ProjectionStoreResult<ObservationProjection> {
+    type GoalPartition = (String, String, Option<String>);
+    type GoalDedupeKey = (String, Option<String>);
+
+    let ObservationProjection::Composite {
+        message,
+        derived_messages,
+        workflow_facts,
+    } = projection
+    else {
+        return Ok(projection);
+    };
+    if workflow_facts.is_empty() {
+        return Ok(ObservationProjection::Composite {
+            message,
+            derived_messages,
+            workflow_facts,
+        });
+    }
+
+    let mut retained = Vec::with_capacity(workflow_facts.len());
+    let mut last_in_batch: HashMap<GoalPartition, GoalDedupeKey> = HashMap::new();
+
+    for fact_projection in workflow_facts {
+        let fact = fact_projection.fact();
+        let session = fact_projection.session();
+        if session.provider != "codex"
+            || fact.semantic_kind != CanonicalWorkflowSemanticKindV1::Goal
+        {
+            retained.push(fact_projection);
+            continue;
+        }
+        let partition = (
+            session.provider.clone(),
+            session.session_id.clone(),
+            fact.provider_reference.clone(),
+        );
+        let key = goal_dedupe_key(fact);
+        let previous = if let Some(previous) = last_in_batch.get(&partition) {
+            Some(previous.clone())
+        } else {
+            read_latest_goal_dedupe_key(
+                conn,
+                &partition.0,
+                &partition.1,
+                partition.2.as_deref(),
+                observation.observation_id().as_str(),
+                rebuild_generation,
+            )
+            .await?
+        };
+        if previous.as_ref() == Some(&key) {
+            continue;
+        }
+        last_in_batch.insert(partition, key);
+        retained.push(fact_projection);
+    }
+
+    let message = if message.as_ref().is_some_and(|projection| {
+        projection.message().kind.as_deref() == Some("goal")
+            && !retained
+                .iter()
+                .any(|fact| fact.fact().semantic_kind == CanonicalWorkflowSemanticKindV1::Goal)
+    }) {
+        None
+    } else {
+        message
+    };
+    if retained.is_empty() {
+        return match message {
+            Some(message) => Ok(ObservationProjection::Message(message)),
+            None => ObservationProjection::for_skip(
+                observation,
+                ProjectionSkipReason::NonConversationalRecord,
+            ),
+        };
+    }
+    Ok(ObservationProjection::Composite {
+        message,
+        derived_messages,
+        workflow_facts: retained,
+    })
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.session")]
+pub(super) async fn apply_session(
+    conn: &impl Executor,
+    session: &SessionRecord,
+) -> ProjectionStoreResult<()> {
+    // Resolve symlinked project-path family roots to their canonical on-disk
+    // form once, here at the ingest boundary, and persist that canonical form.
+    // Downstream reconciliation, verify/audit, and rebuild then operate on
+    // stored strings alone without touching the filesystem.
+    let session = &canonicalize_session_project_paths(session);
+    match read_session(conn, &session.provider, &session.session_id).await? {
+        Some(actual) => {
+            let Some(merged) = reconcile_session_rows(&actual, session) else {
+                return Err(ProjectionStoreError::OutputCollision {
+                    provider: session.provider.clone(),
+                    message_id: format!("session:{}", session.session_id),
+                });
+            };
+            if merged == actual {
+                return Ok(());
+            }
+            conn.execute(
+                "UPDATE sessions
+                 SET project_key = ?3, project_path = ?4, title = ?5, started_at = ?6,
+                     ended_at = ?7, transcript_path = ?8, metadata_json = ?9,
+                     parent_session_id = ?10, is_subagent = ?11, agent_id = ?12,
+                     parent_tool_use_id = ?13
+                 WHERE provider = ?1 AND session_id = ?2",
+                params![
+                    merged.provider.as_str(),
+                    merged.session_id.as_str(),
+                    merged.project_key.as_str(),
+                    merged.project_path.as_str(),
+                    merged.title.as_deref(),
+                    merged.started_at,
+                    merged.ended_at,
+                    merged.transcript_path.as_deref(),
+                    merged.metadata_json.as_deref(),
+                    merged.parent_session_id.as_deref(),
+                    i64::from(merged.is_subagent),
+                    merged.agent_id.as_deref(),
+                    merged.parent_tool_use_id.as_deref(),
+                ],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| storage("enrich projected session", error))
+        }
+        None => conn
+            .execute(
+                "INSERT INTO sessions
+            (provider, session_id, project_key, project_path, title, started_at, ended_at,
+             transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+             parent_tool_use_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    session.provider.as_str(),
+                    session.session_id.as_str(),
+                    session.project_key.as_str(),
+                    session.project_path.as_str(),
+                    session.title.as_deref(),
+                    session.started_at,
+                    session.ended_at,
+                    session.transcript_path.as_deref(),
+                    session.metadata_json.as_deref(),
+                    session.parent_session_id.as_deref(),
+                    i64::from(session.is_subagent),
+                    session.agent_id.as_deref(),
+                    session.parent_tool_use_id.as_deref(),
+                ],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| storage("insert projected session", error)),
+    }
+}
+
+/// Writes the projection-derived raw row through the canonical LCM raw
+/// authority so it carries the content-bound sanitization receipt that
+/// hydration requires; a receipt-less raw row is unreadable, not raw storage.
+///
+/// A deterministic sanitization refusal keeps its typed class: mapping it to
+/// `Storage` would schedule an endless environmental retry for content that
+/// can never succeed, permanently poisoning the sequential projection queue.
+async fn upsert_projected_raw_message(
+    conn: &impl Executor,
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    tracedecay_lcm::raw::upsert_projection_raw_message(conn, message)
+        .await
+        .map_err(|error| match error {
+            LcmError::SanitizationRefused { reason } => {
+                ProjectionStoreError::SanitizationRefused { reason }
+            }
+            environmental => storage("upsert projected LCM raw message", environmental),
+        })
+}
+
+async fn reconcile_projected_codex_goal_response(
+    conn: &impl Executor,
+    current: &SessionMessageRecord,
+) -> ProjectionStoreResult<()> {
+    let Some(response_message_id) = find_preceding_codex_goal_response(conn, current)
+        .await
+        .map_err(|error| storage("find preceding Codex goal response", error))?
+    else {
+        return Ok(());
+    };
+    let mut provenance_rows = conn
+        .query(
+            "SELECT observation_id, receipt_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                current.provider.as_str(),
+                response_message_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("read paired Codex goal provenance", error))?;
+    let mut replaced_observations = Vec::new();
+    while let Some(row) = provenance_rows
+        .next()
+        .await
+        .map_err(|error| storage("read paired Codex goal provenance", error))?
+    {
+        replaced_observations.push((
+            row.get::<String>(0)
+                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+            row.get::<String>(1)
+                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+        ));
+    }
+    drop(provenance_rows);
+    conn.execute(
+        "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+        params![current.provider.as_str(), response_message_id.as_str()],
+    )
+    .await
+    .map_err(|error| storage("remove paired Codex goal raw message", error))?;
+    conn.execute(
+        "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+        params![current.provider.as_str(), response_message_id.as_str()],
+    )
+    .await
+    .map_err(|error| storage("remove paired Codex goal projection", error))?;
+    conn.execute(
+        "DELETE FROM observation_projection_provenance
+         WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            current.provider.as_str(),
+            response_message_id.as_str(),
+        ],
+    )
+    .await
+    .map_err(|error| storage("remove paired Codex goal provenance", error))?;
+    for (observation_id, receipt_id) in replaced_observations {
+        conn.execute(
+            "INSERT INTO observation_projection_dispositions
+                (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT DO NOTHING",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+                receipt_id.as_str(),
+                ProjectionSkipReason::OutputCollision.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("retire paired Codex goal observation", error))?;
+    }
+    conn.execute(
+        "DELETE FROM temp.observation_projection_output_state
+         WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            current.provider.as_str(),
+            response_message_id.as_str(),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("remove paired Codex goal output state", error))
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.rows")]
+async fn apply_rows(
+    conn: &impl Executor,
+    sequence: u64,
+    observation: &DurableObservationV1,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<bool> {
+    let session = projection.session();
+    apply_session(conn, session).await?;
+
+    let message = projection.message();
+    reconcile_projected_codex_goal_response(conn, message).await?;
+    let existing = read_message(conn, &message.provider, &message.message_id).await?;
+    let state = read_output_state(conn, projection).await?;
+    if existing.is_some()
+        && let Some(state) = state.as_ref()
+    {
+        verify_output_state(conn, state, projection).await?;
+    }
+    let transition_state = state.as_ref().map(|state| {
+        MessageTransitionState::new(
+            observation,
+            &state.latest.observation,
+            state.latest.sequence,
+            state.projector_owned,
+        )
+    });
+    let (transition, preserve_protected_payload) = message_transition(
+        conn,
+        sequence,
+        projection,
+        existing.as_ref(),
+        transition_state,
+    )
+    .await?;
+    match transition {
+        MessageTransition::Insert => {
+            conn.execute(
+                "INSERT INTO session_messages
+            (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+             tool_names, source_path, source_offset, metadata_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    message.provider.as_str(),
+                    message.message_id.as_str(),
+                    message.session_id.as_str(),
+                    message.role.as_str(),
+                    message.timestamp,
+                    message.ordinal,
+                    message.text.as_str(),
+                    message.kind.as_deref(),
+                    message.model.as_deref(),
+                    message.tool_names.as_deref(),
+                    message.source_path.as_deref(),
+                    message.source_offset,
+                    message.metadata_json.as_deref(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("insert projected message", error))?;
+        }
+        MessageTransition::Supersede => {
+            conn.execute(
+                "UPDATE session_messages
+                 SET session_id = ?3, role = ?4, timestamp = ?5, ordinal = ?6,
+                     text = ?7, kind = ?8, model = ?9, tool_names = ?10,
+                     source_path = ?11, source_offset = ?12, metadata_json = ?13
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![
+                    message.provider.as_str(),
+                    message.message_id.as_str(),
+                    message.session_id.as_str(),
+                    message.role.as_str(),
+                    message.timestamp,
+                    message.ordinal,
+                    message.text.as_str(),
+                    message.kind.as_deref(),
+                    message.model.as_deref(),
+                    message.tool_names.as_deref(),
+                    message.source_path.as_deref(),
+                    message.source_offset,
+                    message.metadata_json.as_deref(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("supersede projected message", error))?;
+        }
+        MessageTransition::Retain => {}
+    }
+    let projected_message = match transition {
+        MessageTransition::Insert | MessageTransition::Supersede => message,
+        MessageTransition::Retain => {
+            existing
+                .as_ref()
+                .ok_or_else(|| ProjectionStoreError::OutputCollision {
+                    provider: message.provider.clone(),
+                    message_id: message.message_id.clone(),
+                })?
+        }
+    };
+    if projected_message.provider != "hermes" && !preserve_protected_payload {
+        upsert_projected_raw_message(conn, projected_message).await?;
+    }
+    Ok(transition == MessageTransition::Insert)
+}
+
+fn workflow_content_json(
+    projection: &WorkflowFactProjection,
+) -> ProjectionStoreResult<Option<String>> {
+    projection
+        .fact()
+        .content
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
+}
+
+#[derive(PartialEq, Eq)]
+struct StoredWorkflowFact {
+    retrieval_anchor_id: String,
+    receipt_id: String,
+    observation_sequence: i64,
+    provider: String,
+    session_id: String,
+    semantic_kind: String,
+    provider_reference: Option<String>,
+    item_id: Option<String>,
+    parent_reference: Option<String>,
+    list_reference: Option<String>,
+    state: Option<String>,
+    status: Option<String>,
+    item_order: Option<i64>,
+    native_revision: Option<String>,
+    event_sequence: Option<i64>,
+    source_sequence: Option<i64>,
+    native_timestamp: Option<i64>,
+    ordering_domain: String,
+    content_json: Option<String>,
+    content_text: String,
+    output_digest: String,
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query.workflow")]
+async fn verify_workflow_fact(
+    conn: &impl QueryExecutor,
+    projection: &WorkflowFactProjection,
+) -> ProjectionStoreResult<()> {
+    let fact = projection.fact();
+    let provenance = projection.provenance();
+    let session = projection.session();
+    let mut sequence_rows = conn
+        .query(
+            "SELECT sequence FROM observations WHERE observation_id = ?1",
+            (provenance.observation_id().as_str(),),
+        )
+        .await
+        .map_err(|error| storage("read workflow observation sequence", error))?;
+    let sequence = sequence_rows
+        .next()
+        .await
+        .map_err(|error| storage("read workflow observation sequence", error))?
+        .ok_or(ProjectionStoreError::ProvenanceCollision)?
+        .get::<i64>(0)
+        .map_err(|error| storage("read workflow observation sequence", error))?;
+    drop(sequence_rows);
+    let mut rows = conn
+        .query(
+            "SELECT retrieval_anchor_id, receipt_id, observation_sequence, provider, session_id,
+                    semantic_kind,
+                    provider_reference, item_id, parent_reference, list_reference, state, status,
+                    item_order, native_revision, event_sequence, source_sequence,
+                    native_timestamp, ordering_domain, content_json, content_text, output_digest
+             FROM observation_workflow_facts
+             WHERE projector_version = ?1 AND observation_id = ?2 AND fact_ordinal = ?3",
+            (
+                provenance.projector_version(),
+                provenance.observation_id().as_str(),
+                i64::from(fact.fact_ordinal),
+            ),
+        )
+        .await
+        .map_err(|error| storage("verify projected workflow fact", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify projected workflow fact", error))?
+    else {
+        return Err(ProjectionStoreError::ProvenanceCollision);
+    };
+    macro_rules! cell {
+        ($index:literal, $ty:ty) => {
+            row.get::<$ty>($index)
+                .map_err(|error| storage("verify projected workflow fact", error))?
+        };
+    }
+    let actual = StoredWorkflowFact {
+        retrieval_anchor_id: cell!(0, String),
+        receipt_id: cell!(1, String),
+        observation_sequence: cell!(2, i64),
+        provider: cell!(3, String),
+        session_id: cell!(4, String),
+        semantic_kind: cell!(5, String),
+        provider_reference: cell!(6, Option<String>),
+        item_id: cell!(7, Option<String>),
+        parent_reference: cell!(8, Option<String>),
+        list_reference: cell!(9, Option<String>),
+        state: cell!(10, Option<String>),
+        status: cell!(11, Option<String>),
+        item_order: cell!(12, Option<i64>),
+        native_revision: cell!(13, Option<String>),
+        event_sequence: cell!(14, Option<i64>),
+        source_sequence: cell!(15, Option<i64>),
+        native_timestamp: cell!(16, Option<i64>),
+        ordering_domain: cell!(17, String),
+        content_json: cell!(18, Option<String>),
+        content_text: cell!(19, String),
+        output_digest: cell!(20, String),
+    };
+    let expected = StoredWorkflowFact {
+        retrieval_anchor_id: provenance.retrieval_anchor_id().as_str().to_owned(),
+        receipt_id: provenance.receipt_id().to_owned(),
+        observation_sequence: sequence,
+        provider: session.provider.clone(),
+        session_id: session.session_id.clone(),
+        semantic_kind: workflow_semantic_kind(fact.semantic_kind).to_owned(),
+        provider_reference: fact.provider_reference.clone(),
+        item_id: fact.item_id.clone(),
+        parent_reference: fact.parent_reference.clone(),
+        list_reference: fact.list_reference.clone(),
+        state: fact.state.clone(),
+        status: fact.status.clone(),
+        item_order: fact
+            .item_order
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| ProjectionStoreError::SequenceOverflow(u64::MAX))?,
+        native_revision: fact.native_revision.clone(),
+        event_sequence: fact
+            .event_sequence
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| ProjectionStoreError::SequenceOverflow(u64::MAX))?,
+        source_sequence: fact
+            .source_sequence
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| ProjectionStoreError::SequenceOverflow(u64::MAX))?,
+        native_timestamp: fact.native_timestamp,
+        ordering_domain: fact.ordering_domain.clone(),
+        content_json: workflow_content_json(projection)?,
+        content_text: fact.content_text.clone(),
+        output_digest: projection.output_digest()?.as_str().to_owned(),
+    };
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ProjectionStoreError::ProvenanceCollision)
+    }
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.workflow")]
+async fn apply_workflow_fact(
+    conn: &impl Executor,
+    sequence: u64,
+    projection: &WorkflowFactProjection,
+) -> ProjectionStoreResult<()> {
+    apply_session(conn, projection.session()).await?;
+    let transition = WorkflowFactTransition::new(sequence, projection)?;
+    let content_json = workflow_content_json(transition.projection())?;
+    let inserted = write_workflow_fact_transition(
+        conn,
+        WorkflowFactTarget::Live,
+        &transition,
+        workflow_semantic_kind(transition.fact().semantic_kind),
+        content_json.as_deref(),
+    )
+    .await?;
+    // A fresh insert wrote this exact tuple inside the transaction. Only a
+    // conflict can hide a durable row that disagrees with this derivation.
+    if inserted == 1 {
+        Ok(())
+    } else {
+        verify_workflow_fact(conn, projection).await
+    }
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query.provenance")]
+pub(super) async fn verify_provenance(
+    conn: &impl QueryExecutor,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<()> {
+    let provenance = projection.provenance();
+    let message = projection.message();
+    let mut rows = conn
+        .query(
+            "SELECT retrieval_anchor_id, receipt_id, output_provider, output_message_id,
+                    output_digest
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2
+               AND output_ordinal = ?3",
+            params![
+                provenance.projector_version(),
+                provenance.observation_id().as_str(),
+                projection.output_ordinal(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("verify projection provenance", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify projection provenance", error))?
+    else {
+        return Err(ProjectionStoreError::ProvenanceCollision);
+    };
+    let actual = (
+        row.get::<String>(0)
+            .map_err(|error| storage("verify projection provenance", error))?,
+        row.get::<String>(1)
+            .map_err(|error| storage("verify projection provenance", error))?,
+        row.get::<String>(2)
+            .map_err(|error| storage("verify projection provenance", error))?,
+        row.get::<String>(3)
+            .map_err(|error| storage("verify projection provenance", error))?,
+        row.get::<String>(4)
+            .map_err(|error| storage("verify projection provenance", error))?,
+    );
+    let expected = (
+        provenance.retrieval_anchor_id().as_str().to_string(),
+        provenance.receipt_id().to_string(),
+        message.provider.clone(),
+        message.message_id.clone(),
+        projection.output_digest()?.as_str().to_string(),
+    );
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ProjectionStoreError::ProvenanceCollision)
+    }
+}
+
+/// Output identity a durable provenance row already binds for one
+/// observation/ordinal key, if any.
+async fn read_provenance_output_binding(
+    conn: &impl QueryExecutor,
+    provenance: &tracedecay_store::ProjectionProvenance,
+    output_ordinal: u32,
+) -> ProjectionStoreResult<Option<(String, String, bool)>> {
+    let mut rows = conn
+        .query(
+            "SELECT provenance.output_provider, provenance.output_message_id,
+                    EXISTS(
+                        SELECT 1 FROM session_messages AS message
+                        WHERE message.provider = provenance.output_provider
+                          AND message.message_id = provenance.output_message_id
+                    )
+             FROM observation_projection_provenance AS provenance
+             WHERE provenance.projector_version = ?1
+               AND provenance.observation_id = ?2
+               AND provenance.output_ordinal = ?3",
+            params![
+                provenance.projector_version(),
+                provenance.observation_id().as_str(),
+                output_ordinal,
+            ],
+        )
+        .await
+        .map_err(|error| storage("read projection provenance output binding", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection provenance output binding", error))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get::<String>(0)
+            .map_err(|error| storage("read projection provenance output binding", error))?,
+        row.get::<String>(1)
+            .map_err(|error| storage("read projection provenance output binding", error))?,
+        row.get::<i64>(2)
+            .map_err(|error| storage("read projection provenance output binding", error))?
+            != 0,
+    )))
+}
+
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_apply.persist.provenance"
+)]
+async fn apply_provenance(
+    conn: &impl Executor,
+    sequence: u64,
+    projection: &SessionMessageProjection,
+    message_created: bool,
+) -> ProjectionStoreResult<()> {
+    let provenance = projection.provenance();
+    let message = projection.message();
+    let inserted = conn
+        .execute(
+            "INSERT INTO observation_projection_provenance
+            (projector_version, observation_id, output_ordinal, retrieval_anchor_id, receipt_id,
+             output_provider, output_message_id, output_digest, message_created)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT DO NOTHING",
+            params![
+                provenance.projector_version(),
+                provenance.observation_id().as_str(),
+                projection.output_ordinal(),
+                provenance.retrieval_anchor_id().as_str(),
+                provenance.receipt_id(),
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                projection.output_digest()?.as_str(),
+                i64::from(message_created),
+            ],
+        )
+        .await
+        .map_err(|error| storage("insert projection provenance", error))?;
+    match verify_provenance(conn, projection).await {
+        Ok(()) => {}
+        // The insert was a no-op because a row already holds this
+        // observation's provenance key. Only when that row binds a DIFFERENT
+        // output identity AND that output row still exists is this the
+        // deterministic existing-output collision the drain converges into a
+        // durable skip. A ghost binding or a retained row that names
+        // the SAME output but disagrees on anchor, receipt, or digest is
+        // corrupt provenance authority — as is a row that disagrees right
+        // after this insert claimed to write it — and stays a hard error.
+        Err(ProjectionStoreError::ProvenanceCollision) if inserted == 0 => {
+            let (stored_provider, stored_message_id, output_exists) =
+                read_provenance_output_binding(conn, provenance, projection.output_ordinal())
+                    .await?
+                    .ok_or(ProjectionStoreError::ProvenanceCollision)?;
+            if output_exists
+                && (stored_provider, stored_message_id)
+                    != (message.provider.clone(), message.message_id.clone())
+            {
+                return Err(ProjectionStoreError::OutputCollision {
+                    provider: message.provider.clone(),
+                    message_id: message.message_id.clone(),
+                });
+            }
+            return Err(ProjectionStoreError::ProvenanceCollision);
+        }
+        Err(error) => return Err(error),
+    }
+    if inserted == 0 {
+        return Ok(());
+    }
+
+    let sequence_i64 =
+        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
+    conn.execute(
+        "INSERT INTO temp.observation_projection_output_state (
+            projector_version, output_provider, output_message_id,
+            canonical_observation_id, latest_observation_id, latest_sequence,
+            projector_owned, owner_count
+         ) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 1)
+         ON CONFLICT(projector_version, output_provider, output_message_id) DO UPDATE SET
+            canonical_observation_id = CASE
+                WHEN observation_projection_output_state.projector_owned = 1
+                 AND excluded.latest_sequence >= observation_projection_output_state.latest_sequence
+                THEN excluded.latest_observation_id
+                ELSE observation_projection_output_state.canonical_observation_id
+            END,
+            latest_observation_id = CASE
+                WHEN excluded.latest_sequence >= observation_projection_output_state.latest_sequence
+                THEN excluded.latest_observation_id
+                ELSE observation_projection_output_state.latest_observation_id
+            END,
+            latest_sequence = MAX(
+                observation_projection_output_state.latest_sequence,
+                excluded.latest_sequence
+            ),
+            projector_owned = MAX(
+                observation_projection_output_state.projector_owned,
+                excluded.projector_owned
+            ),
+            owner_count = observation_projection_output_state.owner_count + 1",
+        params![
+            provenance.projector_version(),
+            message.provider.as_str(),
+            message.message_id.as_str(),
+            provenance.observation_id().as_str(),
+            sequence_i64,
+            i64::from(message_created),
+        ],
+    )
+    .await
+    .map_err(|error| storage("update projection output state", error))?;
+    Ok(())
+}
+
+/// Durable deterministic dispositions are projection input on every replay and
+/// rebuild. Consulting them before derivation prevents an unchanged invalid
+/// observation from repeating expensive hashing or parsing work.
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query.disposition")]
+pub async fn durable_projection_disposition(
+    conn: &impl QueryExecutor,
+    observation_id: &str,
+) -> ProjectionStoreResult<Option<ProjectionSkipReason>> {
+    let mut rows = conn
+        .query(
+            "SELECT reason FROM observation_projection_dispositions
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            (SESSION_MESSAGE_PROJECTOR_VERSION, observation_id),
+        )
+        .await
+        .map_err(|error| storage("read projection disposition", error))?;
+    let reason = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection disposition", error))?
+        .map(|row| row.get::<String>(0))
+        .transpose()
+        .map_err(|error| storage("read projection disposition", error))?;
+    reason
+        .map(|reason| {
+            ProjectionSkipReason::from_durable_str(&reason).ok_or_else(|| {
+                storage_message(
+                    "read projection disposition",
+                    "projection disposition has an unknown reason",
+                )
+            })
+        })
+        .transpose()
+}
+
+async fn verify_skip_disposition(
+    conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+    reason: ProjectionSkipReason,
+) -> ProjectionStoreResult<()> {
+    let mut rows = conn
+        .query(
+            "SELECT receipt_id, reason FROM observation_projection_dispositions
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str()
+            ],
+        )
+        .await
+        .map_err(|error| storage("verify projection disposition", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify projection disposition", error))?
+    else {
+        return Err(ProjectionStoreError::ProvenanceCollision);
+    };
+    let receipt_id = row
+        .get::<String>(0)
+        .map_err(|error| storage("verify projection disposition", error))?;
+    let actual_reason = row
+        .get::<String>(1)
+        .map_err(|error| storage("verify projection disposition", error))?;
+    let expected_receipt_id = observation.receipt().receipt().receipt_id().as_str();
+    if receipt_id == expected_receipt_id && actual_reason == reason.as_str() {
+        Ok(())
+    } else {
+        Err(ProjectionStoreError::ProvenanceCollision)
+    }
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.skip")]
+pub(super) async fn apply_skip_disposition(
+    conn: &impl Executor,
+    observation: &DurableObservationV1,
+    reason: ProjectionSkipReason,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "INSERT INTO observation_projection_dispositions
+            (projector_version, observation_id, receipt_id, reason)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT DO NOTHING",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            observation.observation_id().as_str(),
+            observation.receipt().receipt().receipt_id().as_str(),
+            reason.as_str(),
+        ],
+    )
+    .await
+    .map_err(|error| storage("insert projection disposition", error))?;
+    verify_skip_disposition(conn, observation, reason).await
+}
+
+async fn verify_message_effect(
+    conn: &impl QueryExecutor,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<()> {
+    verify_provenance(conn, projection).await?;
+    let state = read_output_state(conn, projection)
+        .await?
+        .ok_or(ProjectionStoreError::ProvenanceCollision)?;
+    verify_output_state(conn, &state, projection).await
+}
+
+async fn apply_message_effect(
+    conn: &impl Executor,
+    sequence: u64,
+    observation: &DurableObservationV1,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<()> {
+    let message_created = apply_rows(conn, sequence, observation, projection).await?;
+    apply_provenance(conn, sequence, projection, message_created).await
+}
+
+struct ProviderUsageRow {
+    usage_ordinal: i64,
+    model_json: String,
+    native_scope: &'static str,
+    counter_semantics: &'static str,
+    counters_json: String,
+    request_id: Option<String>,
+    native_kind: String,
+    native_field: String,
+}
+
+fn provider_usage_from_observation(
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<Option<(CanonicalObservationEnvelopeV1, Vec<ProviderUsageRow>)>> {
+    let Ok(envelope) = decode_canonical_envelope(observation.payload()) else {
+        return Ok(None);
+    };
+    let rows = provider_usage_rows_from_envelope(&envelope)?;
+    Ok((!rows.is_empty()).then_some((envelope, rows)))
+}
+
+fn provider_usage_rows_from_envelope(
+    envelope: &CanonicalObservationEnvelopeV1,
+) -> ProjectionStoreResult<Vec<ProviderUsageRow>> {
+    envelope
+        .facts()
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, fact)| {
+            let (
+                model,
+                native_scope,
+                counter_semantics,
+                counters,
+                request_id,
+                native_kind,
+                native_field,
+            ) = match fact {
+                CanonicalObservationFactV1::ProviderUsage {
+                    model,
+                    native_scope,
+                    counter_semantics,
+                    counters,
+                    request_id,
+                    native_kind,
+                    native_field,
+                } => (
+                    model.clone(),
+                    *native_scope,
+                    *counter_semantics,
+                    counters.clone(),
+                    request_id.as_ref().map(|id| id.as_str().to_owned()),
+                    native_kind.clone(),
+                    native_field.clone(),
+                ),
+                CanonicalObservationFactV1::UncorrelatedUsage { .. } => return None,
+                _ => return None,
+            };
+            Some((|| {
+                Ok(ProviderUsageRow {
+                    usage_ordinal: i64::try_from(ordinal).map_err(|_| {
+                        ProjectionStoreError::Contract(
+                            ObservationContractError::InvalidCanonicalPayload,
+                        )
+                    })?,
+                    model_json: serde_json::to_string(&model).map_err(|_| {
+                        ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
+                    })?,
+                    native_scope: native_scope.as_str(),
+                    counter_semantics: counter_semantics.as_str(),
+                    counters_json: serde_json::to_string(&counters).map_err(|_| {
+                        ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
+                    })?,
+                    request_id,
+                    native_kind,
+                    native_field,
+                })
+            })())
+        })
+        .collect()
+}
+
+fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
+    match scope {
+        ObservationScopeV1::Profile => ("profile", None),
+        ObservationScopeV1::Project { project_id } => ("project", Some(project_id.as_str())),
+    }
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist.usage")]
+pub(crate) async fn apply_provider_usage_effects(
+    conn: &impl Executor,
+    sequence: u64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let Some((envelope, expected)) = provider_usage_from_observation(observation)? else {
+        return Ok(());
+    };
+    let sequence =
+        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
+    let context = ProviderUsageContext::from_decoded(sequence, observation, envelope)?;
+    let mut conflicted = Vec::new();
+    for row in &expected {
+        let inserted = conn
+            .execute(
+                "INSERT INTO observation_provider_usage (
+                projector_version, observation_id, usage_ordinal, receipt_id,
+                observation_sequence, scope_kind, project_id, provider, model_json,
+                native_scope, counter_semantics, counters_json, session_id, turn_id,
+                message_id, request_id, native_kind, native_field, ordering_domain,
+                source_start, source_end, native_timestamp
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+             ) ON CONFLICT DO NOTHING",
+                params![
+                    PROVIDER_USAGE_PROJECTOR_VERSION,
+                    observation.observation_id().as_str(),
+                    row.usage_ordinal,
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    sequence,
+                    context.scope_kind,
+                    context.project_id,
+                    context.envelope.provider().as_str(),
+                    row.model_json.as_str(),
+                    row.native_scope,
+                    row.counter_semantics,
+                    row.counters_json.as_str(),
+                    context.envelope.relations().session_id().as_str(),
+                    context.envelope.relations().turn_id().map(|id| id.as_str()),
+                    context
+                        .envelope
+                        .relations()
+                        .message_id()
+                        .map(|id| id.as_str()),
+                    row.request_id.as_deref(),
+                    row.native_kind.as_str(),
+                    row.native_field.as_str(),
+                    context.envelope.evidence().ordering_domain().as_str(),
+                    context.source_start,
+                    context.source_end,
+                    context.envelope.evidence().native_timestamp(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("insert provider usage projection", error))?;
+        // `ON CONFLICT DO NOTHING` reports one changed row for a fresh insert
+        // and zero when the primary key already held one. A fresh insert wrote
+        // the exact tuple above inside this transaction, and the table is
+        // insert-only (immutable update/delete triggers), so reading it back
+        // could only echo these parameters. Only a conflict can hide a durable
+        // row that disagrees with this derivation, so the verification read is
+        // confined to the rows that actually conflicted.
+        if inserted != 1 {
+            conflicted.push(row);
+        }
+    }
+    for row in conflicted {
+        verify_provider_usage_row(conn, &context, observation, row).await?;
+    }
+    Ok(())
+}
+
+#[hotpath::measure(
+    future = true,
+    label = "global_db.observation_apply.persist.stage_usage"
+)]
+pub(super) async fn stage_provider_usage_effects(
+    conn: &impl Executor,
+    generation: &str,
+    sequence: u64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let Some((envelope, expected)) = provider_usage_from_observation(observation)? else {
+        return Ok(());
+    };
+    let sequence =
+        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
+    let context = ProviderUsageContext::from_decoded(sequence, observation, envelope)?;
+    for row in expected {
+        conn.execute(
+            "INSERT INTO observation_projection_rebuild_provider_usage (
+                projector_version, generation, observation_id, usage_ordinal, receipt_id,
+                observation_sequence, scope_kind, project_id, provider, model_json,
+                native_scope, counter_semantics, counters_json, session_id, turn_id,
+                message_id, request_id, native_kind, native_field, ordering_domain,
+                source_start, source_end, native_timestamp
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
+             ) ON CONFLICT DO NOTHING",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                observation.observation_id().as_str(),
+                row.usage_ordinal,
+                observation.receipt().receipt().receipt_id().as_str(),
+                sequence,
+                context.scope_kind,
+                context.project_id,
+                context.envelope.provider().as_str(),
+                row.model_json.as_str(),
+                row.native_scope,
+                row.counter_semantics,
+                row.counters_json.as_str(),
+                context.envelope.relations().session_id().as_str(),
+                context.envelope.relations().turn_id().map(|id| id.as_str()),
+                context
+                    .envelope
+                    .relations()
+                    .message_id()
+                    .map(|id| id.as_str()),
+                row.request_id.as_deref(),
+                row.native_kind.as_str(),
+                row.native_field.as_str(),
+                context.envelope.evidence().ordering_domain().as_str(),
+                context.source_start,
+                context.source_end,
+                context.envelope.evidence().native_timestamp(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("stage provider usage projection", error))?;
+    }
+    Ok(())
+}
+
+/// Provenance shared by every provider-usage row of one observation.
+///
+/// The insert path and the read-back verification need the same decoded
+/// envelope, scope, and source range, so it is decoded once per observation
+/// instead of once per path.
+struct ProviderUsageContext<'a> {
+    sequence: i64,
+    envelope: CanonicalObservationEnvelopeV1,
+    scope_kind: &'static str,
+    project_id: Option<&'a str>,
+    source_start: i64,
+    source_end: i64,
+}
+
+impl<'a> ProviderUsageContext<'a> {
+    fn from_decoded(
+        sequence: i64,
+        observation: &'a DurableObservationV1,
+        envelope: CanonicalObservationEnvelopeV1,
+    ) -> ProjectionStoreResult<Self> {
+        let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
+            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+        })?;
+        let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
+            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+        })?;
+        let (scope_kind, project_id) = provider_usage_scope(observation.scope());
+        Ok(Self {
+            sequence,
+            envelope,
+            scope_kind,
+            project_id,
+            source_start,
+            source_end,
+        })
+    }
+}
+
+/// Re-derives every provider-usage row and asserts the durable table agrees.
+///
+/// This is the unconditional replay contract used by [`verify_effect`] for
+/// observations at or below the projection checkpoint; the write path checks
+/// only the rows whose insert actually conflicted.
+async fn verify_provider_usage_effects(
+    conn: &impl QueryExecutor,
+    sequence: i64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let Some((envelope, expected)) = provider_usage_from_observation(observation)? else {
+        return Ok(());
+    };
+    let context = ProviderUsageContext::from_decoded(sequence, observation, envelope)?;
+    for row in &expected {
+        verify_provider_usage_row(conn, &context, observation, row).await?;
+    }
+    Ok(())
+}
+
+async fn verify_provider_usage_row(
+    conn: &impl QueryExecutor,
+    context: &ProviderUsageContext<'_>,
+    observation: &DurableObservationV1,
+    row: &ProviderUsageRow,
+) -> ProjectionStoreResult<()> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+                 FROM observation_provider_usage
+                 WHERE projector_version = ?1 AND observation_id = ?2
+                   AND usage_ordinal = ?3 AND receipt_id = ?4
+                   AND observation_sequence = ?5 AND scope_kind = ?6
+                   AND project_id IS ?7 AND model_json = ?8
+                   AND native_scope = ?9 AND counter_semantics = ?10
+                   AND counters_json = ?11 AND request_id IS ?12
+                   AND native_kind = ?13 AND native_field = ?14
+                   AND provider = ?15 AND session_id = ?16
+                   AND turn_id IS ?17 AND message_id IS ?18
+                   AND ordering_domain = ?19 AND source_start = ?20
+                   AND source_end = ?21 AND native_timestamp IS ?22",
+            params![
+                PROVIDER_USAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                row.usage_ordinal,
+                observation.receipt().receipt().receipt_id().as_str(),
+                context.sequence,
+                context.scope_kind,
+                context.project_id,
+                row.model_json.as_str(),
+                row.native_scope,
+                row.counter_semantics,
+                row.counters_json.as_str(),
+                row.request_id.as_deref(),
+                row.native_kind.as_str(),
+                row.native_field.as_str(),
+                context.envelope.provider().as_str(),
+                context.envelope.relations().session_id().as_str(),
+                context.envelope.relations().turn_id().map(|id| id.as_str()),
+                context
+                    .envelope
+                    .relations()
+                    .message_id()
+                    .map(|id| id.as_str()),
+                context.envelope.evidence().ordering_domain().as_str(),
+                context.source_start,
+                context.source_end,
+                context.envelope.evidence().native_timestamp(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("verify provider usage projection", error))?;
+    let count = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify provider usage projection", error))?
+        .ok_or(ProjectionStoreError::ProvenanceCollision)?
+        .get::<i64>(0)
+        .map_err(|error| storage("verify provider usage projection", error))?;
+    if count != 1 {
+        return Err(ProjectionStoreError::ProvenanceCollision);
+    }
+    Ok(())
+}
+
+async fn provider_usage_observation_sequence(
+    conn: &impl QueryExecutor,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<i64> {
+    let mut rows = conn
+        .query(
+            "SELECT sequence FROM observations WHERE observation_id = ?1",
+            (observation_id.as_str(),),
+        )
+        .await
+        .map_err(|error| storage("read provider usage observation sequence", error))?;
+    rows.next()
+        .await
+        .map_err(|error| storage("read provider usage observation sequence", error))?
+        .ok_or(ProjectionStoreError::ObservationNotFound)?
+        .get(0)
+        .map_err(|error| storage("read provider usage observation sequence", error))
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.query")]
+pub async fn verify_effect(
+    conn: &impl QueryExecutor,
+    observation: &DurableObservationV1,
+    effect: &ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    let sequence = provider_usage_observation_sequence(conn, observation.observation_id()).await?;
+    verify_provider_usage_effects(conn, sequence, observation).await?;
+    match effect {
+        ObservationProjection::Message(projection) => verify_message_effect(conn, projection).await,
+        ObservationProjection::Composite {
+            message,
+            derived_messages,
+            workflow_facts,
+        } => {
+            if let Some(message) = message {
+                verify_message_effect(conn, message).await?;
+            }
+            for message in derived_messages {
+                verify_message_effect(conn, message).await?;
+            }
+            verify_workflow_effects(conn, workflow_facts).await?;
+            Ok(())
+        }
+        ObservationProjection::Skipped(reason) => {
+            verify_skip_disposition(conn, observation, *reason).await
+        }
+    }
+}
+
+pub async fn verify_workflow_effects(
+    conn: &impl QueryExecutor,
+    workflow_facts: &[WorkflowFactProjection],
+) -> ProjectionStoreResult<()> {
+    for projection in workflow_facts {
+        verify_workflow_fact(conn, projection).await?;
+    }
+    Ok(())
+}
+
+#[hotpath::measure(future = true, label = "global_db.observation_apply.persist")]
+pub(super) async fn apply_effect(
+    conn: &impl Executor,
+    sequence: u64,
+    observation: &DurableObservationV1,
+    effect: &ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    apply_provider_usage_effects(conn, sequence, observation).await?;
+    // Boxed message-effect futures: this apply sits at the bottom of the
+    // session-sync ingest chain, and its many-statement state machine inlined
+    // into that already-deep composition overflows the base-opt worker stack.
+    match effect {
+        ObservationProjection::Message(projection) => {
+            Box::pin(apply_message_effect(
+                conn,
+                sequence,
+                observation,
+                projection,
+            ))
+            .await
+        }
+        ObservationProjection::Composite {
+            message,
+            derived_messages,
+            workflow_facts,
+        } => {
+            if let Some(message) = message {
+                Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
+            }
+            for message in derived_messages {
+                Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
+            }
+            for projection in workflow_facts {
+                apply_workflow_fact(conn, sequence, projection).await?;
+            }
+            Ok(())
+        }
+        ObservationProjection::Skipped(reason) => {
+            apply_skip_disposition(conn, observation, *reason).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projected_session_enrichment_is_commutative_and_rejects_real_path_collisions() {
+        let sparse = SessionRecord {
+            provider: "cursor".to_owned(),
+            session_id: "session.fixture".to_owned(),
+            project_key: "project.fixture".to_owned(),
+            project_path: "project.fixture".to_owned(),
+            title: None,
+            started_at: None,
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        let rich = SessionRecord {
+            project_path: "/workspace/project".to_owned(),
+            title: Some("Composer session".to_owned()),
+            started_at: Some(10),
+            ended_at: Some(20),
+            metadata_json: Some(r#"{"source":"cursor_composer"}"#.to_owned()),
+            ..sparse.clone()
+        };
+
+        let forward = reconcile_session_rows(&sparse, &rich).unwrap();
+        let reverse = reconcile_session_rows(&rich, &sparse).unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.project_path, "/workspace/project");
+        assert_eq!(forward.title.as_deref(), Some("Composer session"));
+
+        let legacy_path_key = SessionRecord {
+            project_key: "/workspace/project".to_owned(),
+            project_path: "/workspace/project".to_owned(),
+            ..sparse.clone()
+        };
+        let typed_project = SessionRecord {
+            project_key: "project.typed".to_owned(),
+            ..legacy_path_key.clone()
+        };
+        let enriched = reconcile_session_rows(&legacy_path_key, &typed_project).unwrap();
+        assert_eq!(enriched.project_key, "project.typed");
+        assert_eq!(
+            enriched,
+            reconcile_session_rows(&typed_project, &legacy_path_key).unwrap()
+        );
+
+        let runtime_owned = SessionRecord {
+            title: Some("Runtime-owned session".to_owned()),
+            metadata_json: Some(r#"{"source":"runtime_preflight"}"#.to_owned()),
+            ..forward.clone()
+        };
+        let projected = SessionRecord {
+            title: Some("Projected session".to_owned()),
+            metadata_json: Some(r#"{"source":"provider_projection"}"#.to_owned()),
+            ..forward.clone()
+        };
+        let preserved = reconcile_session_rows(&runtime_owned, &projected).unwrap();
+        assert_eq!(preserved.title.as_deref(), Some("Runtime-owned session"));
+        assert_eq!(
+            preserved.metadata_json.as_deref(),
+            Some(r#"{"source":"runtime_preflight"}"#)
+        );
+
+        let conflicting = SessionRecord {
+            project_path: "/workspace/other".to_owned(),
+            ..rich
+        };
+        assert!(reconcile_session_rows(&forward, &conflicting).is_none());
+    }
+}

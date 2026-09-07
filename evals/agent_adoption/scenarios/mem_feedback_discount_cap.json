@@ -11,7 +11,7 @@
   "prompt": "Is there a cap on discounts we're allowed to apply to an order? Base your answer on the project's recorded decisions.",
   "expected_tools": {
     "required_first": [
-      "tracedecay_fact_store",
+      "tracedecay_fact_store_search",
       "tracedecay_context"
     ],
     "acceptable": [

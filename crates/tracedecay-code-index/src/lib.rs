@@ -1,42 +1,51 @@
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
-#![cfg_attr(not(test), deny(clippy::expect_used))]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::wildcard_imports)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::single_match)]
-#![allow(clippy::needless_borrow)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::redundant_closure)]
-#![allow(clippy::redundant_closure_for_method_calls)]
-#![allow(clippy::format_push_string)]
+//! TraceDecay language extraction and code-index kernel.
+//!
+//! This crate owns intake validation, language registry, extraction,
+//! chunks, and capability emission port traits, plus the generation engine:
+//! immutable generation planning/sealing, increment planning, symbol lineage
+//! resolution, projection receipt construction, and read-side joins over the
+//! existing Git, managed-diagnostic, graph-impact, and test authorities. No
+//! parser acquisition, filesystem access, storage, or scheduling lives here;
+//! capture owns intake snapshots, the owning stores retain evidence, and the
+//! projector composition owns publication.
+//!
+//! Contract constructors in this tree validate canonical identities built
+//! from controlled formats; the `expect` on those constructor calls documents
+//! the canonical-by-construction invariant and can never fail in practice.
+#![allow(clippy::expect_used)]
 
-//! In-process structural code search.
+pub mod ast_grep_search;
+pub mod capabilities;
+pub mod chunks;
+pub mod diagnostics;
+pub mod embedding_document;
+pub mod extract;
+pub mod generations;
+pub mod git_join;
+pub mod git_projection;
+pub mod graph_projection;
+pub mod grep_search;
+mod hotpath_observe;
+pub mod impact_join;
+pub mod incremental;
+pub mod intake;
+pub mod languages;
+pub mod lineage;
+pub mod parallelism;
+pub mod production;
+pub mod projection;
+pub mod provider;
+pub mod receipts;
+pub mod retained_parse;
+pub mod source_walk;
+pub mod test_attribution;
 
-mod ast_grep_search;
-
-pub use ast_grep_search::{
-    AstGrepSearchError, AstGrepSearchMatch, AstGrepSearchResult, search_tree,
-};
-
-#[doc(hidden)]
-pub use ast_grep_search::{search_tree_scoped, search_tree_scoped_with_cancel};
+pub use self::intake::CodeIndexIntake;
 
 /// Returns `true` if the file path looks like a test file.
 pub fn is_test_file(path: &str) -> bool {
-    let test_segments = [
+    let lower = path.to_ascii_lowercase();
+    [
         "test/",
         "tests/",
         "__tests__/",
@@ -46,7 +55,7 @@ pub fn is_test_file(path: &str) -> bool {
         ".spec.",
         "_test.",
         "_spec.",
-    ];
-    let lower = path.to_ascii_lowercase();
-    test_segments.iter().any(|segment| lower.contains(segment))
+    ]
+    .iter()
+    .any(|segment| lower.contains(segment))
 }

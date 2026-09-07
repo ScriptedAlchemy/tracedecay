@@ -1,0 +1,75 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:04:00Z",
+    "method": "POST",
+    "url": "https://api.github.com/graphql",
+    "operation_kind": "query",
+    "operation_name": "TraceDecayGitHubReviewThreads",
+    "documentation": "https://docs.github.com/en/graphql/reference/objects#pullrequestreviewthread"
+  },
+  "response": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "id": "PR_kwDOSzKG2s7v-wF-",
+          "number": 421,
+          "baseRefOid": "8339371d01311289e2b7cd7b0669ea3549308b8c",
+          "headRefOid": "e29900448db98ae58e90d08770a3bb8bfa710846",
+          "reviewThreads": {
+            "nodes": [
+              {
+                "id": "PRRT_kwDOSzKG2s6PyfyC",
+                "isResolved": false,
+                "isOutdated": true,
+                "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md",
+                "line": null,
+                "originalLine": 1949,
+                "startLine": null,
+                "originalStartLine": 1946,
+                "comments": {
+                  "nodes": [
+                    {
+                      "id": "PRRC_kwDOSzKG2s7T__a_",
+                      "databaseId": 3556767423,
+                      "url": "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767423",
+                      "bodyText": "Schedule the catalog before generated-metadata consumers\nWhen the Phase 3 ladder is followed literally, this schedules PR 22F–22H before PR 22A even though the 22F–22H checklist requires plan 08's generated SurfaceKind everywhere. PR 22A is the step that creates the generated capability/tool catalog and its surface/availability artifacts, so the accounting/adoption work either blocks or has to invent duplicate local surface metadata; move 22A ahead of the first generated-catalog consumer or split the dependent 22H work after it.\nUseful? React with 👍 / 👎.",
+                      "createdAt": "2026-07-10T06:16:13Z",
+                      "updatedAt": "2026-07-10T06:16:13Z",
+                      "authorAssociation": "NONE",
+                      "replyTo": null,
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "chatgpt-codex-connector"
+                      },
+                      "pullRequestReview": {
+                        "databaseId": 4669021204,
+                        "state": "COMMENTED",
+                        "commit": {
+                          "oid": "986f25cca6d2e703e889fb57326696b0d92c965f"
+                        }
+                      },
+                      "originalCommit": {
+                        "oid": "986f25cca6d2e703e889fb57326696b0d92c965f"
+                      }
+                    }
+                  ],
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  }
+                }
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        }
+      }
+    }
+  },
+  "integrity": {
+    "body_text_sha256": "sha256:81b743cede9ff0d124beb58731d91c556343545f71c0ba51eb2b5378fdb95652"
+  }
+}

@@ -38,8 +38,8 @@ sessions/run-ids, never conclusions without citations:
    failure modes, misfires, and workarounds from session logs and agent
    transcripts.
 3. **Automation loops** — invoke `inspecting-automation-cycles`. Skipped
-   runs, curator/reflector/skill-writer output quality, apply policy, run
-   artifacts.
+   runs, curator/reflector/skill-writer output quality, automatic validation
+   and activation, terminal records, and advertised run artifacts.
 4. **Hook hints** — invoke `evaluating-hook-hints` (quality, verbosity,
    dedupe, token efficiency, real transcript replays). For profile-managed
    depth, view `agent-hook-hint-quality-review` and
@@ -67,7 +67,8 @@ supported by a single uncited anecdote.
   `tracedecay_skill_view`) — fresh worktree per independent fix set, exact
   scoped edits for subagents, lead reviews diffs.
 - New or updated automation/profile skills: invoke
-  `writing-agent-managed-skills` for the draft→validate→approve loop.
+  `writing-agent-managed-skills` for automatic writer validation and activation,
+  followed by read-only run and adoption review.
 - Repo-local dev-skill updates: edit `.claude/skills/` and `.codex/skills/`
   together — the copies must not drift (host-specific `agents/` overlays are
   the only allowed asymmetry).
@@ -86,5 +87,5 @@ supported by a single uncited anecdote.
 
 Stop and report instead of pushing on when: the Phase 0 gate cannot be
 cleared, a lane's tooling is unavailable even via the `tracedecay` CLI
-fallback, or a proposed fix requires deleting user memory/facts (needs fresh
-explicit approval — never inside the sweep).
+fallback, or a proposed fix requires deleting user memory/facts without an
+exact user instruction naming the destructive intent and target.

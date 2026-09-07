@@ -1,0 +1,805 @@
+//! Handler for the `tracedecay_analytics` MCP tool.
+//!
+//! Read-only adoption/telemetry rollup so an agent can see its own usage
+//! without querying `.tracedecay` databases directly. Reuses the same
+//! durable-analytics service functions the `tracedecay analytics
+//! diagnostics` CLI and dashboard analytics API use
+//! ([`tracedecay_global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
+//! [`tracedecay_global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
+//! [`tracedecay_dashboard_api::analytics_api::hint_summary_from_counts`],
+//! [`tracedecay_automation_runtime::automation::run_ledger::load_run_records`]) rather than
+//! re-implementing queries against those tables.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+use tracedecay_application::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
+use tracedecay_application::{
+    CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
+};
+use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
+use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_store::{FactReadControl, StoreShardScopeV1};
+
+use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_memory_target};
+use crate::tracedecay::TraceDecay;
+use crate::tracedecay::current_timestamp;
+use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
+
+use super::support::tool_json_with_md;
+use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::renderers;
+
+/// Bound on how many automation run-ledger rows a single call will scan.
+const AUTOMATION_RECORD_LIMIT: usize = 200;
+/// Top-N tools shown by call volume.
+const TOP_TOOLS_LIMIT: usize = 10;
+/// Bound on how many zero-call tool names are listed inline.
+const ZERO_CALL_SAMPLE_LIMIT: usize = 30;
+
+const NAVIGATION_TOOLS: &[&str] = &[
+    "search",
+    "grep",
+    "context",
+    "callers",
+    "callees",
+    "impact",
+    "node",
+    "similar",
+    "rename_preview",
+    "implementations",
+    "callers_for",
+    "by_qualified_name",
+    "call_chain",
+    "file_dependents",
+    "find_exact_symbol",
+    "signature",
+    "impls",
+    "derives",
+    "status",
+    "active_project",
+    "storage_status",
+    "remote_status",
+    "project_list",
+    "project_search",
+    "project_context",
+    "body",
+    "todos",
+    "read",
+    "outline",
+    "config",
+    "signature_search",
+    "port_status",
+    "port_order",
+    "simplify_scan",
+    "files",
+    "type_hierarchy",
+    "affected",
+    "diff_context",
+    "changelog",
+    "commit_context",
+    "pr_context",
+    "branch_search",
+    "branch_diff",
+    "branch_list",
+    "retrieve",
+];
+const ANALYSIS_TOOLS: &[&str] = &[
+    "dead_code",
+    "module_api",
+    "circular",
+    "hotspots",
+    "unused_imports",
+    "unmounted_files",
+    "rank",
+    "largest",
+    "coupling",
+    "inheritance_depth",
+    "distribution",
+    "recursion",
+    "complexity",
+    "doc_coverage",
+    "god_class",
+    "unsafe_patterns",
+    "diagnostics",
+    "constructors",
+    "field_sites",
+    "test_map",
+    "gini",
+    "dependency_depth",
+    "health",
+    "runtime",
+    "test_risk",
+    "redundancy",
+    "dsm",
+];
+const SESSION_TOOLS: &[&str] = &[
+    "message_search",
+    "sessions_for",
+    "workflows",
+    "lcm_status",
+    "lcm_doctor",
+    "lcm_load_session",
+    "lcm_grep",
+    "lcm_describe",
+    "lcm_expand",
+    "lcm_expand_query",
+];
+const MEMORY_TOOLS: &[&str] = &[
+    "memory_status",
+    "fact_feedback",
+    "fact_store_add",
+    "fact_store_search",
+    "fact_store_probe",
+    "fact_store_related",
+    "fact_store_reason",
+    "fact_store_contradict",
+    "fact_store_get",
+    "fact_store_update",
+    "fact_store_remove",
+    "fact_store_supersede",
+    "fact_store_list",
+];
+const EDIT_TOOLS: &[&str] = &[
+    "str_replace",
+    "multi_str_replace",
+    "insert_at",
+    "insert_at_symbol",
+    "replace_symbol",
+    "ast_grep_rewrite",
+];
+const ADMIN_TOOLS: &[&str] = &[
+    "dashboard",
+    "skill_list",
+    "skill_view",
+    "automation_run_artifact_view",
+    "hermes_skill_bridge",
+    "diagnose",
+    "run_affected_tests",
+    "analytics",
+];
+/// Ordered tier list; used both for classification and stable output order.
+const TIERS: &[(&str, &[&str])] = &[
+    ("navigation", NAVIGATION_TOOLS),
+    ("analysis", ANALYSIS_TOOLS),
+    ("session", SESSION_TOOLS),
+    ("memory", MEMORY_TOOLS),
+    ("edit", EDIT_TOOLS),
+    ("admin", ADMIN_TOOLS),
+];
+
+fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: message.to_string(),
+    }
+}
+
+/// Strips a `tracedecay_`/`mcp__tracedecay__` prefix and returns the bucket
+/// name for a tool. Unknown/non-tracedecay tool names bucket as `"other"`.
+fn tool_tier(tool_name: &str) -> &'static str {
+    let normalized = tracedecay_automation::analytics::normalize_tool_name(tool_name);
+    let normalized = normalized
+        .strip_prefix("tracedecay_")
+        .unwrap_or(normalized.as_str());
+    for (tier, names) in TIERS {
+        if names.contains(&normalized) {
+            return tier;
+        }
+    }
+    "other"
+}
+
+/// Maps host-neutral public names and short aliases to their canonical route.
+fn public_name_to_canonical(definitions: &[String]) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    for canonical_name in definitions {
+        names.insert(
+            tracedecay_automation::analytics::normalize_tool_name(canonical_name),
+            canonical_name.clone(),
+        );
+        names
+            .entry(tracedecay_automation::analytics::normalize_tool_name(
+                tracedecay_mcp::short_tool_name(canonical_name),
+            ))
+            .or_insert_with(|| canonical_name.clone());
+    }
+    names
+}
+
+/// Bound routes which are intentionally absent from the maximal public MCP catalog.
+///
+/// Dispatch binding is the authority for whether a persisted event name was a
+/// real daemon route. Subtracting advertised definitions leaves the private
+/// host/runtime routes without duplicating a route inventory here.
+fn bound_but_unadvertised_tool_names(maximal_defined: &[String]) -> BTreeSet<&'static str> {
+    let maximal_public_names: BTreeSet<String> = maximal_defined
+        .iter()
+        .map(|name| tracedecay_automation::analytics::normalize_tool_name(name))
+        .collect();
+    crate::mcp::tools::binding::MCP_TOOL_BINDINGS
+        .iter()
+        .map(|binding| binding.name)
+        .filter(|name| {
+            !maximal_public_names
+                .contains(&tracedecay_automation::analytics::normalize_tool_name(name))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bound_but_unadvertised_tool_names, public_name_to_canonical, tool_tier};
+
+    #[test]
+    fn bound_unadvertised_tool_names_use_the_maximal_public_catalog() {
+        let maximal_defined: Vec<String> = tracedecay_mcp::get_maximal_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let bound_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
+
+        assert!(
+            crate::mcp::tools::binding::MCP_TOOL_BINDINGS
+                .iter()
+                .any(|binding| binding.name == "tracedecay_admin_cli")
+        );
+        assert!(
+            !maximal_defined
+                .iter()
+                .any(|name| name == "tracedecay_admin_cli")
+        );
+        assert!(bound_unadvertised.contains("tracedecay_admin_cli"));
+        assert!(
+            maximal_defined
+                .iter()
+                .any(|name| name == "tracedecay_ast_grep_rewrite")
+        );
+        assert!(!bound_unadvertised.contains("tracedecay_ast_grep_rewrite"));
+    }
+
+    #[test]
+    fn public_lookup_normalizes_host_namespaces() {
+        let defined: Vec<String> = tracedecay_mcp::get_maximal_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let names = public_name_to_canonical(&defined);
+
+        let namespaced_context = tracedecay_automation::analytics::normalize_tool_name(
+            "mcp__tracedecay__tracedecay_context",
+        );
+        assert_eq!(
+            names.get(&namespaced_context),
+            Some(&"tracedecay_context".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_fact_store_routes_remain_in_the_memory_tier() {
+        for route in [
+            "add",
+            "search",
+            "probe",
+            "related",
+            "reason",
+            "contradict",
+            "get",
+            "update",
+            "remove",
+            "list",
+        ] {
+            assert_eq!(
+                tool_tier(&format!("tracedecay_fact_store_{route}")),
+                "memory"
+            );
+        }
+        assert_eq!(tool_tier("tracedecay_fact_store"), "other");
+        assert_eq!(tool_tier("tracedecay_fact_store_unknown"), "other");
+    }
+}
+
+#[derive(Default)]
+struct ToolCallCounts {
+    calls: i64,
+    errors: i64,
+}
+
+fn parse_scope(args: &Value) -> Result<bool> {
+    match args.get("scope").and_then(Value::as_str) {
+        None | Some("project") => Ok(false),
+        Some("all") => Ok(true),
+        Some(other) => Err(config_error(format!(
+            "unknown scope for tracedecay_analytics: {other} (use 'project' or 'all')"
+        ))),
+    }
+}
+
+fn parse_window_days(args: &Value) -> i64 {
+    args.get("window_days")
+        .and_then(Value::as_i64)
+        .unwrap_or(14)
+        .clamp(1, 365)
+}
+
+fn parse_section(args: &Value) -> Result<Option<&str>> {
+    match args.get("section").and_then(Value::as_str) {
+        None => Ok(None),
+        Some(section @ ("tools" | "hints" | "facts" | "automation")) => Ok(Some(section)),
+        Some(other) => Err(config_error(format!(
+            "unknown section for tracedecay_analytics: {other} (use 'tools', 'hints', 'facts', or 'automation')"
+        ))),
+    }
+}
+
+fn wants_section(filter: Option<&str>, name: &str) -> bool {
+    filter.is_none_or(|section| section == name)
+}
+
+struct ResolvedScope {
+    /// `None` when `scope: "all"`; the canonical `analytics_events` project
+    /// key otherwise.
+    filter: Option<String>,
+    /// Always resolved to a concrete project (used for the project-scoped
+    /// facts/automation sections regardless of `scope`).
+    root: PathBuf,
+    display_root: String,
+    project_id: ProjectId,
+}
+
+async fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
+    let FactOwnerV1::Project { project_id } = cg.project_memory_owner().map_err(config_error)?
+    else {
+        return Err(config_error("active analytics target is not a project"));
+    };
+    let project_root = cg.project_root().to_path_buf();
+    let project_display = cg.project_root().to_string_lossy().to_string();
+    let filter = if all_projects {
+        None
+    } else {
+        Some(RegisteredGlobalDb::canonical_project_key(&project_root))
+    };
+    Ok(ResolvedScope {
+        filter,
+        root: project_root,
+        display_root: project_display,
+        project_id,
+    })
+}
+
+#[hotpath::measure(label = "mcp.analytics.report.total")]
+pub(super) async fn handle_analytics(
+    cg: &TraceDecay,
+    args: Value,
+    analytics_db: Option<&RegisteredGlobalDb>,
+    project_sessions: Option<&RegisteredGlobalDb>,
+    application_deadline: Deadline,
+    application_cancellation: CancellationSignal,
+) -> Result<ToolResult> {
+    let read_control = FactReadControl::new(Arc::new(move || {
+        application_cancellation.is_cancelled() || application_deadline.is_elapsed_at(now_micros())
+    }));
+    let all_projects = parse_scope(&args)?;
+    let window_days = parse_window_days(&args);
+    let section = parse_section(&args)?;
+
+    let gdb = analytics_db.ok_or_else(|| {
+        config_error("registered global analytics store is unavailable for tracedecay_analytics")
+    })?;
+
+    let scope = resolve_scope(cg, all_projects).await?;
+
+    let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
+    let event_count = hotpath::future!(
+        gdb.count_analytics_events(scope.filter.as_deref(), since),
+        label = "mcp.analytics.report.events"
+    )
+    .await
+    .map_err(config_error)?;
+    let mut value = json!({
+        "status": "ok",
+        "scope": if all_projects { "all" } else { "project" },
+        "project_id": scope.filter,
+        "project_root": scope.display_root,
+        "window_days": window_days,
+        "since": since,
+        "event_count": event_count,
+        "event_count_truncated": false,
+    });
+
+    if section.is_none() {
+        let observatory = hotpath::future!(
+            tracedecay_usecases::observability::observatory_read_model(
+                gdb,
+                scope.filter.as_deref(),
+                since,
+            ),
+            label = "mcp.analytics.report.observatory"
+        )
+        .await;
+        let observatory = tracedecay_usecases::observability::observatory_mcp_value(&observatory)
+            .map_err(config_error)?;
+        let provider_scope = if all_projects {
+            None
+        } else {
+            project_sessions.and_then(|sessions| {
+                let StoreShardScopeV1::ProjectSessions { project_id } =
+                    &sessions.binding().shard_id.scope
+                else {
+                    return None;
+                };
+                (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str()))
+                    .then(|| ObservationScopeV1::Project {
+                        project_id: project_id.clone(),
+                    })
+            })
+        };
+        let provider_usage_db = if all_projects { None } else { project_sessions };
+        let costs = hotpath::future!(
+            tracedecay_usecases::observability::costs_read_model(
+                gdb,
+                provider_usage_db,
+                provider_scope.as_ref(),
+                scope.filter.as_deref(),
+                since,
+            ),
+            label = "mcp.analytics.report.costs"
+        )
+        .await;
+        let costs =
+            tracedecay_usecases::observability::costs_mcp_value(&costs).map_err(config_error)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
+        object.insert("observatory".to_string(), observatory);
+        object.insert("costs".to_string(), costs);
+    }
+
+    if wants_section(section, "tools") {
+        let counts = hotpath::future!(
+            gdb.query_analytics_tool_counts(scope.filter.as_deref(), since),
+            label = "mcp.analytics.report.tools"
+        )
+        .await
+        .map_err(config_error)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("tools".to_string(), tools_section(&counts)?);
+        }
+    }
+    if wants_section(section, "hints") {
+        let counts = hotpath::future!(
+            gdb.query_analytics_hint_counts(scope.filter.as_deref(), since),
+            label = "mcp.analytics.report.hints"
+        )
+        .await
+        .map_err(config_error)?;
+        let hints = tracedecay_dashboard_api::analytics_api::hint_summary_from_counts(&counts);
+        if let Some(object) = value.as_object_mut() {
+            object.insert("hints".to_string(), hints);
+        }
+    }
+    if wants_section(section, "facts") {
+        let facts = hotpath::future!(
+            facts_section(cg, &scope, &read_control),
+            label = "mcp.analytics.report.facts"
+        )
+        .await;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("facts".to_string(), facts);
+        }
+    }
+    if wants_section(section, "automation") {
+        let automation = hotpath::future!(
+            automation_section(&scope.root, since),
+            label = "mcp.analytics.report.automation"
+        )
+        .await;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("automation".to_string(), automation);
+        }
+    }
+
+    Ok(tool_json_with_md(Some(&scope.root), &args, &value, || {
+        renderers::analytics_md(&value)
+    }))
+}
+
+fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
+    let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
+    for row in rows {
+        let counts = per_tool.entry(row.tool_name.clone()).or_default();
+        counts.calls += row.calls;
+        counts.errors += row.errors;
+    }
+
+    let available_defined: Vec<String> = tracedecay_mcp::get_tool_definitions()
+        .map_err(config_error)?
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let maximal_defined: Vec<String> = tracedecay_mcp::get_maximal_tool_definitions()
+        .map_err(config_error)?
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let available_public_name_to_canonical = public_name_to_canonical(&available_defined);
+    let maximal_public_name_to_canonical = public_name_to_canonical(&maximal_defined);
+    let bound_but_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
+    let mut called_available_defined = BTreeSet::new();
+    let mut aliased_call_names = Vec::new();
+    let mut bound_internal_call_names = Vec::new();
+    let mut unavailable_public_call_names = Vec::new();
+    let mut unknown_or_retired_call_names = Vec::new();
+    let mut logical_tool_counts: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
+    for (event_name, counts) in &per_tool {
+        let normalized_event_name =
+            tracedecay_automation::analytics::normalize_tool_name(event_name);
+        let logical_tool_name = if let Some(canonical_tool_name) =
+            available_public_name_to_canonical.get(&normalized_event_name)
+        {
+            called_available_defined.insert(canonical_tool_name.clone());
+            if event_name != canonical_tool_name {
+                aliased_call_names.push(json!({
+                    "event_name": event_name,
+                    "canonical_tool_name": canonical_tool_name,
+                    "calls": counts.calls,
+                    "errors": counts.errors,
+                }));
+            }
+            canonical_tool_name
+        } else if let Some(canonical_tool_name) =
+            maximal_public_name_to_canonical.get(&normalized_event_name)
+        {
+            unavailable_public_call_names.push(json!({
+                "event_name": event_name,
+                "canonical_tool_name": canonical_tool_name,
+                "calls": counts.calls,
+                "errors": counts.errors,
+            }));
+            canonical_tool_name
+        } else if bound_but_unadvertised.contains(normalized_event_name.as_str()) {
+            bound_internal_call_names.push(json!({
+                "event_name": event_name,
+                "calls": counts.calls,
+                "errors": counts.errors,
+            }));
+            event_name
+        } else {
+            unknown_or_retired_call_names.push(json!({
+                "event_name": event_name,
+                "calls": counts.calls,
+                "errors": counts.errors,
+            }));
+            event_name
+        };
+        let logical_counts = logical_tool_counts
+            .entry(logical_tool_name.clone())
+            .or_default();
+        logical_counts.calls += counts.calls;
+        logical_counts.errors += counts.errors;
+    }
+
+    let mut per_tier: BTreeMap<&'static str, ToolCallCounts> = BTreeMap::new();
+    for (tool_name, counts) in &logical_tool_counts {
+        let tier = per_tier.entry(tool_tier(tool_name)).or_default();
+        tier.calls += counts.calls;
+        tier.errors += counts.errors;
+    }
+    let tiers: Vec<Value> = TIERS
+        .iter()
+        .map(|(tier, _)| *tier)
+        .chain(std::iter::once("other"))
+        .filter_map(|tier| {
+            per_tier.get(tier).map(
+                |counts| json!({ "tier": tier, "calls": counts.calls, "errors": counts.errors }),
+            )
+        })
+        .collect();
+
+    let mut top_tools: Vec<(&String, &ToolCallCounts)> = logical_tool_counts.iter().collect();
+    top_tools.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
+    let top_tools: Vec<Value> = top_tools
+        .into_iter()
+        .take(TOP_TOOLS_LIMIT)
+        .map(|(tool_name, counts)| {
+            json!({
+                "tool_name": tool_name,
+                "tier": tool_tier(tool_name),
+                "calls": counts.calls,
+                "errors": counts.errors,
+            })
+        })
+        .collect();
+
+    let mut zero_call: Vec<&String> = available_defined
+        .iter()
+        .filter(|name| !called_available_defined.contains(*name))
+        .collect();
+    zero_call.sort();
+    let zero_call_count = zero_call.len();
+    let zero_call_sample: Vec<&String> =
+        zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
+    let zero_call_tools = json!({
+        "count": zero_call_count,
+        "sample": zero_call_sample,
+        "sample_truncated": zero_call_count > zero_call_sample.len(),
+    });
+
+    Ok(json!({
+        "available": !rows.is_empty(),
+        "tiers": tiers,
+        "top_tools": top_tools,
+        "raw_distinct_event_name_count": per_tool.len(),
+        // Deprecated shipped key: this was always a count of raw persisted
+        // event names, not a public-catalog adoption numerator.
+        "distinct_tools_called": per_tool.len(),
+        "called_available_defined_tool_count": called_available_defined.len(),
+        "available_defined_tool_count": available_defined.len(),
+        // Deprecated shipped key: it remains the current host-available
+        // catalog count, which the explicit field above now names directly.
+        "defined_tool_count": available_defined.len(),
+        "maximal_defined_tool_count": maximal_defined.len(),
+        "aliased_call_names": aliased_call_names,
+        "bound_internal_call_names": bound_internal_call_names,
+        "unavailable_public_call_names": unavailable_public_call_names,
+        "unknown_or_retired_call_names": unknown_or_retired_call_names,
+        // Deprecated shipped key preserved as an exact object alias.
+        "zero_call_tools": zero_call_tools.clone(),
+        "zero_call_available_defined_tools": zero_call_tools,
+    }))
+}
+
+async fn facts_section(
+    cg: &TraceDecay,
+    scope: &ResolvedScope,
+    read_control: &FactReadControl,
+) -> Value {
+    let admitted_owner = match cg.project_memory_owner() {
+        Ok(FactOwnerV1::Project { project_id }) => project_id,
+        Ok(FactOwnerV1::Profile) | Err(_) => {
+            return json!({
+                "available": false,
+                "reason": "active analytics target has no project memory owner",
+            });
+        }
+    };
+    let selector = (scope.project_id != admitted_owner).then(|| RetainedProjectSelectorV1 {
+        project_id: scope.project_id.clone(),
+    });
+    let target = match open_project_retained_memory_target(
+        cg,
+        cg.project_root(),
+        &admitted_owner,
+        Some(MemoryScopeV1::Project),
+        selector.as_ref(),
+        MemoryTargetAccessV1::Read,
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(err) => {
+            let problem = retained_surface_execution_problem(err);
+            return json!({
+                "available": false,
+                "reason": problem.canonical_code(),
+            });
+        }
+    };
+    let memory = match MemoryApplication::new(
+        target.owner().clone(),
+        DatabaseFactStore::new(target.database()),
+    ) {
+        Ok(memory) => memory,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": format!("fact-store funnel unavailable: {err}"),
+                "project_root": scope.root.display().to_string(),
+            });
+        }
+    };
+    let status = match memory.project_memory_status(read_control).await {
+        Ok(status) => status,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": format!("fact-store funnel unavailable: {err}"),
+                "project_root": scope.root.display().to_string(),
+            });
+        }
+    };
+    let funnel = status.feedback_funnel();
+    json!({
+        "available": true,
+        "project_root": scope.root.display().to_string(),
+        "facts": status.fact_count(),
+        "retrievals": funnel.retrieval_count_total(),
+        "facts_retrieved": funnel.retrieved_fact_count(),
+        "helpful_feedback": status.helpful_count(),
+        "unhelpful_feedback": status.unhelpful_count(),
+        "facts_rated": funnel.rated_fact_count(),
+    })
+}
+
+async fn automation_section(project_root: &Path, since: i64) -> Value {
+    let dashboard_root =
+        match tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root) {
+            Ok(layout) => layout.dashboard_root,
+            Err(err) => {
+                return json!({
+                    "available": false,
+                    "reason": format!("could not resolve automation dashboard root: {err}"),
+                });
+            }
+        };
+    let records = match load_run_records(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
+        Ok(records) => records,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": format!("could not read automation run ledger: {err}"),
+                "dashboard_root": dashboard_root.display().to_string(),
+            });
+        }
+    };
+
+    let mut in_window = 0usize;
+    let mut by_job: BTreeMap<String, BTreeMap<&'static str, i64>> = BTreeMap::new();
+    for record in &records {
+        if let Some(started_at) = parse_rfc3339_timestamp(&record.started_at)
+            && started_at < since
+        {
+            continue;
+        }
+        in_window += 1;
+        let job = serde_json::to_value(record.task)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        *by_job
+            .entry(job)
+            .or_default()
+            .entry(record.status.as_str())
+            .or_default() += 1;
+    }
+
+    let by_job: Vec<Value> = by_job
+        .into_iter()
+        .map(|(job, statuses)| {
+            let succeeded = statuses.get("succeeded").copied().unwrap_or(0);
+            let failed = statuses.get("failed").copied().unwrap_or(0);
+            let skipped = statuses.get("skipped").copied().unwrap_or(0);
+            let mut other = 0i64;
+            for (status, count) in &statuses {
+                if !matches!(*status, "succeeded" | "failed" | "skipped") {
+                    other += *count;
+                }
+            }
+            json!({
+                "job": job,
+                "succeeded": succeeded,
+                "failed": failed,
+                "skipped": skipped,
+                "other": other,
+            })
+        })
+        .collect();
+
+    json!({
+        "available": true,
+        "dashboard_root": dashboard_root.display().to_string(),
+        "records_considered": records.len(),
+        "records_in_window": in_window,
+        "records_truncated": records.len() >= AUTOMATION_RECORD_LIMIT,
+        "by_job": by_job,
+    })
+}

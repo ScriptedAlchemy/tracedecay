@@ -1,0 +1,62 @@
+[package]
+name = "tracedecay-daemon-protocol"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Daemon invocation wire contract, client, and leaf transport for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-framing/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+]
+# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
+# surfaces to dependent crates' test builds only. Never gates production code.
+test-helpers = ["tracedecay-framing/test-helpers"]
+
+[dependencies]
+base64 = "0.22"
+hex = "0.4"
+hotpath.workspace = true
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

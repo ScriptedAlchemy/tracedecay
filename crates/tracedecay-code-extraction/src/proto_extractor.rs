@@ -3,10 +3,10 @@
 /// Parses `.proto` files and emits nodes and edges for the code graph.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
@@ -14,19 +14,19 @@ use tracedecay_domain::code_intelligence::{
 pub struct ProtoExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     errors: Vec<String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -37,18 +37,23 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -57,28 +62,40 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl ProtoExtractor {
-    /// Extract code graph nodes and edges from a Protobuf source file.
     pub fn extract_proto(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
-        // Create the File root node.
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -108,42 +125,24 @@ impl ProtoExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("protobuf")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Protobuf grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("protobuf", "Protobuf", source)
     }
 
-    /// Visit all children of a node.
-    fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                Self::visit_node(state, child);
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "package" => Self::visit_package(state, node),
@@ -160,7 +159,10 @@ impl ProtoExtractor {
         // package -> fullIdent -> ident
         let name = find_direct_child_by_kind(node, "fullIdent")
             .and_then(|fi| find_direct_child_by_kind(fi, "ident"))
-            .map_or_else(|| "<unknown>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<unknown>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -220,7 +222,6 @@ impl ProtoExtractor {
             || "<unknown>".to_string(),
             |n| {
                 let text = state.node_text(n);
-                // Strip surrounding quotes
                 text.trim_matches('"').trim_matches('\'').to_string()
             },
         );
@@ -281,7 +282,10 @@ impl ProtoExtractor {
         // message -> messageName -> ident, messageBody -> (field | message | oneof | enum | ...)
         let name = find_direct_child_by_kind(node, "messageName")
             .and_then(|mn| find_direct_child_by_kind(mn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -328,7 +332,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit message body for fields, nested messages, enums, oneofs.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "messageBody") {
             Self::visit_message_body(state, body);
@@ -361,14 +364,17 @@ impl ProtoExtractor {
         // field -> type, fieldName -> ident, `=`, fieldNumber -> intLit
         let name = find_direct_child_by_kind(node, "fieldName")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let type_text = find_direct_child_by_kind(node, "type")
-            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n).to_string());
 
         let field_number = find_direct_child_by_kind(node, "fieldNumber")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -420,7 +426,10 @@ impl ProtoExtractor {
         // enum -> enumName -> ident, enumBody -> enumField*
         let name = find_direct_child_by_kind(node, "enumName")
             .and_then(|en| find_direct_child_by_kind(en, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -467,7 +476,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit enum body for variants.
         state.node_stack.push((name, id));
         if let Some(body) = find_direct_child_by_kind(node, "enumBody") {
             Self::visit_enum_body(state, body);
@@ -494,11 +502,13 @@ impl ProtoExtractor {
     /// Extract an enum variant (enumField).
     fn visit_enum_field(state: &mut ExtractionState, node: TsNode<'_>) {
         // enumField -> ident, intLit
-        let name = find_direct_child_by_kind(node, "ident")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "ident").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let value = find_direct_child_by_kind(node, "intLit")
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -550,7 +560,10 @@ impl ProtoExtractor {
         // service -> serviceName -> ident, rpc*
         let name = find_direct_child_by_kind(node, "serviceName")
             .and_then(|sn| find_direct_child_by_kind(sn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -597,7 +610,6 @@ impl ProtoExtractor {
             });
         }
 
-        // Visit service body for rpc methods.
         state.node_stack.push((name, id));
         Self::visit_service_body(state, node);
         state.node_stack.pop();
@@ -624,7 +636,10 @@ impl ProtoExtractor {
         // rpc -> rpcName -> ident, enumMessageType (request), enumMessageType (response)
         let name = find_direct_child_by_kind(node, "rpcName")
             .and_then(|rn| find_direct_child_by_kind(rn, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
@@ -634,7 +649,6 @@ impl ProtoExtractor {
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &NodeKind::ProtoRpc, &name, start_line);
 
-        // Build signature from the full rpc text (first line)
         let text = state.node_text(node);
         let signature = text
             .lines()
@@ -702,14 +716,17 @@ impl ProtoExtractor {
         // oneof_field -> type, fieldName -> ident, `=`, fieldNumber -> intLit.
         let name = find_direct_child_by_kind(node, "fieldName")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "ident"))
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+            .map_or_else(
+                || "<anonymous>".to_string(),
+                |n| state.node_text(n).to_string(),
+            );
 
         let type_text = find_direct_child_by_kind(node, "type")
-            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "unknown".to_string(), |n| state.node_text(n).to_string());
 
         let field_number = find_direct_child_by_kind(node, "fieldNumber")
             .and_then(|fn_node| find_direct_child_by_kind(fn_node, "intLit"))
-            .map_or_else(|| "?".to_string(), |n| state.node_text(n));
+            .map_or_else(|| "?".to_string(), |n| state.node_text(n).to_string());
 
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -755,10 +772,6 @@ impl ProtoExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper methods
-    // ----------------------------
 
     /// Extract docstrings from `// comment` lines preceding definitions.
     ///
@@ -807,5 +820,15 @@ impl crate::LanguageExtractor for ProtoExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_proto(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

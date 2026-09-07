@@ -42,7 +42,7 @@ flowchart TB
     style C fill:#6b3d3d,color:#fff,stroke:#6b3d3d
 ```
 
-That many grammars create a binary-size problem. Not everyone needs COBOL parsing. Version 2.0.0 introduced feature-flag tiers: `lite` compiles eleven core languages, `medium` adds nine more, and `full` (the default) includes all thirty-one. Individual `lang-*` flags let you cherry-pick. A `cargo install tracedecay --no-default-features --features lang-nix,lang-bash` gives you exactly what you need and nothing else.
+That many grammars create a binary-size problem. Not everyone needs COBOL parsing. Version 2.0.0 introduced feature-flag tiers: `lite` compiles eleven core languages, `medium` adds nine more, and `full` (the default) includes all thirty-one. Individual `lang-*` flags let source builds cherry-pick languages with `cargo build --release --no-default-features --features lang-nix,lang-bash`.
 
 ## From Nine Tools to Thirty-Seven
 
@@ -105,7 +105,11 @@ Version 1.7.0 embedded three safety metrics directly into every function node du
 
 ## The Agent Problem
 
-TraceDecay started as a Claude Code plugin. You ran `tracedecay claude-install`, it configured your MCP server and permissions, injected prompt rules into `CLAUDE.md`, and set up a PreToolUse hook to block wasteful Explore agents. That worked fine for exactly one agent.
+TraceDecay started as a Claude Code plugin. That original Claude-only setup
+eventually became today's `tracedecay install --agent claude`: it configures
+the MCP server and permissions, injects prompt rules into `CLAUDE.md`, and sets
+up a PreToolUse hook to block wasteful Explore agents. That worked fine for
+exactly one agent.
 
 Then the ecosystem diversified. Codex CLI, OpenCode, Gemini CLI, Copilot, Cursor, Zed, Cline, Roo Code. Each with its own configuration format, its own prompt file location, its own way of registering MCP servers. Some use JSON. Some use TOML. Zed and VS Code use JSON with comments and trailing commas, which isn't actually JSON at all.
 
@@ -113,7 +117,7 @@ Version 1.8.0 introduced a trait-based `AgentIntegration` abstraction with three
 
 The install experience evolved accordingly. Running `tracedecay install` without specifying an agent now auto-detects which ones are present by checking their config directories. If it finds exactly one, it installs directly. If it finds several, it presents an interactive checkbox selector. An `installed_agents` list in `~/.tracedecay/config.toml` tracks which integrations are active, and upgrading from older versions backfills the list by scanning existing configs.
 
-The Claude Code integration deepened further in v3.5.0 with two additional hooks. Beyond the original PreToolUse hook that blocks Explore agents, tracedecay now registers a UserPromptSubmit hook (runs at prompt submission for lifecycle tracking) and a Stop hook (flushes token counters when the session ends). Three hooks, each implemented as a native Rust subcommand, no bash or jq required. The doctor command validates that each hook uses the correct subcommand and auto-repairs broken ones.
+The Claude Code integration deepened further in v3.5.0 with two additional hooks. Beyond the original PreToolUse hook that blocks Explore agents, tracedecay now registers a UserPromptSubmit hook (runs at prompt submission for lifecycle tracking) and a Stop hook (flushes token counters when the session ends). Three hooks, each implemented as a native Rust subcommand, no bash or jq required. The read-only doctor validates that each hook uses the correct subcommand and reports broken configuration; an explicit installer or owner maintenance command performs any authorized repair.
 
 ## The Daemon Gets Smarter
 
@@ -165,6 +169,12 @@ Version 3.4.0 added decorator and annotation extraction across 12 languages. Rus
 
 ## The Visualizer
 
+> **Removed.** `tracedecay visualize`, `src/visualizer.rs`, and the embedded
+> HTML file were deleted; the command no longer exists on any current build.
+> Browser-based graph exploration now lives in the dashboard's Explorer
+> workspace (`tracedecay dashboard`). The paragraph below describes the
+> feature as it stood at the time.
+
 `tracedecay visualize` serves an interactive code graph in the browser via Cytoscape.js. Right-clicking any node opens a context menu with callers, callees, call graph, and impact analysis actions. It's useful for getting a spatial sense of how a codebase is structured, especially for onboarding or architecture reviews. The implementation is a single embedded HTML file served by a lightweight HTTP handler in the tracedecay binary -- no external dependencies.
 
 ## Self-Upgrade
@@ -183,7 +193,14 @@ The zip handling in `tracedecay upgrade` hit a memorable bug. Users on v3.4.4 co
 
 Some features don't fit neatly into "languages" or "tools." They're the connective tissue.
 
-**The doctor command** (1.5.1, expanded continuously) runs a comprehensive health check: binary version, project index integrity, global database, user config, daemon status, agent integrations, MCP server registration, hook configuration (now validating that each hook uses the correct subcommand), permissions, prompt rules, and network connectivity. When it finds a broken hook, it auto-repairs it. As TraceDecay grew more complex, this became essential.
+**The doctor command** (1.5.1, expanded continuously) runs a comprehensive,
+read-only health check: binary version, project index integrity, global database,
+user config, daemon status, agent integrations, MCP server registration, hook
+configuration (now validating that each hook uses the correct subcommand),
+permissions, prompt rules, and network connectivity. It reports typed findings and
+evidence; it never auto-repairs hooks or mutates installation, storage, retention,
+GC, links, or migrations. Installation and daemon-owner maintenance commands own
+those explicitly authorized writes.
 
 **The worldwide counter** (1.4.0) aggregates anonymous token-savings counts across all TraceDecay users via a Cloudflare Worker. `tracedecay status` shows three tiers: project, all local projects, and worldwide. The counter is opt-out. Getting the accounting right took a few iterations: 1.5.4 fixed an inflation bug, and the periodic flush interval moved from shutdown-only to every 30 seconds during MCP sessions.
 

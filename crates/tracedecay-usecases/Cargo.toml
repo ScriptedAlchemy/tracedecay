@@ -2,20 +2,213 @@
 name = "tracedecay-usecases"
 version = "0.1.0"
 publish = false
-edition = "2024"
-description = "Root-free reusable TraceDecay operations"
+edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
+description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and daemon adapters"
+# PACKAGING SEAM: `semantic_runtime` byte-pins the shipped search-quality
+# candidate workload with `include_str!` against a repo-root fixture
+# (tests/fixtures/search_quality/...) that lives outside this package.
+# `cargo check` resolves it; `cargo package` will not. `publish = false` above
+# accepts this rather than vendoring the fixture under `/src` or producing it
+# from a build script.
+include = ["/src/**"]
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "hotpath/ureq-3",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-configuration/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-graph-query/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-host-integration/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-policy/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-semantic/hotpath",
+    "tracedecay-session-memory/hotpath",
+    "tracedecay-session-temporal-store/hotpath",
+    "tracedecay-lcm/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-configuration/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-graph-query/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-integration/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-session-temporal-store/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-configuration/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-graph-query/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-integration/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-session-temporal-store/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+]
+default = []
+# Mirrors the root crate's `semantic-fastembed`: gates the embedded fastembed
+# provider wiring inside `semantic_runtime`.
+semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
+# Mirrors the root crate's `semantic-model2vec`: the ORT-free static
+# embedding backend.
+semantic-model2vec = ["tracedecay-semantic/semantic-model2vec"]
+# Mirrors the root crate's opt-in GPU execution-provider features.
+semantic-gpu-coreml = ["tracedecay-semantic/semantic-gpu-coreml"]
+semantic-gpu-cuda = ["tracedecay-semantic/semantic-gpu-cuda"]
+# Exposes test-only helper surfaces to dependent crates' test builds without
+# enabling in-process transports. Forwards to tracedecay-sessions so the
+# re-exported wire test helpers (read_bounded_line, line_outcome_to_io) resolve
+# when this crate is built standalone with the feature.
+test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-session-temporal-store/test-helpers", "tracedecay-sessions/test-helpers"]
+# Mirrors the root crate's `test-transport`: enables the in-process transport
+# seams used by integration harnesses.
+test-transport = [
+    "test-helpers",
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-runtime-core/test-transport",
+]
 
 [dependencies]
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
+getrandom = "0.2"
+fs2 = "0.4"
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+glob = "0.3"
+hmac = { version = "0.13.0", features = ["zeroize"] }
 hex = "0.4"
-libsql = "0.9.30"
+hotpath.workspace = true
+same-file = "1"
+schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-toml = "1"
-tracedecay-automation = { path = "../tracedecay-automation" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tempfile = "3"
+thiserror = "2"
+ureq = { version = "3", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+url = "2"
+zeroize = "1.9.0"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+# Grammar-free entry only: `markdown_structure` compiles with no language
+# feature enabled, so section structure reaches retrieval without linking a
+# tree-sitter bundle into this crate.
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 
 [dev-dependencies]
-tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+static_assertions = "1.1.0"
+# Test-only helper surfaces reached across crate boundaries by this crate's
+# test targets. Feature unification supplies them to the test build only.
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+
+[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+libc = "0.2"
+
+# Dual-mode self-check via benches/hotpath_coverage.rs: feature off must
+# not write a report; feature on must record exact journey labels.
+[[bench]]
+name = "work_rollup"
+harness = false
+
+[[bench]]
+name = "work_readiness"
+harness = false
+required-features = ["test-helpers"]
+
+# Same dual-mode coverage as `work_rollup`; the commit sweep carries a
+# bounded `measure_block!` so the expected-label set is nonempty.
+[[bench]]
+name = "semantic_vector_commit_scale"
+harness = false

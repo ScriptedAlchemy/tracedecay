@@ -1,7 +1,7 @@
 {
   "name": "tracedecay",
   "label": "TraceDecay",
-  "description": "TraceDecay dashboards: holographic memory, LCM, code graph, and savings explorers (served by the tracedecay engine).",
+  "description": "The embedded TraceDecay dashboard: Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and Settings.",
   "icon": "Cpu",
   "version": "0.2.0",
   "provider": {
@@ -13,6 +13,5 @@
     "position": "after:plugins"
   },
   "entry": "dist/index.js",
-  "css": "dist/style.css",
   "api": "plugin_api.py"
 }

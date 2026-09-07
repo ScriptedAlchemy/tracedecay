@@ -1,59 +1,382 @@
-//! LCM dashboard API, backed by tracedecay's LCM session store.
+//! LCM dashboard API.
 //!
-//! Serves Hermes-compatible LCM routes from `lcm_raw_messages`,
-//! `lcm_summary_nodes`, and `lcm_summary_sources`. The store is selected by
-//! [`super::resolve_lcm_store`], and every payload reports it via `path` and
-//! `storage_scope`.
-//!
-//! Schema mapping (hermes-lcm → tracedecay):
-//! - `messages`               → `lcm_raw_messages` (`source` ← `provider`,
-//!   `token_estimate` ← ~chars/4, `pinned`/`tool_name` not tracked)
-//! - `summary_nodes`          → `lcm_summary_nodes` (`summary` ←
-//!   `summary_text`, `token_count` ← `summary_token_count`, `latest_at` ←
-//!   `source_time_end`; node ids are strings, not ints)
-//! - `summary_nodes.source_ids` JSON → `lcm_summary_sources` rows
-//! - FTS mirrors → `lcm_raw_messages_fts` / `lcm_summary_nodes_fts`
+//! All LCM reads use a daemon-owned temporal retrieval port. This crate never
+//! opens or queries the session store, and therefore cannot bypass canonical
+//! owning-store hydration or redaction.
 
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::future::Future;
+use std::pin::Pin;
 
-use axum::{Json, extract::State, http::StatusCode};
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use axum::{
+    Json,
+    extract::{Extension, State},
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-use super::DashboardState;
-use super::lcm_service;
-use super::util::{JsonPath, JsonQuery, coerce_limit};
-use crate::sessions::lcm::{LcmGcConfig, gc, query};
-use crate::tracedecay::current_timestamp;
+use super::read_model::{
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
+    scope_from_state,
+};
+use super::util::{JsonPath, JsonQuery};
+use super::{DashboardHttpRequestControlV1, DashboardState};
 
-type LcmResponse = (StatusCode, Json<Value>);
-type LcmResult = Result<LcmResponse, LcmResponse>;
+mod aggregates;
 
-#[derive(Debug, Clone)]
-struct PayloadGcPreview {
-    token: String,
-    provider: String,
+#[derive(Clone, Debug)]
+pub enum DashboardLcmReadRequestV1 {
+    Overview {
+        query: String,
+        limit: i64,
+    },
+    Search {
+        query: String,
+        limit: i64,
+        cursor: Option<String>,
+        role: Option<String>,
+        source: Option<String>,
+        session_id: Option<String>,
+        since: Option<i64>,
+        until: Option<i64>,
+    },
+    Session {
+        session_id: String,
+        limit: i64,
+        cursor: Option<String>,
+    },
+    Timeline {
+        bucket: DashboardLcmTimelineBucketV1,
+        session_id: Option<String>,
+        limit: i64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DashboardLcmTimelineBucketV1 {
+    Hour,
+    Day,
+}
+
+impl DashboardLcmTimelineBucketV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+        }
+    }
+}
+
+pub enum DashboardLcmReadOutcomeV1 {
+    Ready(DashboardLcmCanonicalPageV1),
+    Partial {
+        page: DashboardLcmCanonicalPageV1,
+        omitted: u64,
+    },
+    NotReady {
+        state: DashboardLcmReadStateV1,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DashboardLcmReadStateV1 {
+    Absent,
+    Stale,
+    Locked,
+    Denied,
+    Redacted,
+    Unavailable,
+    CursorManifestLimitExceeded,
+    BudgetExhausted,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardLcmCanonicalMessageV1 {
+    pub session_id: String,
+    pub provider: String,
+    pub role: String,
+    pub timestamp: Option<i64>,
+    pub ordinal: i64,
+    pub content: String,
+    pub message_id: String,
+    pub metadata_json: Option<String>,
+    pub tool_names: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardLcmCanonicalSummaryV1 {
+    pub node_id: String,
+    pub session_id: String,
+    pub depth: i64,
+    pub token_count: Option<i64>,
+    pub source_token_count: Option<i64>,
+    pub latest_at: Option<i64>,
+    pub created_at: i64,
+    pub expand_hint: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DashboardLcmCanonicalStatsV1 {
+    pub message_count: i64,
+    pub summary_node_count: i64,
+    pub summary_token_count: Option<i64>,
+    pub source_token_count: Option<i64>,
+    /// Complete session token estimate from the LCM store-status authority;
+    /// typed-absent when the bounded scan did not cover the whole session.
+    pub token_estimate_total: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardLcmCanonicalPageV1 {
+    pub messages: Vec<DashboardLcmCanonicalMessageV1>,
+    pub summary_nodes: Vec<DashboardLcmCanonicalSummaryV1>,
+    pub overview_matches: Option<DashboardLcmCanonicalMatchesV1>,
+    pub stats: DashboardLcmCanonicalStatsV1,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardLcmCanonicalMatchesV1 {
+    pub messages: Vec<DashboardLcmCanonicalMessageV1>,
+    pub summary_nodes: Vec<DashboardLcmCanonicalSummaryV1>,
+}
+
+pub type DashboardLcmReadFutureV1<'a> =
+    Pin<Box<dyn Future<Output = DashboardLcmReadOutcomeV1> + Send + 'a>>;
+
+pub trait DashboardLcmReadPortV1: Send + Sync {
+    fn read(
+        &self,
+        control: DashboardHttpRequestControlV1,
+        project_id: Option<&str>,
+        request: DashboardLcmReadRequestV1,
+    ) -> DashboardLcmReadFutureV1<'_>;
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmSessionCountsV1 {
+    message_count: i64,
+    summary_node_count: i64,
+    summary_token_count: Option<i64>,
+    source_token_count: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum LcmTokenCountProvenanceV1 {
+    O200kApproximate,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmMessageV1 {
+    pub(super) store_id: Option<i64>,
+    pub(super) session_id: String,
+    pub(super) role: Option<String>,
+    pub(super) source: Option<String>,
+    pub(super) timestamp: Option<i64>,
+    pub(super) token_count: Option<i64>,
+    pub(super) token_count_provenance: Option<LcmTokenCountProvenanceV1>,
+    pub(super) content: Option<String>,
+    pub(super) message_id: String,
+    pub(super) ordinal: Option<i64>,
+    pub(super) storage_kind: Option<String>,
+    pub(super) metadata_json: Option<String>,
+    pub(super) tool_name: Option<String>,
+    pub(super) pinned: Option<i64>,
+    pub(super) summary_node_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) snippet: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmSummaryNodeV1 {
+    pub(super) node_id: String,
+    pub(super) session_id: String,
+    pub(super) depth: i64,
+    pub(super) category: String,
+    pub(super) source_type: String,
+    pub(super) token_count: Option<i64>,
+    pub(super) source_token_count: Option<i64>,
+    pub(super) latest_at: Option<i64>,
+    pub(super) created_at: i64,
+    pub(super) expand_hint: String,
+    pub(super) summary: String,
+    #[serde(default)]
+    pub(super) recency: Option<i64>,
+    #[serde(default)]
+    pub(super) snippet: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmRoleCountV1 {
+    role: Option<String>,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmSourceCountV1 {
+    source: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmDepthCountV1 {
+    depth: i64,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmCompressionSummaryV1 {
+    source_token_count: Option<i64>,
+    token_count: Option<i64>,
+    ratio: Option<f64>,
+    node_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmOverviewStatsV1 {
+    messages_total: i64,
+    sessions_total: i64,
+    summary_nodes_total: i64,
+    summary_node_sessions_total: i64,
+    max_summary_depth: i64,
+    role_counts: Vec<LcmRoleCountV1>,
+    source_counts: Vec<LcmSourceCountV1>,
+    depth_counts: Vec<LcmDepthCountV1>,
+    compression: LcmCompressionSummaryV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmLatestSessionV1 {
+    session_id: String,
+    message_count: i64,
+    last_store_id: Option<i64>,
+    last_timestamp: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmMatchesV1 {
+    messages: Vec<LcmMessageV1>,
+    summary_nodes: Vec<LcmSummaryNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LcmOverviewPayloadV1 {
+    path: String,
+    storage_scope: String,
+    exists: bool,
+    overview: LcmOverviewStatsV1,
+    latest_sessions: Vec<LcmLatestSessionV1>,
+    latest_summary_nodes: Vec<LcmSummaryNodeV1>,
+    matches: LcmMatchesV1,
+    query: String,
+    limit: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmSearchEngineDetailV1 {
+    messages: String,
+    summary_nodes: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmSearchTotalsV1 {
+    messages: i64,
+    summary_nodes: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmSearchFiltersV1 {
+    role: Option<String>,
+    source: Option<String>,
     session_id: Option<String>,
-    created_at: i64,
+    since: Option<f64>,
+    until: Option<f64>,
 }
 
-static PAYLOAD_GC_PREVIEW: LazyLock<Mutex<Option<PayloadGcPreview>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-fn ok(payload: Map<String, Value>) -> LcmResponse {
-    (StatusCode::OK, Json(Value::Object(payload)))
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LcmSearchPayloadV1 {
+    path: String,
+    storage_scope: String,
+    exists: bool,
+    query: String,
+    limit: i64,
+    next_cursor: Option<String>,
+    engine: String,
+    engine_detail: LcmSearchEngineDetailV1,
+    total: LcmSearchTotalsV1,
+    filters: LcmSearchFiltersV1,
+    matches: LcmMatchesV1,
 }
 
-fn err(status: StatusCode, message: impl Into<String>) -> LcmResponse {
-    (
-        status,
-        Json(json!({
-            "status": "error",
-            "error": message.into(),
-        })),
-    )
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmSessionPayloadV1 {
+    path: String,
+    storage_scope: String,
+    exists: bool,
+    session_id: String,
+    limit: i64,
+    counts: LcmSessionCountsV1,
+    messages: Vec<LcmMessageV1>,
+    summary_nodes: Vec<LcmSummaryNodeV1>,
+    has_more: bool,
+    has_more_messages: bool,
+    has_more_summary_nodes: bool,
+    next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmTimelineBucketV1 {
+    bucket: String,
+    count: i64,
+    token_count: Option<i64>,
+    token_count_provenance: LcmTokenCountProvenanceV1,
+    known_message_count: i64,
+    unknown_message_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmTimelineCoverageV1 {
+    limit: i64,
+    returned_buckets: i64,
+    total_dated_buckets: i64,
+    truncated: bool,
+    ordering: String,
+    next_before_bucket: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmTimelinePayloadV1 {
+    path: String,
+    storage_scope: String,
+    exists: bool,
+    bucket: String,
+    session_id: Option<String>,
+    buckets: Vec<LcmTimelineBucketV1>,
+    node_buckets: Vec<LcmTimelineNodeBucketV1>,
+    undated: LcmTimelineUndatedV1,
+    #[serde(default)]
+    coverage: Option<LcmTimelineCoverageV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmTimelineNodeBucketV1 {
+    bucket: Option<String>,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmTimelineUndatedV1 {
+    count: i64,
+    token_count: Option<i64>,
+    token_count_provenance: LcmTokenCountProvenanceV1,
+    known_message_count: i64,
+    unknown_message_count: i64,
 }
 
 #[derive(Deserialize)]
@@ -63,58 +386,30 @@ pub struct OverviewParams {
     limit: Option<i64>,
 }
 
-#[derive(Deserialize)]
-pub struct PayloadHealthParams {
-    #[serde(default)]
-    provider: String,
-    #[serde(default)]
-    session_id: String,
-    deep: Option<bool>,
-    limit: Option<i64>,
-}
-
-#[derive(Deserialize)]
-pub struct PayloadGcApplyRequest {
-    #[serde(default)]
-    provider: String,
-    #[serde(default)]
-    session_id: String,
-    #[serde(default)]
-    dry_run_token: String,
-    confirm: Option<bool>,
-}
-
-/// `GET /api/plugins/hermes-lcm/overview`
+/// GET /api/plugins/hermes-lcm/overview
+///
+/// The daemon authority freezes and traverses the canonical temporal result
+/// manifest before this boundary reduces the hydrated records.
 pub async fn overview(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<OverviewParams>,
-) -> LcmResult {
-    let limit = coerce_limit(params.limit, 25, 200);
-    let mut payload = lcm_service::overview_payload(&state, &params.q, limit).await?;
-    if let Some(conn) = &state.lcm_conn {
-        let provider = "cursor";
-        let storage_root = lcm_storage_root(&state);
-        let detail = query::payload_health_detail(
-            conn,
-            &storage_root,
-            provider,
-            None,
-            false,
-            20,
-            &LcmGcConfig::default(),
-        )
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("overview payload health failed: {e}"),
+) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            lcm_read(
+                &state,
+                control.map(|Extension(control)| control),
+                DashboardLcmReadRequestV1::Overview {
+                    query: params.q,
+                    limit: params.limit.unwrap_or(25).clamp(1, 200),
+                },
             )
-        })?;
-        payload.insert("payload_health".into(), payload_health_value(&detail));
-    } else {
-        payload.insert("payload_health".into(), Value::Null);
-    }
-    Ok(ok(payload))
+            .await
+        },
+        label = "dashboard_api.lcm.overview"
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -122,7 +417,7 @@ pub struct SearchParams {
     #[serde(default)]
     q: String,
     limit: Option<i64>,
-    offset: Option<i64>,
+    cursor: Option<String>,
     #[serde(default)]
     role: String,
     #[serde(default)]
@@ -135,64 +430,73 @@ pub struct SearchParams {
     until: String,
 }
 
-/// `GET /api/plugins/hermes-lcm/search`
+/// GET /api/plugins/hermes-lcm/search
 pub async fn search(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SearchParams>,
-) -> LcmResult {
-    let limit = coerce_limit(params.limit, 25, 200);
-    let offset = params.offset.unwrap_or(0).max(0);
-    let since = lcm_service::parse_epoch(&params.since);
-    let until = lcm_service::parse_epoch(&params.until);
-    let payload = lcm_service::search_payload(
-        &state,
-        lcm_service::SearchPayloadArgs {
-            query: &params.q,
-            limit,
-            offset,
-            role: &params.role,
-            source: &params.source,
-            session_id: &params.session_id,
-            since,
-            until,
+) -> Json<DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let since = match parse_optional_i64(&params.since) {
+                Ok(since) => since,
+                Err(()) => return invalid_lcm_request(&state),
+            };
+            let until = match parse_optional_i64(&params.until) {
+                Ok(until) => until,
+                Err(()) => return invalid_lcm_request(&state),
+            };
+            lcm_read(
+                &state,
+                control.map(|Extension(control)| control),
+                DashboardLcmReadRequestV1::Search {
+                    query: params.q,
+                    limit: params.limit.unwrap_or(50).clamp(1, 500),
+                    cursor: params.cursor,
+                    role: trimmed_nonempty(params.role),
+                    source: trimmed_nonempty(params.source),
+                    session_id: trimmed_nonempty(params.session_id),
+                    since,
+                    until,
+                },
+            )
+            .await
         },
+        label = "dashboard_api.lcm.search"
     )
-    .await?;
-    Ok(ok(payload))
+    .await
 }
 
 #[derive(Deserialize)]
 pub struct SessionParams {
     limit: Option<i64>,
-    offset: Option<i64>,
-    #[serde(default)]
-    order: String,
+    cursor: Option<String>,
 }
 
-/// `GET /api/plugins/hermes-lcm/session/{session_id}`
+/// GET /api/plugins/hermes-lcm/session/{session_id}
 pub async fn session(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
-) -> LcmResult {
-    let limit = coerce_limit(params.limit, 200, 1000);
-    let offset = params.offset.unwrap_or(0).max(0);
-    let descending = params.order.eq_ignore_ascii_case("desc");
-    let payload =
-        lcm_service::session_payload(&state, &session_id, limit, offset, descending).await?;
-    Ok(ok(payload))
+) -> Json<DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            lcm_read(
+                &state,
+                control.map(|Extension(control)| control),
+                DashboardLcmReadRequestV1::Session {
+                    session_id,
+                    limit: params.limit.unwrap_or(100).clamp(1, 500),
+                    cursor: params.cursor,
+                },
+            )
+            .await
+        },
+        label = "dashboard_api.lcm.session"
+    )
+    .await
 }
-
-/// `GET /api/plugins/hermes-lcm/node/{node_id}` — a summary node plus the
-/// exact source items it covers (lossless expand).
-pub async fn node(
-    State(state): State<DashboardState>,
-    JsonPath(node_id): JsonPath<String>,
-) -> LcmResult {
-    let payload = lcm_service::node_payload(&state, &node_id).await?;
-    Ok(ok(payload))
-}
-
 #[derive(Deserialize)]
 pub struct TimelineParams {
     #[serde(default)]
@@ -202,281 +506,191 @@ pub struct TimelineParams {
     limit: Option<i64>,
 }
 
-/// `GET /api/plugins/hermes-lcm/timeline`
+/// GET /api/plugins/hermes-lcm/timeline
 pub async fn timeline(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<TimelineParams>,
-) -> LcmResult {
-    let limit = coerce_limit(params.limit, 400, 2000);
-    let by_hour = params.bucket.eq_ignore_ascii_case("hour");
-    let payload = lcm_service::timeline_payload(&state, by_hour, &params.session_id, limit).await?;
-    Ok(ok(payload))
-}
-
-#[derive(Deserialize)]
-pub struct CompressionParams {
-    #[serde(default)]
-    by: String,
-    limit: Option<i64>,
-}
-
-/// `GET /api/plugins/hermes-lcm/compression`
-pub async fn compression(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<CompressionParams>,
-) -> LcmResult {
-    let limit = coerce_limit(params.limit, 50, 500);
-    let by_node = params.by.eq_ignore_ascii_case("node");
-    let payload = lcm_service::compression_payload(&state, by_node, limit).await?;
-    Ok(ok(payload))
-}
-
-/// `GET /api/plugins/hermes-lcm/payloads/health`
-pub async fn payloads_health(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<PayloadHealthParams>,
-) -> LcmResult {
-    let conn = state
-        .lcm_conn
-        .as_ref()
-        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LCM store unavailable"))?;
-    let provider = if params.provider.trim().is_empty() {
-        "cursor"
-    } else {
-        params.provider.trim()
-    };
-    let session_id = (!params.session_id.trim().is_empty()).then_some(params.session_id.trim());
-    let deep = params.deep.unwrap_or(false);
-    let sample_limit = coerce_limit(params.limit, 20, 100) as usize;
-    let detail = query::payload_health_detail(
-        conn,
-        &lcm_storage_root(&state),
-        provider,
-        session_id,
-        deep,
-        sample_limit,
-        &LcmGcConfig::default(),
-    )
-    .await
-    .map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("payload health failed: {e}"),
-        )
-    })?;
-
-    Ok(ok(Map::from_iter([
-        ("status".into(), json!("ok")),
-        ("provider".into(), json!(provider)),
-        (
-            "session_id".into(),
-            session_id.map_or(Value::Null, |value| json!(value)),
-        ),
-        ("storage_scope".into(), json!(state.lcm_scope)),
-        ("path".into(), json!(state.lcm_db_path)),
-        ("deep".into(), json!(deep)),
-        ("payload_health".into(), payload_health_value(&detail)),
-        (
-            "samples".into(),
-            json!({
-                "missing_payload_refs": detail.missing_payload_refs,
-                "orphan_files": detail.orphan_files,
-                "unreferenced_refs": detail.unreferenced_refs,
-                "missing_placeholder_refs": detail.missing_placeholder_refs,
-                "integrity_mismatch_refs": detail.integrity_mismatch_refs,
-            }),
-        ),
-    ])))
-}
-
-/// `GET /api/plugins/hermes-lcm/payloads/gc`
-pub async fn payloads_gc_preview(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<PayloadHealthParams>,
-) -> LcmResult {
-    let conn = state
-        .lcm_conn
-        .as_ref()
-        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LCM store unavailable"))?;
-    let provider = if params.provider.trim().is_empty() {
-        "cursor"
-    } else {
-        params.provider.trim()
-    };
-    let session_id = (!params.session_id.trim().is_empty()).then_some(params.session_id.trim());
-    let report = gc::run_payload_gc_with_apply(
-        conn,
-        &lcm_storage_root(&state),
-        provider,
-        session_id,
-        &LcmGcConfig::default(),
-        false,
-        current_timestamp(),
-    )
-    .await
-    .map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("payload GC preview failed: {e}"),
-        )
-    })?;
-    let token = make_preview_token(provider, session_id);
-    if let Ok(mut preview) = PAYLOAD_GC_PREVIEW.lock() {
-        *preview = Some(PayloadGcPreview {
-            token: token.clone(),
-            provider: provider.to_string(),
-            session_id: session_id.map(str::to_string),
-            created_at: now_unix(),
-        });
-    }
-
-    Ok(ok(Map::from_iter([
-        ("status".into(), json!("ok")),
-        ("provider".into(), json!(provider)),
-        (
-            "session_id".into(),
-            session_id.map_or(Value::Null, |value| json!(value)),
-        ),
-        ("storage_scope".into(), json!(state.lcm_scope)),
-        ("path".into(), json!(state.lcm_db_path)),
-        ("dry_run".into(), json!(true)),
-        ("dry_run_token".into(), json!(token)),
-        (
-            "gc_report".into(),
-            serde_json::to_value(report).unwrap_or(Value::Null),
-        ),
-    ])))
-}
-
-/// `POST /api/plugins/hermes-lcm/payloads/gc`
-pub async fn payloads_gc_apply(
-    State(state): State<DashboardState>,
-    Json(body): Json<PayloadGcApplyRequest>,
-) -> LcmResult {
-    let conn = state
-        .lcm_conn
-        .as_ref()
-        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LCM store unavailable"))?;
-    let provider = if body.provider.trim().is_empty() {
-        "cursor"
-    } else {
-        body.provider.trim()
-    };
-    let session_id = (!body.session_id.trim().is_empty()).then_some(body.session_id.trim());
-    if body.confirm != Some(true) || body.dry_run_token.trim().is_empty() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "payload GC apply requires confirm=true and a prior dry_run_token",
-        ));
-    }
-    {
-        let preview = PAYLOAD_GC_PREVIEW.lock().map_err(|_| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "payload GC preview lock poisoned",
+) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let bucket = match params.bucket.trim().to_ascii_lowercase().as_str() {
+                "" | "day" => DashboardLcmTimelineBucketV1::Day,
+                "hour" => DashboardLcmTimelineBucketV1::Hour,
+                _ => return invalid_lcm_request(&state),
+            };
+            lcm_read(
+                &state,
+                control.map(|Extension(control)| control),
+                DashboardLcmReadRequestV1::Timeline {
+                    bucket,
+                    session_id: trimmed_nonempty(params.session_id),
+                    limit: params.limit.unwrap_or(400).clamp(1, 2_000),
+                },
             )
-        })?;
-        let Some(preview) = preview.as_ref() else {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "payload GC apply requires a prior dry-run preview",
-            ));
-        };
-        if preview.token != body.dry_run_token
-            || preview.provider != provider
-            || preview.session_id.as_deref() != session_id
-            || now_unix().saturating_sub(preview.created_at) > 300
-        {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "payload GC dry_run_token is missing, expired, or does not match the requested scope",
-            ));
+            .await
+        },
+        label = "dashboard_api.lcm.timeline"
+    )
+    .await
+}
+
+async fn lcm_read<T>(
+    state: &DashboardState,
+    control: Option<DashboardHttpRequestControlV1>,
+    request: DashboardLcmReadRequestV1,
+) -> Json<DashboardEnvelopeV1<Option<T>>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let Some(authority) = state.lcm_read_authority.as_ref() else {
+        return Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(state),
+            None,
+            "lcm_daemon_authority_unavailable",
+        ));
+    };
+    let Some(control) = control else {
+        return Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(state),
+            None,
+            "dashboard_request_admission_unavailable",
+        ));
+    };
+    let outcome = authority
+        .read(control, state.project_id.as_deref(), request.clone())
+        .await;
+    let scope = scope_from_state(state);
+    match outcome {
+        DashboardLcmReadOutcomeV1::Ready(page) => {
+            let timeline_coverage = aggregates::timeline_view_coverage(&request, &page);
+            let coverage = if aggregates::is_aggregate_request(&request) {
+                DashboardCoverageV1::complete(
+                    aggregates::returned_count(&page),
+                    "canonical hydrated records",
+                )
+            } else {
+                DashboardCoverageV1::unknown()
+            };
+            match aggregates::render_canonical_payload(
+                request,
+                page,
+                &state.lcm_scope,
+                &state.token_counts,
+            ) {
+                Ok(payload) => {
+                    if let Some((eligible, examined, true)) = timeline_coverage {
+                        Json(DashboardEnvelopeV1::partial(
+                            scope,
+                            eligible,
+                            examined,
+                            "timeline_buckets",
+                            vec!["page_limit".to_owned()],
+                            Some(payload),
+                        ))
+                    } else {
+                        Json(DashboardEnvelopeV1::ready(scope, coverage, Some(payload)))
+                    }
+                }
+                Err(()) => Json(DashboardEnvelopeV1::unavailable(
+                    scope,
+                    None,
+                    "lcm_daemon_payload_invalid",
+                )),
+            }
+        }
+        DashboardLcmReadOutcomeV1::Partial { page, omitted } => {
+            let examined = aggregates::returned_count(&page);
+            let eligible = examined.saturating_add(omitted);
+            match aggregates::render_canonical_payload(
+                request,
+                page,
+                &state.lcm_scope,
+                &state.token_counts,
+            ) {
+                Ok(payload) => Json(DashboardEnvelopeV1::partial(
+                    scope,
+                    eligible,
+                    examined,
+                    "canonical hydrated records",
+                    vec!["lcm_temporal_read_incomplete".to_owned()],
+                    Some(payload),
+                )),
+                Err(()) => Json(DashboardEnvelopeV1::unavailable(
+                    scope,
+                    None,
+                    "lcm_daemon_payload_invalid",
+                )),
+            }
+        }
+        DashboardLcmReadOutcomeV1::NotReady {
+            state: read_state,
+            reason,
+        } => {
+            let envelope = match read_state {
+                DashboardLcmReadStateV1::Absent => DashboardEnvelopeV1::complete_zero_findings(
+                    scope,
+                    DashboardCoverageV1::complete(0, "canonical hydrated records"),
+                    None,
+                ),
+                DashboardLcmReadStateV1::Stale => {
+                    let mut coverage = DashboardCoverageV1::unknown();
+                    coverage.omission_reasons.push(reason);
+                    DashboardEnvelopeV1::stale(scope, coverage, None)
+                }
+                DashboardLcmReadStateV1::Locked => {
+                    typed_not_ready_envelope(scope, DashboardDomainStateV1::Locked, reason)
+                }
+                DashboardLcmReadStateV1::Denied => DashboardEnvelopeV1::denied(scope, None),
+                DashboardLcmReadStateV1::Redacted => {
+                    typed_not_ready_envelope(scope, DashboardDomainStateV1::Redacted, reason)
+                }
+                DashboardLcmReadStateV1::Unavailable
+                | DashboardLcmReadStateV1::CursorManifestLimitExceeded
+                | DashboardLcmReadStateV1::BudgetExhausted
+                | DashboardLcmReadStateV1::TimedOut
+                | DashboardLcmReadStateV1::Cancelled => {
+                    DashboardEnvelopeV1::unavailable(scope, None, reason)
+                }
+            };
+            Json(envelope)
         }
     }
+}
 
-    let report = gc::run_payload_gc_with_apply(
-        conn,
-        &lcm_storage_root(&state),
-        provider,
-        session_id,
-        &LcmGcConfig::default(),
-        true,
-        current_timestamp(),
+fn typed_not_ready_envelope<T>(
+    scope: super::read_model::DashboardScopeV1,
+    state: DashboardDomainStateV1,
+    reason: String,
+) -> DashboardEnvelopeV1<Option<T>> {
+    let mut coverage = DashboardCoverageV1::unknown();
+    coverage.omission_reasons.push(reason);
+    DashboardEnvelopeV1::new(
+        scope,
+        state,
+        coverage,
+        DashboardFreshnessV1::unknown(),
+        None,
     )
-    .await
-    .map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("payload GC apply failed: {e}"),
-        )
-    })?;
-    if let Ok(mut preview) = PAYLOAD_GC_PREVIEW.lock() {
-        *preview = None;
+}
+
+fn invalid_lcm_request<T>(state: &DashboardState) -> Json<DashboardEnvelopeV1<Option<T>>> {
+    Json(DashboardEnvelopeV1::unavailable(
+        scope_from_state(state),
+        None,
+        "lcm_dashboard_request_invalid",
+    ))
+}
+
+fn trimmed_nonempty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn parse_optional_i64(value: &str) -> Result<Option<i64>, ()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
     }
-
-    Ok(ok(Map::from_iter([
-        ("status".into(), json!("ok")),
-        ("provider".into(), json!(provider)),
-        (
-            "session_id".into(),
-            session_id.map_or(Value::Null, |value| json!(value)),
-        ),
-        ("storage_scope".into(), json!(state.lcm_scope)),
-        ("path".into(), json!(state.lcm_db_path)),
-        ("dry_run".into(), json!(false)),
-        (
-            "gc_report".into(),
-            serde_json::to_value(report).unwrap_or(Value::Null),
-        ),
-    ])))
-}
-
-fn payload_health_value(detail: &query::PayloadHealthDetail) -> Value {
-    let mut object = Map::new();
-    object.insert(
-        "status".into(),
-        json!(query::payload_health_state(
-            &detail.payload,
-            &detail.payload_gc
-        )),
-    );
-    merge_object(
-        &mut object,
-        serde_json::to_value(&detail.payload).unwrap_or(Value::Null),
-    );
-    merge_object(
-        &mut object,
-        serde_json::to_value(&detail.payload_gc).unwrap_or(Value::Null),
-    );
-    Value::Object(object)
-}
-
-fn merge_object(target: &mut Map<String, Value>, value: Value) {
-    if let Value::Object(object) = value {
-        target.extend(object);
-    }
-}
-
-fn lcm_storage_root(state: &DashboardState) -> PathBuf {
-    Path::new(&state.lcm_db_path)
-        .parent()
-        .map_or_else(|| state.store_root.clone(), Path::to_path_buf)
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default()
-}
-
-fn make_preview_token(provider: &str, session_id: Option<&str>) -> String {
-    let session = session_id.unwrap_or("all");
-    format!(
-        "payload-gc-{}-{}-{}-{}",
-        provider,
-        session,
-        std::process::id(),
-        now_unix()
-    )
+    trimmed.parse().map(Some).map_err(|_| ())
 }

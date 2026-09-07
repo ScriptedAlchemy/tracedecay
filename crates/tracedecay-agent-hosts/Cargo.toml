@@ -2,7 +2,7 @@
 name = "tracedecay-agent-hosts"
 version = "0.1.0"
 publish = false
-edition = "2024"
+edition.workspace = true
 license = "MIT"
 description = "Agent host integrations and self-improvement automation for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
@@ -11,26 +11,147 @@ build = "build.rs"
 [lib]
 doctest = false
 
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-automation-runtime/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
+    "tracedecay-framing/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-host-integration/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-mcp/hotpath",
+    "tracedecay-policy/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-lcm/hotpath",
+    "tracedecay-session-memory/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-automation-runtime/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-integration/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-mcp/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-automation-runtime/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-integration/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-mcp/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
+default = []
+# Exact token counting for automation artifact budgeting (tiktoken BPE).
+# Mirrors the root crate's `token-counting` feature; forwarded by the root.
+token-counting = ["dep:tiktoken-rs"]
+# Test-only transport wiring; mirrors the root crate's `test-transport`.
+# Forwards to the kernel so this crate's test targets can reach the hidden
+# `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test` seams.
+test-transport = [
+    "tracedecay-runtime-core/test-transport",
+    "tracedecay-automation-runtime/test-transport",
+]
+
 [dependencies]
-dirs = "6"
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 fs2 = "0.4"
+same-file = "1.0.6"
 getrandom = "0.2"
 hex = "0.4"
-libsql = "0.9.30"
-regex = "1.12.3"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+shell-words = "1.1"
 tempfile = "3"
 thiserror = "2"
+tiktoken-rs = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7.19", default-features = false }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
+toml_edit = "0.25"
 tracing = "0.1"
 url = "2"
-webpki-roots = "1"
+yaml-edit = { version = "0.2.3", default-features = false }
 
-tracedecay-automation = { path = "../tracedecay-automation" }
-tracedecay-lsp = { path = "../tracedecay-lsp" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
+tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+
+# Linux-only extended-attribute probe in `agents::mod` (host install provenance).
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }

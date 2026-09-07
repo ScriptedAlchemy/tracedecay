@@ -1,0 +1,24 @@
+[package]
+name = "tracedecay-host-integration"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Root-free host integration manifests, receipts, journals, and evidence"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+
+[dependencies]
+hotpath.workspace = true
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+
+[features]
+# Opt-in profiling passthrough so workspace `--features hotpath*` resolve.
+hotpath = ["hotpath/hotpath", "tracedecay-domain/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "tracedecay-domain/hotpath-alloc"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-domain/hotpath-cpu"]

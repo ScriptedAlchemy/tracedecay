@@ -1,8 +1,12 @@
 # TraceDecay Design Document
 
+This document is a historical snapshot of the pre-crate-split design, not current
+layout or ownership authority (`AGENTS.md` and the V2 plan set are).
 TraceDecay is a code intelligence tool that builds semantic knowledge graphs from source code.
-It parses source files with tree-sitter, extracts symbols and relationships into a SQLite
-database, and exposes the graph through a CLI and an MCP (Model Context Protocol) server.
+It parses source files with tree-sitter, extracts symbols and relationships into
+`tracedecay-graph-db` (Grafeo), and exposes the graph through a CLI, MCP, LSP, and an
+embedded dashboard. Relational SQLite remains for session, memory, and registry
+state — not the code graph.
 The core insight is that AI coding agents waste tokens reading raw files when a pre-built
 graph can answer most questions instantly.
 
@@ -18,7 +22,7 @@ graph LR
         B --> C[Language Extractors]
         C --> D[Nodes + Edges + Unresolved Refs]
         D --> E[Reference Resolver]
-        E --> F[SQLite Database]
+        E --> F[Graph store]
     end
 
     subgraph Querying
@@ -42,6 +46,10 @@ The library (`src/lib.rs`) exposes all internals so the CLI and server share the
 paths without duplication.
 
 ## Module Map
+
+This map is a historical snapshot of the pre-crate-split tree. Current layout
+is in `AGENTS.md` and `CONTRIBUTING.md` (`src/` daemon/MCP, `crates/` members,
+`dashboard/`, `plugin/`).
 
 ```
 src/
@@ -100,7 +108,7 @@ src/
 
 ## Core Data Model
 
-The graph has three primary entities stored in SQLite tables.
+The graph has three primary entities stored in `tracedecay-graph-db`.
 
 **Nodes** represent code symbols. Each node has:
 
@@ -168,10 +176,9 @@ etc.) that create cross-file connections in the graph.
 
 ### 4. Storage
 
-Nodes, edges, and file records are bulk-inserted into SQLite via `Database::insert_nodes`
-and `Database::insert_edges`, which use batched prepared statements for performance.
-The database runs in WAL mode with `busy_timeout = 5000ms` to handle concurrent access
-from the MCP server and git post-commit hooks.
+The code graph persists through `tracedecay-graph-db` (Grafeo). Relational
+SQLite (`tracedecay-rusqlite-runtime`) holds session, memory, and registry
+state, not graph nodes.
 
 ### 5. Incremental Sync
 
@@ -187,8 +194,9 @@ again on the full graph to pick up any new cross-file edges.
 
 ## Database Layer
 
-The database uses `libsql` (a SQLite fork by Turso) for async support. The schema
-is managed by sequential migrations tracked via `PRAGMA user_version`.
+The code graph is Grafeo. Relational catalogs use SQLite through the bundled
+`tracedecay-rusqlite-runtime`. Sequential migrations still track relational
+schema via `PRAGMA user_version`.
 
 Key schema features:
 
@@ -198,9 +206,10 @@ Key schema features:
 - **Content-addressed node IDs** enable deduplication and stable references
 - **WAL mode** with `NORMAL` synchronous for concurrent read/write safety
 
-The `queries.rs` module (~1600 lines) implements all data access as async methods
-on `Database`. Complex analytical queries (god classes, inheritance depth, coupling)
-use CTEs and window functions to avoid pulling large datasets into Rust.
+Domain-specific modules under `src/db/` implement data access through the
+engine executor traits. Complex analytical queries (god classes, inheritance
+depth, coupling) use CTEs and window functions to avoid pulling large datasets
+into Rust.
 
 ## Graph Algorithms
 
@@ -386,11 +395,7 @@ or SQLite-bound. Key concurrency points:
 
 ## Build and Distribution
 
-- **Cargo**: `cargo install tracedecay`
-- **Homebrew**: custom tap with prebuilt bottles (macOS ARM64, Linux x86_64)
-- **Scoop**: custom bucket with prebuilt Windows x86_64 zip
-- **GitHub Releases**: prebuilt archives for all platforms
+- **GitHub Releases**: checksummed prebuilt archives and `install.sh`
 
-The release workflow (`release.yml`) builds binaries for 4 targets, packages them
-as archives and Homebrew bottles, then updates the Homebrew tap and Scoop bucket
-repos automatically.
+The release workflow (`release.yml`) builds reproducible binary archives for
+four targets and publishes them only as GitHub Release assets.

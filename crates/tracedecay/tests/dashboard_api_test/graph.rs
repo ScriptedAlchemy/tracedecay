@@ -1,0 +1,1231 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::sync::Arc;
+
+use crate::common::{
+    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, get_json, http_agent,
+    pick_free_port, tempdir_or_panic, wait_for_dashboard,
+};
+use crate::dashboard_api_support::write_file;
+use crate::runtime::DashboardTestRuntimeV1;
+use serde_json::Value;
+use tempfile::TempDir;
+
+/// Proves a graph envelope was served ready by the verified graph authority:
+/// its version carries the generation the daemon published and verified for
+/// the served topology, never a fabricated or absent one.
+fn assert_ready_verified_generation(body: &Value) {
+    assert_eq!(body["domain_state"], "ready", "{body}");
+    assert!(
+        body["version"]["graph_version"]
+            .as_str()
+            .is_some_and(|generation| generation.starts_with("generation.dashboard-graph")),
+        "graph reads must carry their verified generation: {body}"
+    );
+}
+use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay::dashboard;
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay_application::{
+    CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
+    ResolvedScope,
+};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_domain::code_intelligence::{Edge, EdgeKind, Node, NodeKind, Visibility};
+use tracedecay_domain::{
+    ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
+    ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId,
+    LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
+    RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
+    SymbolOccurrenceId, canonical_sha256,
+};
+use tracedecay_graph_db::NeverCancelled;
+use tracedecay_graph_query::{
+    CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
+    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
+    VerifiedCodeGraphRead,
+};
+use tracedecay_session_memory::context::RegisteredScopeResolver;
+
+struct DashboardFixture {
+    _tmp: TempDir,
+    _env_guard: EnvVarGuard,
+    _data_dir_guard: EnvVarGuard,
+    base_url: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct GraphFixtureSeedV1 {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    /// Logical paths of the seeded files; the snapshot derives per-file
+    /// occurrence ids, digests, and languages from the path alone.
+    files: Vec<String>,
+}
+
+#[derive(Clone)]
+struct FixtureGraphProjectionV1 {
+    scope: ResolvedScope,
+    store: Arc<CodeGraphProjectionStore>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+}
+
+impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
+    fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            if request.context.scope() != &self.scope {
+                return Err(CodeGraphReadError::Denied);
+            }
+            match request.context.admission_at(request.observed_at) {
+                RequestAdmission::Admitted => VerifiedCodeGraphRead::new(
+                    self.scope.clone(),
+                    Arc::clone(&self.store),
+                    self.freshness,
+                ),
+                RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
+                RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+struct FixtureGraphAdmissionV1 {
+    scope: ResolvedScope,
+}
+
+impl CodeGraphReadAdmissionPort for FixtureGraphAdmissionV1 {
+    fn admit<'a>(
+        &'a self,
+        request: CodeGraphReadAdmissionRequest<'a>,
+    ) -> CodeGraphReadAdmissionFuture<'a> {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            if request.deadline.is_elapsed_at(request.observed_at) {
+                return Err(CodeGraphReadError::TimedOut);
+            }
+            let actor = ActorId::new("actor.dashboard-graph-fixture")
+                .unwrap_or_else(|error| panic!("fixture actor: {error}"));
+            let grant = CapabilityGrantSnapshot::new(
+                CapabilityGrantId::new("grant.dashboard-graph-fixture")
+                    .unwrap_or_else(|error| panic!("fixture grant: {error}")),
+                1,
+                ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .unwrap_or_else(|error| panic!("fixture grant digest: {error}")),
+                actor.clone(),
+                request.observed_at,
+                request.deadline.expires_at,
+                self.scope.clone(),
+                BTreeSet::from([request.operation.capability_id().clone()]),
+                BTreeSet::from([request.operation.use_case_id().clone()]),
+                DisclosureClass::Evidence,
+            )
+            .map_err(|error| CodeGraphReadError::InvalidRequest {
+                detail: error.to_string(),
+            })?;
+            RequestContext::new(
+                actor,
+                self.scope.clone(),
+                grant,
+                request.request_id,
+                request.deadline,
+                request.cancellation.context(),
+            )
+            .map_err(|error| CodeGraphReadError::InvalidRequest {
+                detail: error.to_string(),
+            })
+        })
+    }
+}
+
+impl Drop for DashboardFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: u32) -> Node {
+    Node {
+        id: id.to_string(),
+        kind,
+        name: name.to_string(),
+        qualified_name: format!("tracedecay_dashboard_api::{name}"),
+        file_path: file_path.to_string(),
+        start_line,
+        attrs_start_line: start_line,
+        end_line: start_line + 4,
+        start_column: 0,
+        end_column: 1,
+        signature: Some(format!("fn {name}()")),
+        docstring: Some(format!("Fixture documentation for {name}")),
+        visibility: Visibility::Pub,
+        is_async: false,
+        branches: 1,
+        loops: 0,
+        returns: 1,
+        max_nesting: 1,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 1_700_000_000,
+        parent_id: None,
+    }
+}
+
+async fn setup_project(
+    project_root: &Path,
+    profile_root: &Path,
+) -> (TraceDecay, std::sync::Arc<DashboardTestRuntimeV1>) {
+    write_file(
+        &project_root.join("src/dashboard/mod.rs"),
+        "pub fn dashboard() {}\n\n\n\n\n\n\npub fn route_graph() {}\n\n\n\n\n\n\n\n\n\n\n\npub struct GraphState;\n",
+    );
+    write_file(
+        &project_root.join("src/dashboard/view.tsx"),
+        "\n\nexport function render_graph() {}\n",
+    );
+    write_file(
+        &project_root.join("tests/dashboard_graph.rs"),
+        "\n\n\n\n\n\n\n\n\n\n\nfn route_graph_test() {}\n",
+    );
+    let runtime = std::sync::Arc::new(
+        DashboardTestRuntimeV1::project(
+            profile_root,
+            project_root,
+            ProjectId::new("dashboard_graph_fixture").expect("project identity"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("open dashboard graph authority: {error}")),
+    );
+    let graph = runtime
+        .initialize_project_graph_for_test(
+            project_root,
+            tracedecay::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root.to_path_buf()),
+                global_db_path: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("initialize dashboard graph fixture: {error}"));
+    (graph, runtime)
+}
+
+/// Extra node with no edges, for exercising the default-mode prune/fill rules.
+fn seed_orphan_node(seed: &mut GraphFixtureSeedV1) {
+    seed.nodes.push(make_node(
+        "n-orphan",
+        NodeKind::Function,
+        "orphan_helper",
+        "src/dashboard/orphan.rs",
+        1,
+    ));
+    seed.files.push("src/dashboard/orphan.rs".to_owned());
+}
+
+fn seed_graph_fixture() -> GraphFixtureSeedV1 {
+    let nodes = vec![
+        make_node(
+            "n-dashboard",
+            NodeKind::Function,
+            "dashboard",
+            "src/dashboard/mod.rs",
+            1,
+        ),
+        make_node(
+            "n-route",
+            NodeKind::Function,
+            "route_graph",
+            "src/dashboard/mod.rs",
+            8,
+        ),
+        make_node(
+            "n-render",
+            NodeKind::Function,
+            "render_graph",
+            "src/dashboard/view.tsx",
+            3,
+        ),
+        make_node(
+            "n-state",
+            NodeKind::Struct,
+            "GraphState",
+            "src/dashboard/mod.rs",
+            20,
+        ),
+    ];
+
+    let edges = vec![
+        Edge {
+            source: "n-dashboard".to_string(),
+            target: "n-route".to_string(),
+            kind: EdgeKind::Calls,
+            line: Some(2),
+        },
+        Edge {
+            source: "n-route".to_string(),
+            target: "n-render".to_string(),
+            kind: EdgeKind::Calls,
+            line: Some(9),
+        },
+        Edge {
+            source: "n-route".to_string(),
+            target: "n-state".to_string(),
+            kind: EdgeKind::Uses,
+            line: Some(12),
+        },
+    ];
+
+    let files = vec![
+        "src/dashboard/mod.rs".to_string(),
+        "src/dashboard/view.tsx".to_string(),
+    ];
+    GraphFixtureSeedV1 {
+        nodes,
+        edges,
+        files,
+    }
+}
+
+fn seed_neighbor_symmetry_fixture(seed: &mut GraphFixtureSeedV1) {
+    seed.nodes.extend([
+        make_node(
+            "n-sym-center",
+            NodeKind::Function,
+            "symmetry_center",
+            "src/dashboard/symmetry.rs",
+            30,
+        ),
+        make_node(
+            "n-sym-alpha",
+            NodeKind::Function,
+            "alpha_neighbor",
+            "src/dashboard/symmetry.rs",
+            40,
+        ),
+        make_node(
+            "n-sym-beta",
+            NodeKind::Function,
+            "beta_neighbor",
+            "src/dashboard/symmetry.rs",
+            50,
+        ),
+        make_node(
+            "n-sym-gamma",
+            NodeKind::Function,
+            "gamma_neighbor",
+            "src/dashboard/symmetry.rs",
+            60,
+        ),
+    ]);
+    seed.files.push("src/dashboard/symmetry.rs".to_owned());
+
+    seed.edges.extend(
+        [
+            ("n-sym-alpha", "n-sym-center", 101),
+            ("n-sym-center", "n-sym-alpha", 101),
+            ("n-sym-beta", "n-sym-center", 102),
+            ("n-sym-center", "n-sym-beta", 102),
+            ("n-sym-gamma", "n-sym-center", 103),
+            ("n-sym-center", "n-sym-gamma", 103),
+        ]
+        .map(|(source, target, line)| Edge {
+            source: source.to_string(),
+            target: target.to_string(),
+            kind: EdgeKind::Calls,
+            line: Some(line),
+        }),
+    );
+}
+
+fn seed_structure_fixture(seed: &mut GraphFixtureSeedV1) {
+    let test_node = make_node(
+        "n-route-test",
+        NodeKind::Function,
+        "route_graph_test",
+        "tests/dashboard_graph.rs",
+        12,
+    );
+    seed.edges.push(Edge {
+        source: test_node.id.clone(),
+        target: "n-route".to_string(),
+        kind: EdgeKind::Calls,
+        line: Some(13),
+    });
+    seed.nodes.push(test_node);
+    seed.files.push("tests/dashboard_graph.rs".to_string());
+}
+
+fn fixture_digest(domain: &str, value: &str) -> String {
+    canonical_sha256(&(domain, value))
+        .unwrap_or_else(|error| panic!("fixture digest: {error}"))
+        .as_str()
+        .to_owned()
+}
+
+fn fixture_language(path: &str) -> LanguageId {
+    let language = if path.ends_with(".tsx") {
+        "typescript"
+    } else {
+        "rust"
+    };
+    LanguageId::new(language).unwrap_or_else(|error| panic!("fixture language: {error}"))
+}
+
+fn relation_kind(kind: &EdgeKind) -> RelationEdgeKindV1 {
+    match kind {
+        EdgeKind::Contains => RelationEdgeKindV1::Contains,
+        EdgeKind::Calls => RelationEdgeKindV1::Calls,
+        EdgeKind::Uses => RelationEdgeKindV1::Uses,
+        EdgeKind::Implements => RelationEdgeKindV1::Implements,
+        EdgeKind::TypeOf => RelationEdgeKindV1::TypeOf,
+        EdgeKind::Returns => RelationEdgeKindV1::Returns,
+        EdgeKind::Extends => RelationEdgeKindV1::Extends,
+        EdgeKind::Annotates | EdgeKind::DerivesMacro => RelationEdgeKindV1::Annotates,
+        EdgeKind::Receives => RelationEdgeKindV1::Receives,
+    }
+}
+
+fn compose_graph_authority(
+    cg: &TraceDecay,
+    seed: GraphFixtureSeedV1,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+) -> (
+    Arc<dyn CodeGraphReadAdmissionPort>,
+    Arc<dyn CodeGraphProjectionReadPort>,
+) {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| ProjectId::new(value.to_owned()).ok())
+        .unwrap_or_else(|| panic!("fixture project identity is registered"));
+    let scope = RegisteredScopeResolver::resolve(cg.project_root(), cg.project_root(), &project_id)
+        .unwrap_or_else(|error| panic!("fixture graph scope: {error}"));
+    let generation = CodeGenerationId::new("generation.dashboard-graph-fixture.1")
+        .unwrap_or_else(|error| panic!("fixture generation: {error}"));
+
+    let files: Vec<_> = seed
+        .files
+        .iter()
+        .map(|path| SanitizedCodeFileV1 {
+            file_occurrence_id: FileOccurrenceId::new(format!("file:dashboard:{path}"))
+                .unwrap_or_else(|error| panic!("fixture file occurrence: {error}")),
+            logical_path: path.clone(),
+            language: Some(fixture_language(path)),
+            content_digest: ContentDigest::new(fixture_digest("dashboard-file", path))
+                .unwrap_or_else(|error| panic!("fixture file digest: {error}")),
+            disposition: SnapshotFileDispositionV1::Present,
+        })
+        .collect();
+    let file_occurrences: std::collections::BTreeMap<_, _> = files
+        .iter()
+        .map(|file| (file.logical_path.clone(), file.file_occurrence_id.clone()))
+        .collect();
+    let symbols = GenerationSymbolIndexV1::new(
+        generation.clone(),
+        seed.nodes
+            .iter()
+            .map(|node| {
+                Arc::new(LineageSymbolRecordV1 {
+                    occurrence: SymbolOccurrenceId::new(node.id.clone())
+                        .unwrap_or_else(|error| panic!("fixture symbol occurrence: {error}")),
+                    identity: SymbolIdentityDigest::new(fixture_digest(
+                        "dashboard-symbol-identity",
+                        &node.id,
+                    ))
+                    .unwrap_or_else(|error| panic!("fixture symbol identity: {error}")),
+                    qualified_name: node.qualified_name.clone(),
+                    simple_name: node.name.clone(),
+                    kind: node.kind.as_str().to_owned(),
+                    visibility: node.visibility.as_str().to_owned(),
+                    branches: node.branches,
+                    loops: node.loops,
+                    max_nesting: node.max_nesting,
+                    line_span: node
+                        .end_line
+                        .saturating_sub(node.start_line)
+                        .saturating_add(1),
+                    start_line: node.start_line,
+                    signature: node.signature.clone(),
+                    skip_test_coverage: false,
+                    file_identity: FileIdentityDigest::new(fixture_digest(
+                        "dashboard-file-identity",
+                        &node.file_path,
+                    ))
+                    .unwrap_or_else(|error| panic!("fixture file identity: {error}")),
+                    content_digest: ContentDigest::new(fixture_digest(
+                        "dashboard-symbol-content",
+                        &node.id,
+                    ))
+                    .unwrap_or_else(|error| panic!("fixture symbol digest: {error}")),
+                })
+            })
+            .collect(),
+    )
+    .unwrap_or_else(|error| panic!("fixture symbol index: {error}"));
+    let chunks: Vec<_> = seed
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(ordinal, node)| {
+            let occurrence = SymbolOccurrenceId::new(node.id.clone())
+                .unwrap_or_else(|error| panic!("fixture chunk occurrence: {error}"));
+            let file = file_occurrences
+                .get(&node.file_path)
+                .unwrap_or_else(|| panic!("fixture node file is registered: {}", node.file_path));
+            Arc::new(CodeSearchChunkV1 {
+                id: CodeSearchChunkId::new(format!("chunk:dashboard:{}", node.id))
+                    .unwrap_or_else(|error| panic!("fixture chunk identity: {error}")),
+                anchor: CodeSearchChunkAnchorV1 {
+                    generation_id: generation.clone(),
+                    file_occurrence_id: file.clone(),
+                    symbol_occurrence_id: Some(occurrence),
+                    parent_chunk_id: None,
+                    source_span: SourceSpan {
+                        start_byte: u64::try_from(ordinal).unwrap_or(0),
+                        end_byte: u64::try_from(ordinal.saturating_add(1)).unwrap_or(u64::MAX),
+                    },
+                    grain: CodeSearchChunkGrainV1::SymbolBody,
+                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                },
+                content_digest: ContentDigest::new(fixture_digest("dashboard-chunk", &node.id))
+                    .unwrap_or_else(|error| panic!("fixture chunk digest: {error}")),
+                language_descriptor_revision: LanguageDescriptorRevision::new(
+                    "language.dashboard-fixture.v1",
+                )
+                .unwrap_or_else(|error| panic!("fixture language revision: {error}")),
+                chunker_revision: ChunkerRevision::new("chunker.dashboard-fixture.v1")
+                    .unwrap_or_else(|error| panic!("fixture chunker revision: {error}")),
+                sanitizer_revision: SanitizerRevision::new("sanitizer.dashboard-fixture.v1")
+                    .unwrap_or_else(|error| panic!("fixture sanitizer revision: {error}")),
+                sensitivity: SensitivityDecision {
+                    level: SensitivityLevelV1::Public,
+                    policy_revision: PolicyRevisionId::new("policy.dashboard-fixture.v1")
+                        .unwrap_or_else(|error| panic!("fixture policy revision: {error}")),
+                },
+                exact_terms: Vec::new(),
+                subtokens: Vec::new(),
+                sanitized_text: BoundedSanitizedText::new("fixture")
+                    .unwrap_or_else(|error| panic!("fixture sanitized text: {error}")),
+            })
+        })
+        .collect();
+    let edges: Vec<_> = seed
+        .edges
+        .iter()
+        .map(|edge| CanonicalRelationEdgeV1 {
+            from_occurrence: SymbolOccurrenceId::new(edge.source.clone())
+                .unwrap_or_else(|error| panic!("fixture edge source: {error}")),
+            to_occurrence: SymbolOccurrenceId::new(edge.target.clone())
+                .unwrap_or_else(|error| panic!("fixture edge target: {error}")),
+            kind: relation_kind(&edge.kind),
+            authority: EdgeAuthorityV1::SyntaxExact,
+            evidence_span: SourceSpan {
+                start_byte: edge.line.unwrap_or(0).into(),
+                end_byte: edge.line.unwrap_or(0).saturating_add(1).into(),
+            },
+        })
+        .collect();
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancel.dashboard-graph-fixture")
+            .unwrap_or_else(|error| panic!("fixture graph cancellation: {error}"));
+    let projection = HermeticCodeGraphProjectionStore::memory(&cancellation)
+        .unwrap_or_else(|error| panic!("fixture graph projection: {error}"));
+    projection
+        .publish_indexed_with_cancellation(
+            &generation,
+            &edges,
+            &chunks,
+            &files,
+            &symbols,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap_or_else(|error| panic!("publish fixture graph: {error}"));
+    let store = Arc::new(
+        projection
+            .verified_store(&generation)
+            .unwrap_or_else(|error| panic!("verify fixture graph: {error}")),
+    );
+    (
+        Arc::new(FixtureGraphAdmissionV1 {
+            scope: scope.clone(),
+        }),
+        Arc::new(FixtureGraphProjectionV1 {
+            scope,
+            store,
+            freshness,
+        }),
+    )
+}
+
+async fn start_dashboard_fixture() -> DashboardFixture {
+    start_dashboard_fixture_with(false, false, false).await
+}
+
+/// [`start_dashboard_fixture`] whose graph port serves the last complete
+/// generation typed stale, the rebuild-window shape the envelope freshness
+/// marker must expose.
+async fn start_stale_serving_dashboard_fixture() -> DashboardFixture {
+    start_dashboard_fixture_full(
+        false,
+        false,
+        false,
+        tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+            sealed_at: tracedecay_domain::UtcMicros(1),
+            rebuild_in_flight: true,
+        },
+    )
+    .await
+}
+
+async fn start_dashboard_fixture_with(
+    with_orphan: bool,
+    with_structure_fixture: bool,
+    with_neighbor_symmetry_fixture: bool,
+) -> DashboardFixture {
+    start_dashboard_fixture_full(
+        with_orphan,
+        with_structure_fixture,
+        with_neighbor_symmetry_fixture,
+        tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+    )
+    .await
+}
+
+async fn start_dashboard_fixture_full(
+    with_orphan: bool,
+    with_structure_fixture: bool,
+    with_neighbor_symmetry_fixture: bool,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+) -> DashboardFixture {
+    let tmp = tempdir_or_panic();
+    let project_root = tmp.path().join("project");
+    let global_db_path = tmp.path().join("global").join("global.db");
+    let profile_root = tmp.path().join("profile").join(".tracedecay");
+    let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
+    let mut graph_seed = seed_graph_fixture();
+    if with_orphan {
+        seed_orphan_node(&mut graph_seed);
+    }
+    if with_structure_fixture {
+        seed_structure_fixture(&mut graph_seed);
+    }
+    if with_neighbor_symmetry_fixture {
+        seed_neighbor_symmetry_fixture(&mut graph_seed);
+    }
+    let (code_graph_admission, code_graph_projection) =
+        compose_graph_authority(&cg, graph_seed, freshness);
+
+    let port = pick_free_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let server_graph = std::sync::Arc::new(cg);
+    let authority = host_runtime
+        .dashboard_test_authority_with_session_reads(&server_graph)
+        .await
+        .unwrap_or_else(|error| panic!("compose dashboard graph authority: {error}"))
+        .with_code_graph_authority(code_graph_admission, code_graph_projection);
+    let server = tokio::spawn(async move {
+        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+            server_graph,
+            authority,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            dashboard::DashboardTestEndpointV1 {
+                host: "127.0.0.1",
+                port,
+            },
+            tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
+            dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
+            std::future::pending(),
+        )
+        .await;
+    });
+
+    let agent = http_agent();
+    wait_for_dashboard(&agent, &base_url).await;
+
+    DashboardFixture {
+        _tmp: tmp,
+        _env_guard: env_guard,
+        _data_dir_guard: data_dir_guard,
+        base_url,
+        server,
+    }
+}
+
+#[test]
+fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture().await;
+        let agent = http_agent();
+
+        let (status, capabilities) =
+            get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(capabilities["features"]["graph"], true);
+        assert_eq!(
+            capabilities["dashboards"],
+            serde_json::json!(["tracedecay"])
+        );
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/overview", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&overview);
+        assert_eq!(overview["payload"]["totals"]["nodes"], 4);
+        assert_eq!(overview["payload"]["totals"]["edges"], 3);
+        assert_eq!(overview["payload"]["totals"]["files"], 2);
+        assert!(
+            overview["payload"]["nodes_by_kind"]
+                .as_array()
+                .is_some_and(|rows| rows
+                    .iter()
+                    .any(|row| row["kind"] == "function" && row["count"] == 3)),
+            "overview should include node counts by kind"
+        );
+        assert!(
+            overview["payload"]["files_by_language"]
+                .as_array()
+                .is_some_and(|rows| rows
+                    .iter()
+                    .any(|row| row["language"] == "rust" && row["count"] == 1)),
+            "overview should include file counts by language"
+        );
+
+        let (status, search) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=dashboard&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&search);
+        assert_eq!(search["payload"]["query"], "dashboard");
+        assert!(
+            search["payload"]["results"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-dashboard")),
+            "search should include the exact dashboard symbol"
+        );
+
+        let (status, node) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/node/n-route", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            node["payload"]["node"]["qualified_name"],
+            "tracedecay_dashboard_api::route_graph"
+        );
+        assert_eq!(node["payload"]["node"]["span"]["start_line"], 8);
+        assert_eq!(
+            node["payload"]["node"]["doc"],
+            Value::Null,
+            "the verified projection does not publish documentation text"
+        );
+
+        let (status, neighbors) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/node/n-route/neighbors",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(neighbors["payload"]["node_id"], "n-route");
+        assert!(
+            neighbors["payload"]["callers"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-dashboard")),
+            "neighbors should include callers"
+        );
+        assert!(
+            neighbors["payload"]["callees"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-render")),
+            "neighbors should include callees"
+        );
+        assert!(
+            neighbors["payload"]["edges_by_kind"]
+                .as_array()
+                .is_some_and(|rows| rows
+                    .iter()
+                    .any(|row| row["kind"] == "uses" && row["count"] == 1)),
+            "neighbors should group non-call edges by kind"
+        );
+
+        let (status, subgraph) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?node_id=n-route&limit_nodes=3&limit_edges=2",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(subgraph["payload"]["seed_id"], "n-route");
+        assert_eq!(subgraph["payload"]["mode"], "seeded");
+        assert_eq!(subgraph["payload"]["capped"]["nodes"], true);
+        let nodes = subgraph["payload"]["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected subgraph nodes array"));
+        let edges = subgraph["payload"]["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected subgraph edges array"));
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(edges.len(), 2);
+
+        // Tighter edge limit: 2 edges exist among the visible nodes, cap at 1.
+        let (status, capped) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?node_id=n-route&limit_nodes=3&limit_edges=1",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(capped["payload"]["capped"]["edges"], true);
+        assert_eq!(
+            capped["payload"]["edges"]
+                .as_array()
+                .map_or(0, |rows| rows.len()),
+            1,
+            "edge list should be truncated to the cap"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["id"] == "n-route" && node["degree"] == 3),
+            "subgraph nodes should carry total degree counts (n-route has 3 edges)"
+        );
+    });
+}
+
+#[test]
+fn graph_api_marks_stale_served_reads_in_the_envelope_freshness() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_stale_serving_dashboard_fixture().await;
+        let agent = http_agent();
+
+        let (status, overview) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/overview", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&overview);
+        assert_eq!(
+            overview["freshness"]["state"], "stale",
+            "stale-served graph reads must carry the stale freshness marker: {overview}"
+        );
+
+        let (status, search) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=dashboard&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            search["freshness"]["state"], "stale",
+            "stale-served graph search must carry the stale freshness marker: {search}"
+        );
+
+        let (status, node) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/node/n-route", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            node["freshness"]["state"], "stale",
+            "stale-served node detail must carry the stale freshness marker: {node}"
+        );
+    });
+}
+
+#[test]
+fn graph_api_caller_and_callee_traversal_are_behaviorally_symmetric() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_with(false, false, true).await;
+        let agent = http_agent();
+        let (status, neighbors) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/node/n-sym-center/neighbors?limit=2",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{neighbors}");
+        assert_eq!(neighbors["payload"]["limit"], 2);
+
+        let callers = neighbors["payload"]["callers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected caller rows: {neighbors}"));
+        let callees = neighbors["payload"]["callees"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected callee rows: {neighbors}"));
+        assert_eq!(callers, callees, "direction must preserve row mapping");
+        assert_eq!(callers.len(), 2, "both directions must honor the limit");
+        assert_eq!(
+            callers
+                .iter()
+                .map(|row| row["id"].as_str())
+                .collect::<Vec<_>>(),
+            vec![Some("n-sym-alpha"), Some("n-sym-beta")],
+            "both directions must use qualified-name ordering before limiting"
+        );
+
+        for (row, expected_start_line) in callers.iter().zip([40, 50]) {
+            assert_eq!(row["kind"], "function");
+            assert_eq!(row["file_path"], "src/dashboard/symmetry.rs");
+            assert_eq!(row["edge_kind"], "calls");
+            assert_eq!(
+                row["edge_line"],
+                Value::Null,
+                "canonical edges carry byte spans, not fabricated line numbers"
+            );
+            assert_eq!(row["degree"], 2);
+            assert_eq!(row["span"]["start_line"], expected_start_line);
+        }
+    });
+}
+
+#[test]
+fn graph_api_finds_shortest_path_and_analytics() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture().await;
+        let agent = http_agent();
+
+        // dashboard -> route_graph -> render_graph is the only path.
+        let (status, path) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/path?from=n-dashboard&to=n-render",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&path);
+        assert_eq!(path["payload"]["found"], true);
+        assert_eq!(
+            path["payload"]["path"],
+            serde_json::json!(["n-dashboard", "n-route", "n-render"])
+        );
+        let path_edges = path["payload"]["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected path edges array"));
+        assert_eq!(path_edges.len(), 2);
+        assert!(
+            path["payload"]["nodes"]
+                .as_array()
+                .is_some_and(|rows| rows.len() == 3),
+            "path payload should hydrate full node rows"
+        );
+
+        // No path between disconnected nodes within depth.
+        let (status, no_path) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/path?from=n-render&to=n-missing",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(no_path["payload"]["found"], false);
+
+        // Landing analytics: most-connected symbols + largest files.
+        let (status, overview) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/overview", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let top = overview["payload"]["top_connected"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected top_connected array"));
+        assert!(
+            top.iter()
+                .any(|row| row["id"] == "n-route" && row["degree"] == 3),
+            "top_connected should rank n-route with degree 3"
+        );
+        let largest = overview["payload"]["largest_files"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected largest_files array"));
+        assert!(
+            largest
+                .iter()
+                .any(|row| row["path"] == "src/dashboard/mod.rs"),
+            "largest_files should include the seeded rust file"
+        );
+    });
+}
+
+#[test]
+fn graph_api_seedless_subgraph_returns_default_hub_slice() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        // 4 interconnected nodes + 1 orphan with no edges.
+        let fixture = start_dashboard_fixture_with(true, false, false).await;
+        let agent = http_agent();
+
+        // No seed at all: the default overview slice. Everything fits under
+        // the default caps, so all 5 nodes come back (connected hubs first,
+        // the orphan fills leftover capacity) with all 3 edges.
+        let (status, default_slice) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/subgraph", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&default_slice);
+        assert_eq!(default_slice["payload"]["mode"], "default");
+        assert_eq!(default_slice["payload"]["seed_id"], Value::Null);
+        let nodes = default_slice["payload"]["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected default subgraph nodes array"));
+        assert_eq!(nodes.len(), 5);
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["id"] == "n-route" && node["degree"] == 3),
+            "default slice should include the top hub with its degree"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["id"] == "n-orphan" && node["degree"] == 0),
+            "isolated nodes should fill leftover capacity"
+        );
+        assert_eq!(
+            default_slice["payload"]["edges"]
+                .as_array()
+                .map_or(0, |rows| rows.len()),
+            3,
+            "default slice should include every edge among the selected nodes"
+        );
+        assert_eq!(default_slice["payload"]["capped"]["nodes"], false);
+        assert_eq!(default_slice["payload"]["capped"]["edges"], false);
+
+        // With only 4 slots, the connected nodes win and the orphan is pruned.
+        let (status, pruned) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?limit_nodes=4",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let pruned_nodes = pruned["payload"]["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected pruned subgraph nodes array"));
+        assert_eq!(pruned_nodes.len(), 4);
+        assert!(
+            pruned_nodes.iter().all(|node| node["id"] != "n-orphan"),
+            "connected hubs should win the node budget over isolated nodes"
+        );
+        assert_eq!(pruned["payload"]["capped"]["nodes"], true);
+
+        // Tight budget: top-degree hub plus its best-connected peer, and only
+        // the edges among the selected nodes.
+        let (status, tight) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?limit_nodes=2",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let tight_nodes = tight["payload"]["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected tight subgraph nodes array"));
+        assert_eq!(tight_nodes.len(), 2);
+        assert!(
+            tight_nodes.iter().any(|node| node["id"] == "n-route"),
+            "the top hub should always survive a tight node budget"
+        );
+        let tight_edges = tight["payload"]["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected tight subgraph edges array"));
+        assert!(
+            tight_edges.iter().all(|edge| {
+                tight_nodes.iter().any(|node| node["id"] == edge["source"])
+                    && tight_nodes.iter().any(|node| node["id"] == edge["target"])
+            }),
+            "default slice edges must stay within the selected node set"
+        );
+
+        // An explicit query that matches nothing must stay empty (it is a
+        // failed search, not a request for the default slice).
+        let (status, no_hit) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/subgraph?q=zzz_no_such_symbol",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(no_hit["payload"]["seed_id"], Value::Null);
+        assert_eq!(
+            no_hit["payload"]["nodes"]
+                .as_array()
+                .map_or(1, |rows| rows.len()),
+            0
+        );
+        assert_eq!(
+            no_hit["payload"]["edges"]
+                .as_array()
+                .map_or(1, |rows| rows.len()),
+            0
+        );
+    });
+}
+
+#[test]
+fn structure_visualization_endpoints_report_measured_data() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_with(false, true, false).await;
+        let agent = http_agent();
+
+        let (status, chain) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/call-chain?from=n-dashboard&to=n-render&max_depth=20",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{chain}");
+        assert_eq!(chain["domain_state"], "ready");
+        assert_eq!(chain["payload"]["status"], "measured");
+        assert_eq!(chain["payload"]["measurement"]["directed"], true);
+        assert_eq!(chain["payload"]["measurement"]["edge_kind"], "calls");
+        assert_eq!(
+            chain["payload"]["measurement"]["selection"],
+            "single_shortest_path"
+        );
+        assert_eq!(chain["payload"]["measurement"]["hop_count"], 2);
+
+        let (status, strata) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/strata", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{strata}");
+        assert_eq!(strata["payload"]["status"], "measured");
+        assert_eq!(strata["payload"]["measurement"]["granularity"], "file");
+        assert_eq!(
+            strata["payload"]["measurement"]["dependency_edge_kinds"],
+            serde_json::json!(["calls", "uses"])
+        );
+        assert_eq!(
+            strata["payload"]["measurement"]["scan"]["cache_scope"],
+            "graph_generation"
+        );
+        assert!(
+            strata["payload"]["measurement"]["files"]
+                .as_array()
+                .is_some_and(|files| files
+                    .iter()
+                    .any(|file| file["path"] == "src/dashboard/view.tsx")),
+            "strata should carry per-file depth rows: {strata}"
+        );
+
+        let (status, facts) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/node/n-route/facts", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{facts}");
+        assert_eq!(facts["payload"]["status"], "measured");
+        assert_eq!(facts["payload"]["measurement"]["granularity"], "name_match");
+        assert_eq!(
+            facts["payload"]["measurement"]["identity_semantics"],
+            "not_symbol_identity"
+        );
+        assert_eq!(
+            facts["payload"]["measurement"]["caption"],
+            "citing this name"
+        );
+        assert_eq!(
+            facts["payload"]["measurement"]["entity_matches"],
+            serde_json::json!([]),
+            "removed compatibility entity tables are not a fact source"
+        );
+        assert_eq!(
+            facts["payload"]["measurement"]["arms"][0]["match_basis"],
+            "memory_v2_assertion_payloads_fts",
+            "the fact join must use the canonical assertion payload projection"
+        );
+
+        let (status, tests) = get_json(
+            &agent,
+            &format!("{}/api/plugins/graph/node/n-route/tests", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{tests}");
+        assert_eq!(tests["payload"]["status"], "measured");
+        assert_eq!(tests["payload"]["measurement"]["granularity"], "symbol");
+        assert_eq!(tests["payload"]["measurement"]["caller_depth"], 3);
+        assert!(
+            tests["payload"]["measurement"]["tests"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|test| {
+                    test["id"] == "n-route-test" && test["file_path"] == "tests/dashboard_graph.rs"
+                })),
+            "test map should report the covering test: {tests}"
+        );
+        let (status, sessions) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/node/n-route/sessions",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{sessions}");
+        assert_eq!(sessions["payload"]["status"], "measured");
+        assert_eq!(
+            sessions["payload"]["measurement"]["available_granularities"],
+            serde_json::json!(["file"])
+        );
+        assert_eq!(
+            sessions["payload"]["measurement"]["linkage"]["providers"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            sessions["payload"]["measurement"]["symbol_granularity_available"],
+            false
+        );
+    });
+}

@@ -3,11 +3,11 @@
 /// Parses PowerShell source files and emits nodes and edges for the code graph.
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
 use crate::complexity::{POWERSHELL_COMPLEXITY, count_complexity};
 use crate::traversal::find_direct_child_by_kind;
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
@@ -15,7 +15,7 @@ use tracedecay_domain::code_intelligence::{
 pub struct PowerShellExtractor;
 
 /// Internal state used during AST traversal.
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
@@ -23,12 +23,12 @@ struct ExtractionState {
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -40,18 +40,23 @@ impl ExtractionState {
             errors: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             timestamp,
         }
     }
 
     /// Returns the current qualified name prefix from the node stack.
+    ///
+    /// The file root is pushed onto `node_stack` as the first frame when
+    /// extraction begins, so iterating the stack already yields the file
+    /// path as the leading segment — prepending `self.file_path` here was
+    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
     fn qualified_prefix(&self) -> String {
-        let mut parts = vec![self.file_path.clone()];
-        for (name, _) in &self.node_stack {
-            parts.push(name.clone());
-        }
-        parts.join("::")
+        self.node_stack
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
     /// Returns the current parent node ID, or None if at file root level.
@@ -60,31 +65,41 @@ impl ExtractionState {
     }
 
     /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl PowerShellExtractor {
-    /// Extract code graph nodes and edges from a PowerShell source file.
-    ///
     /// `file_path` is used for qualified names and node IDs (not for I/O).
-    /// `source` is the PowerShell source code to parse.
     pub fn extract_powershell(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
-        // Create the File root node.
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
+
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -114,28 +129,24 @@ impl PowerShellExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Walk the AST.
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("powershell")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load PowerShell grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("powershell", "PowerShell", source)
     }
 
-    /// Visit all children of a node.
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -149,7 +160,6 @@ impl PowerShellExtractor {
         }
     }
 
-    /// Visit a single AST node, dispatching on its type.
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "function_statement" => Self::visit_function(state, node),
@@ -164,17 +174,19 @@ impl PowerShellExtractor {
         // A pipeline wraps either an assignment_expression or a pipeline_chain > command.
         if let Some(assignment) = find_direct_child_by_kind(node, "assignment_expression") {
             Self::visit_assignment(state, assignment, node);
-        } else if let Some(chain) = find_direct_child_by_kind(node, "pipeline_chain") {
-            if let Some(command) = find_direct_child_by_kind(chain, "command") {
-                Self::visit_command(state, command);
-            }
+        } else if let Some(chain) = find_direct_child_by_kind(node, "pipeline_chain")
+            && let Some(command) = find_direct_child_by_kind(chain, "command")
+        {
+            Self::visit_command(state, command);
         }
     }
 
     /// Extract a function definition.
     fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "function_name")
-            .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        let name = find_direct_child_by_kind(node, "function_name").map_or_else(
+            || "<anonymous>".to_string(),
+            |n| state.node_text(n).to_string(),
+        );
 
         let kind = NodeKind::Function;
         let visibility = Visibility::Pub;
@@ -186,7 +198,7 @@ impl PowerShellExtractor {
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
         let id = generate_node_id(&state.file_path, &kind, &name, start_line);
-        let metrics = count_complexity(node, &POWERSHELL_COMPLEXITY, &state.source);
+        let metrics = count_complexity(node, &POWERSHELL_COMPLEXITY, state.source);
 
         let graph_node = Node {
             id: id.clone(),
@@ -215,7 +227,6 @@ impl PowerShellExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -225,7 +236,6 @@ impl PowerShellExtractor {
             });
         }
 
-        // Extract call sites from the function body.
         Self::extract_call_sites(state, node, &id);
     }
 
@@ -240,7 +250,6 @@ impl PowerShellExtractor {
             return;
         };
 
-        // Look for a cast_expression recursively inside the left side.
         let Some(cast) = Self::find_descendant_by_kind(left, "cast_expression") else {
             return;
         };
@@ -251,7 +260,6 @@ impl PowerShellExtractor {
         };
 
         let var_text = state.node_text(var_node);
-        // Strip leading $ from variable name.
         let name = var_text.trim_start_matches('$').to_string();
 
         let start_line = pipeline_node.start_position().row as u32;
@@ -289,7 +297,6 @@ impl PowerShellExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -310,19 +317,18 @@ impl PowerShellExtractor {
             .unwrap_or_default();
 
         if cmd_name == "Import-Module" {
-            // Extract the module name from command_elements.
-            if let Some(elements) = node.child_by_field_name("command_elements") {
-                if let Some(token) = find_direct_child_by_kind(elements, "generic_token") {
-                    let module_name = state.node_text(token);
-                    Self::emit_use_node(state, node, &module_name);
-                }
+            if let Some(elements) = node.child_by_field_name("command_elements")
+                && let Some(token) = find_direct_child_by_kind(elements, "generic_token")
+            {
+                let module_name = state.node_text(token);
+                Self::emit_use_node(state, node, module_name);
             }
         } else if find_direct_child_by_kind(node, "command_invokation_operator").is_some() {
             // Dot-source command: `. .\Utils.ps1`
             // The path is in command_name_expr > command_name.
             if let Some(name_expr) = node.child_by_field_name("command_name") {
                 let path = state.node_text(name_expr);
-                Self::emit_use_node(state, node, &path);
+                Self::emit_use_node(state, node, path);
             }
         }
     }
@@ -364,7 +370,6 @@ impl PowerShellExtractor {
         };
         state.nodes.push(graph_node);
 
-        // Contains edge from parent.
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
@@ -374,10 +379,6 @@ impl PowerShellExtractor {
             });
         }
     }
-
-    // ----------------------------
-    // Helper extraction methods
-    // ----------------------------
 
     /// Extract the function signature (first line of the definition).
     fn extract_function_signature(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
@@ -401,13 +402,11 @@ impl PowerShellExtractor {
             if prev_node.kind() == "comment" {
                 let text = state.node_text(prev_node);
                 let stripped = if text.starts_with("<#") {
-                    // Block comment: strip <# and #> delimiters.
                     text.trim_start_matches("<#")
                         .trim_end_matches("#>")
                         .trim()
                         .to_string()
                 } else {
-                    // Line comment: strip leading #.
                     text.trim_start_matches('#').trim().to_string()
                 };
                 comments.push(stripped);
@@ -431,19 +430,17 @@ impl PowerShellExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "command" => {
-                        // Extract the command name.
                         if let Some(name_node) = child.child_by_field_name("command_name") {
                             let callee_name = state.node_text(name_node);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.to_string(),
                                 reference_kind: EdgeKind::Calls,
                                 line: child.start_position().row as u32,
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                             });
                         }
-                        // Recurse into command for nested command substitutions.
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                     // Skip nested function definitions.
@@ -508,5 +505,15 @@ impl crate::LanguageExtractor for PowerShellExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_powershell(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

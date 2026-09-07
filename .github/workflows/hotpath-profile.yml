@@ -53,6 +53,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: kache compiler cache
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kache
+            ~/.cache/kache
+          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: kache-${{ runner.os }}-
+      - name: Enable kache
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          command -v kache >/dev/null 2>&1 || cargo install kache --locked
+          kache init --no-service
+          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
       - name: Create metrics directory
         run: mkdir -p /tmp/metrics
 
@@ -136,10 +152,12 @@ jobs:
           jq -r '"base peak RSS bytes: \(.peak_rss_bytes)"' /tmp/metrics/base_workload.json
 
       - name: Save PR metadata
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
           echo '${{ github.base_ref }}' > /tmp/metrics/base_ref.txt
-          echo '${{ github.head_ref }}' > /tmp/metrics/head_ref.txt
+          printf '%s\n' "$HEAD_REF" > /tmp/metrics/head_ref.txt
           echo '${{ steps.head_bench.outputs.available }}' > /tmp/metrics/head_bench_available.txt
           echo '${{ steps.base_bench.outputs.available }}' > /tmp/metrics/base_bench_available.txt
 

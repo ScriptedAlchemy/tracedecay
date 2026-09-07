@@ -1,0 +1,654 @@
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use tracedecay_application::{
+    ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
+    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
+    CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
+    SafeDiagnostic,
+};
+use tracedecay_daemon_service::callable_code_request_context;
+use tracedecay_domain::{ComponentVersion, UtcMicros};
+
+use tracedecay_configuration::{
+    ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
+};
+use tracedecay_graph_query::CodeGraphReadError;
+use tracedecay_usecases::{
+    CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
+    ProjectSourceAccessSnapshot,
+};
+
+type CurrentAccessFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, ApplicationProblem>> + Send + 'a>,
+>;
+
+trait CurrentCallableCodeAccessPort: Send + Sync {
+    fn current_access(&self, observed_at: UtcMicros) -> CurrentAccessFuture<'_>;
+}
+
+struct ProductionCallableCodeAccessPort {
+    project_root: PathBuf,
+    scope: ResolvedScope,
+    configuration: Arc<ProjectConfigurationRuntime>,
+}
+
+impl CurrentCallableCodeAccessPort for ProductionCallableCodeAccessPort {
+    fn current_access(&self, observed_at: UtcMicros) -> CurrentAccessFuture<'_> {
+        Box::pin(async move {
+            let current = self
+                .configuration
+                .configuration_store()
+                .current()
+                .await
+                .map_err(configuration_current_problem)?;
+            let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+                self.configuration.configuration_target().clone(),
+                current.revision_id,
+                current.snapshot,
+            )
+            .map_err(|_| concealed())?;
+            crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
+                &self.scope,
+                &self.project_root,
+                &configuration,
+                observed_at,
+            )
+            .map_err(|_| concealed())
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct DaemonCallableCodeAuthorizationSource {
+    access: Arc<dyn CurrentCallableCodeAccessPort>,
+}
+
+impl DaemonCallableCodeAuthorizationSource {
+    pub(super) fn production(
+        project_root: PathBuf,
+        scope: ResolvedScope,
+        configuration: Arc<ProjectConfigurationRuntime>,
+    ) -> Self {
+        Self {
+            access: Arc::new(ProductionCallableCodeAccessPort {
+                project_root,
+                scope,
+                configuration,
+            }),
+        }
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn current(
+        &self,
+        observed_at: UtcMicros,
+    ) -> Result<ProjectSourceAccessSnapshot, ApplicationProblem> {
+        self.access.current_access(observed_at).await
+    }
+
+    pub(super) fn authorize(
+        &self,
+        admitted_access: ProjectSourceAccessSnapshot,
+    ) -> DaemonCallableCodeAuthorization {
+        DaemonCallableCodeAuthorization {
+            source: self.clone(),
+            admitted_access,
+        }
+    }
+}
+
+impl CallableCodeAuthorizationSourcePort for DaemonCallableCodeAuthorizationSource {
+    fn current(&self, observed_at: UtcMicros) -> CurrentCallableCodeAccessFuture<'_> {
+        Box::pin(async move { self.access.current_access(observed_at).await })
+    }
+
+    fn authorize(
+        &self,
+        admitted_access: ProjectSourceAccessSnapshot,
+    ) -> Arc<dyn CallableCodeAuthorizationPort> {
+        Arc::new(DaemonCallableCodeAuthorizationSource::authorize(
+            self,
+            admitted_access,
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct DaemonCodeGraphReadAdmission {
+    scope: ResolvedScope,
+    authorization: DaemonCallableCodeAuthorizationSource,
+}
+
+impl DaemonCodeGraphReadAdmission {
+    pub(crate) fn production(
+        project_root: PathBuf,
+        scope: ResolvedScope,
+        configuration: Arc<ProjectConfigurationRuntime>,
+    ) -> Self {
+        Self::new(
+            scope.clone(),
+            DaemonCallableCodeAuthorizationSource::production(project_root, scope, configuration),
+        )
+    }
+
+    fn new(scope: ResolvedScope, authorization: DaemonCallableCodeAuthorizationSource) -> Self {
+        Self {
+            scope,
+            authorization,
+        }
+    }
+
+    #[hotpath::skip]
+    async fn admit_graph_read(
+        &self,
+        request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'_>,
+    ) -> Result<RequestContext, CodeGraphReadError> {
+        let access = self
+            .authorization
+            .current(request.observed_at)
+            .await
+            .map_err(map_graph_admission_problem)?;
+        if access.scope != self.scope {
+            return Err(CodeGraphReadError::Denied);
+        }
+        let context = callable_code_request_context(
+            &self.scope,
+            &access,
+            request.request_id.as_str(),
+            request.operation,
+            request.observed_at,
+            request.deadline,
+            request.cancellation.context(),
+        )
+        .map_err(map_graph_admission_problem)?;
+        self.authorization
+            .authorize(access)
+            .admit(&context, request.operation, request.observed_at)
+            .await
+            .map_err(map_graph_admission_problem)?;
+        Ok(context)
+    }
+}
+
+impl tracedecay_graph_query::CodeGraphReadAdmissionPort for DaemonCodeGraphReadAdmission {
+    fn admit<'a>(
+        &'a self,
+        request: tracedecay_graph_query::CodeGraphReadAdmissionRequest<'a>,
+    ) -> tracedecay_graph_query::CodeGraphReadAdmissionFuture<'a> {
+        Box::pin(async move {
+            let admission = hotpath::measure_block!(
+                "daemon.authority.callable_code.admit",
+                self.admit_graph_read(request).await
+            );
+            record_graph_read_admission(&admission);
+            admission
+        })
+    }
+}
+
+/// Tallies one graph-read admission decision against its exact typed outcome.
+/// The reason set is the closed [`CodeGraphReadError`] enum, so every gauge
+/// key stays compile-time static.
+fn record_graph_read_admission<T>(admission: &Result<T, CodeGraphReadError>) {
+    match admission {
+        Ok(_) => {
+            hotpath::gauge!("daemon.code_authorization.admit.admitted").inc(1.0);
+        }
+        Err(CodeGraphReadError::MissingRegistry) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.missing_registry").inc(1.0);
+        }
+        Err(CodeGraphReadError::Unavailable { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.unavailable").inc(1.0);
+        }
+        Err(CodeGraphReadError::ResetRequired { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.reset_required").inc(1.0);
+        }
+        Err(CodeGraphReadError::Stale { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.stale").inc(1.0);
+        }
+        Err(CodeGraphReadError::Cancelled) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.cancelled").inc(1.0);
+        }
+        Err(CodeGraphReadError::TimedOut) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.timed_out").inc(1.0);
+        }
+        Err(CodeGraphReadError::BudgetExhausted { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.budget_exhausted").inc(1.0);
+        }
+        Err(CodeGraphReadError::Denied) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.denied").inc(1.0);
+        }
+        Err(CodeGraphReadError::InvalidRequest { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.invalid_request").inc(1.0);
+        }
+        Err(CodeGraphReadError::Corrupt { .. }) => {
+            hotpath::gauge!("daemon.code_authorization.admit.refused.corrupt").inc(1.0);
+        }
+    }
+}
+
+fn map_graph_admission_problem(problem: ApplicationProblem) -> CodeGraphReadError {
+    match problem.kind() {
+        ApplicationProblemKind::InvalidRequest => CodeGraphReadError::InvalidRequest {
+            detail: "the code-graph read admission request is invalid".to_owned(),
+        },
+        ApplicationProblemKind::NotFoundOrNotAuthorized => CodeGraphReadError::Denied,
+        ApplicationProblemKind::Stale | ApplicationProblemKind::Conflict => {
+            CodeGraphReadError::Stale {
+                detail: "the code-graph read authority changed before admission".to_owned(),
+            }
+        }
+        ApplicationProblemKind::ResetRequired => CodeGraphReadError::ResetRequired {
+            detail: "the code-graph read authority requires reset".to_owned(),
+        },
+        ApplicationProblemKind::Cancelled => CodeGraphReadError::Cancelled,
+        ApplicationProblemKind::TimedOut => CodeGraphReadError::TimedOut,
+        ApplicationProblemKind::PartialEffect
+        | ApplicationProblemKind::ExecutionFailed
+        | ApplicationProblemKind::Unsupported
+        | ApplicationProblemKind::Unavailable
+        | ApplicationProblemKind::Saturated => CodeGraphReadError::Unavailable {
+            detail: "the code-graph read authority is unavailable".to_owned(),
+        },
+    }
+}
+
+pub(super) struct DaemonCallableCodeAuthorization {
+    source: DaemonCallableCodeAuthorizationSource,
+    admitted_access: ProjectSourceAccessSnapshot,
+}
+
+impl DaemonCallableCodeAuthorization {
+    #[hotpath::skip]
+    async fn route_receipt(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        let receipt = self
+            .route_receipt_checked(context, operation, observed_at)
+            .await;
+        match &receipt {
+            Ok(_) => {
+                hotpath::gauge!("daemon.code_authorization.authorize.granted").inc(1.0);
+            }
+            Err(_) => {
+                hotpath::gauge!("daemon.code_authorization.authorize.refused").inc(1.0);
+            }
+        }
+        receipt
+    }
+
+    #[hotpath::measure(label = "daemon.authority.callable_code.authorize", future = true)]
+    async fn route_receipt_checked(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        let current = self.source.current(observed_at).await?;
+        if !same_authority(&self.admitted_access, &current)
+            || context.admission_at(observed_at) != RequestAdmission::Admitted
+            || !current.allows(context, operation, observed_at)
+        {
+            return Err(concealed());
+        }
+        let policy = tracedecay_application::PolicyDecisionRef::new(
+            format!(
+                "route.callable-code.{}",
+                current.binding.binding_id.as_str()
+            ),
+            1,
+            current.configuration_provenance_digest,
+            ComponentVersion::new("project-source-access.v1").map_err(|_| concealed())?,
+        )
+        .map_err(|_| concealed())?;
+        AuthorityReceipt::from_context(context, policy, observed_at).map_err(|_| concealed())
+    }
+}
+
+impl CallableCodeAuthorizationPort for DaemonCallableCodeAuthorization {
+    fn admit<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<
+        'a,
+        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
+    > {
+        Box::pin(async move {
+            self.route_receipt(context, operation, observed_at)
+                .await
+                .map(CallableCodeAuthorizationAdmission::Routed)
+        })
+    }
+
+    fn recheck_publication<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        operation: &'a ApplicationOperation,
+        admission: &'a CallableCodeAuthorizationAdmission,
+        observed_at: UtcMicros,
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
+        Box::pin(async move {
+            let receipt = hotpath::measure_block!(
+                "daemon.authority.callable_code.recheck",
+                self.recheck_route(context, operation, admission, observed_at)
+                    .await
+            );
+            match &receipt {
+                Ok(_) => {
+                    hotpath::gauge!("daemon.code_authorization.recheck.granted").inc(1.0);
+                }
+                Err(_) => {
+                    hotpath::gauge!("daemon.code_authorization.recheck.refused").inc(1.0);
+                }
+            }
+            receipt
+        })
+    }
+}
+
+impl DaemonCallableCodeAuthorization {
+    #[hotpath::skip]
+    async fn recheck_route(
+        &self,
+        context: &RequestContext,
+        operation: &ApplicationOperation,
+        admission: &CallableCodeAuthorizationAdmission,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorityReceipt, ApplicationProblem> {
+        let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
+            return Err(concealed());
+        };
+        let current = self.route_receipt(context, operation, observed_at).await?;
+        if admission.grant_id != current.grant_id
+            || admission.grant_revision != current.grant_revision
+            || admission.grant_digest != current.grant_digest
+            || admission.authorized_scope_digest != current.authorized_scope_digest
+            || admission.disclosure != current.disclosure
+            || admission.policy != current.policy
+        {
+            return Err(concealed());
+        }
+        Ok(current)
+    }
+}
+
+fn same_authority(
+    admitted: &ProjectSourceAccessSnapshot,
+    current: &ProjectSourceAccessSnapshot,
+) -> bool {
+    admitted.scope == current.scope
+        && admitted.requester == current.requester
+        && admitted.binding == current.binding
+        && admitted.configuration_revision == current.configuration_revision
+        && admitted.configuration_digest == current.configuration_digest
+        && admitted.configuration_provenance_digest == current.configuration_provenance_digest
+        && admitted.effective_capabilities == current.effective_capabilities
+}
+
+fn concealed() -> ApplicationProblem {
+    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+}
+
+/// Availability of the configuration authority is not an authorization
+/// outcome. During cold open the store can be transiently unavailable
+/// (reader saturation, publication still pending) and concealing that window
+/// would mint a permanent denial against the daemon's own project; it must
+/// surface as a retryable unavailable state instead. Every other failure
+/// shape stays concealed so a probing caller learns nothing about identity.
+fn configuration_current_problem(error: ConfigurationError) -> ApplicationProblem {
+    match error {
+        ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "configuration_authority_unavailable".to_owned(),
+            message: "The project configuration authority is temporarily unavailable.".to_owned(),
+        }),
+        ConfigurationError::TargetUnavailable
+        | ConfigurationError::AuthorizedTargetAmbiguous
+        | ConfigurationError::RevisionConflict
+        | ConfigurationError::PlanExpired
+        | ConfigurationError::PlanStale
+        | ConfigurationError::PolicyWideningForbidden
+        | ConfigurationError::ProjectlessProfileRequired
+        | ConfigurationError::IdempotencyConflict
+        | ConfigurationError::MutationAuthorityRejected
+        | ConfigurationError::Validation(_)
+        | ConfigurationError::ResetRequired { .. } => concealed(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    use tracedecay_application::{
+        CallableCodeOperationKind, CancellationContext, CancellationSignal, CapabilityGrantId,
+        CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestId, callable_code_operations,
+    };
+    use tracedecay_domain::configuration::{
+        AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceKindV1,
+    };
+    use tracedecay_domain::{
+        ActorId, LocatorDigest, ManifestDigest, ProjectId, RepositoryId, SourceBindingId,
+        WorktreeId, canonical_sha256,
+    };
+
+    use super::*;
+
+    struct MutableAccess {
+        current: Mutex<ProjectSourceAccessSnapshot>,
+    }
+
+    impl CurrentCallableCodeAccessPort for MutableAccess {
+        fn current_access(&self, _observed_at: UtcMicros) -> CurrentAccessFuture<'_> {
+            Box::pin(async move {
+                Ok(self
+                    .current
+                    .lock()
+                    .unwrap_or_else(|_| panic!("mutable access lock"))
+                    .clone())
+            })
+        }
+    }
+
+    fn access(operation: &ApplicationOperation) -> ProjectSourceAccessSnapshot {
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.callable-auth").expect("project"),
+            RepositoryId::new("repository.callable-auth").expect("repository"),
+            WorktreeId::new("worktree.callable-auth").expect("worktree"),
+            None,
+        )
+        .expect("scope");
+        ProjectSourceAccessSnapshot {
+            scope: scope.clone(),
+            requester: ActorId::new("actor.callable-auth").expect("actor"),
+            binding: ScopeSourceBinding::new(
+                SourceBindingId::new("binding.callable-auth").expect("binding"),
+                SourceKindV1::Cursor,
+                LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("locator"),
+                AuthorityRef::Project(scope.project_id.clone()),
+            )
+            .expect("binding"),
+            configuration_revision: ConfigurationRevisionId::new("revision.callable-auth.1")
+                .expect("revision"),
+            configuration_digest: canonical_sha256(&"callable-auth-configuration")
+                .expect("configuration digest"),
+            configuration_provenance_digest: canonical_sha256(
+                &"callable-auth-configuration-provenance",
+            )
+            .expect("provenance digest"),
+            effective_capabilities: BTreeSet::from([operation.capability_id().clone()]),
+            grant_expires_at: UtcMicros(100),
+        }
+    }
+
+    fn context(
+        access: &ProjectSourceAccessSnapshot,
+        operation: &ApplicationOperation,
+    ) -> RequestContext {
+        let digest: ManifestDigest =
+            canonical_sha256(&"callable-auth-grant").expect("grant digest");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.callable-auth").expect("grant"),
+            1,
+            digest,
+            access.requester.clone(),
+            UtcMicros(1),
+            access.grant_expires_at,
+            access.scope.clone(),
+            BTreeSet::from([operation.capability_id().clone()]),
+            BTreeSet::from([operation.use_case_id().clone()]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        RequestContext::new(
+            access.requester.clone(),
+            access.scope.clone(),
+            grant,
+            RequestId::new("request.callable-auth").expect("request"),
+            Deadline::new(UtcMicros(90)).expect("deadline"),
+            CancellationContext::active("cancel.callable-auth").expect("cancellation"),
+        )
+        .expect("context")
+    }
+
+    #[tokio::test]
+    async fn configuration_mutation_after_mount_fails_publication_revalidation_closed() {
+        let operation = callable_code_operations()
+            .expect("operations")
+            .get(CallableCodeOperationKind::ExactOccurrence)
+            .clone();
+        let mounted = access(&operation);
+        let mutable = Arc::new(MutableAccess {
+            current: Mutex::new(mounted.clone()),
+        });
+        let source = DaemonCallableCodeAuthorizationSource {
+            access: mutable.clone(),
+        };
+        let authorization = source.authorize(mounted.clone());
+        let context = context(&mounted, &operation);
+        let admission = authorization
+            .admit(&context, &operation, UtcMicros(10))
+            .await
+            .expect("initial current authority");
+
+        {
+            let mut current = mutable
+                .current
+                .lock()
+                .unwrap_or_else(|_| panic!("mutable access lock"));
+            current.configuration_revision =
+                ConfigurationRevisionId::new("revision.callable-auth.2").expect("revision");
+            current.configuration_digest =
+                canonical_sha256(&"revoked-callable-auth-configuration").expect("digest");
+            current.effective_capabilities.clear();
+        }
+
+        assert!(
+            authorization
+                .recheck_publication(&context, &operation, &admission, UtcMicros(11))
+                .await
+                .is_err(),
+            "configuration/capability mutation must conceal the result"
+        );
+        assert!(
+            source
+                .authorize(mounted)
+                .admit(&context, &operation, UtcMicros(12))
+                .await
+                .is_err(),
+            "a later call must not reuse project-open access"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_read_admission_preserves_exact_scope_and_caller_control() {
+        let operation =
+            tracedecay_application::retrieval::catalog::primitive_read_operation("health_read")
+                .expect("health operation")
+                .expect("registered health operation");
+        let observed_at = tracedecay_application::now_micros();
+        let mut mounted = access(&operation);
+        mounted.grant_expires_at = UtcMicros(observed_at.0.saturating_add(60_000_000));
+        let source = DaemonCallableCodeAuthorizationSource {
+            access: Arc::new(MutableAccess {
+                current: Mutex::new(mounted.clone()),
+            }),
+        };
+        let admission = DaemonCodeGraphReadAdmission::new(mounted.scope.clone(), source);
+        let request_id = RequestId::new("request.graph-read-admission").expect("request id");
+        let cancellation =
+            CancellationSignal::active("cancel.graph-read-admission").expect("cancellation");
+
+        let context = tracedecay_graph_query::CodeGraphReadAdmissionPort::admit(
+            &admission,
+            tracedecay_graph_query::CodeGraphReadAdmissionRequest::new(
+                &operation,
+                request_id.clone(),
+                Deadline::new(mounted.grant_expires_at).expect("deadline"),
+                &cancellation,
+                observed_at,
+            ),
+        )
+        .await
+        .expect("admitted graph read");
+
+        assert_eq!(context.scope(), &mounted.scope);
+        assert_eq!(context.request_id(), &request_id);
+        assert_eq!(context.cancellation(), &cancellation.context());
+        assert!(context.allows(operation.capability_id(), operation.use_case_id()));
+    }
+
+    #[test]
+    fn transient_configuration_unavailability_stays_retryable_not_denied() {
+        let problem = configuration_current_problem(ConfigurationError::Unavailable);
+        assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+
+        let read_error = map_graph_admission_problem(problem);
+        assert!(
+            matches!(read_error, CodeGraphReadError::Unavailable { .. }),
+            "a warming configuration authority must not read as a denial: {read_error:?}"
+        );
+
+        let routed = tracedecay_graph_query::map_code_graph_read_runtime_error(read_error);
+        let tracedecay_domain::errors::TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable,
+            ..
+        } = routed
+        else {
+            panic!("graph-read unavailability must stay a project-route refusal: {routed:?}");
+        };
+        assert_eq!(reason_code, "code-graph-unavailable");
+        assert!(
+            retryable,
+            "the cold-open configuration window must stay retryable"
+        );
+    }
+
+    #[test]
+    fn authorization_shaped_configuration_failures_stay_concealed() {
+        for error in [
+            ConfigurationError::TargetUnavailable,
+            ConfigurationError::MutationAuthorityRejected,
+            ConfigurationError::Validation("tampered".to_owned()),
+        ] {
+            let problem = configuration_current_problem(error);
+            assert_eq!(
+                problem.kind(),
+                ApplicationProblemKind::NotFoundOrNotAuthorized
+            );
+            assert!(matches!(
+                map_graph_admission_problem(problem),
+                CodeGraphReadError::Denied
+            ));
+        }
+    }
+}

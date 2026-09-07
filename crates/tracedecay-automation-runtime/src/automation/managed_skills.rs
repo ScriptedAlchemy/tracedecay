@@ -1,0 +1,1326 @@
+use std::collections::BTreeSet;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use super::config_error;
+use crate::errors::Result;
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
+use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
+
+pub use super::managed_skill_model::{
+    MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillMaterializationScope, ManagedSkillMetadata,
+    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
+    ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
+};
+pub use super::managed_skill_validation::validate_managed_support_files;
+use super::managed_skill_validation::{
+    validate_managed_skill, validate_managed_skill_update, validate_skill_id,
+};
+
+/// Decode the retained summary-only format without mutating inspection state.
+fn decode_retained_skill(bytes: &[u8]) -> Result<(ManagedSkill, bool)> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let metadata = value
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| config_error("managed skill metadata must be an object"))?;
+    let legacy = !metadata.contains_key("routing_description");
+    if legacy {
+        let summary = metadata
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| config_error("retained managed skill summary is required"))?;
+        let routing =
+            tracedecay_automation::managed_skills::legacy_managed_skill_routing_description(
+                summary,
+            );
+        metadata.insert(
+            "routing_description".to_owned(),
+            serde_json::Value::String(routing),
+        );
+    }
+    let skill: ManagedSkill = serde_json::from_value(value)?;
+    validate_managed_skill(&skill)?;
+    Ok((skill, legacy))
+}
+
+/// Upgrade retained routing metadata before authoring evidence is captured.
+/// Inspection reads use the decoder only; this explicit mutation uses the same
+/// journal and lock as skill edits, without changing authored timestamps or provenance.
+pub async fn migrate_managed_skill_routing(profile_root: &Path) -> Result<()> {
+    if !managed_skill_root(profile_root).exists() {
+        return Ok(());
+    }
+    let _lock = lock_skill_store_async(profile_root).await?;
+    let root = managed_skill_root(profile_root);
+    let mut migrated = Vec::new();
+    for entry in std::fs::read_dir(&root)? {
+        let path = entry?.path().join("skill.json");
+        if !path.is_file() {
+            continue;
+        }
+        let (mut skill, legacy) = decode_retained_skill(&std::fs::read(path)?)?;
+        if legacy {
+            skill.refresh_checksum();
+            migrated.push(skill);
+        }
+    }
+    if !migrated.is_empty() {
+        persist_skill_transaction_unlocked(profile_root, &migrated.iter().collect::<Vec<_>>())?;
+    }
+    Ok(())
+}
+
+pub fn managed_skill_root(profile_root: &Path) -> PathBuf {
+    profile_root.join("agent_managed").join("skills")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillConsolidationResult {
+    pub target: Option<ManagedSkill>,
+    pub source: ManagedSkill,
+    pub target_before_checksum: Option<String>,
+    pub target_after_checksum: Option<String>,
+    pub source_before_checksum: String,
+    pub source_after_checksum: String,
+}
+
+enum SkillConsolidationKind<'a> {
+    General(&'a str),
+    DetectedOverlap,
+}
+
+impl SkillConsolidationKind<'_> {
+    fn archived_reason(&self) -> &str {
+        match self {
+            Self::General(reason) => reason,
+            Self::DetectedOverlap => SKILL_OVERLAP_REMOVAL_TOMBSTONE,
+        }
+    }
+}
+
+struct SkillStoreLock(File);
+
+impl Drop for SkillStoreLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn lock_skill_store(profile_root: &Path) -> Result<SkillStoreLock> {
+    let root = managed_skill_root(profile_root);
+    std::fs::create_dir_all(&root).map_err(|e| {
+        config_error(format!(
+            "failed to create managed skill root '{}': {e}",
+            root.display()
+        ))
+    })?;
+    let path = root.join(".consolidation.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| {
+            config_error(format!(
+                "failed to open skill lock '{}': {e}",
+                path.display()
+            ))
+        })?;
+    file.lock_exclusive().map_err(|e| {
+        config_error(format!(
+            "failed to lock skill store '{}': {e}",
+            path.display()
+        ))
+    })?;
+    recover_skill_transaction(&root)?;
+    Ok(SkillStoreLock(file))
+}
+
+async fn lock_skill_store_async(profile_root: &Path) -> Result<SkillStoreLock> {
+    let profile_root = profile_root.to_path_buf();
+    tokio::task::spawn_blocking(move || lock_skill_store(&profile_root))
+        .await
+        .map_err(|error| config_error(format!("managed skill lock task failed: {error}")))?
+}
+
+const SKILL_TRANSACTION_JOURNAL: &str = ".skill-transaction.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SkillTransactionEntry {
+    id: String,
+    stage: PathBuf,
+    backup: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SkillTransactionJournal {
+    entries: Vec<SkillTransactionEntry>,
+}
+
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            config_error(format!("failed to create '{}': {error}", parent.display()))
+        })?;
+    }
+    let mut file = File::create(path)
+        .map_err(|error| config_error(format!("failed to create '{}': {error}", path.display())))?;
+    file.write_all(bytes)
+        .map_err(|error| config_error(format!("failed to write '{}': {error}", path.display())))?;
+    file.sync_all()
+        .map_err(|error| config_error(format!("failed to sync '{}': {error}", path.display())))
+}
+
+fn remove_owned_dir(path: &Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+fn clean_staged_entries(entries: &[SkillTransactionEntry]) {
+    for entry in entries {
+        remove_owned_dir(&entry.stage);
+        remove_owned_dir(&entry.backup);
+    }
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    tracedecay_private_fs::framed_log::sync_directory(path, DirectorySyncPolicy::Strict)
+        .map_err(|error| config_error(format!("failed to sync '{}': {error}", path.display())))
+}
+
+fn validate_transaction_entry(root: &Path, entry: &SkillTransactionEntry) -> Result<()> {
+    validate_skill_id(&entry.id)?;
+    let valid_owned_path = |path: &Path, prefix: &str| {
+        path.parent() == Some(root)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(prefix))
+    };
+    if !valid_owned_path(&entry.stage, &format!(".stage-{}-", entry.id))
+        || !valid_owned_path(&entry.backup, &format!(".backup-{}-", entry.id))
+    {
+        return Err(config_error(format!(
+            "skill transaction entry '{}' escapes its managed root",
+            entry.id
+        )));
+    }
+    Ok(())
+}
+
+fn recover_skill_transaction(root: &Path) -> Result<()> {
+    let journal_path = root.join(SKILL_TRANSACTION_JOURNAL);
+    let bytes = match std::fs::read(&journal_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to read skill transaction journal '{}': {error}",
+                journal_path.display()
+            )));
+        }
+    };
+    let journal: SkillTransactionJournal = serde_json::from_slice(&bytes).map_err(|error| {
+        config_error(format!(
+            "failed to parse skill transaction journal '{}': {error}",
+            journal_path.display()
+        ))
+    })?;
+    for entry in &journal.entries {
+        validate_transaction_entry(root, entry)?;
+        let destination = root.join(&entry.id);
+        if entry.stage.exists() {
+            if destination.exists() && !entry.backup.exists() {
+                std::fs::rename(&destination, &entry.backup).map_err(|error| {
+                    config_error(format!(
+                        "failed to back up '{}' during skill transaction recovery: {error}",
+                        destination.display()
+                    ))
+                })?;
+            }
+            if destination.exists() {
+                remove_owned_dir(&destination);
+            }
+            std::fs::rename(&entry.stage, &destination).map_err(|error| {
+                config_error(format!(
+                    "failed to publish '{}' during skill transaction recovery: {error}",
+                    destination.display()
+                ))
+            })?;
+        } else if !destination.exists() && entry.backup.exists() {
+            std::fs::rename(&entry.backup, &destination).map_err(|error| {
+                config_error(format!(
+                    "failed to restore '{}' during skill transaction recovery: {error}",
+                    destination.display()
+                ))
+            })?;
+        }
+    }
+    sync_directory(root)?;
+    clean_staged_entries(&journal.entries);
+    std::fs::remove_file(&journal_path).map_err(|error| {
+        config_error(format!(
+            "failed to clear skill transaction journal '{}': {error}",
+            journal_path.display()
+        ))
+    })?;
+    sync_directory(root)?;
+    Ok(())
+}
+
+fn stage_skill_directory(
+    root: &Path,
+    skill: &ManagedSkill,
+    nonce: u128,
+) -> Result<SkillTransactionEntry> {
+    validate_managed_skill(skill)?;
+    let id = skill.metadata.id.clone();
+    let stage = root.join(format!(".stage-{id}-{}-{nonce}", std::process::id()));
+    let backup = root.join(format!(".backup-{id}-{}-{nonce}", std::process::id()));
+    remove_owned_dir(&stage);
+    remove_owned_dir(&backup);
+    let entry = SkillTransactionEntry { id, stage, backup };
+    let write_stage = || -> Result<()> {
+        std::fs::create_dir_all(&entry.stage).map_err(|error| {
+            config_error(format!(
+                "failed to create '{}': {error}",
+                entry.stage.display()
+            ))
+        })?;
+        write_synced(
+            &entry.stage.join("skill.json"),
+            &serde_json::to_vec_pretty(skill)?,
+        )?;
+        write_synced(
+            &entry.stage.join("SKILL.md"),
+            skill.render_skill_markdown().as_bytes(),
+        )?;
+        for support in &skill.support_files {
+            write_synced(&entry.stage.join(&support.path), &support.bytes)?;
+        }
+        sync_directory(&entry.stage)
+    };
+    if let Err(error) = write_stage() {
+        clean_staged_entries(std::slice::from_ref(&entry));
+        return Err(error);
+    }
+    Ok(entry)
+}
+
+#[hotpath::measure(label = "automation.managed_skill.persist")]
+fn persist_skill_transaction_unlocked(profile_root: &Path, skills: &[&ManagedSkill]) -> Result<()> {
+    let root = managed_skill_root(profile_root);
+    let mut ids = BTreeSet::new();
+    for skill in skills {
+        if !ids.insert(skill.metadata.id.as_str()) {
+            return Err(config_error(format!(
+                "managed skill transaction contains duplicate id '{}'",
+                skill.metadata.id
+            )));
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            config_error(format!(
+                "managed skill transaction clock is invalid: {error}"
+            ))
+        })?
+        .as_nanos();
+    let mut entries = Vec::with_capacity(skills.len());
+    for skill in skills {
+        match stage_skill_directory(&root, skill, nonce) {
+            Ok(entry) => entries.push(entry),
+            Err(error) => {
+                clean_staged_entries(&entries);
+                return Err(error);
+            }
+        }
+    }
+    let journal = SkillTransactionJournal { entries };
+    let journal_path = root.join(SKILL_TRANSACTION_JOURNAL);
+    let journal_temp = root.join(format!("{SKILL_TRANSACTION_JOURNAL}.tmp"));
+    let publish_journal = || -> Result<()> {
+        write_synced(&journal_temp, &serde_json::to_vec_pretty(&journal)?)?;
+        std::fs::rename(&journal_temp, &journal_path).map_err(|error| {
+            config_error(format!(
+                "failed to publish skill transaction journal: {error}"
+            ))
+        })
+    };
+    if let Err(error) = publish_journal() {
+        let _ = std::fs::remove_file(&journal_temp);
+        clean_staged_entries(&journal.entries);
+        return Err(error);
+    }
+    sync_directory(&root)?;
+    recover_skill_transaction(&root)
+}
+
+/// Re-loads and checksum-validates both revisions under one store lock, then
+/// publishes target and archived source through one crash-recoverable directory
+/// transaction. Source content is never deleted.
+#[hotpath::measure(label = "automation.managed_skill.consolidate", future = true)]
+pub async fn apply_managed_skill_consolidation(
+    profile_root: &Path,
+    target_id: Option<&str>,
+    target_checksum: Option<&str>,
+    target_update: Option<ManagedSkillUpdate>,
+    source_id: &str,
+    source_checksum: &str,
+    reason: &str,
+) -> Result<SkillConsolidationResult> {
+    reject_reserved_overlap_tombstone(Some(reason))?;
+    apply_managed_skill_consolidation_kind(
+        profile_root,
+        target_id,
+        target_checksum,
+        target_update,
+        source_id,
+        source_checksum,
+        SkillConsolidationKind::General(reason),
+    )
+    .await
+}
+
+pub(crate) async fn apply_managed_skill_overlap_consolidation(
+    profile_root: &Path,
+    target_id: &str,
+    target_checksum: &str,
+    target_update: Option<ManagedSkillUpdate>,
+    source_id: &str,
+    source_checksum: &str,
+) -> Result<SkillConsolidationResult> {
+    apply_managed_skill_consolidation_kind(
+        profile_root,
+        Some(target_id),
+        Some(target_checksum),
+        target_update,
+        source_id,
+        source_checksum,
+        SkillConsolidationKind::DetectedOverlap,
+    )
+    .await
+}
+
+async fn apply_managed_skill_consolidation_kind(
+    profile_root: &Path,
+    target_id: Option<&str>,
+    target_checksum: Option<&str>,
+    target_update: Option<ManagedSkillUpdate>,
+    source_id: &str,
+    source_checksum: &str,
+    kind: SkillConsolidationKind<'_>,
+) -> Result<SkillConsolidationResult> {
+    if target_id == Some(source_id) {
+        return Err(config_error(
+            "managed skill consolidation source and target must differ",
+        ));
+    }
+    let lock = lock_skill_store_async(profile_root).await?;
+    let mut source = load_managed_skill_unlocked(profile_root, source_id)?;
+    validate_autonomous_consolidation_skill(&source, source_checksum)?;
+    let source_before_checksum = source.metadata.checksum.clone();
+
+    let mut original_target = None;
+    let mut target = match target_id {
+        Some(id) => {
+            let loaded = load_managed_skill_unlocked(profile_root, id)?;
+            let checksum =
+                target_checksum.ok_or_else(|| config_error("merge target checksum is required"))?;
+            validate_autonomous_consolidation_skill(&loaded, checksum)?;
+            original_target = Some(loaded.clone());
+            Some(loaded)
+        }
+        None => None,
+    };
+
+    if matches!(&kind, SkillConsolidationKind::DetectedOverlap) {
+        let target = target
+            .as_ref()
+            .ok_or_else(|| config_error("skill-overlap consolidation requires an exact target"))?;
+        validate_detected_skill_overlap_pair(target, &source)?;
+    }
+
+    if let (Some(target), Some(update)) = (&mut target, target_update)
+        && apply_managed_skill_update_fields(target, update)?
+    {
+        target.touch();
+        target.refresh_checksum();
+    }
+
+    source.metadata.absorbed_into = target_id.map(ToOwned::to_owned);
+    source.metadata.archived_reason = Some(kind.archived_reason().to_string());
+    source.set_state(ManagedSkillState::Archived);
+    source.refresh_checksum();
+    if let Some(target) = target.as_mut() {
+        target.refresh_checksum();
+    }
+    let mut revisions: Vec<&ManagedSkill> = target.iter().collect();
+    revisions.push(&source);
+    persist_skill_transaction_unlocked(profile_root, &revisions)?;
+    drop(lock);
+    for skill in &revisions {
+        if let Err(error) = super::skill_usage::sync_skill_usage_metadata(profile_root, skill).await
+        {
+            tracing::warn!(skill_id = %skill.metadata.id, error = %error, "skill usage metadata reconciliation failed after committed consolidation");
+        }
+    }
+
+    Ok(SkillConsolidationResult {
+        target_before_checksum: original_target
+            .as_ref()
+            .map(|skill| skill.metadata.checksum.clone()),
+        target_after_checksum: target.as_ref().map(|skill| skill.metadata.checksum.clone()),
+        source_before_checksum,
+        source_after_checksum: source.metadata.checksum.clone(),
+        target,
+        source,
+    })
+}
+
+/// Typed-error adapter over the single pairwise overlap authority in
+/// `skill_usage`; proposal parsing runs the same predicate, so the two layers
+/// cannot disagree about whether a pair is a detected overlap.
+fn validate_detected_skill_overlap_pair(first: &ManagedSkill, second: &ManagedSkill) -> Result<()> {
+    if !super::skill_usage::detected_skill_overlap_pair(first, second) {
+        return Err(config_error(format!(
+            "managed skills '{}' and '{}' are not a detected overlap candidate pair",
+            first.metadata.id, second.metadata.id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_autonomous_consolidation_skill(skill: &ManagedSkill, checksum: &str) -> Result<()> {
+    let id = &skill.metadata.id;
+    if skill.metadata.checksum != checksum {
+        return Err(config_error(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        )));
+    }
+    if skill.metadata.provenance.source != ManagedSkillSource::AutomationRun {
+        return Err(config_error(format!(
+            "managed skill '{id}' is not automation-owned"
+        )));
+    }
+    if skill.metadata.pinned {
+        return Err(config_error(format!(
+            "managed skill '{id}' is pinned and exempt from consolidation"
+        )));
+    }
+    if skill.metadata.state == ManagedSkillState::Archived {
+        return Err(config_error(format!(
+            "managed skill '{id}' is already archived"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_overlap_partner(skill: &ManagedSkill, checksum: &str) -> Result<()> {
+    let id = &skill.metadata.id;
+    if skill.metadata.checksum != checksum {
+        return Err(config_error(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        )));
+    }
+    if skill.metadata.pinned {
+        return Err(config_error(format!(
+            "managed skill '{id}' is pinned and exempt from consolidation"
+        )));
+    }
+    if skill.metadata.state != ManagedSkillState::Active {
+        return Err(config_error(format!("managed skill '{id}' is not active")));
+    }
+    Ok(())
+}
+
+pub fn managed_skill_dir(profile_root: &Path, id: &str) -> Result<PathBuf> {
+    validate_skill_id(id)?;
+    Ok(managed_skill_root(profile_root).join(id))
+}
+
+#[hotpath::measure(label = "automation.managed_skill.save", future = true)]
+pub async fn save_managed_skill(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
+    let lock = lock_skill_store_async(profile_root).await?;
+    let destination = managed_skill_dir(profile_root, &skill.metadata.id)?;
+    if destination.exists() {
+        return Err(config_error(format!(
+            "managed skill '{}' already exists; use a lifecycle update operation",
+            skill.metadata.id
+        )));
+    }
+    persist_skill_transaction_unlocked(profile_root, &[skill])?;
+    drop(lock);
+    if let Err(error) = super::skill_usage::sync_skill_usage_metadata(profile_root, skill).await {
+        tracing::warn!(skill_id = %skill.metadata.id, error = %error, "skill usage metadata reconciliation failed after committed skill save");
+    }
+    Ok(())
+}
+
+#[hotpath::measure(label = "automation.managed_skill.create", future = true)]
+pub async fn create_managed_skill(
+    profile_root: &Path,
+    draft: ManagedSkillDraft,
+) -> Result<ManagedSkill> {
+    let skill = draft.materialize()?;
+    let lock = lock_skill_store_async(profile_root).await?;
+    let destination = managed_skill_dir(profile_root, &skill.metadata.id)?;
+    if destination.exists() {
+        return Err(config_error(format!(
+            "managed skill '{}' already exists",
+            skill.metadata.id
+        )));
+    }
+    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
+    drop(lock);
+    if let Err(error) = super::skill_usage::sync_skill_usage_metadata(profile_root, &skill).await {
+        tracing::warn!(skill_id = %skill.metadata.id, error = %error, "skill usage metadata reconciliation failed after committed skill create");
+    }
+    Ok(skill)
+}
+
+#[hotpath::measure(label = "automation.managed_skill.load", future = true)]
+pub async fn load_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
+    let _lock = lock_skill_store_async(profile_root).await?;
+    load_managed_skill_unlocked(profile_root, id)
+}
+
+fn load_managed_skill_unlocked(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
+    let dir = managed_skill_dir(profile_root, id)?;
+    let path = dir.join("skill.json");
+    let bytes = std::fs::read(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            config_error(format!("managed skill '{id}' not found"))
+        } else {
+            config_error(format!(
+                "failed to read managed skill record '{}': {e}",
+                path.display()
+            ))
+        }
+    })?;
+    let mut skill: ManagedSkill = decode_retained_skill(&bytes)
+        .map(|(skill, _)| skill)
+        .map_err(|e| {
+            config_error(format!(
+                "failed to parse managed skill record '{}': {e}",
+                path.display()
+            ))
+        })?;
+    skill.normalize_timestamps();
+    validate_managed_skill(&skill)?;
+    Ok(skill)
+}
+
+#[hotpath::measure(label = "automation.managed_skill.list", future = true)]
+pub async fn list_managed_skills(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
+    if !managed_skill_root(profile_root).exists() {
+        return Ok(Vec::new());
+    }
+    let _lock = lock_skill_store_async(profile_root).await?;
+    list_managed_skills_unlocked(profile_root)
+}
+
+pub(crate) fn load_active_managed_skills_snapshot(
+    profile_root: &Path,
+) -> Result<Vec<ManagedSkill>> {
+    let _lock = lock_skill_store(profile_root)?;
+    Ok(list_managed_skills_unlocked(profile_root)?
+        .into_iter()
+        .filter(|skill| skill.metadata.state == ManagedSkillState::Active)
+        .collect())
+}
+
+fn list_managed_skills_unlocked(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
+    let root = managed_skill_root(profile_root);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(config_error(format!("failed to read managed skills: {e}"))),
+    };
+    let mut skills = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| config_error(format!("failed to read managed skill entry: {e}")))?;
+        let path = entry.path().join("skill.json");
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|e| {
+            config_error(format!(
+                "failed to read managed skill record '{}': {e}",
+                path.display()
+            ))
+        })?;
+        let mut skill = decode_retained_skill(&bytes)
+            .map(|(skill, _)| skill)
+            .map_err(|e| {
+                config_error(format!(
+                    "failed to parse managed skill record '{}': {e}",
+                    path.display()
+                ))
+            })?;
+        skill.normalize_timestamps();
+        validate_managed_skill(&skill)?;
+        skills.push(skill);
+    }
+    skills.sort_by(|a, b| a.metadata.id.cmp(&b.metadata.id));
+    Ok(skills)
+}
+
+pub async fn set_managed_skill_state(
+    profile_root: &Path,
+    id: &str,
+    state: ManagedSkillState,
+) -> Result<ManagedSkill> {
+    let lock = lock_skill_store_async(profile_root).await?;
+    let skill = set_managed_skill_state_unlocked(profile_root, id, state)?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "lifecycle").await;
+    Ok(skill)
+}
+
+fn set_managed_skill_state_unlocked(
+    profile_root: &Path,
+    id: &str,
+    state: ManagedSkillState,
+) -> Result<ManagedSkill> {
+    let mut skill = load_managed_skill_unlocked(profile_root, id)?;
+    skill.set_state(state);
+    skill.refresh_checksum();
+    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
+    Ok(skill)
+}
+
+pub async fn update_managed_skill(
+    profile_root: &Path,
+    id: &str,
+    update: ManagedSkillUpdate,
+) -> Result<ManagedSkill> {
+    let lock = lock_skill_store_async(profile_root).await?;
+    let skill = apply_managed_skill_update_unlocked(profile_root, id, None, update)?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "update").await;
+    Ok(skill)
+}
+
+pub async fn set_managed_skill_pinned(
+    profile_root: &Path,
+    id: &str,
+    pinned: bool,
+) -> Result<ManagedSkill> {
+    let lock = lock_skill_store_async(profile_root).await?;
+    let mut skill = load_managed_skill_unlocked(profile_root, id)?;
+    skill.set_pinned(pinned);
+    skill.refresh_checksum();
+    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "pin").await;
+    Ok(skill)
+}
+
+#[hotpath::measure(label = "automation.managed_skill.update", future = true)]
+pub async fn apply_managed_skill_update(
+    profile_root: &Path,
+    id: &str,
+    base_checksum: &str,
+    update: ManagedSkillUpdate,
+) -> Result<ManagedSkill> {
+    let lock = lock_skill_store_async(profile_root).await?;
+    let skill = apply_managed_skill_update_unlocked(profile_root, id, Some(base_checksum), update)?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "automatic_update").await;
+    Ok(skill)
+}
+
+fn apply_managed_skill_update_unlocked(
+    profile_root: &Path,
+    id: &str,
+    base_checksum: Option<&str>,
+    update: ManagedSkillUpdate,
+) -> Result<ManagedSkill> {
+    let skill = load_managed_skill_unlocked(profile_root, id)?;
+    if base_checksum.is_some_and(|checksum| checksum != skill.metadata.checksum) {
+        return Err(config_error(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        )));
+    }
+    let skill = preview_managed_skill_update(&skill, &update)?;
+    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
+    Ok(skill)
+}
+
+/// Applies the canonical managed-skill update semantics without persisting.
+/// This lets an adapter validate an update before entering a write without
+/// maintaining a second field-change authority.
+pub fn preview_managed_skill_update(
+    current: &ManagedSkill,
+    update: &ManagedSkillUpdate,
+) -> Result<ManagedSkill> {
+    let mut skill = current.clone();
+    let original_pinned = skill.metadata.pinned;
+    let content_changed = apply_managed_skill_update_fields(&mut skill, update.clone())?;
+    let metadata_changed = skill.metadata.pinned != original_pinned;
+    if !content_changed && !metadata_changed {
+        return Err(config_error(format!(
+            "managed skill '{}' update does not change the active revision",
+            skill.metadata.id
+        )));
+    }
+    // Metadata-only updates also complete a retained-format checksum cutover.
+    skill.refresh_checksum();
+    skill.set_state(ManagedSkillState::Active);
+    skill.touch();
+    Ok(skill)
+}
+
+/// Applies a checksum-fenced archive transition after proposal validation.
+/// Skill content remains recoverable on disk and pinned skills stay exempt.
+pub async fn apply_managed_skill_archive(
+    profile_root: &Path,
+    id: &str,
+    base_checksum: &str,
+    reason: Option<String>,
+) -> Result<ManagedSkill> {
+    reject_reserved_overlap_tombstone(reason.as_deref())?;
+    let lock = lock_skill_store_async(profile_root).await?;
+    let skill = apply_managed_skill_archive_unlocked(profile_root, id, base_checksum, reason)?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "automatic_archive").await;
+    Ok(skill)
+}
+
+pub(crate) async fn apply_managed_skill_overlap_archive(
+    profile_root: &Path,
+    source_id: &str,
+    source_checksum: &str,
+    overlap_id: &str,
+    overlap_checksum: &str,
+) -> Result<ManagedSkill> {
+    if source_id == overlap_id {
+        return Err(config_error(
+            "skill-overlap archive source and partner must differ",
+        ));
+    }
+    let lock = lock_skill_store_async(profile_root).await?;
+    let source = load_managed_skill_unlocked(profile_root, source_id)?;
+    validate_autonomous_consolidation_skill(&source, source_checksum)?;
+    let overlap = load_managed_skill_unlocked(profile_root, overlap_id)?;
+    validate_overlap_partner(&overlap, overlap_checksum)?;
+    validate_detected_skill_overlap_pair(&source, &overlap)?;
+    let skill = apply_managed_skill_archive_unlocked(
+        profile_root,
+        source_id,
+        source_checksum,
+        Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string()),
+    )?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "automatic_archive").await;
+    Ok(skill)
+}
+
+fn reject_reserved_overlap_tombstone(reason: Option<&str>) -> Result<()> {
+    if reason == Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE) {
+        return Err(config_error(
+            "reserved skill-overlap tombstone requires exact overlap authority",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_managed_skill_archive_unlocked(
+    profile_root: &Path,
+    id: &str,
+    base_checksum: &str,
+    reason: Option<String>,
+) -> Result<ManagedSkill> {
+    let mut skill = load_managed_skill_unlocked(profile_root, id)?;
+    if base_checksum != skill.metadata.checksum {
+        return Err(config_error(format!(
+            "base_checksum for managed skill id '{id}' is stale"
+        )));
+    }
+    if skill.metadata.pinned {
+        return Err(config_error(format!(
+            "managed skill '{id}' is pinned and exempt from automatic archive"
+        )));
+    }
+    if skill.metadata.state == ManagedSkillState::Archived {
+        return Err(config_error(format!(
+            "managed skill '{id}' is already archived"
+        )));
+    }
+    skill.metadata.archived_reason = reason;
+    skill.set_state(ManagedSkillState::Archived);
+    skill.refresh_checksum();
+    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
+    Ok(skill)
+}
+
+fn replace_if_changed<T: PartialEq>(slot: &mut T, next: T) -> bool {
+    if *slot == next {
+        false
+    } else {
+        *slot = next;
+        true
+    }
+}
+
+fn apply_managed_skill_update_fields(
+    skill: &mut ManagedSkill,
+    update: ManagedSkillUpdate,
+) -> Result<bool> {
+    validate_managed_skill_update(&update)?;
+
+    let mut content_changed = false;
+    if let Some(title) = update.title {
+        content_changed |= replace_if_changed(&mut skill.metadata.title, title);
+    }
+    if let Some(summary) = update.summary {
+        content_changed |= replace_if_changed(&mut skill.metadata.summary, summary);
+    }
+    if let Some(routing_description) = update.routing_description {
+        content_changed |=
+            replace_if_changed(&mut skill.metadata.routing_description, routing_description);
+    }
+    if let Some(category) = update.category {
+        content_changed |= replace_if_changed(&mut skill.metadata.category, category);
+    }
+    if let Some(targets) = update.targets {
+        content_changed |= replace_if_changed(&mut skill.metadata.targets, targets);
+    }
+    if let Some(body_markdown) = update.body_markdown {
+        content_changed |= replace_if_changed(&mut skill.body_markdown, body_markdown);
+    }
+    if let Some(support_files) = update.support_files {
+        content_changed |= replace_if_changed(&mut skill.support_files, support_files);
+    }
+    if let Some(pinned) = update.pinned {
+        skill.set_pinned(pinned);
+    }
+    Ok(content_changed)
+}
+
+async fn record_skill_patch_best_effort(profile_root: &Path, skill: &ManagedSkill, target: &str) {
+    if let Err(error) = super::skill_usage::record_skill_usage_event(
+        profile_root,
+        super::skill_usage::SkillUsageEvent {
+            skill_name: skill.metadata.id.clone(),
+            action: super::skill_usage::SkillUsageAction::Patch,
+            timestamp: tracedecay_runtime_core::tracedecay::current_timestamp(),
+            target: Some(target.to_string()),
+        },
+        Some(skill),
+    )
+    .await
+    {
+        tracing::warn!(skill_id = %skill.metadata.id, target, error = %error, "skill usage patch recording failed after committed skill change");
+    }
+}
+
+pub async fn disable_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
+    set_managed_skill_state(profile_root, id, ManagedSkillState::Disabled).await
+}
+
+pub async fn archive_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
+    set_managed_skill_state(profile_root, id, ManagedSkillState::Archived).await
+}
+
+pub async fn restore_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
+    let lock = lock_skill_store_async(profile_root).await?;
+    let mut skill = load_managed_skill_unlocked(profile_root, id)?;
+    skill.metadata.absorbed_into = None;
+    skill.metadata.archived_reason = None;
+    skill.set_state(ManagedSkillState::Active);
+    skill.refresh_checksum();
+    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
+    drop(lock);
+    record_skill_patch_best_effort(profile_root, &skill, "restore").await;
+    Ok(skill)
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    fn skill(id: &str, body: &str) -> ManagedSkill {
+        ManagedSkillDraft {
+            id: id.to_string(),
+            title: id.to_string(),
+            summary: format!("Reusable workflow for {id}."),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
+            category: "testing".to_string(),
+            targets: vec![SkillInstallTarget::Codex],
+            body_markdown: body.to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::AutomationRun,
+                actor: "test".to_string(),
+                run_id: Some("run-1".to_string()),
+            },
+        }
+        .materialize()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn recovery_rolls_forward_a_partially_published_multi_skill_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let original_a = skill("skill-a", "# A\nold");
+        let original_b = skill("skill-b", "# B\nold");
+        {
+            let _lock = lock_skill_store(profile).unwrap();
+            persist_skill_transaction_unlocked(profile, &[&original_a, &original_b]).unwrap();
+        }
+
+        let mut next_a = original_a.clone();
+        next_a.body_markdown = "# A\nnew".to_string();
+        next_a.refresh_checksum();
+        let mut next_b = original_b.clone();
+        next_b.metadata.archived_reason = Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string());
+        next_b.set_state(ManagedSkillState::Archived);
+        let root = managed_skill_root(profile);
+        let nonce = 7;
+        let entry_a = stage_skill_directory(&root, &next_a, nonce).unwrap();
+        let entry_b = stage_skill_directory(&root, &next_b, nonce).unwrap();
+        let journal = SkillTransactionJournal {
+            entries: vec![entry_a, entry_b],
+        };
+        write_synced(
+            &root.join(SKILL_TRANSACTION_JOURNAL),
+            &serde_json::to_vec_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        let first = &journal.entries[0];
+        std::fs::rename(root.join(&first.id), &first.backup).unwrap();
+        std::fs::rename(&first.stage, root.join(&first.id)).unwrap();
+
+        drop(lock_skill_store(profile).unwrap());
+
+        let loaded_a = load_managed_skill(profile, "skill-a").await.unwrap();
+        let loaded_b = load_managed_skill(profile, "skill-b").await.unwrap();
+        assert_eq!(loaded_a.body_markdown, "# A\nnew");
+        assert_eq!(loaded_b.metadata.state, ManagedSkillState::Archived);
+        assert_eq!(
+            loaded_b.metadata.archived_reason.as_deref(),
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE)
+        );
+        assert!(!root.join(SKILL_TRANSACTION_JOURNAL).exists());
+        assert!(
+            journal
+                .entries
+                .iter()
+                .all(|entry| !entry.stage.exists() && !entry.backup.exists())
+        );
+    }
+
+    #[test]
+    fn transaction_rejects_duplicate_skill_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let first = skill("same-skill", "# First");
+        let second = skill("same-skill", "# Second");
+        let _lock = lock_skill_store(profile).unwrap();
+
+        let error = persist_skill_transaction_unlocked(profile, &[&first, &second]).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate id 'same-skill'"));
+    }
+
+    #[test]
+    fn failed_journal_write_cleans_staged_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let skill = skill("staged-skill", "# Staged");
+        let root = managed_skill_root(profile);
+        let _lock = lock_skill_store(profile).unwrap();
+        std::fs::create_dir(root.join(format!("{SKILL_TRANSACTION_JOURNAL}.tmp"))).unwrap();
+
+        persist_skill_transaction_unlocked(profile, &[&skill]).unwrap_err();
+
+        assert!(std::fs::read_dir(root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage-")
+        }));
+    }
+
+    #[tokio::test]
+    async fn consolidation_rejects_the_same_source_and_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = apply_managed_skill_consolidation(
+            temp.path(),
+            Some("same-skill"),
+            Some("checksum"),
+            None,
+            "same-skill",
+            "checksum",
+            "duplicate",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("source and target must differ"));
+    }
+
+    #[tokio::test]
+    async fn archive_authority_rejects_the_reserved_overlap_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let original = skill("unrelated-archive", "# Unrelated archive");
+        save_managed_skill(profile, &original).await.unwrap();
+
+        let error = apply_managed_skill_archive(
+            profile,
+            &original.metadata.id,
+            &original.metadata.checksum,
+            Some(SKILL_OVERLAP_REMOVAL_TOMBSTONE.to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("reserved skill-overlap tombstone")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &original.metadata.id)
+                .await
+                .unwrap(),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn consolidation_authority_rejects_the_reserved_overlap_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let target = skill("unrelated-target", "# Unrelated target");
+        let source = skill("unrelated-source", "# Unrelated source");
+        save_managed_skill(profile, &target).await.unwrap();
+        save_managed_skill(profile, &source).await.unwrap();
+
+        let error = apply_managed_skill_consolidation(
+            profile,
+            Some(&target.metadata.id),
+            Some(&target.metadata.checksum),
+            None,
+            &source.metadata.id,
+            &source.metadata.checksum,
+            SKILL_OVERLAP_REMOVAL_TOMBSTONE,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("reserved skill-overlap tombstone")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &target.metadata.id)
+                .await
+                .unwrap(),
+            target
+        );
+        assert_eq!(
+            load_managed_skill(profile, &source.metadata.id)
+                .await
+                .unwrap(),
+            source
+        );
+    }
+
+    #[tokio::test]
+    async fn overlap_archive_authority_rejects_an_unrelated_exact_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let source = skill(
+            "rust-errors",
+            "# Rust errors\nModel failures with typed enums and explicit conversions.",
+        );
+        let partner = skill(
+            "dashboard-layout",
+            "# Dashboard layout\nAlign responsive cards with accessible navigation.",
+        );
+        save_managed_skill(profile, &source).await.unwrap();
+        save_managed_skill(profile, &partner).await.unwrap();
+
+        let error = apply_managed_skill_overlap_archive(
+            profile,
+            &source.metadata.id,
+            &source.metadata.checksum,
+            &partner.metadata.id,
+            &partner.metadata.checksum,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("not a detected overlap candidate pair")
+        );
+        assert_eq!(
+            load_managed_skill(profile, &source.metadata.id)
+                .await
+                .unwrap(),
+            source
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_store_wait_does_not_block_the_runtime_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().to_path_buf();
+        create_managed_skill(
+            &profile,
+            ManagedSkillDraft {
+                id: "waiting-skill".to_string(),
+                title: "Waiting skill".to_string(),
+                summary: "Exercises asynchronous lock acquisition.".to_string(),
+                routing_description:
+                    "Repeated repository workflows requiring this maintained procedure.".to_owned(),
+                category: "testing".to_string(),
+                targets: vec![SkillInstallTarget::Codex],
+                body_markdown: "# Waiting".to_string(),
+                support_files: Vec::new(),
+                provenance: ManagedSkillProvenance {
+                    source: ManagedSkillSource::AutomationRun,
+                    actor: "test".to_string(),
+                    run_id: Some("run-1".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let lock = lock_skill_store(&profile).unwrap();
+        let waiter_profile = profile.clone();
+        let waiter =
+            tokio::spawn(async move { load_managed_skill(&waiter_profile, "waiting-skill").await });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(lock);
+
+        let loaded = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("lock waiter should not block the runtime")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.metadata.id, "waiting-skill");
+    }
+
+    #[tokio::test]
+    async fn public_save_rejects_stale_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let original = skill("existing-skill", "# Original");
+        save_managed_skill(profile, &original).await.unwrap();
+        let mut stale = original.clone();
+        stale.body_markdown = "# Stale replacement".to_string();
+        stale.refresh_checksum();
+
+        let error = save_managed_skill(profile, &stale).await.unwrap_err();
+
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(
+            load_managed_skill(profile, "existing-skill")
+                .await
+                .unwrap()
+                .body_markdown,
+            "# Original"
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_change_survives_usage_ledger_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path();
+        let original = skill("ledger-skill", "# Ledger");
+        save_managed_skill(profile, &original).await.unwrap();
+        let ledger_path = super::super::skill_usage::skill_usage_ledger_path(profile);
+        std::fs::remove_file(&ledger_path).unwrap();
+        std::fs::create_dir(&ledger_path).unwrap();
+
+        let pinned = set_managed_skill_pinned(profile, "ledger-skill", true)
+            .await
+            .unwrap();
+
+        assert!(pinned.metadata.pinned);
+        assert!(
+            load_managed_skill(profile, "ledger-skill")
+                .await
+                .unwrap()
+                .metadata
+                .pinned
+        );
+    }
+
+    #[test]
+    fn concurrent_export_recovers_before_reading_a_partial_publish() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().to_path_buf();
+        let mut original_a = skill("skill-a", "# A\nold");
+        original_a.set_state(ManagedSkillState::Active);
+        let mut original_b = skill("skill-b", "# B\nold");
+        original_b.set_state(ManagedSkillState::Active);
+        {
+            let _lock = lock_skill_store(&profile).unwrap();
+            persist_skill_transaction_unlocked(&profile, &[&original_a, &original_b]).unwrap();
+        }
+
+        let lock = lock_skill_store(&profile).unwrap();
+        let mut next_a = original_a.clone();
+        next_a.body_markdown = "# A\nnew".to_string();
+        next_a.refresh_checksum();
+        let mut next_b = original_b.clone();
+        next_b.set_state(ManagedSkillState::Archived);
+        let root = managed_skill_root(&profile);
+        let entry_a = stage_skill_directory(&root, &next_a, 11).unwrap();
+        let entry_b = stage_skill_directory(&root, &next_b, 11).unwrap();
+        let journal = SkillTransactionJournal {
+            entries: vec![entry_a, entry_b],
+        };
+        write_synced(
+            &root.join(SKILL_TRANSACTION_JOURNAL),
+            &serde_json::to_vec_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        let first = &journal.entries[0];
+        std::fs::rename(root.join(&first.id), &first.backup).unwrap();
+        std::fs::rename(&first.stage, root.join(&first.id)).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let thread_barrier = Arc::clone(&barrier);
+        let thread_profile = profile.clone();
+        let exporter = std::thread::spawn(move || {
+            thread_barrier.wait();
+            crate::automation::skill_targets::load_active_managed_skills(&thread_profile).unwrap()
+        });
+        barrier.wait();
+        drop(lock);
+
+        let exported = exporter.join().unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].metadata.id, "skill-a");
+        assert_eq!(exported[0].body_markdown, "# A\nnew");
+    }
+}
+
+#[cfg(test)]
+#[path = "managed_skills/routing_tests.rs"]
+mod routing_tests;

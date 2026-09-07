@@ -1,26 +1,26 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
 pub struct ErlangExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -32,31 +32,45 @@ impl ExtractionState {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl ErlangExtractor {
     pub fn extract_erlang(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(t) => t,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -85,21 +99,19 @@ impl ErlangExtractor {
         };
         state.nodes.push(file_node);
 
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("erlang")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load Erlang grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("erlang", "Erlang", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -127,7 +139,9 @@ impl ErlangExtractor {
     fn visit_fun_decl(state: &mut ExtractionState, node: TsNode<'_>) {
         // fun_decl contains one or more function_clause nodes.
         // The function name is in the first function_clause's `name` child.
-        let Some(first_clause) = Self::find_child(node, "function_clause") else {
+        let Some(first_clause) =
+            crate::traversal::find_direct_child_by_kind(node, "function_clause")
+        else {
             return;
         };
 
@@ -179,15 +193,14 @@ impl ErlangExtractor {
             line: Some(start_line),
         });
 
-        // Collect call sites from all clauses.
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "function_clause" {
-                    if let Some(body) = child.child_by_field_name("body") {
-                        Self::extract_calls(state, body, &id);
-                    }
+                if child.kind() == "function_clause"
+                    && let Some(body) = child.child_by_field_name("body")
+                {
+                    Self::extract_calls(state, body, &id);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -284,7 +297,6 @@ impl ErlangExtractor {
         // -spec name(Type) -> Type.  Track as an unresolved ref to the function.
         let text = state.node_text(node);
         let start_line = node.start_position().row as u32;
-        // Extract just the function name from spec.
         if let Some(name) = Self::extract_attr_value(state, node) {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: state.file_node_id.clone(),
@@ -298,27 +310,10 @@ impl ErlangExtractor {
         let _ = text;
     }
 
-    /// Finds the first child of a node with a given kind.
-    fn find_child<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == kind {
-                    return Some(child);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-        None
-    }
-
     /// Extracts the atom (function name) from the first child of a `function_clause`.
     fn extract_atom_name(state: &ExtractionState, clause: TsNode<'_>) -> Option<String> {
         if let Some(n) = clause.child_by_field_name("name") {
-            return Some(state.node_text(n));
+            return Some(state.node_text(n).to_string());
         }
         // Fall back to first atom child.
         let mut cursor = clause.walk();
@@ -326,7 +321,7 @@ impl ErlangExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "atom" {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -369,11 +364,8 @@ impl ErlangExtractor {
                 if child.kind() == "atom" {
                     let text = state.node_text(child);
                     // Skip keywords like "module", "type", "spec".
-                    if !matches!(
-                        text.as_str(),
-                        "module" | "type" | "opaque" | "spec" | "callback"
-                    ) {
-                        return Some(text);
+                    if !matches!(text, "module" | "type" | "opaque" | "spec" | "callback") {
+                        return Some(text.to_string());
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -394,7 +386,7 @@ impl ErlangExtractor {
                         let name = state.node_text(callee);
                         state.unresolved_refs.push(UnresolvedRef {
                             from_node_id: fn_id.to_string(),
-                            reference_name: name,
+                            reference_name: name.to_string(),
                             reference_kind: EdgeKind::Calls,
                             line: child.start_position().row as u32,
                             column: child.start_position().column as u32,
@@ -439,5 +431,15 @@ impl crate::LanguageExtractor for ErlangExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_erlang(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

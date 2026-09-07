@@ -3,11 +3,7 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
 fn extract_fixture() -> ExtractionResult {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.gw"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.gw").unwrap();
     let extractor = GwBasicExtractor;
     let result = extractor.extract("sample.gw", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -100,7 +96,6 @@ fn test_gwbasic_gosub_calls() {
         .collect();
     assert!(!calls.is_empty(), "expected call site refs");
 
-    // Top-level: GOSUB 1000, GOSUB 2000, GOSUB 3000
     assert!(
         calls.iter().any(|r| r.reference_name == "1000"),
         "expected GOSUB 1000 call, got: {:?}",
@@ -168,7 +163,6 @@ fn test_gwbasic_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 2 consts + 4 functions (1 DEF FN + 3 subroutines) = 6 Contains edges
     assert!(
         contains.len() >= 6,
         "should have >= 6 Contains edges, got {}",
@@ -180,7 +174,6 @@ fn test_gwbasic_contains_edges() {
 fn test_gwbasic_subroutine_complexity() {
     let result = extract_fixture();
 
-    // CONNECT_TO_SERVER has a WHILE loop
     let connect_fn = result
         .nodes
         .iter()
@@ -192,7 +185,6 @@ fn test_gwbasic_subroutine_complexity() {
         connect_fn.loops
     );
 
-    // VALIDATE_CONFIGURATION has IF branches
     let validate_fn = result
         .nodes
         .iter()

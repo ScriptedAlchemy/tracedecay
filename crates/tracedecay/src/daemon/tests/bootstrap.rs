@@ -1,0 +1,3951 @@
+use super::*;
+use crate::daemon::ProductionProjectCompositionHarnessV1;
+use crate::daemon::{
+    AuthenticatedFirstRequest, ProjectServerRequirement, project_server_requirement,
+};
+use std::process::Command;
+#[cfg(unix)]
+use tracedecay_domain::errors::TraceDecayError;
+
+fn requirement_for(line: String) -> ProjectServerRequirement {
+    let request = AuthenticatedFirstRequest::new(line);
+    project_server_requirement(request.parsed())
+}
+use tracedecay_mcp::JsonRpcResponse;
+#[cfg(unix)]
+use tracedecay_session_memory::context::CancellationToken;
+
+static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[test]
+fn bootstrap_tool_catalog_uses_project_node_count() {
+    let request: super::super::JsonRpcRequest = serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list"
+    }))
+    .expect("tools/list request");
+    let response = super::super::daemon_bootstrap_response(&request, None, Some(65_395))
+        .expect("bootstrap response")
+        .expect("tools/list response");
+    let result = response.result.expect("tools/list result");
+    let context_description = result["tools"]
+        .as_array()
+        .expect("tool catalog")
+        .iter()
+        .find(|tool| tool["name"] == serde_json::json!("tracedecay_context"))
+        .and_then(|tool| tool["description"].as_str())
+        .expect("context tool description");
+
+    assert!(context_description.contains("5 calls maximum"));
+    assert!(context_description.contains("65395 nodes"));
+}
+
+fn project_open_test_route(name: &str) -> ProjectRouteKey {
+    ProjectRouteKey {
+        profile_root: std::path::PathBuf::from(format!("/profiles/{name}")),
+        global_db_path: std::path::PathBuf::from(format!("/profiles/{name}/global.db")),
+        project_path: std::path::PathBuf::from(format!("/projects/{name}")),
+        scope_prefix: None,
+    }
+}
+
+#[test]
+fn hook_runtime_reset_counter_only_requires_core_publication() {
+    let reset = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_hook_runtime",
+            "arguments": {"action": "reset_counter"}
+        }
+    })
+    .to_string();
+    let status = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_status",
+            "arguments": {"format": "json"}
+        }
+    })
+    .to_string();
+
+    assert_eq!(requirement_for(reset), ProjectServerRequirement::Core);
+    assert_eq!(requirement_for(status), ProjectServerRequirement::Core);
+}
+
+#[test]
+fn hook_runtime_ingest_waits_for_registered_project_authority_publication() {
+    let ingest = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_hook_runtime",
+            "arguments": {
+                "action": "ingest_transcript",
+                "provider": "cursor",
+                "user_scope": false,
+                "event_json": "{}"
+            }
+        }
+    })
+    .to_string();
+
+    assert_eq!(
+        requirement_for(ingest),
+        ProjectServerRequirement::RegisteredHostIngest
+    );
+}
+
+#[test]
+fn hook_runtime_missing_malformed_or_unknown_action_waits_for_registration() {
+    for arguments in [
+        json!({}),
+        json!({"action": 42}),
+        json!({"action": "unknown"}),
+    ] {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_hook_runtime",
+                "arguments": arguments
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            requirement_for(request),
+            ProjectServerRequirement::RegisteredHostIngest
+        );
+    }
+}
+
+#[test]
+fn hook_event_waits_for_registered_project_authority_publication() {
+    let hook_event = json!({
+        "jsonrpc": "2.0",
+        "method": crate::daemon::HOOK_EVENT_METHOD,
+        "params": {}
+    })
+    .to_string();
+
+    assert_eq!(
+        requirement_for(hook_event),
+        ProjectServerRequirement::RegisteredHostIngest
+    );
+}
+
+pub(super) fn run_git(root: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
+        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn assert_missing_enrollment_admission(error: &TraceDecayError) {
+    match error {
+        TraceDecayError::Config { message } => {
+            assert!(
+                message.contains("is not enrolled"),
+                "expected missing-enrollment admission error, got: {error}"
+            );
+        }
+        // Add the typed MissingEnrollment admission variant here once exposed.
+        other => panic!("expected missing-enrollment admission error, got: {other}"),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join(".tracedecay");
+    let ambient_directory = home.path().join("ambient");
+    std::fs::create_dir_all(&ambient_directory).expect("create ambient directory");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "unenrolled ambient route");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(ambient_directory.clone());
+    handshake.client_identity = test_client_identity_for(profile_root);
+
+    let error = match engine.begin_project_open(handshake, None).await {
+        Ok(_) => panic!("unenrolled ambient directory must not start project warm-up"),
+        Err(error) => error,
+    };
+
+    assert_missing_enrollment_admission(&error);
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the expensive project-open operation must not start"
+    );
+    assert!(
+        !ambient_directory.join(".tracedecay").exists(),
+        "rejection must not manufacture project state"
+    );
+}
+
+#[test]
+fn daemon_project_route_rejects_the_user_profile_root() {
+    // Portable production path: `project_route_for_handshake` is the Windows
+    // and Unix authority. `DaemonEngine::project_route` is only a unix wrapper
+    // around it and must not be referenced from this un-gated contract test.
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("pinned HOME"));
+    let handshake = DaemonHandshake {
+        project_path: Some(home),
+        ..test_handshake_defaults()
+    };
+
+    let error = super::super::project_route_for_handshake(&handshake)
+        .expect_err("ambient home route must fail before project open");
+
+    assert!(error.to_string().contains("ambient user/filesystem root"));
+}
+
+/// Enrolls `project_root` on disk exactly as a previously-initialized project
+/// is enrolled — a `.git/` repository identity marker plus a materialized
+/// profile store — without touching the profile registry. This is the on-disk
+/// shape retained while the derived registry is rebuilt: every project's
+/// durable enrollment survives, and nothing lives in the working tree.
+#[cfg(unix)]
+pub(super) fn enroll_project_on_disk_only(
+    project_root: &std::path::Path,
+    profile_root: &std::path::Path,
+    project_id: &str,
+) -> tracedecay_runtime_core::storage::StoreLayout {
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project_root,
+            project_id
+        )
+        .expect("repository identity marker"),
+        "fixture repository must accept an identity marker"
+    );
+    let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
+        project_id: project_id.to_owned(),
+        storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+    };
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        project_root,
+        profile_root,
+        &marker,
+    )
+    .expect("layout");
+    std::fs::create_dir_all(&layout.data_root).expect("profile store root");
+    tracedecay_runtime_core::storage::write_store_manifest(&layout).expect("store manifest");
+    let sessions = rusqlite::Connection::open(&layout.sessions_db_path).expect("sessions database");
+    sessions
+        .execute_batch("PRAGMA user_version = 1;")
+        .expect("initialize sessions database");
+    std::fs::write(&layout.graph_db_path, b"existing graph store").expect("graph store");
+    layout
+}
+
+/// The post-update startup-health probe runs as an ordinary daemon tool call
+/// and cannot pass `allow_init`. Admission must honour the same durable
+/// enrollment the authoritative layout resolver consults first: a project
+/// whose store is intact on disk is not "not enrolled" just because the
+/// profile registry was reset.
+#[cfg(unix)]
+#[tokio::test]
+async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_forward_boundary");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "post-boundary registry reset");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    // The registry is the fresh one forward recovery brought the daemon up on.
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    assert!(
+        registry
+            .project_registry_context_by_alias(&project)
+            .await
+            .expect("registry lookup")
+            .is_none(),
+        "fixture must reproduce the post-boundary fresh registry"
+    );
+
+    engine
+        .ensure_registered_project_route(&project, false)
+        .await
+        .expect("a durably enrolled project must be admitted without allow_init");
+
+    // Admission must mount the recovered store, never mint a replacement.
+    let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(&project)
+        .expect("read repository identity marker")
+        .expect("repository identity marker retained");
+    assert_eq!(marker.project_id, "proj_forward_boundary");
+    assert!(
+        layout.graph_db_path.is_file(),
+        "the pre-existing store must be left intact"
+    );
+}
+
+/// The guard still refuses a project whose repository identity marker points
+/// at a store that is not on disk, so the widened admission cannot resurrect a
+/// route with nothing behind it.
+#[cfg(unix)]
+#[tokio::test]
+async fn identity_marker_without_a_store_is_still_rejected() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_store_absent");
+    std::fs::remove_dir_all(&layout.data_root).expect("remove profile store");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "enrollment marker without store");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    let error = match engine
+        .ensure_registered_project_route(&project, false)
+        .await
+    {
+        Ok(()) => panic!("a marker with no store on disk must not be admitted"),
+        Err(error) => error,
+    };
+    assert_missing_enrollment_admission(&error);
+}
+
+/// Regression for the orphaned-store deadlock: a repository whose durable
+/// identity marker (`.git/tracedecay-project.json`) survived while its
+/// registry rows were lost, with the profile store still fully materialized
+/// on disk. Identity resolution answers through the durable marker (so
+/// first-touch never runs). Recovery must re-adopt: admit the route, resolve
+/// the enrollment roots under exactly the identity the durable marker names
+/// (never a freshly minted alias), and leave the store's data untouched —
+/// without creating anything in the working tree.
+#[cfg(unix)]
+#[tokio::test]
+async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+
+    // The durable repository identity marker names a project id that is NOT
+    // the path-derived hash of this checkout, so a re-adoption that silently
+    // minted a fresh identity would fail the assertions below.
+    let project_id = "proj_orphan_readopt";
+    let layout = enroll_project_on_disk_only(&project, &profile_root, project_id);
+    let graph_bytes_before = std::fs::read(&layout.graph_db_path).expect("orphan graph bytes");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "orphan store re-adoption");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    // The route guard must admit the orphan without allow_init: its durable
+    // identity resolves an existing store, so this is recovery, not init.
+    engine
+        .ensure_registered_project_route(&project, false)
+        .await
+        .expect("orphaned store with durable identity must be admitted");
+
+    // Identity resolution must answer with the durable marker's exact id.
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    let open_options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: None,
+    };
+    let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+        &project,
+        &open_options,
+        registry.as_ref(),
+    )
+    .await
+    .expect("durable identity must resolve the registered layout");
+    assert_eq!(
+        store_layout.identity.project_id.as_deref(),
+        Some(project_id),
+        "re-adoption must keep the durable identity, never mint an alias"
+    );
+
+    // Enrollment-root resolution is the re-adoption step: the same resolution
+    // the session mount performs must answer through the durable `.git/`
+    // marker without creating anything in the working tree.
+    let typed_project_id =
+        tracedecay_store::ProjectId::new(project_id.to_owned()).expect("typed project id");
+    let roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
+        &project,
+        &store_layout,
+        &typed_project_id,
+        registry.as_ref(),
+    )
+    .await
+    .expect("re-adoption must resolve the enrollment root");
+    assert!(
+        !roots.is_empty(),
+        "re-adoption must produce enrollment roots"
+    );
+    let retained = tracedecay_runtime_core::storage::read_repository_identity_marker(&project)
+        .expect("read repository identity marker")
+        .expect("repository identity marker must be retained");
+    assert_eq!(
+        retained.project_id, project_id,
+        "re-adoption must keep the durable identity"
+    );
+    assert!(
+        !project.join(".tracedecay").exists(),
+        "re-adoption must not create anything in the working tree"
+    );
+
+    // Re-adoption restores identity only; the store's data is never replaced.
+    let graph_bytes_after = std::fs::read(&layout.graph_db_path).expect("graph bytes after");
+    assert_eq!(
+        graph_bytes_before, graph_bytes_after,
+        "re-adoption must not rewrite or replace the existing store"
+    );
+}
+
+/// Enrolls a non-git project store on disk: profile shard + manifest + graph
+/// bytes, and no `.git/` marker. Identity lives in the registry and the
+/// store's recorded root.
+#[cfg(unix)]
+fn enroll_nongit_project_on_disk(
+    project_root: &std::path::Path,
+    profile_root: &std::path::Path,
+    project_id: &str,
+) -> tracedecay_runtime_core::storage::StoreLayout {
+    let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
+        project_id: project_id.to_owned(),
+        storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+    };
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        project_root,
+        profile_root,
+        &marker,
+    )
+    .expect("nongit layout");
+    std::fs::create_dir_all(&layout.data_root).expect("profile store root");
+    tracedecay_runtime_core::storage::write_store_manifest(&layout).expect("store manifest");
+    let sessions = rusqlite::Connection::open(&layout.sessions_db_path).expect("sessions database");
+    sessions
+        .execute_batch("PRAGMA user_version = 1;")
+        .expect("initialize sessions database");
+    std::fs::write(
+        &layout.graph_db_path,
+        format!("nongit-graph-{project_id}").as_bytes(),
+    )
+    .expect("graph store");
+    layout
+}
+
+#[cfg(unix)]
+fn moved_nongit_open_options(
+    profile_root: &std::path::Path,
+) -> crate::tracedecay::TraceDecayOpenOptions {
+    crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.to_path_buf()),
+        global_db_path: None,
+    }
+}
+
+/// After the working-tree enrollment file was removed, a moved non-git
+/// project cannot be found by path-derived id. Rebinding its registry row is
+/// an operator decision: ambient first-touch mints fresh, explicit init
+/// without flags refuses with the candidate, and `--yes` (`AdoptUnique`)
+/// completes the remap with store data intact.
+#[cfg(unix)]
+#[tokio::test]
+async fn moved_nongit_project_is_readopted_only_when_confirmed() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let original = root.join("nongit-original");
+    std::fs::create_dir_all(&original).expect("create nongit project");
+    let project_id = "proj_nongit_moved";
+    let layout = enroll_nongit_project_on_disk(&original, &profile_root, project_id);
+    let graph_bytes_before = std::fs::read(&layout.graph_db_path).expect("graph bytes");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "moved nongit unique re-adoption");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    registry
+        .upsert_code_project(project_id, &original, None, None, None)
+        .await
+        .expect("register nongit project");
+
+    let moved = root.join("nongit-moved");
+    std::fs::rename(&original, &moved).expect("move nongit project");
+    let moved_canonical = moved.canonicalize().expect("canonical moved root");
+
+    // Ambient first-touch (`Never`) mints a fresh path-derived identity and
+    // must not touch the moved project's registration.
+    let ambient =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &moved,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::Never,
+        )
+        .await
+        .expect("ambient first-touch mints fresh");
+    assert_eq!(
+        ambient.identity.project_id.as_deref(),
+        Some(
+            tracedecay_runtime_core::storage::default_profile_project_id(&moved_canonical).as_str()
+        ),
+        "ambient first-touch must mint the path-derived identity, never adopt"
+    );
+
+    // Explicit init without adoption flags refuses with the candidate and
+    // the explicit choices instead of silently remapping or silently
+    // splitting identity.
+    let offer =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &moved,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::OfferCandidates,
+        )
+        .await
+        .expect_err("explicit init without flags must refuse when a candidate exists");
+    let message = offer.to_string();
+    assert!(
+        message.contains(project_id)
+            && message.contains("--adopt-project")
+            && message.contains("--fresh"),
+        "refusal must name the candidate and both explicit choices, got {message}"
+    );
+    let unmoved = registry
+        .project_registry_context_by_id(project_id)
+        .await
+        .expect("registry lookup")
+        .expect("refusal must not touch the registration");
+    assert_eq!(
+        std::path::Path::new(&unmoved.project.canonical_root),
+        original.as_path(),
+        "a refusal must leave the registry row untouched"
+    );
+
+    // `init --yes` confirms adopting the unique candidate.
+    let store_layout =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &moved,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::AdoptUnique,
+        )
+        .await
+        .expect("confirmed unique moved nongit project must be adopted");
+    assert_eq!(
+        store_layout.identity.project_id.as_deref(),
+        Some(project_id),
+        "adoption must keep the registered identity, never mint a path-derived alias"
+    );
+    assert_eq!(
+        store_layout.graph_db_path, layout.graph_db_path,
+        "adoption must keep the existing profile shard"
+    );
+    let remapped = registry
+        .project_registry_context_by_id(project_id)
+        .await
+        .expect("registry lookup")
+        .expect("adopted project remains registered");
+    assert_eq!(
+        std::path::Path::new(&remapped.project.canonical_root),
+        moved_canonical.as_path(),
+        "registry canonical root must follow the move"
+    );
+    let graph_bytes_after = std::fs::read(&layout.graph_db_path).expect("graph bytes after");
+    assert_eq!(
+        graph_bytes_before, graph_bytes_after,
+        "adoption must leave store data intact"
+    );
+    assert!(
+        !moved.join(".tracedecay").exists(),
+        "adoption must not create working-tree state"
+    );
+}
+
+/// One stale non-git registry row must never hijack an unrelated fresh
+/// directory: ambient first-touch (any handshake with `allow_init`, e.g.
+/// agent tools touching a scratch directory) always mints the path-derived
+/// identity and leaves the stale registration alone.
+#[cfg(unix)]
+#[tokio::test]
+async fn ambient_first_touch_never_adopts_a_moved_nongit_store() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let original = root.join("nongit-original");
+    std::fs::create_dir_all(&original).expect("create nongit project");
+    let stale_id = "proj_nongit_stale";
+    enroll_nongit_project_on_disk(&original, &profile_root, stale_id);
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "ambient first-touch never adopts");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    registry
+        .upsert_code_project(stale_id, &original, None, None, None)
+        .await
+        .expect("register nongit project");
+    std::fs::remove_dir_all(&original).expect("delete the project without wiping the store");
+
+    let scratch = root.join("unrelated-scratch");
+    std::fs::create_dir_all(&scratch).expect("create unrelated directory");
+    let scratch_canonical = scratch.canonicalize().expect("canonical scratch root");
+
+    let layout =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &scratch,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::Never,
+        )
+        .await
+        .expect("ambient first-touch on a fresh directory mints a fresh identity");
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(
+            tracedecay_runtime_core::storage::default_profile_project_id(&scratch_canonical)
+                .as_str()
+        ),
+        "ambient first-touch must never inherit a stale project identity"
+    );
+    let stale = registry
+        .project_registry_context_by_id(stale_id)
+        .await
+        .expect("registry lookup")
+        .expect("stale registration survives");
+    assert_eq!(
+        std::path::Path::new(&stale.project.canonical_root),
+        original.as_path(),
+        "ambient first-touch must not rewrite the stale registry row"
+    );
+}
+
+/// Two moved non-git stores can claim a brand-new root. A confirmed adoption
+/// (`--yes`) must refuse instead of picking a winner — and the stale stores
+/// must not brick a fresh init: opting out of adoption mints a new identity.
+#[cfg(unix)]
+#[tokio::test]
+async fn moved_nongit_adoption_is_refused_when_ambiguous() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let original_a = root.join("nongit-a");
+    let original_b = root.join("nongit-b");
+    std::fs::create_dir_all(&original_a).expect("create project a");
+    std::fs::create_dir_all(&original_b).expect("create project b");
+    enroll_nongit_project_on_disk(&original_a, &profile_root, "proj_nongit_ambig_a");
+    enroll_nongit_project_on_disk(&original_b, &profile_root, "proj_nongit_ambig_b");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "moved nongit ambiguous adoption");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    registry
+        .upsert_code_project("proj_nongit_ambig_a", &original_a, None, None, None)
+        .await
+        .expect("register a");
+    registry
+        .upsert_code_project("proj_nongit_ambig_b", &original_b, None, None, None)
+        .await
+        .expect("register b");
+
+    std::fs::rename(&original_a, root.join("nongit-a-moved")).expect("move a");
+    std::fs::rename(&original_b, root.join("nongit-b-moved")).expect("move b");
+    let target = root.join("nongit-new");
+    std::fs::create_dir_all(&target).expect("create adoption target");
+
+    let error =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &target,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::AdoptUnique,
+        )
+        .await
+        .expect_err("ambiguous moved nongit adoption must refuse");
+    let message = error.to_string();
+    assert!(
+        message.contains("ambiguous") && message.contains("--adopt-project"),
+        "refusal must name the adopt flag, got {message}"
+    );
+    assert!(
+        message.contains("proj_nongit_ambig_a") && message.contains("proj_nongit_ambig_b"),
+        "refusal must name both candidates, got {message}"
+    );
+
+    // The stale stores must not brick a genuinely new project: opting out of
+    // adoption (`--fresh`, and every ambient first-touch) mints fresh.
+    let fresh =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &target,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::Never,
+        )
+        .await
+        .expect("fresh init must stay possible with stale moved stores present");
+    let target_canonical = target.canonicalize().expect("canonical target");
+    assert_eq!(
+        fresh.identity.project_id.as_deref(),
+        Some(
+            tracedecay_runtime_core::storage::default_profile_project_id(&target_canonical)
+                .as_str()
+        ),
+        "opting out of adoption must mint the path-derived identity"
+    );
+}
+
+/// `--adopt-project` selects exactly one moved non-git store when first-touch
+/// would otherwise be ambiguous.
+#[cfg(unix)]
+#[tokio::test]
+async fn moved_nongit_adoption_honors_explicit_project_id() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let original_a = root.join("nongit-a");
+    let original_b = root.join("nongit-b");
+    std::fs::create_dir_all(&original_a).expect("create project a");
+    std::fs::create_dir_all(&original_b).expect("create project b");
+    let layout_a = enroll_nongit_project_on_disk(&original_a, &profile_root, "proj_nongit_flag_a");
+    enroll_nongit_project_on_disk(&original_b, &profile_root, "proj_nongit_flag_b");
+    let graph_bytes_before = std::fs::read(&layout_a.graph_db_path).expect("graph bytes");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "moved nongit flagged adoption");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    registry
+        .upsert_code_project("proj_nongit_flag_a", &original_a, None, None, None)
+        .await
+        .expect("register a");
+    registry
+        .upsert_code_project("proj_nongit_flag_b", &original_b, None, None, None)
+        .await
+        .expect("register b");
+
+    std::fs::rename(&original_a, root.join("nongit-a-moved")).expect("move a");
+    std::fs::rename(&original_b, root.join("nongit-b-moved")).expect("move b");
+    let target = root.join("nongit-new");
+    std::fs::create_dir_all(&target).expect("create adoption target");
+
+    let store_layout =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &target,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::AdoptNamed("proj_nongit_flag_a".to_owned()),
+        )
+        .await
+        .expect("flagged adoption must select the named project");
+    assert_eq!(
+        store_layout.identity.project_id.as_deref(),
+        Some("proj_nongit_flag_a")
+    );
+    let remapped = registry
+        .project_registry_context_by_id("proj_nongit_flag_a")
+        .await
+        .expect("registry lookup")
+        .expect("adopted project remains registered");
+    assert_eq!(
+        std::path::Path::new(&remapped.project.canonical_root),
+        target.canonicalize().expect("canonical target").as_path()
+    );
+    assert_eq!(
+        std::fs::read(&layout_a.graph_db_path).expect("graph bytes after"),
+        graph_bytes_before
+    );
+}
+
+/// A new root that already resolves to a different registered project cannot
+/// be aliased onto a moved store.
+#[cfg(unix)]
+#[tokio::test]
+async fn moved_nongit_adoption_refuses_conflicting_registered_root() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let occupant = root.join("occupant");
+    let original = root.join("nongit-original");
+    std::fs::create_dir_all(&occupant).expect("create occupant");
+    std::fs::create_dir_all(&original).expect("create moved project");
+    enroll_nongit_project_on_disk(&occupant, &profile_root, "proj_nongit_occupant");
+    enroll_nongit_project_on_disk(&original, &profile_root, "proj_nongit_conflict");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "moved nongit conflicting adoption");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    registry
+        .upsert_code_project("proj_nongit_occupant", &occupant, None, None, None)
+        .await
+        .expect("register occupant");
+    registry
+        .upsert_code_project("proj_nongit_conflict", &original, None, None, None)
+        .await
+        .expect("register moved project");
+    std::fs::rename(&original, root.join("nongit-moved")).expect("move conflicting project");
+
+    let error =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &occupant,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::AdoptNamed("proj_nongit_conflict".to_owned()),
+        )
+        .await
+        .expect_err("adoption onto another project's root must refuse");
+    let message = error.to_string();
+    assert!(
+        message.contains("proj_nongit_conflict") && message.contains("proj_nongit_occupant"),
+        "conflict refusal must name both identities, got {message}"
+    );
+}
+
+/// A remap interrupted between the store-side evidence write and the registry
+/// commit leaves the shard manifest naming the new root while the registry
+/// still names the gone previous root. That manifest is the journal record:
+/// the next explicit init resumes the remap without flags — positive linkage
+/// written under the earlier explicit adoption — and commits the registry.
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let original = root.join("nongit-original");
+    std::fs::create_dir_all(&original).expect("create nongit project");
+    let project_id = "proj_nongit_torn";
+    let layout = enroll_nongit_project_on_disk(&original, &profile_root, project_id);
+    let graph_bytes_before = std::fs::read(&layout.graph_db_path).expect("graph bytes");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "interrupted nongit remap resume");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    registry
+        .upsert_code_project(project_id, &original, None, None, None)
+        .await
+        .expect("register nongit project");
+
+    let moved = root.join("nongit-moved");
+    std::fs::rename(&original, &moved).expect("move nongit project");
+    // Simulate the interruption: the remap wrote the shard manifest for the
+    // new root but crashed before the registry upsert.
+    let torn_layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &moved,
+        &profile_root,
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
+            project_id: project_id.to_owned(),
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("layout for the interrupted remap");
+    tracedecay_runtime_core::storage::write_store_manifest(&torn_layout)
+        .expect("journal manifest write");
+
+    let resumed =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &moved,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::OfferCandidates,
+        )
+        .await
+        .expect("a torn remap must resume from its manifest journal record");
+    assert_eq!(
+        resumed.identity.project_id.as_deref(),
+        Some(project_id),
+        "resume must restore the registered identity, never mint an alias"
+    );
+    let remapped = registry
+        .project_registry_context_by_id(project_id)
+        .await
+        .expect("registry lookup")
+        .expect("resumed project remains registered");
+    let moved_canonical = moved.canonicalize().expect("canonical moved root");
+    assert_eq!(
+        std::path::Path::new(&remapped.project.canonical_root),
+        moved_canonical.as_path(),
+        "resume must commit the registry to the new root"
+    );
+    assert_eq!(
+        std::fs::read(&layout.graph_db_path).expect("graph bytes after"),
+        graph_bytes_before,
+        "resume must leave store data intact"
+    );
+}
+
+/// A present-but-unreadable store manifest must fail candidate evaluation
+/// with a typed error, not silently drop the candidate: a corrupt manifest
+/// could otherwise remove the true candidate and make a wrong one unique.
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_moved_store_evidence_is_a_typed_refusal() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let original = root.join("nongit-original");
+    std::fs::create_dir_all(&original).expect("create nongit project");
+    let project_id = "proj_nongit_corrupt";
+    let layout = enroll_nongit_project_on_disk(&original, &profile_root, project_id);
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "unreadable adoption evidence");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    registry
+        .upsert_code_project(project_id, &original, None, None, None)
+        .await
+        .expect("register nongit project");
+
+    let moved = root.join("nongit-moved");
+    std::fs::rename(&original, &moved).expect("move nongit project");
+    let manifest_path = layout
+        .manifest_path
+        .as_deref()
+        .expect("profile-sharded layout carries a manifest path");
+    std::fs::write(manifest_path, b"not a manifest").expect("corrupt the manifest");
+
+    let error =
+        crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+            &moved,
+            &moved_nongit_open_options(&profile_root),
+            registry.as_ref(),
+            &crate::tracedecay::MovedStoreAdoption::AdoptUnique,
+        )
+        .await
+        .expect_err("unreadable evidence must be a typed error, not a silent non-match");
+    let message = error.to_string();
+    assert!(
+        message.contains("moved-store adoption evidence") && message.contains("--fresh"),
+        "the refusal must name the evidence failure and the fresh-mint escape, got {message}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_project_deletion_stays_settling_until_transferred_reaper_joins() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_reaper_settling");
+    std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote deletion reaper settling");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let database = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile database");
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: profile_root.canonicalize().expect("canonical profile"),
+            global_db_path: database.db_path().to_path_buf(),
+            project_id: Some("proj_reaper_settling".to_owned()),
+            store_root: layout.data_root.canonicalize().expect("canonical store"),
+            graph_db_path: layout.graph_db_path.clone(),
+        },
+        project_root: project.canonicalize().expect("canonical project"),
+        scope_prefix: None,
+    };
+    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    started_rx.await.expect("maintenance task started");
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(key.clone(), test_automation_scheduler_handle(task));
+    let retirement = engine
+        .retire_automation_scheduler_locked(&key)
+        .await
+        .expect("transfer scheduler to reaper");
+    engine
+        .store_administration
+        .wait_for_retirement_reaper_count_for_test(1)
+        .await;
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+
+    let settling = engine
+        .store_administration
+        .execute_remote_deletion(
+            &owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_reaper_settling".to_owned()),
+            "tombstone.reaper-settling".to_owned(),
+        )
+        .await
+        .expect_err("live reaper must keep deletion settling");
+    assert_eq!(
+        settling.receipt.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Settling
+    );
+    assert!(
+        layout.data_root.exists(),
+        "settling shard must be preserved"
+    );
+    let profile_id = engine
+        .store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .as_str();
+    assert!(matches!(
+        database
+            .remote_deletion_tombstone(
+                profile_id,
+                tracedecay_global_db::RemoteDeletionTarget::Project,
+                Some("proj_reaper_settling"),
+            )
+            .await
+            .expect("read tombstone")
+            .expect("tombstone"),
+        tracedecay_global_db::RemoteDeletionTombstone {
+            cleanup: tracedecay_global_db::RemoteDeletionCleanupState::Settling { .. },
+            ..
+        }
+    ));
+
+    release.release();
+    completed_rx.await.expect("maintenance task completed");
+    retirement.wait().await;
+    let deleted = engine
+        .store_administration
+        .execute_remote_deletion(
+            &owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_reaper_settling".to_owned()),
+            "tombstone.reaper-settling".to_owned(),
+        )
+        .await
+        .expect("retry deletion after reaper join");
+    assert_eq!(
+        deleted.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Deleted
+    );
+    assert!(!layout.data_root.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_project_deletion_ignores_unrelated_server_retirement() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("target-repository");
+    std::fs::create_dir_all(&project).expect("create target repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_retirement_target");
+    std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "project retirement isolation");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let unrelated_owner = StoreOwnerKey {
+        profile_root: profile_root.clone(),
+        global_db_path: profile_root.join("global.db"),
+        project_id: Some("proj_unrelated_retirement".to_owned()),
+        store_root: profile_root.join("projects/proj_unrelated_retirement"),
+        graph_db_path: profile_root.join("projects/proj_unrelated_retirement/graph.db"),
+    };
+    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    started_rx
+        .await
+        .expect("unrelated server retirement started");
+    engine
+        .store_administration
+        .track_project_server_retirement(unrelated_owner, task)
+        .await;
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+
+    let deletion = engine
+        .store_administration
+        .execute_remote_deletion(
+            &owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_retirement_target".to_owned()),
+            "tombstone.retirement-isolation".to_owned(),
+        )
+        .await;
+    release.release();
+    completed_rx
+        .await
+        .expect("unrelated server retirement completed");
+    engine
+        .store_administration
+        .join_project_server_retirements()
+        .await;
+    let receipt = deletion.expect("unrelated retirement must not make target deletion settle");
+    assert_eq!(
+        receipt.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Deleted
+    );
+    assert!(!layout.data_root.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_project_deletion_denies_unknown_and_cross_profile_identities_without_tombstones() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let authenticated_profile = root.join("authenticated-profile");
+    let other_profile = root.join("other-profile");
+    let other_project = root.join("other-repository");
+    std::fs::create_dir_all(&other_project).expect("create other repository");
+    run_git(&other_project, &["init", "--quiet"]);
+    enroll_project_on_disk_only(&other_project, &other_profile, "proj_cross_profile");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&authenticated_profile, "remote deletion identity denial");
+    let engine = test_daemon_engine_for_profile(&authenticated_profile);
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    for (project_id, tombstone_id) in [
+        ("proj_unknown", "tombstone.unknown"),
+        ("proj_cross_profile", "tombstone.cross-profile"),
+    ] {
+        let denied = engine
+            .store_administration
+            .execute_remote_deletion(
+                &owners,
+                super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+                Some(project_id.to_owned()),
+                tombstone_id.to_owned(),
+            )
+            .await
+            .expect_err("unowned project identity must be denied");
+        assert_eq!(
+            denied.receipt.status,
+            super::super::remote_deletion::RemoteDeletionStatus::Denied
+        );
+        assert!(!denied.receipt.tombstone_recorded);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_project_deletion_denies_unprovable_corrupt_shard_before_tombstoning() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout =
+        enroll_project_on_disk_only(&project, &profile_root, "proj_remote_partial_cleanup");
+    std::fs::remove_dir_all(&layout.data_root).expect("remove synthetic project shard");
+    std::fs::write(&layout.data_root, "not a project shard")
+        .expect("replace project shard with a regular file");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "partial remote project deletion");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let deletion_owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    let error = engine
+        .store_administration
+        .execute_remote_deletion(
+            &deletion_owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_remote_partial_cleanup".to_owned()),
+            "tombstone.remote-partial".to_owned(),
+        )
+        .await
+        .expect_err("a corrupt shard without another exact authority must be denied");
+
+    assert_eq!(
+        error.receipt.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Denied
+    );
+    assert!(!error.receipt.tombstone_recorded);
+    assert_eq!(
+        error.receipt.pending_project_ids,
+        ["proj_remote_partial_cleanup".to_owned()]
+    );
+    assert_eq!(
+        error.receipt.failure,
+        Some(super::super::remote_deletion::RemoteDeletionFailure {
+            code: super::super::remote_deletion::RemoteDeletionFailureCode::TargetNotFound,
+            phase: super::super::remote_deletion::RemoteDeletionPhase::ResolveTarget,
+            retryable: false,
+        })
+    );
+    assert!(
+        layout.data_root.is_file(),
+        "invalid exact shard is preserved for operator recovery"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_account_deletion_removes_all_exact_profile_shards_and_fences_replay() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let first_project = root.join("first-repository");
+    let second_project = root.join("second-repository");
+    for project in [&first_project, &second_project] {
+        std::fs::create_dir_all(project).expect("create repository");
+        run_git(project, &["init", "--quiet"]);
+    }
+    let first_layout =
+        enroll_project_on_disk_only(&first_project, &profile_root, "proj_remote_account_a");
+    let second_layout =
+        enroll_project_on_disk_only(&second_project, &profile_root, "proj_remote_account_b");
+    for layout in [&first_layout, &second_layout] {
+        std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
+        std::fs::write(
+            layout.data_root.join("payload.txt"),
+            "remote account payload",
+        )
+        .expect("write isolated profile payload");
+    }
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote account deletion");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let deletion_owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    let receipt = engine
+        .store_administration
+        .execute_remote_deletion(
+            &deletion_owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Account,
+            None,
+            "tombstone.remote-account".to_owned(),
+        )
+        .await
+        .expect("delete isolated remote account");
+
+    assert_eq!(
+        receipt.removed_project_ids,
+        [
+            "proj_remote_account_a".to_owned(),
+            "proj_remote_account_b".to_owned(),
+        ]
+    );
+    assert!(receipt.tombstone_recorded);
+    assert!(receipt.pending_project_ids.is_empty());
+    assert!(!first_layout.data_root.exists());
+    assert!(!second_layout.data_root.exists());
+    assert!(first_project.exists());
+    assert!(second_project.exists());
+    for project in [&first_project, &second_project] {
+        let error = engine
+            .ensure_registered_project_route(project, false)
+            .await
+            .expect_err("account tombstone must fence every stale project enrollment");
+        assert!(matches!(
+            error,
+            TraceDecayError::ProjectRoute { ref reason_code, retryable: false, .. }
+                if reason_code == "remote_deleted"
+        ));
+    }
+    let params = serde_json::json!({
+        "name": "tracedecay_lcm_status",
+        "arguments": {
+            "storage_scope": "user",
+            "provider": "cursor",
+            "format": "json"
+        }
+    });
+    let identity = test_client_identity_for(profile_root);
+    let projectless = super::super::projectless_tools_call_response(
+        serde_json::json!(1),
+        Some(&params),
+        &identity,
+        &engine.store_administration,
+    )
+    .await;
+    let error = projectless
+        .error
+        .expect("account tombstone must deny projectless profile-session access");
+    assert!(
+        error.message.contains("remotely deleted"),
+        "unexpected projectless denial: {}",
+        error.message
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reconciles_restart() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project_root = root.join("racing-project");
+    let project_id = "proj_remote_account_race";
+    std::fs::create_dir_all(&project_root).expect("create racing project");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote account open race");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    let tasks = super::super::project_open_tasks(engine.project_open_gates.as_ref()).await;
+    let route = ProjectRouteKey {
+        profile_root: profile_root.clone(),
+        global_db_path: profile_root.join("global.db"),
+        project_path: project_root,
+        scope_prefix: None,
+    };
+    let data_root =
+        tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, project_id);
+    let racing_data_root = data_root.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let open = tasks
+        .start(route, async move {
+            started_tx.send(()).map_err(|()| TraceDecayError::Config {
+                message: "account deletion race observer dropped".to_owned(),
+            })?;
+            release_rx.await.map_err(|_| TraceDecayError::Config {
+                message: "account deletion race release dropped".to_owned(),
+            })?;
+            std::fs::create_dir_all(&racing_data_root)?;
+            std::fs::write(racing_data_root.join("post-tombstone.txt"), "owned write")?;
+            Ok(())
+        })
+        .await;
+    let open = match open {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("racing project open must be admitted before account deletion")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("racing project open must fit the bounded registry")
+        }
+    };
+    started_rx.await.expect("racing project open started");
+
+    let persist_receipt = engine
+        .store_administration
+        .remote_account_deletion_tombstone_persist_receipt();
+    let deletion_administration = engine.store_administration.clone();
+    let deletion_owners = owners.clone();
+    let deletion = tokio::spawn(async move {
+        deletion_administration
+            .execute_remote_deletion(
+                &deletion_owners,
+                super::super::remote_deletion::RemoteDeletionReceiptTarget::Account,
+                None,
+                "tombstone.remote-account-race".to_owned(),
+            )
+            .await
+    });
+    let persisted =
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), persist_receipt.wait())
+            .await
+            .expect("account tombstone persist receipt was not settled")
+            .expect("account tombstone persist receipt");
+    assert_eq!(persisted.tombstone_id, "tombstone.remote-account-race");
+    assert_eq!(
+        persisted.target,
+        tracedecay_global_db::RemoteDeletionTarget::Account
+    );
+    release_tx.send(()).expect("release racing shard creation");
+    super::super::ProjectOpenTasks::wait_for_completion(open)
+        .await
+        .expect("racing open completed its owned write");
+    deletion
+        .await
+        .expect("account deletion task")
+        .expect("account deletion after joined open");
+    let late_route = ProjectRouteKey {
+        profile_root: profile_root.clone(),
+        global_db_path: profile_root.join("global.db"),
+        project_path: root.join("late-project"),
+        scope_prefix: None,
+    };
+    assert!(
+        matches!(
+            tasks.start(late_route, async { Ok(()) }).await,
+            super::super::ProjectOpenTaskClaim::Failed(_)
+        ),
+        "account deletion must leave profile project-open admission closed"
+    );
+    assert!(
+        !data_root.exists(),
+        "account deletion must enumerate after every admitted open has joined"
+    );
+
+    std::fs::create_dir_all(&data_root).expect("recreate post-deletion shard");
+    std::fs::write(data_root.join("restart-race.txt"), "late shard")
+        .expect("write post-deletion shard");
+    drop(tasks);
+    drop(owners);
+    drop(engine);
+
+    let restarted = test_daemon_engine_for_profile(&profile_root);
+    let restarted_owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: restarted.store_administration.clone(),
+        invocation: restarted.invocation.clone(),
+        project_open_gates: Arc::clone(&restarted.project_open_gates),
+    };
+    let mode =
+        super::super::remote_deletion::resume_remote_account_deletion_for_boot(&restarted_owners)
+            .await
+            .expect("resume account deletion after restart");
+    assert!(matches!(
+        mode,
+        super::super::remote_deletion::RemoteDeletionBootMode::DeletionOnly(_)
+    ));
+    assert!(
+        !data_root.exists(),
+        "Deleted replay must reconcile every shard present after the tombstone"
+    );
+}
+
+#[tokio::test]
+async fn remote_account_deletion_tombstone_persist_receipt_fails_when_never_settled() {
+    let administration = super::super::StoreAdministration::default();
+    let receipt = administration.remote_account_deletion_tombstone_persist_receipt();
+    drop(administration);
+    let error = receipt
+        .wait()
+        .await
+        .expect_err("unset persist receipt must fail closed");
+    assert!(
+        error.to_string().contains("dropped before it settled"),
+        "unexpected persist failure: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_restart_resumes_account_tombstone_without_ordinary_admission() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join(".tracedecay");
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "remote account restart");
+    let first = test_daemon_engine_for_profile(&profile_root);
+    let database = first
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile database");
+    let profile_id = first
+        .store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .as_str()
+        .to_owned();
+    database
+        .record_remote_deletion_tombstone(tracedecay_global_db::RemoteDeletionTombstone {
+            target: tracedecay_global_db::RemoteDeletionTarget::Account,
+            profile_id,
+            project_id: None,
+            tombstone_id: "tombstone.restart-account".to_owned(),
+            recorded_at_micros: 1,
+            cleanup: tracedecay_global_db::RemoteDeletionCleanupState::Pending,
+        })
+        .await
+        .expect("persist account tombstone");
+    drop(database);
+    drop(first);
+
+    let restarted = test_daemon_engine_for_profile(&profile_root);
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: restarted.store_administration.clone(),
+        invocation: restarted.invocation.clone(),
+        project_open_gates: Arc::clone(&restarted.project_open_gates),
+    };
+    let mode = super::super::remote_deletion::resume_remote_account_deletion_for_boot(&owners)
+        .await
+        .expect("resume deletion-only boot");
+    let super::super::remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) = mode else {
+        panic!("account tombstone must prevent ordinary daemon admission");
+    };
+    assert_eq!(
+        receipt.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Deleted
+    );
+    assert!(
+        !restarted.http_application_registry.is_active(),
+        "deletion-only restart must not publish ordinary HTTP admission"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn account_tombstone_denies_projectless_memory_and_profile_automation() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join(".tracedecay");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote account projectless fence");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    engine
+        .store_administration
+        .execute_remote_deletion(
+            &owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Account,
+            None,
+            "tombstone.projectless-fence".to_owned(),
+        )
+        .await
+        .expect("delete account");
+    let identity = test_client_identity_for(profile_root);
+    for params in [
+        serde_json::json!({
+            "name": "tracedecay_memory_status",
+            "arguments": {"memory_scope": "user", "format": "json"}
+        }),
+        serde_json::json!({
+            "name": "tracedecay_admin_project",
+            "arguments": {"action": "automation_reconcile", "scope": "profile"}
+        }),
+    ] {
+        let response = super::super::projectless_tools_call_response(
+            serde_json::json!(1),
+            Some(&params),
+            &identity,
+            &engine.store_administration,
+        )
+        .await;
+        let error = response
+            .error
+            .expect("deleted account projectless request must be denied");
+        assert!(
+            error.message.contains("remote_deleted"),
+            "unexpected projectless denial: {}",
+            error.message
+        );
+    }
+    let runtime_error = match engine
+        .store_administration
+        .registered_runtime_registry()
+        .await
+    {
+        Ok(_) => panic!("account tombstone must fence profile runtime openings"),
+        Err(error) => error,
+    };
+    assert!(runtime_error.to_string().contains("remote_deleted"));
+    let automation_error = engine
+        .store_administration
+        .reconcile_cached_automation_for_profile(&identity.profile_root)
+        .await
+        .expect_err("account tombstone must fence profile automation reconciliation");
+    assert!(automation_error.to_string().contains("remote_deleted"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join(".tracedecay");
+    let repository = home.path().join("repository");
+    std::fs::create_dir_all(&repository).expect("create repository");
+    run_git(&repository, &["init", "--quiet"]);
+    let leaf_directory = repository.join("leaf");
+    std::fs::create_dir_all(&leaf_directory).expect("create leaf directory");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "direct unenrolled leaf route");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(leaf_directory.clone());
+    handshake.client_identity = test_client_identity_for(profile_root);
+    handshake.allow_init = true;
+
+    let cache_error = match engine.cached_project_server(&handshake).await {
+        Ok(_) => panic!("cache lookup must enforce enrollment admission"),
+        Err(error) => error,
+    };
+    assert_missing_enrollment_admission(&cache_error);
+
+    let cancellation = CancellationToken::new();
+    let open_error = match engine
+        .open_project_server_until_cancelled(&handshake, &cancellation)
+        .await
+    {
+        Ok(_) => panic!("direct project open must enforce enrollment admission"),
+        Err(error) => error,
+    };
+    assert_missing_enrollment_admission(&open_error);
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the expensive project-open operation must not start"
+    );
+    assert!(
+        !leaf_directory.join(".tracedecay").exists(),
+        "rejection must not manufacture project state"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn linked_worktree_root_is_admitted_for_explicit_first_touch_init() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let profile_root = root.join("profile");
+    std::fs::create_dir_all(&primary).expect("create primary repository");
+    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(primary.join("README.md"), "first touch authority\n").expect("fixture");
+    run_git(&primary, &["add", "."]);
+    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/first-touch",
+            linked.to_str().expect("utf-8 linked path"),
+            "HEAD",
+        ],
+    );
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "linked first-touch rejection");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity: test_client_identity_for(profile_root),
+        allow_init: true,
+        ..test_handshake_defaults()
+    };
+
+    engine
+        .ensure_registered_project_route(&linked, handshake.allow_init)
+        .await
+        .expect("explicit init must admit a linked worktree repository root");
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "admission alone must not start project opening"
+    );
+    assert!(
+        !linked.join(".tracedecay").exists(),
+        "admission must not write linked-worktree project state"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let profile_root = root.join("profile");
+    std::fs::create_dir_all(&primary).expect("create primary repository");
+    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(primary.join("README.md"), "shared authority\n").expect("fixture");
+    run_git(&primary, &["add", "."]);
+    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "--force",
+            linked.to_str().expect("utf-8 linked path"),
+            "main",
+        ],
+    );
+
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let linked_handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+
+    let primary_server = engine
+        .project_server(&primary_handshake)
+        .await
+        .expect("primary project must open");
+
+    let blocker_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        blocker_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release shadow writer");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let linked_server = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.project_server(&linked_handshake),
+    )
+    .await
+    .expect("linked worktree must not wait on shadow writer administration")
+    .expect("linked worktree must reuse the primary authority without shadow admission");
+    release_writer.send(()).expect("release shadow writer");
+    blocker.await.expect("shadow writer blocker joins");
+
+    let servers = engine.store_administration.project_servers().lock().await;
+    let server_keys = servers.servers.keys().cloned().collect::<Vec<_>>();
+    let route_aliases = servers
+        .aliases
+        .iter()
+        .map(|(route, key)| (route.project_path.clone(), key.project_root.clone()))
+        .collect::<Vec<_>>();
+    drop(servers);
+    assert!(
+        Arc::ptr_eq(&primary_server, &linked_server),
+        "both routes must resolve one retained project server; \
+         server keys: {server_keys:?}; route aliases: {route_aliases:?}"
+    );
+    let servers = engine.store_administration.project_servers().lock().await;
+    assert_eq!(
+        servers.servers.len(),
+        1,
+        "one physical project server key: {server_keys:?}"
+    );
+    assert_eq!(
+        servers.aliases.len(),
+        2,
+        "primary and linked route aliases: {route_aliases:?}"
+    );
+    drop(servers);
+    assert!(
+        !linked.join(".tracedecay").exists(),
+        "linked route must not acquire working-tree project state"
+    );
+    engine.shutdown_all().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
+    let home = TempDir::new().expect("isolated home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let repository = home.join("repository");
+    std::fs::create_dir_all(&repository).expect("create repository");
+    run_git(&repository, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(repository.join("README.md"), "shutdown fence fixture\n").expect("fixture");
+    run_git(&repository, &["add", "."]);
+    run_git(&repository, &["commit", "-m", "fixture", "--quiet"]);
+
+    let handshake = DaemonHandshake {
+        project_path: Some(repository.clone()),
+        allow_init: true,
+        client_identity: test_client_identity_for(home.join("client")),
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "git-shutdown-fence-test",
+    );
+    engine
+        .open_project_server(&handshake)
+        .await
+        .expect("project open must mount the Git transaction service");
+
+    let registry = engine.store_administration.git_index_transaction_services();
+    registry
+        .for_repository_root(&repository)
+        .await
+        .expect("owner lookup before shutdown")
+        .expect("project open must mount exactly one Git invocation owner");
+
+    engine.shutdown_all().await;
+
+    // Post-fence admission is a truthful typed unavailable state — not a
+    // hang, a transport error, or an empty success.
+    assert!(matches!(
+        registry.for_repository_root(&repository).await,
+        Err(tracedecay_application::GitIndexTransactionPortError::DaemonUnavailable)
+    ));
+
+    // The idempotent receipt proves engine shutdown already closed the one
+    // mounted service and joined its store actor thread, so the registered
+    // session database Arc retained by the actor dropped with
+    // `shutdown_servers` rather than at process exit.
+    let receipt = registry
+        .shutdown()
+        .await
+        .expect("idempotent shutdown receipt");
+    assert_eq!(receipt.services_closed, 1);
+    assert_eq!(receipt.store_actors_joined, 1);
+}
+
+#[tokio::test]
+async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("rejected");
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first_attempts = Arc::clone(&attempts);
+    let first = tasks
+        .start(route.clone(), async move {
+            first_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(tracedecay_domain::errors::TraceDecayError::Database {
+                message: "session temporal receipts or cursor keys are mutable".to_string(),
+                operation: "ensure global database authority invariants".to_string(),
+            })
+        })
+        .await;
+    let first = match first {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("first route request must start one open task")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("first route request must fit the bounded task registry")
+        }
+    };
+
+    for _ in 0..32 {
+        let repeated_attempts = Arc::clone(&attempts);
+        let claim = tokio::time::timeout(
+            tokio::time::Duration::from_millis(50),
+            tasks.start(route.clone(), async move {
+                repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .await
+        .expect("repeated initialize/tools-list routing must return promptly");
+        assert!(
+            matches!(
+                claim,
+                super::super::ProjectOpenTaskClaim::InFlight(_)
+                    | super::super::ProjectOpenTaskClaim::Failed(_)
+            ),
+            "same route must reuse its one opening or cached failure"
+        );
+        assert!(
+            tasks.tracked_task_count().await <= 1,
+            "same route must never accumulate detached open tasks"
+        );
+    }
+
+    let error = super::super::ProjectOpenTasks::wait_for_completion(first)
+        .await
+        .expect_err("the injected invariant rejection must surface");
+    assert!(
+        error
+            .to_string()
+            .contains(super::super::PROJECT_OPEN_FAILURE_RETRY_HINT),
+        "cached route failure must carry the stable backoff marker: {error}"
+    );
+    let repeated_attempts = Arc::clone(&attempts);
+    let repeated_error = match tokio::time::timeout(
+        tokio::time::Duration::from_millis(50),
+        tasks.start(route, async move {
+            repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .await
+    .expect("cached invariant failure must return promptly")
+    {
+        super::super::ProjectOpenTaskClaim::Failed(failure) => failure.to_error(),
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {
+            panic!("cached invariant failure must not re-open the route")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("cached invariant failure must not be replaced by global saturation")
+        }
+    };
+    assert!(
+        repeated_error
+            .to_string()
+            .contains(super::super::PROJECT_OPEN_FAILURE_RETRY_HINT),
+        "repeated routing must return the typed backoff failure"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "repeated bootstrap requests must use one bounded open attempt"
+    );
+    assert_eq!(
+        tasks.tracked_route_count().await,
+        1,
+        "the rejected route must retain one backoff entry"
+    );
+
+    let response = super::super::project_open_error_response(serde_json::json!(17), &error);
+    let data = response
+        .error
+        .expect("typed route rejection")
+        .data
+        .expect("route rejection data");
+    assert_eq!(
+        data["kind"],
+        serde_json::json!("project_route_open_backoff")
+    );
+    assert_eq!(data["retryable"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn project_open_task_registry_caps_distinct_inflight_routes() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
+        let claim = tasks
+            .start(
+                project_open_test_route(&format!("bounded-{index}")),
+                std::future::pending::<tracedecay_domain::errors::Result<()>>(),
+            )
+            .await;
+        assert!(
+            matches!(claim, super::super::ProjectOpenTaskClaim::InFlight(_)),
+            "each route inside the configured bound must get one task"
+        );
+    }
+    assert_eq!(
+        tasks.tracked_task_count().await,
+        super::super::MAX_TRACKED_PROJECT_OPEN_TASKS
+    );
+
+    let overflow = tasks
+        .start(project_open_test_route("overflow"), async { Ok(()) })
+        .await;
+    assert!(
+        matches!(overflow, super::super::ProjectOpenTaskClaim::Saturated),
+        "a new route must not create an unbounded detached task"
+    );
+    let response = super::super::project_open_error_response(
+        serde_json::Value::Null,
+        &super::super::project_open_task_capacity_error(),
+    );
+    let data = response
+        .error
+        .expect("typed task capacity rejection")
+        .data
+        .expect("task capacity rejection data");
+    assert_eq!(data["kind"], "project_open_task_capacity_reached");
+    assert_eq!(data["retryable"], true);
+    assert_eq!(
+        data["capacity"],
+        super::super::MAX_TRACKED_PROJECT_OPEN_TASKS
+    );
+
+    tasks.shutdown().await;
+    assert_eq!(tasks.tracked_task_count().await, 0);
+    assert_eq!(tasks.tracked_route_count().await, 0);
+}
+
+#[tokio::test]
+async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
+        let state = match tasks
+            .start(
+                project_open_test_route(&format!("cached-failure-{index}")),
+                async {
+                    Err(authority_invariant_error(
+                        "invalid committed observation authority JSON",
+                    ))
+                },
+            )
+            .await
+        {
+            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+            super::super::ProjectOpenTaskClaim::Failed(_) => {
+                panic!("first route attempt must start")
+            }
+            super::super::ProjectOpenTaskClaim::Saturated => {
+                panic!("completed failures must not consume active-task capacity")
+            }
+        };
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("injected authority failure must surface");
+    }
+
+    let healthy = tasks
+        .start(project_open_test_route("healthy-after-failures"), async {
+            Ok(())
+        })
+        .await;
+    let state = match healthy {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("independent healthy route must not reuse a failure")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("cached failures must not block an unrelated open")
+        }
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect("independent healthy route must open");
+}
+
+#[tokio::test]
+async fn project_open_failure_cache_is_bounded_separately() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    for index in 0..(super::super::MAX_CACHED_PROJECT_OPEN_FAILURES + 8) {
+        let state = match tasks
+            .start(
+                project_open_test_route(&format!("bounded-failure-{index}")),
+                async {
+                    Err(authority_invariant_error(
+                        "invalid committed observation authority JSON",
+                    ))
+                },
+            )
+            .await
+        {
+            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+            super::super::ProjectOpenTaskClaim::Failed(_) => {
+                panic!("each distinct route must start once")
+            }
+            super::super::ProjectOpenTaskClaim::Saturated => {
+                panic!("cached failures must not consume task capacity")
+            }
+        };
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("injected authority failure must surface");
+    }
+    assert!(
+        tasks.tracked_route_count().await <= super::super::MAX_CACHED_PROJECT_OPEN_FAILURES,
+        "failure cache must stay independently bounded"
+    );
+}
+
+fn authority_invariant_error(message: &str) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Database {
+        message: message.to_string(),
+        operation: "ensure global database authority invariants".to_string(),
+    }
+}
+
+#[test]
+fn deterministic_code_authority_conflicts_do_not_spin_project_warmup() {
+    let error = tracedecay_domain::errors::TraceDecayError::Database {
+        message: "DuplicateCodeAuthority { shard_id: fixture }".to_string(),
+        operation: "register code-shard authority".to_string(),
+    };
+
+    assert_eq!(
+        super::super::project_open_retry_backoff(&error),
+        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
+    );
+}
+
+#[test]
+fn exhausted_code_runtime_capacity_retries_at_resource_cadence() {
+    let error = tracedecay_domain::errors::TraceDecayError::Database {
+        message: "ProjectCodeBudgetExhausted { limit: 4 }".to_string(),
+        operation: "open registered session runtime".to_string(),
+    };
+
+    assert_eq!(
+        super::super::project_open_retry_backoff(&error),
+        Some(super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
+    );
+    assert!(
+        super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF
+            > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
+    );
+}
+
+#[test]
+fn undecodable_authority_row_backs_off_beyond_the_transient_debounce() {
+    // The identity material of a committed observation stopped matching the
+    // derivation the running binary applies, so every reopen re-runs the whole
+    // authority audit and fails on the same row.
+    let backoff = super::super::project_open_retry_backoff(&authority_invariant_error(
+        "invalid committed observation authority JSON: serialized observation identity \
+         does not match its source evidence",
+    ));
+
+    assert_eq!(
+        backoff,
+        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
+        "an undecodable persisted row must not reopen at the transient debounce cadence"
+    );
+    assert!(
+        super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF
+            > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
+    );
+}
+
+#[test]
+fn mutable_cursor_key_rejection_keeps_the_transient_debounce() {
+    assert_eq!(
+        super::super::project_open_retry_backoff(&authority_invariant_error(
+            "session temporal receipts or cursor keys are mutable",
+        )),
+        Some(super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
+    );
+}
+
+/// Every authority verdict that is a property of the stored rows must back off,
+/// including messages nobody has enumerated yet.
+///
+/// The column-versus-JSON disagreement below was unclassified and spun warm-up
+/// at the debounce cadence, burning roughly three quarters of a core. It is a
+/// deterministic judgement of persisted data, so it cannot self-clear, and
+/// neither can the rest of this family.
+#[test]
+fn deterministic_authority_verdicts_all_back_off() {
+    for message in [
+        "committed observation authority columns disagree with observation JSON",
+        "sanitization receipt authority columns disagree with receipt JSON",
+        "summary publication receipt authority columns disagree with receipt JSON",
+        "source cursor authority keys disagree with cursor JSON",
+        "committed source cursor disagrees with observation source evidence",
+        "committed observation references a missing receipt",
+        "projection provenance disagrees with deterministic output",
+        "an invariant message that does not exist yet",
+    ] {
+        assert_eq!(
+            super::super::project_open_retry_backoff(&authority_invariant_error(message)),
+            Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
+            "{message} cannot clear on its own and must not reopen at the debounce cadence"
+        );
+    }
+}
+
+#[test]
+fn transient_authority_failures_stay_immediately_retryable() {
+    // A locked or unreadable database surfaces under the same operation but
+    // clears without operator repair, so it must not be backed off.
+    assert_eq!(
+        super::super::project_open_retry_backoff(&authority_invariant_error("database is locked",)),
+        None
+    );
+    assert_eq!(
+        super::super::project_open_retry_backoff(
+            &tracedecay_domain::errors::TraceDecayError::Database {
+                message: "invalid committed observation authority JSON: trailing characters"
+                    .to_string(),
+                operation: "read observation".to_string(),
+            }
+        ),
+        None,
+        "only the authority-invariant operation classifies these messages"
+    );
+}
+
+#[tokio::test]
+async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let rejected = project_open_test_route("rejected");
+    let healthy = project_open_test_route("healthy");
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let rejected_attempts = Arc::clone(&attempts);
+    let rejected_state = match tasks
+        .start(rejected.clone(), async move {
+            rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "identity cutover conflict: strict route invariant".to_string(),
+            })
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("first rejected route attempt must start")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("first rejected route must fit"),
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(rejected_state)
+        .await
+        .expect_err("rejected route must fail");
+
+    let healthy_attempts = Arc::clone(&attempts);
+    let healthy_state = match tasks
+        .start(healthy, async move {
+            healthy_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("a rejected route must not poison another route")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("independent route must fit the bounded task registry")
+        }
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(healthy_state)
+        .await
+        .expect("independent route must open while another is backed off");
+
+    tokio::time::sleep(
+        super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF + tokio::time::Duration::from_millis(25),
+    )
+    .await;
+    let retry_attempts = Arc::clone(&attempts);
+    let retry_state = match tasks
+        .start(rejected, async move {
+            retry_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("backoff expiry must allow a new route attempt")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("retry must fit after its completed failure is pruned")
+        }
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(retry_state)
+        .await
+        .expect("retry after route-specific backoff must open");
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "one rejected route retry and one independent route must be the only opens"
+    );
+}
+
+#[tokio::test]
+async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("shutdown");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let task_started = Arc::clone(&started);
+    let state = match tasks
+        .start_cancellable(route, move |cancellation| async move {
+            task_started.notify_one();
+            cancellation.cancelled().await;
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "project open cancelled".to_string(),
+            })
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+    };
+    started.notified().await;
+    assert_eq!(tasks.tracked_task_count().await, 1);
+
+    tasks.shutdown().await;
+
+    assert_eq!(tasks.tracked_task_count().await, 0);
+    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert!(
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .is_err(),
+        "cancelled open tasks must wake waiters instead of retaining them"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("cooperative-shutdown");
+    let lifecycle = DaemonLifecycle::default();
+    let (cancellation_tx, cancellation_rx) = tokio::sync::oneshot::channel();
+    let (unit_started_tx, unit_started_rx) = tokio::sync::oneshot::channel();
+    let (unit_release_tx, unit_release_rx) = tokio::sync::oneshot::channel();
+    let (unit_finished_tx, unit_finished_rx) = tokio::sync::oneshot::channel();
+
+    let task_lifecycle = lifecycle.clone();
+    let state = match tasks
+        .start_cancellable(route, move |cancellation| async move {
+            let _activity = task_lifecycle
+                .try_enter()
+                .expect("project open lifecycle activity");
+            let published_cancellation = cancellation.clone();
+            cancellation_tx
+                .send(published_cancellation)
+                .expect("publish project-open cancellation");
+            unit_started_tx.send(()).expect("publish safe unit start");
+            unit_release_rx.await.expect("release safe unit");
+            unit_finished_tx
+                .send(())
+                .expect("publish safe unit completion");
+            cancellation.cancelled().await;
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "project open cancelled after safe unit".to_string(),
+            })
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("project open must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("project open must fit"),
+    };
+    let cancellation = cancellation_rx
+        .await
+        .expect("project-open cancellation token");
+    unit_started_rx.await.expect("safe unit started");
+
+    let shutdown_tasks = tasks.clone();
+    let mut shutdown = tokio::spawn(async move { shutdown_tasks.shutdown().await });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        cancellation.cancelled(),
+    )
+    .await
+    .expect("shutdown must request cooperative cancellation");
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must not abort a transactionally safe unit in progress"
+    );
+
+    unit_release_tx.send(()).expect("release safe unit");
+    unit_finished_rx.await.expect("safe unit completed");
+    let cooperative = tokio::time::timeout(tokio::time::Duration::from_secs(1), &mut shutdown)
+        .await
+        .expect("cooperative project-open shutdown timed out")
+        .expect("project-open shutdown task");
+    assert!(
+        cooperative,
+        "normal warm-up cancellation must not reach its timeout guard"
+    );
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        lifecycle.wait_for_idle(),
+    )
+    .await
+    .expect("client-drain lifecycle activity must be released");
+    assert_eq!(tasks.tracked_route_count().await, 0);
+    super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect_err("cancelled project open must report a terminal failure");
+}
+
+/// A task that ignores its cancellation token but still suspends at an await
+/// point is reachable by abort, so shutdown forces it at the backstop instead
+/// of leaking a tracked route past daemon shutdown. Work that abort cannot
+/// reach — a synchronous body that never yields — is the retained case, and
+/// `project_open_shutdown_retains_synchronous_work_after_deadline` owns it.
+#[tokio::test]
+async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("shutdown-backstop");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    match tasks
+        .start_cancellable(route, move |_| async move {
+            started_tx.send(()).expect("publish task start");
+            release_rx.await.expect("release task");
+            Ok(())
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+    }
+    started_rx.await.expect("noncooperative task started");
+
+    // Zero cooperative budget: the task never observes its cancellation, so
+    // the cooperative phase must expire and the abort phase must settle it.
+    assert!(
+        tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::ZERO,
+                tokio::time::Duration::from_secs(1),
+            )
+            .await,
+        "the abort backstop must join a task that ignored its cancellation"
+    );
+    assert_eq!(tasks.tracked_route_count().await, 0);
+    // The abort dropped the task body, and with it the release receiver:
+    // there is nothing left for a retry to join.
+    assert!(
+        release_tx.send(()).is_err(),
+        "an aborted open must not still be waiting on its release"
+    );
+}
+
+#[tokio::test]
+async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let unrelated = project_open_test_route("unrelated-retiring-open");
+    let target = project_open_test_route("target-project-open");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let state = tasks
+        .start(unrelated.clone(), async move {
+            started_tx.send(()).map_err(|()| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "unrelated open observer dropped".to_owned(),
+                }
+            })?;
+            release_rx
+                .await
+                .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: "unrelated open release dropped".to_owned(),
+                })?;
+            Ok(())
+        })
+        .await;
+    let state = match state {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("unrelated open must start")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("unrelated open must fit the bounded registry")
+        }
+    };
+    started_rx.await.expect("unrelated open started");
+    assert!(
+        !tasks
+            .shutdown_project_identity_with_deadline(
+                &unrelated.profile_root,
+                "proj_unrelated",
+                &[unrelated.project_path.clone()].into_iter().collect(),
+                tokio::time::Duration::from_millis(10),
+            )
+            .await,
+        "noncooperative unrelated open must remain retained"
+    );
+
+    assert!(
+        tasks
+            .shutdown_project_identity_with_deadline(
+                &target.profile_root,
+                "proj_target",
+                &[target.project_path].into_iter().collect(),
+                tokio::time::Duration::from_millis(10),
+            )
+            .await,
+        "target cleanup must not wait on an unrelated retiring open"
+    );
+
+    release_tx.send(()).expect("release unrelated open");
+    super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect("unrelated open completed");
+    assert!(
+        tasks
+            .shutdown_project_identity_with_deadline(
+                &unrelated.profile_root,
+                "proj_unrelated",
+                &[unrelated.project_path].into_iter().collect(),
+                tokio::time::Duration::from_secs(1),
+            )
+            .await,
+        "unrelated owner must remain joinable by its exact identity"
+    );
+}
+
+#[tokio::test]
+async fn project_deletion_retires_rootless_open_by_persisted_project_identity() {
+    let temp = TempDir::new().expect("temp root");
+    let profile_root = temp.path().join("profile");
+    let project_root = temp.path().join("repository");
+    std::fs::create_dir_all(&profile_root).expect("profile root");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        "proj_rootless_open",
+    )
+    .expect("pin fixture repository identity");
+    let route = ProjectRouteKey {
+        profile_root: profile_root.canonicalize().expect("canonical profile"),
+        global_db_path: profile_root.join("global.db"),
+        project_path: project_root.canonicalize().expect("canonical project"),
+        scope_prefix: None,
+    };
+    let tasks = super::super::ProjectOpenTasks::default();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let _claim = tasks
+        .start_cancellable(route, move |_| async move {
+            started_tx.send(()).expect("publish start");
+            release_rx.await.expect("release rootless open");
+            Ok(())
+        })
+        .await;
+    started_rx.await.expect("rootless open started");
+    let roots = std::collections::BTreeSet::new();
+    assert!(
+        !tasks
+            .shutdown_project_identity_with_deadline(
+                &profile_root.canonicalize().expect("canonical profile"),
+                "proj_rootless_open",
+                &roots,
+                tokio::time::Duration::from_millis(25),
+            )
+            .await,
+        "in-flight rootless open must remain owned while settling"
+    );
+    assert_eq!(tasks.tracked_route_count().await, 1);
+    release_tx.send(()).expect("release rootless open");
+    assert!(
+        tasks
+            .shutdown_project_identity_with_deadline(
+                &profile_root.canonicalize().expect("canonical profile"),
+                "proj_rootless_open",
+                &roots,
+                tokio::time::Duration::from_secs(1),
+            )
+            .await,
+        "retry must join the retained rootless open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("shutdown-synchronous-backstop");
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_started = Arc::clone(&started);
+    let task_release = Arc::clone(&release);
+    match tasks
+        .start_cancellable(route, move |_| async move {
+            task_started.store(true, std::sync::atomic::Ordering::Release);
+            while !task_release.load(std::sync::atomic::Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            Ok(())
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("synchronous task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("synchronous task must fit"),
+    }
+    while !started.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    let cooperative = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        tasks.shutdown_with_deadline(
+            tokio::time::Duration::ZERO,
+            tokio::time::Duration::from_millis(25),
+        ),
+    )
+    .await
+    .expect("shutdown must return a settling state at its deadline");
+
+    assert!(!cooperative, "synchronous work must reach the backstop");
+    assert_eq!(tasks.tracked_route_count().await, 1);
+    release.store(true, std::sync::atomic::Ordering::Release);
+    assert!(
+        tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::from_secs(1),
+                tokio::time::Duration::ZERO,
+            )
+            .await
+    );
+    assert_eq!(tasks.tracked_route_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "portable-bootstrap-cache-test",
+    )
+    .expect("daemon database scope");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let owners = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("load test profile identity");
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_profile_identity(profile_identity);
+    store_administration
+        .registered_profile_database()
+        .await
+        .expect("prewarm portable bootstrap profile registry");
+    super::super::prewarm_daemon_bootstrap_catalog()
+        .expect("prewarm portable static bootstrap catalog");
+    // Daemon bootstrap installs the profile-scoped code-index worker plan
+    // before publishing any transport endpoint
+    // (`bootstrap::install_profile_worker_plan`), and project open refuses
+    // outright without it. This test drives `serve_windows_broker_client`
+    // directly, so it must reproduce that ordering itself or the warmup poll
+    // fails with "profile code-index worker plan was not installed".
+    super::super::DaemonInvocationState::default()
+        .install_worker_selection(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+        )
+        .expect("install portable broker profile worker plan");
+    let gates = Arc::new(tokio::sync::Mutex::new(
+        super::super::ProjectOpenGates::default(),
+    ));
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lifecycle = DaemonLifecycle::default();
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+
+    let blocker_administration = store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        blocker_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let server_administration = store_administration.clone();
+    let server_gates = Arc::clone(&gates);
+    let server_attempts = Arc::clone(&attempts);
+    let server_lifecycle = lifecycle.clone();
+    let server = tokio::spawn(async move {
+        let mut clients = tokio::task::JoinSet::new();
+        for _ in 0..2 {
+            let stream = listener.accept().await.expect("accept client");
+            let administration = server_administration.clone();
+            let gates = Arc::clone(&server_gates);
+            let attempts = Arc::clone(&server_attempts);
+            let lifecycle = server_lifecycle.clone();
+            clients.spawn(async move {
+                Box::pin(super::super::serve_windows_broker_client(
+                    stream,
+                    TOKEN,
+                    &lifecycle,
+                    administration,
+                    gates,
+                    Some(attempts),
+                ))
+                .await
+            });
+        }
+        while let Some(client) = clients.join_next().await {
+            client.expect("client task").expect("serve client");
+        }
+    });
+
+    let request = |id: u64, method: &'static str| {
+        let endpoint = endpoint.clone();
+        let handshake = handshake.clone();
+        async move {
+            let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
+                .await
+                .expect("connect client");
+            let (reader, mut writer) = stream.into_split();
+            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
+                .to_line()
+                .expect("auth preface");
+            writer.write_all(preface.as_bytes()).await.expect("preface");
+            writer.write_all(b"\n").await.expect("preface newline");
+            writer
+                .write_all(handshake.to_line().expect("handshake").as_bytes())
+                .await
+                .expect("handshake");
+            writer.write_all(b"\n").await.expect("handshake newline");
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": (method == "initialize").then_some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "portable-bootstrap-test", "version": "1"}
+                }))
+            });
+            writer
+                .write_all(request.to_string().as_bytes())
+                .await
+                .expect("request");
+            writer.write_all(b"\n").await.expect("request newline");
+            writer.shutdown().await.expect("shutdown request writer");
+            let mut lines = tokio::io::BufReader::new(reader).lines();
+            let response = lines
+                .next_line()
+                .await
+                .expect("read response")
+                .expect("response line");
+            serde_json::from_str::<serde_json::Value>(&response).expect("response json")
+        }
+    };
+    let mut initialize_task = tokio::spawn(request(1, "initialize"));
+    let mut tools_list_task = tokio::spawn(request(2, "tools/list"));
+    let (initialize_within_bound, tools_list_within_bound) = tokio::join!(
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut initialize_task),
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut tools_list_task),
+    );
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    if initialize_within_bound.is_err() {
+        let _ = initialize_task.await;
+    }
+    if tools_list_within_bound.is_err() {
+        let _ = tools_list_task.await;
+    }
+    server.await.expect("portable broker server");
+
+    let initialize_response = initialize_within_bound
+        .expect("portable initialize must not wait for project writer gate")
+        .expect("initialize client task");
+    assert_eq!(
+        initialize_response["result"]["protocolVersion"],
+        serde_json::json!("2024-11-05")
+    );
+    let tools_list_response = tools_list_within_bound
+        .expect("portable tools/list must not wait for project writer gate")
+        .expect("tools/list client task");
+    assert!(
+        tools_list_response["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "portable bootstrap tool catalog must not be empty"
+    );
+    let portable_context_description = tools_list_response["result"]["tools"]
+        .as_array()
+        .and_then(|tools| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == serde_json::json!("tracedecay_context"))
+        })
+        .and_then(|tool| tool["description"].as_str())
+        .expect("portable context tool description");
+    assert!(portable_context_description.contains("3 calls maximum"));
+    assert!(portable_context_description.contains("project graph is warming"));
+
+    lifecycle.begin_draining();
+    tokio::time::timeout(PHASE_TIMEOUT, lifecycle.wait_for_idle())
+        .await
+        .expect("portable warmup lifecycle drain timed out");
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "portable initialize warmup must singleflight one project open"
+    );
+    let receipt = super::super::shutdown_project_servers(
+        tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+        &store_administration,
+        &super::super::http_application::DaemonHttpApplicationRegistry::default(),
+    )
+    .await;
+    assert!(receipt.is_clean(), "{:?}", receipt.outcomes);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    std::fs::create_dir_all(&profile_root).expect("profile dir");
+    let project = project.canonicalize().expect("canonical project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "warmup drain enrolled route");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let handshake = DaemonHandshake {
+        project_path: Some(project),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let initialize_request = serde_json::from_value(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    }))
+    .expect("initialize request");
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    Box::pin(engine.schedule_project_server_warmup(handshake, initialize_request))
+        .await
+        .expect("schedule project warmup");
+    engine.lifecycle.begin_draining();
+    engine.shutdown_project_open_tasks().await;
+    let idle_while_writer_held = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        engine.lifecycle.wait_for_idle(),
+    )
+    .await;
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    if idle_while_writer_held.is_err() {
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            engine.lifecycle.wait_for_idle(),
+        )
+        .await
+        .expect("warmup cleanup after writer release");
+    }
+
+    idle_while_writer_held.expect("draining must cancel project warmup before writer release");
+    let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
+    assert_eq!(
+        tasks.tracked_task_count().await,
+        0,
+        "daemon shutdown must clear its tracked project-open task"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_activation_drain_wins_when_discovery_is_simultaneously_ready() {
+    for _ in 0..32 {
+        let lifecycle = DaemonLifecycle::default();
+        let discovery_polled = Arc::new(tokio::sync::Notify::new());
+        let discovery_polled_by_future = Arc::clone(&discovery_polled);
+        let discovery_lifecycle = lifecycle.clone();
+        let discovery_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discovery_won_by_future = Arc::clone(&discovery_won);
+        super::super::project_open_orchestration::spawn_lifecycle_automation_scheduler_activation(
+            lifecycle.clone(),
+            async move {
+                discovery_polled_by_future.notify_one();
+                discovery_lifecycle.wait_for_draining().await;
+                discovery_won_by_future.store(true, std::sync::atomic::Ordering::Release);
+            },
+        );
+        discovery_polled.notified().await;
+
+        lifecycle.begin_draining();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            lifecycle.wait_for_idle(),
+        )
+        .await
+        .expect("simultaneous scheduler discovery drain timed out");
+        assert!(
+            !discovery_won.load(std::sync::atomic::Ordering::Acquire),
+            "draining must win when scheduler discovery becomes ready on the same tick"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    prepare_test_profile_root(&profile_root);
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let initialize_request: tracedecay_mcp::JsonRpcRequest =
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .expect("initialize request");
+    let owners = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("load test profile identity");
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_profile_identity(profile_identity);
+    let project_open_gates = Arc::new(tokio::sync::Mutex::new(
+        super::super::ProjectOpenGates::default(),
+    ));
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lifecycle = DaemonLifecycle::default();
+
+    lifecycle.begin_draining();
+    let error = Box::pin(super::super::schedule_portable_project_server_warmup(
+        lifecycle.clone(),
+        store_administration,
+        project_open_gates,
+        super::super::DaemonInvocationState::default(),
+        super::super::http_application::DaemonHttpApplicationRegistry::default(),
+        handshake,
+        initialize_request,
+        Some(Arc::clone(&attempts)),
+    ))
+    .await
+    .expect_err("draining must reject a new portable project warmup");
+    assert!(error.to_string().contains("draining"), "{error}");
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        lifecycle.wait_for_idle(),
+    )
+    .await
+    .expect("rejected portable warmup must not retain lifecycle activity");
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "draining must reject a portable warmup before opening a project"
+    );
+    assert!(
+        owners.lock().await.values().next().is_none(),
+        "draining portable warmup must not insert a server after shutdown snapshot"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
+    let initialize_request: tracedecay_mcp::JsonRpcRequest =
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .expect("initialize request");
+
+    for _ in 0..32 {
+        let lifecycle = DaemonLifecycle::default();
+        let open_polled = Arc::new(tokio::sync::Notify::new());
+        let open_polled_by_future = Arc::clone(&open_polled);
+        let open_lifecycle = lifecycle.clone();
+        let open_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let open_won_by_future = Arc::clone(&open_won);
+        let tasks = super::super::ProjectOpenTasks::default();
+        let claim = Box::pin(
+            super::super::project_open_orchestration::start_lifecycle_project_open(
+                &tasks,
+                lifecycle.clone(),
+                project_open_test_route("simultaneous-drain"),
+                std::path::PathBuf::from("/projects/simultaneous-drain"),
+                Some(initialize_request.clone()),
+                move |_| async move {
+                    open_polled_by_future.notify_one();
+                    open_lifecycle.wait_for_draining().await;
+                    open_won_by_future.store(true, std::sync::atomic::Ordering::Release);
+                    Err(tracedecay_domain::errors::TraceDecayError::Config {
+                        message: "simultaneous warmup completion".to_string(),
+                    })
+                },
+            ),
+        )
+        .await;
+        let state = match claim {
+            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+            super::super::ProjectOpenTaskClaim::Failed(_) => {
+                panic!("production warmup task must start before draining")
+            }
+            super::super::ProjectOpenTaskClaim::Saturated => {
+                panic!("production warmup task must fit")
+            }
+        };
+        open_polled.notified().await;
+
+        lifecycle.begin_draining();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            lifecycle.wait_for_idle(),
+        )
+        .await
+        .expect("simultaneous warmup drain timed out");
+        assert!(
+            open_won.load(std::sync::atomic::Ordering::Acquire),
+            "an admitted open must settle before draining releases its lifecycle activity"
+        );
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("draining production warmup must report cancellation");
+        tasks.shutdown().await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
+    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let project = project.canonicalize().expect("canonical project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "mcp-bootstrap-cache-test",
+    )
+    .expect("daemon database scope");
+    engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("prewarm bootstrap profile registry");
+    super::super::prewarm_daemon_bootstrap_catalog().expect("prewarm static bootstrap catalog");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        allow_initialize_root_routing: true,
+        ..test_handshake_defaults()
+    };
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "bootstrap-cache-test", "version": "1"},
+            "roots": [{"uri": project, "name": "registered-project"}]
+        }
+    });
+    let tools_list = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+    });
+    let initialize_engine = engine.clone();
+    let initialize_handshake = handshake.clone();
+    let mut initialize_task = tokio::spawn(async move {
+        super::handshake::daemon_round_trip(initialize_engine, &initialize_handshake, initialize)
+            .await
+    });
+    let tools_list_engine = engine.clone();
+    let tools_list_handshake = handshake.clone();
+    let mut tools_list_task = tokio::spawn(async move {
+        super::handshake::daemon_round_trip(tools_list_engine, &tools_list_handshake, tools_list)
+            .await
+    });
+    let (initialize_within_bound, tools_list_within_bound) = tokio::join!(
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut initialize_task),
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut tools_list_task),
+    );
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    if initialize_within_bound.is_err() {
+        let _ = initialize_task.await;
+    }
+    if tools_list_within_bound.is_err() {
+        let _ = tools_list_task.await;
+    }
+
+    let initialize_responses = initialize_within_bound
+        .expect("initialize must not wait for project writer gate")
+        .expect("initialize client task");
+    let initialize_response = initialize_responses
+        .iter()
+        .find(|response| response["id"] == json!(1))
+        .expect("initialize response");
+    assert_eq!(
+        initialize_response["result"]["protocolVersion"],
+        json!("2024-11-05")
+    );
+    assert_eq!(
+        initialize_response["result"]["serverInfo"]["name"],
+        json!("tracedecay")
+    );
+    assert_eq!(
+        initialize_response["result"]["_meta"]["tracedecayInitializeRoute"],
+        json!({
+            "projectPath": handshake.project_path,
+            "allowInit": false,
+        })
+    );
+
+    let tools_list_responses = tools_list_within_bound
+        .expect("tools/list must not wait for project writer gate")
+        .expect("tools/list client task");
+    let tools = tools_list_responses
+        .iter()
+        .find(|response| response["id"] == json!(2))
+        .and_then(|response| response["result"]["tools"].as_array())
+        .expect("tools/list result catalog");
+    assert!(
+        !tools.is_empty(),
+        "bootstrap tool catalog must not be empty"
+    );
+    let context_description = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("tracedecay_context"))
+        .and_then(|tool| tool["description"].as_str())
+        .expect("context tool description");
+    assert!(context_description.contains("3 calls maximum"));
+    assert!(context_description.contains("project graph is warming"));
+
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        while engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initialize warmup did not start after the writer gate was released");
+    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
+        .await
+        .expect("bootstrap-cache shutdown timed out");
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "initialize warmup must singleflight one project open"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_background() {
+    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let project = project.canonicalize().expect("canonical project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "direct-warmup-test",
+    )
+    .expect("daemon database scope");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+
+    // The lever must be one a cold project open actually takes. The daemon-wide
+    // writer gate is not: the open path takes no writer at all any more (only
+    // owner rekey and background refresh do), so blocking `WriterScope::Daemon`
+    // let the open publish inside the bound and the request returned a result
+    // instead of the warming refusal. `production_project_server_inner` blocks
+    // on the project-open capacity gate before it counts an open attempt, so
+    // holding that gate keeps every route cold for exactly as long as the test
+    // holds it, then releases the background warm-up this test goes on to await.
+    let capacity_gate = {
+        let gates = engine.project_open_gates.lock().await;
+        Arc::clone(&gates.capacity_gate)
+    };
+    let capacity_admission = capacity_gate.lock_owned().await;
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_status",
+            "arguments": {"format": "json"}
+        }
+    });
+    let request_engine = engine.clone();
+    let request_handshake = handshake.clone();
+    let mut request_task = tokio::spawn(async move {
+        super::handshake::daemon_round_trip(request_engine, &request_handshake, request).await
+    });
+    let response_within_bound =
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut request_task).await;
+
+    drop(capacity_admission);
+    if response_within_bound.is_err() {
+        let _ = request_task.await;
+    }
+
+    let responses = response_within_bound
+        .expect("direct tool cache miss must return a bounded warming response")
+        .expect("direct tool client task");
+    let response = responses
+        .iter()
+        .find(|response| response["id"] == json!(3))
+        .expect("direct tool response");
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("warming error message");
+    assert!(message.contains("warming in the background"), "{message}");
+    assert!(message.contains("retry"), "{message}");
+
+    let route =
+        super::super::ProjectRouteKey::from_handshake(&project, &handshake).expect("project route");
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        loop {
+            let warmed = engine
+                .store_administration
+                .project_servers()
+                .lock()
+                .await
+                .get_route(&route)
+                .is_some();
+            if warmed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached project warmup timed out");
+    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
+        .await
+        .expect("direct warmup shutdown timed out");
+}
+
+#[tokio::test(start_paused = true)]
+async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
+    let project_path = std::path::PathBuf::from("/projects/uncontended");
+    let published = super::super::project_open_orchestration::wait_for_project_open_publication(
+        &project_path,
+        async { Ok::<(), tracedecay_domain::errors::TraceDecayError>(()) },
+    )
+    .await;
+    assert!(
+        published.is_ok(),
+        "publication inside the deadline must succeed"
+    );
+
+    let warming = super::super::project_open_orchestration::wait_for_project_open_publication(
+        &project_path,
+        std::future::pending::<tracedecay_domain::errors::Result<()>>(),
+    )
+    .await
+    .expect_err("an uncontended warm-up must not pin the foreground request");
+    assert!(
+        warming.to_string().contains("warming in the background"),
+        "{warming}"
+    );
+}
+
+fn production_composition_tool_text(response: &JsonRpcResponse) -> &str {
+    assert!(response.error.is_none(), "tool failed: {response:?}");
+    let result = response.result.as_ref().expect("tool result");
+    assert_ne!(result["isError"], true, "tool returned an error: {result}");
+    result["content"][0]["text"].as_str().expect("tool text")
+}
+
+/// Read one tool response as JSON under the production truncation contract.
+///
+/// A response over `mcp::tools::MAX_RESPONSE_CHARS` is replaced by a preview
+/// envelope carrying a `tracedecay_retrieve` handle, so a caller that needs the
+/// whole payload must redeem that handle exactly as a real client does. A
+/// `tracedecay_search` result sits close enough to the cap that whether it
+/// truncates is not a property the test should depend on.
+///
+/// A stored response exists only because it exceeded the response cap, so one
+/// retrieve can never carry the whole body: every page is clamped to the same
+/// cap and reports `next_offset`/`has_more`. Walk the handle to its end and
+/// parse the reassembled body, exactly as
+/// `mcp::tools::handlers::dispatch_tests::selected_project_retrieve_finds_selected_project_response_handle`
+/// does.
+async fn production_composition_tool_json(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &std::path::Path,
+    response: &JsonRpcResponse,
+) -> serde_json::Value {
+    let payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(response)).expect("tool json");
+    let Some(handle) = payload["handle"].as_str().map(str::to_owned) else {
+        return payload;
+    };
+    assert_eq!(
+        payload["truncated"],
+        json!(true),
+        "only a truncation envelope may carry a response handle: {payload}"
+    );
+    let mut offset = 0_u64;
+    let mut body = String::new();
+    let mut pages = 0_u32;
+    loop {
+        let retrieved = harness
+            .call_tool(
+                project,
+                "tracedecay_retrieve",
+                json!({"handle": handle, "offset": offset, "format": "json"}),
+            )
+            .await
+            .expect("retrieve truncated production response");
+        let retrieved: serde_json::Value =
+            serde_json::from_str(production_composition_tool_text(&retrieved))
+                .expect("retrieved envelope json");
+        assert_eq!(
+            retrieved["expired"],
+            json!(false),
+            "a live production handle must not read back expired: {retrieved}"
+        );
+        body.push_str(
+            retrieved["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieved envelope must carry a page: {retrieved}")),
+        );
+        pages += 1;
+        assert!(pages < 64, "production retrieve paging did not settle");
+        match retrieved["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    serde_json::from_str(&body).unwrap_or_else(|error| {
+        panic!(
+            "retrieved payload json ({} chars over {pages} page(s)): {error}",
+            body.len()
+        )
+    })
+}
+
+fn production_composition_probe_candidate(
+    payload: &serde_json::Value,
+) -> Option<&serde_json::Value> {
+    payload["results"].as_array().and_then(|matches| {
+        matches
+            .iter()
+            .find(|candidate| candidate["display"]["name"] == json!("production_composition_probe"))
+    })
+}
+
+fn production_composition_probe_node_id(payload: &serde_json::Value) -> Option<&str> {
+    production_composition_probe_candidate(payload)
+        .and_then(|candidate| candidate["node_id"].as_str())
+}
+
+fn commit_production_composition_project(project: &std::path::Path) {
+    let run_git = |arguments: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(project)
+            .args(arguments)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {arguments:?}");
+    };
+    run_git(&["init", "--quiet"]);
+    run_git(&["add", "."]);
+    run_git(&[
+        "-c",
+        "user.name=TraceDecay Test",
+        "-c",
+        "user.email=tracedecay@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "test: seed production composition",
+    ]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_mounts_core_query_without_optional_stage_evaluation() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn production_composition_probe() -> bool { true }\n\
+         pub fn production_composition_caller() -> bool { production_composition_probe() }\n",
+    )
+    .expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    let payload = tokio::time::timeout(tokio::time::Duration::from_secs(20), async {
+        loop {
+            let response = harness
+                .call_tool(
+                    &project,
+                    "tracedecay_search",
+                    json!({
+                        "query": "production_composition_probe",
+                        "limit": 10,
+                        "format": "json"
+                    }),
+                )
+                .await
+                .expect("production search");
+            let payload = production_composition_tool_json(&harness, &project, &response).await;
+            // Graph seating is deliberately detached from text freshness, so
+            // the code generation publishes before the verified graph read is
+            // servable and `node_id` is absent until then. A follow-up that
+            // consumes the graph identity must wait for the graph lane, not
+            // merely for the code generation.
+            if payload["code_generation"].as_str().is_some()
+                && production_composition_probe_node_id(&payload).is_some()
+            {
+                break payload;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("core query authority did not become ready");
+    let candidate = production_composition_probe_candidate(&payload).unwrap_or_else(|| {
+        panic!("core query authority did not return the indexed symbol: {payload}")
+    });
+    let node_id = candidate["node_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("search result must address graph follow-up tools: {candidate}"));
+    let impact = harness
+        .call_tool(
+            &project,
+            "tracedecay_impact",
+            json!({"node_id": node_id, "format": "json"}),
+        )
+        .await
+        .expect("production impact");
+    let impact_payload = production_composition_tool_json(&harness, &project, &impact).await;
+    assert!(
+        impact_payload["node_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "impact must consume the graph identity returned by core search: {impact_payload}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_wires_cross_project_resolver() {
+    let temp = TempDir::new().expect("temp dir");
+    let first_project = temp.path().join("first");
+    let second_project = temp.path().join("second");
+    for project in [&first_project, &second_project] {
+        std::fs::create_dir_all(project.join("src")).expect("source dir");
+    }
+    std::fs::write(
+        first_project.join("src/lib.rs"),
+        "pub fn first_project_probe() {}\n",
+    )
+    .expect("first source file");
+    std::fs::write(
+        second_project.join("src/lib.rs"),
+        "pub fn second_project_probe() {}\n",
+    )
+    .expect("second source file");
+    for project in [&first_project, &second_project] {
+        commit_production_composition_project(project);
+    }
+
+    let harness = ProductionProjectCompositionHarnessV1::open(
+        temp.path(),
+        vec![first_project.clone(), second_project.clone()],
+    )
+    .await
+    .expect("production composition");
+    // A top-level `project_path` is not a registered-project selector; the
+    // registered identity of the second mount is the only accepted cross-
+    // project route.
+    let second_project_id = harness
+        .project_id(&second_project)
+        .await
+        .expect("second project identity");
+    let response = harness
+        .call_tool(
+            &first_project,
+            "tracedecay_grep",
+            json!({
+                "pattern": "second_project_probe",
+                "project_selector": {"project_id": second_project_id},
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("cross-project grep");
+    let payload = production_composition_tool_text(&response);
+    assert!(
+        payload.contains("second_project_probe") && !payload.contains("first_project_probe"),
+        "production retained-project resolver must route search to the mounted project: {payload}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_dispatches_application_invocations_in_process() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.rs"), "pub fn storage_probe() {}\n").expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    assert!(
+        !harness.semantic_auto_download_enabled(),
+        "the effective semantic startup policy used by production composition must disable auto-download"
+    );
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_storage_status",
+            serde_json::json!({"format": "json"}),
+        )
+        .await
+        .expect("in-process application invocation");
+    let payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&response))
+            .expect("storage-status application envelope");
+    assert!(
+        payload["contract"]["schema_id"]
+            == serde_json::json!("schema.application.primitive.storage-status.result"),
+        "production invocation must preserve the application result contract: {payload}"
+    );
+    assert!(
+        payload["problem"].is_null() && !payload["outcome"].is_null(),
+        "production composition must dispatch through retained daemon state: {payload}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_dashboard_persists_project_settings_over_http() {
+    let _dashboard_guard = PRODUCTION_DASHBOARD_TEST_LOCK.lock().await;
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn dashboard_settings_probe() {}\n",
+    )
+    .expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    let dashboard = harness
+        .call_tool(
+            &project,
+            "tracedecay_dashboard",
+            json!({
+                "action": "start",
+                "host": "127.0.0.1",
+                "port": 0,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("start production dashboard");
+    let dashboard_payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&dashboard))
+            .expect("dashboard start payload");
+    let base_url = dashboard_payload["url"]
+        .as_str()
+        .expect("dashboard URL")
+        .trim_end_matches('/')
+        .to_owned();
+
+    tokio::task::spawn_blocking(move || {
+        fn response_json(
+            mut response: ureq::http::Response<ureq::Body>,
+        ) -> (u16, serde_json::Value) {
+            let status = response.status().as_u16();
+            let body = response
+                .body_mut()
+                .read_to_string()
+                .expect("read dashboard response");
+            let payload = serde_json::from_str(&body)
+                .unwrap_or_else(|error| panic!("decode dashboard response `{body}`: {error}"));
+            (status, payload)
+        }
+
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(4)))
+            .build()
+            .into();
+        let settings_url = format!("{base_url}/api/settings");
+        let project_settings_url = format!("{settings_url}/project");
+
+        let (status, initial_envelope) = response_json(
+            agent
+                .get(&settings_url)
+                .call()
+                .expect("GET project settings"),
+        );
+        assert_eq!(status, 200, "GET settings failed: {initial_envelope}");
+        let initial = &initial_envelope["payload"];
+        let initial_revision = initial["project"]["configuration_revision_id"]
+            .as_str()
+            .expect("initial configuration revision")
+            .to_owned();
+        let initial_snapshot = initial["project"]["configuration_snapshot_id"]
+            .as_str()
+            .expect("initial configuration snapshot")
+            .to_owned();
+
+        let (status, patched_envelope) = response_json(
+            agent
+                .patch(&project_settings_url)
+                .send_json(json!({
+                    "expected_revision_id": initial_revision,
+                    // The patch contract requires one caller-stable
+                    // idempotency key per distinct mutation; the stale patch
+                    // below carries its own so it cannot replay this effect.
+                    "idempotency_key": "dashboard.production-composition.max-file-size",
+                    "max_file_size": 2048
+                }))
+                .expect("PATCH project settings"),
+        );
+        assert_eq!(
+            status, 200,
+            "production dashboard settings patch failed: {patched_envelope}"
+        );
+        assert!(
+            patched_envelope["application_outcome"].is_object(),
+            "a changed settings patch must expose its application settlement: {patched_envelope}"
+        );
+        let patched = &patched_envelope["current"]["payload"];
+        let patched_revision = patched["project"]["configuration_revision_id"]
+            .as_str()
+            .expect("patched configuration revision")
+            .to_owned();
+        assert_ne!(
+            patched_revision, initial_revision,
+            "configuration mutation must advance its content-addressed revision"
+        );
+        assert_ne!(
+            patched["project"]["configuration_snapshot_id"], initial_snapshot,
+            "response must carry the daemon's updated configuration snapshot"
+        );
+        assert_eq!(patched["project"]["config"]["max_file_size"], 2048);
+        assert_eq!(
+            patched["resync_recommended"], true,
+            "index-affecting settings must truthfully recommend resync"
+        );
+
+        let (status, persisted_envelope) = response_json(
+            agent
+                .get(&settings_url)
+                .call()
+                .expect("GET persisted settings"),
+        );
+        assert_eq!(
+            status, 200,
+            "persisted settings GET failed: {persisted_envelope}"
+        );
+        let persisted = &persisted_envelope["payload"];
+        assert_eq!(
+            persisted["project"]["configuration_revision_id"],
+            patched_revision
+        );
+        assert_eq!(persisted["project"]["config"]["max_file_size"], 2048);
+        assert_eq!(persisted["project"]["config"]["track_call_sites"], true);
+
+        let (status, stale) = response_json(
+            agent
+                .patch(&project_settings_url)
+                .send_json(json!({
+                    "expected_revision_id": initial_revision,
+                    "idempotency_key": "dashboard.production-composition.stale-track-call-sites",
+                    "track_call_sites": false
+                }))
+                .expect("PATCH stale project settings"),
+        );
+        assert_eq!(status, 409, "stale project settings must conflict: {stale}");
+
+        let (status, unchanged_envelope) = response_json(
+            agent
+                .get(&settings_url)
+                .call()
+                .expect("GET unchanged settings"),
+        );
+        assert_eq!(
+            status, 200,
+            "unchanged settings GET failed: {unchanged_envelope}"
+        );
+        let unchanged = &unchanged_envelope["payload"];
+        assert_eq!(
+            unchanged["project"]["configuration_revision_id"],
+            patched_revision
+        );
+        assert_eq!(unchanged["project"]["config"]["max_file_size"], 2048);
+        assert_eq!(unchanged["project"]["config"]["track_call_sites"], true);
+    })
+    .await
+    .expect("dashboard HTTP assertions");
+
+    harness
+        .call_tool(
+            &project,
+            "tracedecay_dashboard",
+            json!({"action": "stop", "format": "json"}),
+        )
+        .await
+        .expect("stop production dashboard");
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_reads_retained_profile_analytics_authority() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.rs"), "pub fn analytics_probe() {}\n")
+        .expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    harness
+        .call_tool(
+            &project,
+            "tracedecay_search",
+            json!({"query": "analytics_probe", "format": "json"}),
+        )
+        .await
+        .expect("production search");
+    harness
+        .server(&project)
+        .expect("production server")
+        .ledger_writes_settled()
+        .await;
+
+    let second_owner =
+        crate::host_admission::HostAdmissionTestRuntimeV1::profile(harness.profile_root()).await;
+    let error = match second_owner {
+        Ok(_) => panic!("parallel profile authority must remain rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("different daemon election already owns database scope"),
+        "parallel authority must fail at daemon election: {error}"
+    );
+
+    let events = harness
+        .read_profile_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
+            provider: Some("mcp".to_owned()),
+            project_id: None,
+            session_id: None,
+            event_kind: Some("mcp_tool_call".to_owned()),
+            since: None,
+            until: None,
+            before_id: None,
+            limit: 100,
+        })
+        .await
+        .expect("read retained profile analytics");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.tool_name.as_deref() == Some("tracedecay_search")),
+        "retained production authority must expose the exercised tool event: {events:?}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_shutdown_allows_immediate_profile_reopen() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.rs"), "pub fn reopen_probe() {}\n").expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    let profile_root = harness.profile_root().to_path_buf();
+    harness.shutdown().await;
+
+    let profile_identity =
+        tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("reload isolated profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        100,
+        "production-composition-reopen",
+    )
+    .expect("fresh daemon election");
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(profile_identity)
+        .await
+        .expect("immediately reopen profile runtime");
+    registry
+        .profile_database()
+        .await
+        .expect("immediately reopen profile authority database");
+    registry
+        .profile_sessions()
+        .await
+        .expect("immediately reopen profile session database");
+    let project_id = tracedecay_runtime_core::storage::read_repository_identity_marker(&project)
+        .expect("read project identity")
+        .expect("project identity marker");
+    registry
+        .project_sessions(
+            tracedecay_store::ProjectId::new(project_id.project_id)
+                .expect("valid project identity"),
+            [project],
+        )
+        .await
+        .expect("immediately reopen project session database");
+}
+
+#[tokio::test]
+async fn production_composition_harness_rejects_live_profile_overlap() {
+    let temp = TempDir::new().expect("temp dir");
+    let live_profile = temp.path().join("live-profile");
+    let overlapping_isolation = live_profile.join("test-isolation");
+    std::fs::create_dir_all(&live_profile).expect("live profile");
+
+    let error = match ProductionProjectCompositionHarnessV1::open_with_live_profile_root_for_test(
+        &overlapping_isolation,
+        Vec::new(),
+        live_profile.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("live-profile overlap must be rejected before any project or store opens"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("overlaps live profile")
+            && message.contains(&live_profile.display().to_string()),
+        "overlap rejection must identify the protected live profile: {message}"
+    );
+    assert!(
+        !overlapping_isolation.join("profile").exists(),
+        "rejection must fire before the harness creates an isolated profile"
+    );
+}

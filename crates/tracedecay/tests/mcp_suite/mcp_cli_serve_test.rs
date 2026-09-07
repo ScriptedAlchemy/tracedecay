@@ -1,0 +1,1170 @@
+use crate::common;
+
+#[cfg(unix)]
+use std::ffi::OsStr;
+#[cfg(unix)]
+use std::fs;
+use std::io::Write;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::Output;
+use std::process::Stdio;
+
+#[cfg(unix)]
+use crate::common::canonical_existing_path;
+use crate::common::tracedecay_command_with_home;
+#[cfg(unix)]
+use crate::serve_harness::runtime_project_root;
+#[cfg(unix)]
+use crate::serve_harness::{canonical_path_string, run_serve_runtime};
+#[cfg(unix)]
+use crate::serve_harness::{init_project_under, register_global_project};
+use crate::serve_harness::{init_project_with_file, profile_root};
+#[cfg(unix)]
+use rusqlite::Connection;
+use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use tempfile::TempDir;
+#[cfg(unix)]
+use tokio::sync::Mutex;
+#[cfg(unix)]
+use tracedecay::mcp::handle_tool_call;
+use tracedecay::serve;
+#[cfg(unix)]
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::TraceDecayOpenOptions;
+use tracedecay_automation_runtime::automation::managed_skills::{
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
+    create_managed_skill,
+};
+use tracedecay_automation_runtime::automation::run_ledger::{
+    AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
+    append_run_record, write_run_artifact,
+};
+use tracedecay_runtime_core::storage::default_profile_sharded_layout;
+#[cfg(unix)]
+use tracedecay_runtime_core::storage::{PrivateStoreIo, pin_fixture_repository_identity};
+
+#[cfg(unix)]
+static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn json_rpc_tool_payload(stdout: &[u8], id: i64) -> Value {
+    let stdout_text = String::from_utf8(stdout.to_vec()).unwrap();
+    let response: Value = stdout_text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|response| response.get("id") == Some(&json!(id)))
+        .unwrap_or_else(|| panic!("missing JSON-RPC response {id} in stdout:\n{stdout_text}"));
+    assert!(
+        response.get("error").is_none(),
+        "JSON-RPC response {id} should not be an error: {response}"
+    );
+    let content = response["result"]["content"]
+        .as_array()
+        .expect("tool result should include content items");
+    for item in content {
+        let Some(text) = item["text"].as_str() else {
+            continue;
+        };
+        let Some(json_start) = text.find('{').or_else(|| text.find('[')) else {
+            continue;
+        };
+        if let Ok(payload) = serde_json::from_str(&text[json_start..]) {
+            return payload;
+        }
+    }
+    panic!("tool response {id} should include a JSON payload:\n{response}")
+}
+
+fn managed_skill_stdio_draft(id: &str, title: &str) -> ManagedSkillDraft {
+    ManagedSkillDraft {
+        id: id.to_string(),
+        title: title.to_string(),
+        summary: format!("{title} summary."),
+        routing_description: format!("{title} summary."),
+        category: "maintenance".to_string(),
+        targets:
+            tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(
+            ),
+        body_markdown: format!("Use {title} before applying repository changes."),
+        support_files: vec![
+            ManagedSupportFile::new(
+                "references/checklist.md",
+                b"- inspect context\n- run focused tests\n".to_vec(),
+            )
+            .unwrap(),
+        ],
+        provenance: ManagedSkillProvenance {
+            source: ManagedSkillSource::AutomationRun,
+            actor: "tracedecay-stdio-test".to_string(),
+            run_id: Some("run_mcp_stdio_skill".to_string()),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn run_serve_runtime_with_initialize_root(
+    home: &Path,
+    cwd: &Path,
+    explicit_path: Option<&Path>,
+    root_uri: String,
+    root_name: &str,
+) -> Output {
+    let output = run_serve_runtime(
+        home,
+        cwd,
+        explicit_path.map(Path::as_os_str),
+        json!({
+            "roots": [{
+                "uri": root_uri,
+                "name": root_name
+            }]
+        }),
+    );
+    assert!(
+        output.status.success(),
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[cfg(unix)]
+async fn set_user_version(db_path: &Path, version: u32) {
+    let conn = Connection::open(db_path).unwrap();
+    conn.pragma_update(None, "user_version", version).unwrap();
+}
+
+#[cfg(unix)]
+fn extract_tool_text(value: &Value) -> &str {
+    value["content"][0]["text"]
+        .as_str()
+        .expect("tool result should include text content")
+}
+
+#[cfg(unix)]
+async fn create_read_only_project_db(
+    home: &Path,
+    project: &Path,
+    project_id: &str,
+    user_version: Option<u32>,
+) -> (PathBuf, PathBuf) {
+    let project_root = canonical_existing_path(project);
+    let profile_root = profile_root(home);
+    // Profile identity validation requires an owner-private root (0700). Seed
+    // it through PrivateStoreIo before any store paths are created under it.
+    PrivateStoreIo::create_dir_all(&profile_root).expect("create owner-private profile root");
+
+    // Pin enrollment identity before init so the store lands under the exact
+    // project id the caller named. Init (not a bare graph DB publish) is what
+    // admits a canonical configuration revision — open_read_only fails closed
+    // without one.
+    pin_fixture_repository_identity(&project_root, project_id).unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    let cg = TraceDecay::init_with_options(&project_root, open_options)
+        .await
+        .expect("seed read-only fixture through production init");
+    let db_path = cg.store_layout().graph_db_path.clone();
+    cg.close();
+    if let Some(version) = user_version {
+        set_user_version(&db_path, version).await;
+    }
+
+    let mut permissions = fs::metadata(&db_path).unwrap().permissions();
+    permissions.set_mode(0o444);
+    fs::set_permissions(&db_path, permissions).unwrap();
+
+    (project_root, db_path)
+}
+
+#[cfg(unix)]
+fn file_uri_localhost_percent_encoded(path: &Path) -> String {
+    let encoded = path.to_string_lossy().replace(' ', "%20");
+    format!("file://localhost{encoded}")
+}
+
+/// Builds a portable `file://` URI: `/tmp/x` → `file:///tmp/x` on Unix,
+/// `C:\Users\x` → `file:///C:/Users/x` on Windows.
+#[cfg(unix)]
+fn file_uri(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.starts_with('/') {
+        format!("file://{normalized}")
+    } else {
+        format!("file:///{normalized}")
+    }
+}
+
+#[cfg(unix)]
+fn create_unindexed_git_project_with_file(contents: &str) -> TempDir {
+    let project = TempDir::new().unwrap();
+    let output = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(project.path())
+        .output()
+        .expect("git init should run");
+    assert!(
+        output.status.success(),
+        "git init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    fs::write(project.path().join("src/lib.rs"), contents).unwrap();
+    project
+}
+
+#[tokio::test]
+async fn serve_without_daemon_socket_reports_daemon_unavailable() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn client_only_marker() {}\n").await;
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TraceDecay daemon") && stderr.contains("is not available"),
+        "expected explicit daemon-unavailable error, got:\n{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn serve_stdio_smokes_managed_skill_list_and_view() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn skill_stdio_marker() {}\n").await;
+    let profile_root = profile_root(home.path());
+
+    create_managed_skill(
+        &profile_root,
+        managed_skill_stdio_draft("active-stdio-skill", "Active stdio skill"),
+    )
+    .await
+    .unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env_remove("TRACEDECAY_DAEMON_SOCKET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_skill_list",
+                    "arguments": { "state": "active", "format": "json" }
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_skill_view",
+                    "arguments": {
+                        "id": "active-stdio-skill",
+                        "include_support_files": false,
+                        "format": "json"
+                    }
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    assert!(
+        output.status.success(),
+        "serve skill stdio smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let list = json_rpc_tool_payload(&output.stdout, 2);
+    assert_eq!(list["status"], "ok");
+    assert_eq!(list["count"], 1);
+    assert_eq!(list["skills"][0]["metadata"]["id"], "active-stdio-skill");
+    assert_eq!(list["skills"][0]["metadata"]["state"], "active");
+    assert_eq!(list["skills"][0]["support_file_count"], 1);
+    assert!(list["skills"][0].get("body_markdown").is_none());
+
+    let view = json_rpc_tool_payload(&output.stdout, 3);
+    assert_eq!(view["status"], "ok");
+    assert_eq!(view["skill"]["metadata"]["id"], "active-stdio-skill");
+    assert!(
+        view["skill"]["body_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Active stdio skill")
+    );
+    assert_eq!(view["skill"]["support_files"].as_array().unwrap().len(), 0);
+    assert_eq!(view["support_files_included"], false);
+}
+
+#[tokio::test]
+async fn serve_stdio_smokes_automation_run_artifact_view() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn artifact_stdio_marker() {}\n").await;
+    let dashboard_root = default_profile_sharded_layout(project.path(), &profile_root(home.path()))
+        .unwrap()
+        .dashboard_root;
+    let run_id = "run-stdio-artifact";
+    let artifact = write_run_artifact(
+        &dashboard_root,
+        run_id,
+        AutomationRunArtifactKind::CodexHandoff,
+        &json!({
+            "status": "ready_for_review",
+            "next_actions": ["inspect stdio artifact payload"],
+        }),
+        Some("stdio handoff ready".to_string()),
+        "1782283200",
+    )
+    .await
+    .unwrap();
+    append_run_record(
+        &dashboard_root,
+        &AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: run_id.to_string(),
+            trigger: AutomationTrigger::Dashboard,
+            task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
+            task_key: Some("memory_curator".to_string()),
+            backend: "codex_app_server".to_string(),
+            backend_identity: None,
+            host_mode: Some("standalone".to_string()),
+            prompt_version: Some("memory_curator:v1".to_string()),
+            response_schema: None,
+            strict_json: Some(true),
+            model: Some("test-model".to_string()),
+            status: AutomationRunStatus::Succeeded,
+            evidence_hash: Some("sha256:evidence".to_string()),
+            input_hash: Some("sha256:input".to_string()),
+            output_hash: Some("sha256:output".to_string()),
+            proposed_ops: Some(json!({"ops": []})),
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 0,
+            error: None,
+            error_classification: None,
+            error_retryable: None,
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
+            fallback_status: None,
+            report_ref: None,
+            artifacts: vec![artifact],
+            started_at: "1782283199".to_string(),
+            completed_at: "1782283200".to_string(),
+            completed_at_micros: Some(1_782_283_200_000_000),
+        },
+    )
+    .await
+    .unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env_remove("TRACEDECAY_DAEMON_SOCKET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_automation_run_artifact_view",
+                    "arguments": {
+                        "run_id": run_id,
+                        "kind": "codex_handoff",
+                        "format": "json"
+                    }
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    assert!(
+        output.status.success(),
+        "serve artifact stdio smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = json_rpc_tool_payload(&output.stdout, 2);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["run_id"], run_id);
+    assert_eq!(payload["artifact"]["kind"], "codex_handoff");
+    assert_eq!(payload["payload"]["status"], "ready_for_review");
+    assert_eq!(
+        payload["payload"]["next_actions"][0],
+        "inspect stdio artifact payload"
+    );
+}
+
+/// Serve must proxy through a reachable daemon without opening either database
+/// locally. The intentionally uninitialized explicit path also proves that
+/// proxy startup preserves authoritative path routing without local resolution.
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_path = common::daemon_socket_path(home.path());
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking fake daemon listener");
+
+    let fake_daemon = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let mut stream = match listener.accept() {
+                Ok((stream, _addr)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept serve connection: {error}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking fake daemon stream");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            let mut handshake_line = String::new();
+            reader
+                .read_line(&mut handshake_line)
+                .expect("read daemon handshake");
+            let handshake: Value =
+                serde_json::from_str(handshake_line.trim()).expect("daemon handshake json");
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read proxied request");
+            let request: Value =
+                serde_json::from_str(request_line.trim()).expect("proxied request json");
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {
+                        "name": "sentinel-proxy-first-daemon",
+                        // The fixture build version: the value only needs to
+                        // round-trip through the proxy, not match the child.
+                        "version": tracedecay::product_runtime::register_fixture_product_runtime()
+                            .build_version()
+                    }
+                }
+            });
+            writeln!(stream, "{response}").expect("write fake daemon response");
+            let mut scratch = [0_u8; 64];
+            while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
+            return Some(handshake);
+        }
+    });
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    let handshake = fake_daemon
+        .join()
+        .expect("fake daemon thread should exit")
+        .expect("serve should connect to the daemon before project resolution");
+
+    assert!(
+        output.status.success(),
+        "proxy-first serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("initialize response json");
+    assert_eq!(
+        response["result"]["serverInfo"]["name"],
+        json!("sentinel-proxy-first-daemon")
+    );
+    assert_eq!(
+        handshake["project_path"],
+        json!(project.path().display().to_string()),
+        "an explicit path must remain authoritative"
+    );
+    assert_eq!(handshake["allow_initialize_root_routing"], json!(false));
+    assert!(
+        !home.path().join(".tracedecay/global.db").exists(),
+        "the stdio proxy must not open the global database"
+    );
+    assert!(
+        !project.path().join(".tracedecay").exists(),
+        "the stdio proxy must not open or initialize the project"
+    );
+}
+
+/// Regression test for the serve/daemon-restart race: a serve process started
+/// while `tracedecay update` is restarting the daemon sees no socket file, but
+/// must not silently commit to in-process mode when an installed service is
+/// about to rebind the socket.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn restart_window_marker() {}\n").await;
+    // Granted once serve is running with its request queued, so the rebind
+    // lands inside the restart window without timing the window by clock.
+    let (rebind_tx, rebind_rx) = mpsc::channel();
+    let socket_path = common::daemon_socket_path(home.path());
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+
+    // An installed service unit claims the socket, but the socket file is
+    // missing — exactly the window between daemon shutdown and rebind.
+    let unit_dir = canonical_existing_path(home.path()).join(".config/systemd/user");
+    fs::create_dir_all(&unit_dir).unwrap();
+    fs::write(
+        unit_dir.join("tracedecay.service"),
+        format!(
+            "[Service]\nExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .unwrap();
+
+    // The "restarted daemon" binds the socket only after serve has started.
+    // It answers `initialize` with a sentinel server name and a skewed
+    // version, so a proxied response is distinguishable from the in-process
+    // fallback and exercises the client-side version-skew warning.
+    let listener_path = socket_path.clone();
+    let fake_daemon = std::thread::spawn(move || {
+        rebind_rx
+            .recv()
+            .expect("serve should grant the rebind permit");
+        let listener = UnixListener::bind(&listener_path).expect("bind restarted daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking fake daemon listener");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _addr)) => stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return None,
+                    Err(e) => panic!("accept serve connection: {e}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking fake daemon stream");
+                let mut reader =
+                    BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+                let mut handshake_line = String::new();
+                if reader
+                    .read_line(&mut handshake_line)
+                    .expect("read handshake")
+                    == 0
+                {
+                    // The transport probe connects and hangs up without a handshake.
+                    return None;
+                }
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).expect("read request") == 0 {
+                    return None;
+                }
+                let request: Value =
+                    serde_json::from_str(request_line.trim()).expect("request json");
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": {
+                            "name": "sentinel-restarted-daemon",
+                            "version": "0.0.1-sentinel"
+                        }
+                    }
+                });
+                writeln!(stream, "{response}").expect("write fake daemon response");
+                // Drain until the proxy hangs up so the response is not lost to a
+                // connection reset.
+                let mut scratch = [0_u8; 64];
+                while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
+                Some(())
+            },
+            || "timed out waiting for serve to proxy a request to the restarted daemon".to_string(),
+        );
+    });
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+    // serve is up and its request is queued, so the socket was absent for at
+    // least one probe. Let the "restarted daemon" claim it now.
+    rebind_tx.send(()).expect("grant the rebind permit");
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    fake_daemon.join().expect("fake daemon thread should exit");
+
+    assert!(
+        output.status.success(),
+        "serve should ride out the daemon restart window\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let response: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("stdout should contain one JSON-RPC response: {err}\n{stdout}")
+    });
+    assert_eq!(
+        response["result"]["serverInfo"]["name"],
+        json!("sentinel-restarted-daemon"),
+        "initialize must be answered by the restarted daemon, not an in-process fallback:\n{response}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("0.0.1-sentinel") && stderr.contains("tracedecay daemon restart"),
+        "proxy should warn about the daemon/client version skew\nstderr:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_daemon_proxy_reports_daemon_disconnect_as_json_rpc_error() {
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn disconnect_marker() {}\n").await;
+    let socket_dir = TempDir::new().unwrap();
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    let listener_path = socket_path.clone();
+    let fake_daemon = std::thread::spawn(move || {
+        let listener = UnixListener::bind(&listener_path).expect("bind fake daemon socket");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+        if let Ok((mut stream, _addr)) = listener.accept() {
+            let mut scratch = [0_u8; 512];
+            let _ = stream.read(&mut scratch);
+        }
+    });
+    ready_rx.recv().expect("fake daemon should be ready");
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    fake_daemon.join().expect("fake daemon thread should exit");
+
+    assert!(
+        output.status.success(),
+        "serve should keep stdio healthy after daemon disconnect\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let response: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("stdout should contain one JSON-RPC response: {err}\n{stdout}")
+    });
+    assert_eq!(response["id"], json!(1));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("TraceDecay daemon connection failed")),
+        "disconnect should be reported as a JSON-RPC error response, got:\n{response}"
+    );
+}
+
+#[tokio::test]
+async fn ensure_initialized_with_options_fails_closed_without_daemon_routing() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root(home.path())),
+        global_db_path: Some(profile_root(home.path()).join("global.db")),
+    };
+
+    let error = match serve::ensure_initialized_with_options(project.path(), open_options).await {
+        Ok(_) => panic!("serve compatibility API must not open project databases locally"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("direct project database access is disabled")
+            && message.contains("managed TraceDecay daemon"),
+        "error should direct callers through the sole database owner, got: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_read_only_open_reports_and_guards_read_only_store() {
+    let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root(home.path())),
+        global_db_path: Some(profile_root(home.path()).join("global.db")),
+    };
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn readonly_marker() {}\n",
+    )
+    .unwrap();
+    let (project_root, _db_path) = create_read_only_project_db(
+        home.path(),
+        project.path(),
+        "proj_serve_readonly_current_schema",
+        None,
+    )
+    .await;
+
+    let cg = TraceDecay::open_read_only_with_options(&project_root, open_options)
+        .await
+        .expect("current-schema read-only DB should open explicitly");
+
+    let status = handle_tool_call(
+        &cg,
+        "tracedecay_storage_status",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_tool_text(&status.value)).unwrap();
+    // Plan 21 moved storage_status onto the daemon-retained typed primitive
+    // owner. Without a live daemon transport this in-process harness receives
+    // the truthful unavailable envelope rather than a fabricated local answer.
+    // The read-only write guard below preserves this test's core intent.
+    assert_eq!(
+        payload["contract"]["schema_id"].as_str(),
+        Some("schema.application.primitive.storage-status.result")
+    );
+    assert_eq!(payload["problem"]["kind"].as_str(), Some("unavailable"));
+    assert_eq!(
+        payload["problem"]["code"].as_str(),
+        Some("application.transport.unavailable")
+    );
+    assert!(
+        payload["problem"]["legal_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|a| a == "retry"))
+    );
+
+    let error = match cg.open_project_store_db().await {
+        Ok(_) => panic!("mutating operations should be guarded before SQLite rejects writes"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("read-only"),
+        "write guard should report read-only state, got: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn no_explicit_path_prefers_initialize_roots_over_global_fallback() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let stale = init_project_with_file(home.path(), "pub fn stale_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    register_global_project(home.path(), stale.path()).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        cwd.path(),
+        None,
+        file_uri(active.path()),
+        "active",
+    );
+
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(active.path()),
+        "serve should prefer MCP initialize roots over stale global DB fallback"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn no_explicit_path_prefers_discovered_cwd_over_initialize_roots() {
+    let home = TempDir::new().unwrap();
+    let cwd_project = init_project_with_file(home.path(), "pub fn cwd_project_marker() {}\n").await;
+    let nested_cwd = cwd_project.path().join("src");
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        &nested_cwd,
+        None,
+        file_uri(active.path()),
+        "active",
+    );
+
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(cwd_project.path()),
+        "discovered cwd project should be preferred over MCP initialize roots"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unexpanded_template_path_prefers_initialize_roots_over_discovered_cwd() {
+    let home = TempDir::new().unwrap();
+    let cwd_project = init_project_with_file(home.path(), "pub fn cwd_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime(
+        home.path(),
+        cwd_project.path(),
+        Some(OsStr::new("${workspaceFolder}")),
+        json!({
+            "roots": [{
+                "uri": file_uri(active.path()),
+                "name": "active"
+            }]
+        }),
+    );
+
+    assert!(
+        output.status.success(),
+        "tracedecay serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(active.path()),
+        "an unexpanded host template must defer routing to MCP initialize roots"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn no_explicit_path_auto_initializes_unindexed_git_cwd() {
+    let home = TempDir::new().unwrap();
+    let cwd_project =
+        create_unindexed_git_project_with_file("pub fn auto_initialized_project_marker() {}\n");
+    let nested_cwd = cwd_project.path().join("src");
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        &nested_cwd,
+        None,
+        file_uri(active.path()),
+        "active",
+    );
+    let payload = json_rpc_tool_payload(&output.stdout, 2);
+
+    assert_eq!(
+        canonical_path_string(Path::new(
+            payload["database"]["project_root"]
+                .as_str()
+                .expect("runtime should include database.project_root")
+        )),
+        canonical_path_string(cwd_project.path()),
+        "unindexed git cwd should be initialized before MCP initialize-root fallback"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_roots_auto_initializes_unindexed_git_repo() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let root_project =
+        create_unindexed_git_project_with_file("pub fn auto_initialized_root_marker() {}\n");
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        cwd.path(),
+        None,
+        file_uri(root_project.path()),
+        "active",
+    );
+    let payload = json_rpc_tool_payload(&output.stdout, 2);
+
+    assert_eq!(
+        canonical_path_string(Path::new(
+            payload["database"]["project_root"]
+                .as_str()
+                .expect("runtime should include database.project_root")
+        )),
+        canonical_path_string(root_project.path()),
+        "unindexed git initialize root should be initialized and selected"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_initialized_path_ignores_initialize_roots() {
+    let home = TempDir::new().unwrap();
+    let explicit =
+        init_project_with_file(home.path(), "pub fn explicit_project_marker() {}\n").await;
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        explicit.path(),
+        Some(explicit.path()),
+        file_uri(active.path()),
+        "active",
+    );
+
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(explicit.path()),
+        "explicit --path should be authoritative over MCP initialize roots"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn no_explicit_path_without_roots_still_uses_global_fallback() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let active = init_project_with_file(home.path(), "pub fn active_project_marker() {}\n").await;
+    register_global_project(home.path(), active.path()).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .current_dir(cwd.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay serve should run");
+
+    assert!(
+        output.status.success(),
+        "no explicit path should keep global DB fallback when MCP roots are unavailable\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialize_roots_decode_file_uri_localhost_and_percent_escapes() {
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let projects = TempDir::new().unwrap();
+    let stale = init_project_under(
+        home.path(),
+        projects.path(),
+        "stale-project",
+        "pub fn stale_project_marker() {}\n",
+    )
+    .await;
+    let active = init_project_under(
+        home.path(),
+        projects.path(),
+        "active project",
+        "pub fn active_project_marker() {}\n",
+    )
+    .await;
+    register_global_project(home.path(), &stale).await;
+    register_global_project(home.path(), &active).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+
+    let output = run_serve_runtime_with_initialize_root(
+        home.path(),
+        cwd.path(),
+        None,
+        file_uri_localhost_percent_encoded(&active),
+        "active",
+    );
+    assert_eq!(
+        canonical_path_string(Path::new(&runtime_project_root(&output.stdout, 2))),
+        canonical_path_string(&active),
+        "serve should use the decoded MCP root project"
+    );
+}

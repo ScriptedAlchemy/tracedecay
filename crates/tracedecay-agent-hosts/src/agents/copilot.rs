@@ -1,24 +1,58 @@
 //! GitHub Copilot integration.
 //!
-//! Handles registration of the tracedecay MCP server in both:
-//! - VS Code's `settings.json` under `mcp.servers.tracedecay`
-//! - Copilot CLI's `~/.copilot/mcp-config.json` under `mcpServers.tracedecay`
+//! Two independent registration surfaces carry the tracedecay MCP server, and
+//! they are owned by different parties:
+//!
+//! * **Copilot CLI's `~/.copilot/mcp-config.json`** (`mcpServers.tracedecay`)
+//!   is owned by GitHub Copilot's own non-interactive registry commands
+//!   (`copilot mcp add` / `copilot mcp remove`). TraceDecay drives those
+//!   commands and never merges that file itself: the host owns the registry,
+//!   and emulating its writes is exactly what the host-capability doctrine
+//!   forbids. The `copilot` binary is therefore a **hard requirement** for this
+//!   half of the lifecycle, with no config-editing fallback — a half-emulated
+//!   registration is indistinguishable on disk from a corrupt one.
+//! * **VS Code's `settings.json`** (`mcp.servers.tracedecay`, plus the
+//!   Insiders profile) has **no host CLI at all**. VS Code exposes no
+//!   non-interactive command that writes an `mcp.servers` entry into a user
+//!   settings file, so that half stays TraceDecay-written exactly as it is
+//!   today and is only read back here by the doctor. Adopting a host command
+//!   for it is not an option that exists; this module must not invent one.
+//!
+//! The launch arguments both spellings use live in one place
+//! ([`MCP_SERVER_ARGS`]) so the CLI-driven registration and the
+//! TraceDecay-owned readback cannot drift apart.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_and_write_json,
-    backup_config_file, load_json_file, load_json_file_strict, load_jsonc_file,
-    load_jsonc_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, config_backup_path,
+    load_json_file, load_jsonc_file,
 };
 
-use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
+/// Name of GitHub Copilot's own CLI, which owns `~/.copilot/mcp-config.json`.
+const COPILOT_CLI: &str = "copilot";
 
-/// GitHub Copilot agent.
+/// What the binary is required *for*, used in the typed absence error so the
+/// operator learns both what is missing and which lifecycle needed it.
+const COPILOT_CLI_LIFECYCLE: &str = "GitHub Copilot MCP registry lifecycle";
+
+/// Name Copilot's registry selects the server by (`copilot mcp add <name>`,
+/// `copilot mcp remove <name>`) and the key it lands under in `mcpServers`.
+/// The two are the same string by Copilot's own contract, so the doctor and
+/// the peer-preservation guard below keep reading `mcpServers.tracedecay`.
+const COPILOT_MCP_SERVER_NAME: &str = "tracedecay";
+
+/// Arguments the tracedecay MCP server is launched with.
+///
+/// Shared by the CLI-driven registration (the trailing `-- <command> <args…>`
+/// words) and by the doctor readback that verifies what actually landed, so
+/// the two spellings of the same server cannot drift apart. Any remaining
+/// TraceDecay-written registration surface (the VS Code `settings.json` half)
+/// must source its `args` array from here for the same reason.
+const MCP_SERVER_ARGS: &[&str] = &["serve"];
+
 pub struct CopilotIntegration;
 
 impl AgentIntegration for CopilotIntegration {
@@ -30,118 +64,13 @@ impl AgentIntegration for CopilotIntegration {
         "copilot"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let vscode_settings_path = super::vscode_data_dir(&ctx.home).join("User/settings.json");
-        let cli_settings_path = super::copilot_cli_dir(&ctx.home).join("mcp-config.json");
-
-        install_vscode_mcp_server(&vscode_settings_path, &ctx.tracedecay_bin)?;
-        let insiders_settings_path =
-            super::vscode_insiders_data_dir(&ctx.home).join("User/settings.json");
-        if insiders_settings_path
-            .parent()
-            .is_some_and(std::path::Path::exists)
-        {
-            install_vscode_mcp_server(&insiders_settings_path, &ctx.tracedecay_bin)?;
-        }
-        install_cli_mcp_server(&cli_settings_path, &ctx.tracedecay_bin)?;
-
-        // Install prompt rules
-        let vscode_instructions =
-            super::vscode_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
-        install_prompt_rules(&vscode_instructions)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &vscode_instructions,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )?;
-        let insiders_instructions =
-            super::vscode_insiders_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
-        if super::vscode_insiders_data_dir(&ctx.home)
-            .join("User")
-            .exists()
-        {
-            install_prompt_rules(&insiders_instructions)?;
-            super::install_managed_skill_prompt_index(
-                &ctx.home,
-                &insiders_instructions,
-                crate::automation::skill_targets::SkillInstallTarget::Agents,
-            )?;
-        }
-        let cli_instructions = super::copilot_cli_dir(&ctx.home).join("copilot-instructions.md");
-        install_prompt_rules(&cli_instructions)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &cli_instructions,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Restart VS Code and/or start a new Copilot CLI session");
-        eprintln!("     tracedecay tools are now available in GitHub Copilot");
-        Ok(())
-    }
-
+    /// Copilot's registration surfaces are all user-scope: the CLI-owned
+    /// `~/.copilot/mcp-config.json` (written by `copilot mcp add`) and the
+    /// VS Code user `settings.json`. There is no project-local surface the
+    /// host reads, so offering a local install would mean hand-writing files
+    /// the adopted CLI lifecycle exists to eliminate — same ruling as Gemini.
     fn supports_local_install(&self) -> bool {
-        true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let mcp_path = project_path.join(".vscode/mcp.json");
-        let instructions = project_path.join(".github/copilot-instructions.md");
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [mcp_path.as_path(), instructions.as_path()],
-        )?;
-        install_workspace_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
-        install_prompt_rules(&instructions)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &instructions,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let vscode_settings_path = super::vscode_data_dir(&ctx.home).join("User/settings.json");
-        let cli_settings_path = super::copilot_cli_dir(&ctx.home).join("mcp-config.json");
-        uninstall_vscode_mcp_server(&vscode_settings_path);
-        let insiders_settings_path =
-            super::vscode_insiders_data_dir(&ctx.home).join("User/settings.json");
-        uninstall_vscode_mcp_server(&insiders_settings_path);
-        uninstall_cli_mcp_server(&cli_settings_path);
-
-        let vscode_instructions =
-            super::vscode_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &vscode_instructions,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )?;
-        uninstall_prompt_rules(&vscode_instructions);
-        let insiders_instructions =
-            super::vscode_insiders_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md");
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &insiders_instructions,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )?;
-        uninstall_prompt_rules(&insiders_instructions);
-        let cli_instructions = super::copilot_cli_dir(&ctx.home).join("copilot-instructions.md");
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &cli_instructions,
-            crate::automation::skill_targets::SkillInstallTarget::Agents,
-        )?;
-        uninstall_prompt_rules(&cli_instructions);
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from GitHub Copilot.");
-        eprintln!(
-            "Restart VS Code and/or start a new Copilot CLI session for changes to take effect."
-        );
-        Ok(())
+        false
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -161,48 +90,92 @@ impl AgentIntegration for CopilotIntegration {
             || super::copilot_cli_dir(home).is_dir()
     }
 
-    fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
-        Some(super::vscode_data_dir(home).join("User/settings.json"))
+    fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
+        Some(vscode_settings_path(home))
+    }
+
+    fn host_component_registration(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+        }
+        copilot_context_mcp_registration_state(&ctx.home)
+    }
+
+    /// Mutable registration paths for the exact selected components.
+    ///
+    /// `ContextMcp` is the CLI-driven half of this integration: the only file
+    /// it mutates is Copilot's own `~/.copilot/mcp-config.json`, and the writer
+    /// is `copilot mcp`, not TraceDecay. Naming that file (and its staged
+    /// backup) here is what gives the component-set transaction rollback
+    /// authority over the host command's effect; without it the observation
+    /// recorded in [`run_mcp_registry_step`] would have nothing to restore.
+    /// Any other component set keeps the default inventory, which is the
+    /// TraceDecay-written VS Code settings file.
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+            let path = copilot_cli_mcp_config_path(home);
+            vec![path.clone(), config_backup_path(&path)]
+        } else {
+            self.host_registration_paths(home)
+        }
+    }
+
+    /// Register the tracedecay MCP server through Copilot's own registry.
+    ///
+    /// Only the `ContextMcp` component is CLI-driven. The VS Code
+    /// `settings.json` half is deliberately absent here: no host command
+    /// writes it (see the module documentation), so there is nothing to drive.
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            let copilot_cli = require_copilot_cli()?;
+            copilot_mcp_add_with(&copilot_cli, &ctx.home, &ctx.tracedecay_bin)?;
+        }
+        Ok(())
+    }
+
+    /// Mirror of [`Self::activate_deployed_host_component_registration`]:
+    /// removal goes back through the same registry that performed the add, so
+    /// deactivation reverses exactly what activation created.
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            let copilot_cli = require_copilot_cli()?;
+            copilot_mcp_remove_with(&copilot_cli, &ctx.home)?;
+        }
+        Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        let vscode_settings_path = super::vscode_data_dir(home).join("User/settings.json");
-        let insiders_settings_path =
-            super::vscode_insiders_data_dir(home).join("User/settings.json");
-        let cli_settings_path = super::copilot_cli_dir(home).join("mcp-config.json");
-
-        let vscode_has_tracedecay = if vscode_settings_path.exists() {
-            let json = load_jsonc_file(&vscode_settings_path);
-            let servers = json.get("mcp").and_then(|v| v.get("servers"));
-            servers.and_then(|v| v.get("tracedecay")).is_some()
-        } else {
-            false
-        };
-
-        let insiders_has_tracedecay = if insiders_settings_path.exists() {
-            let json = load_jsonc_file(&insiders_settings_path);
-            let servers = json.get("mcp").and_then(|v| v.get("servers"));
-            servers.and_then(|v| v.get("tracedecay")).is_some()
-        } else {
-            false
-        };
-
-        let cli_has_tracedecay = if cli_settings_path.exists() {
-            let json = load_json_file(&cli_settings_path);
-            let servers = json.get("mcpServers");
-            servers.and_then(|v| v.get("tracedecay")).is_some()
-        } else {
-            false
-        };
-
-        vscode_has_tracedecay || insiders_has_tracedecay || cli_has_tracedecay
+        vscode_mcp_servers_has_tracedecay(&vscode_settings_path(home))
+            || vscode_mcp_servers_has_tracedecay(&vscode_insiders_settings_path(home))
+            || super::mcp_config_has_tracedecay(
+                &copilot_cli_mcp_config_path(home),
+                "mcpServers",
+                load_json_file,
+            )
     }
 
     fn export_managed_skills(
         &self,
         home: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         if !self.has_tracedecay(home) {
             return Ok(Vec::new());
         }
@@ -215,9 +188,10 @@ impl AgentIntegration for CopilotIntegration {
             .iter()
             .filter(|path| path.exists())
             .map(|path| {
-                crate::automation::skill_targets::install_managed_skills(
+                tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                    &crate::host_io(),
                     profile_root,
-                    crate::automation::skill_targets::SkillInstallTarget::Agents,
+                    tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
                     path,
                 )
             })
@@ -228,15 +202,17 @@ impl AgentIntegration for CopilotIntegration {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+    ) -> Result<Vec<tracedecay_automation_runtime::automation::skill_targets::SkillInstallSummary>>
+    {
         let instructions = project_root.join(".github/copilot-instructions.md");
         if !workspace_mcp_has_tracedecay(project_root) || !instructions.exists() {
             return Ok(Vec::new());
         }
         Ok(vec![
-            crate::automation::skill_targets::install_managed_skills(
+            tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
-                crate::automation::skill_targets::SkillInstallTarget::Agents,
+                tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
                 &instructions,
             )?,
         ])
@@ -244,294 +220,273 @@ impl AgentIntegration for CopilotIntegration {
 }
 
 fn workspace_mcp_has_tracedecay(project_root: &Path) -> bool {
-    let settings_path = project_root.join(".vscode/mcp.json");
+    super::mcp_config_has_tracedecay(
+        &project_root.join(".vscode/mcp.json"),
+        "servers",
+        load_jsonc_file,
+    )
+}
+
+fn vscode_mcp_servers_has_tracedecay(settings_path: &Path) -> bool {
     if !settings_path.exists() {
         return false;
     }
-    let json = load_jsonc_file(&settings_path);
-    json.get("servers")
+    load_jsonc_file(settings_path)
+        .get("mcp")
+        .and_then(|mcp| mcp.get("servers"))
         .and_then(|servers| servers.get("tracedecay"))
         .is_some()
 }
 
-/// Register MCP server in VS Code settings.json.
-fn install_vscode_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let backup = backup_config_file(settings_path)?;
-    let mut settings = match load_jsonc_file_strict(settings_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-    settings["mcp"]["servers"]["tracedecay"] = json!({
-        "type": "stdio",
-        "command": tracedecay_bin,
-        "args": ["serve"]
-    });
-
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        settings_path.display()
-    );
-    Ok(())
-}
-
-/// Register MCP server in Copilot CLI's ~/.copilot/mcp-config.json.
-fn install_cli_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let backup = backup_config_file(settings_path)?;
-    let mut settings = match load_json_file_strict(settings_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-    settings["mcpServers"]["tracedecay"] = json!({
-        "type": "stdio",
-        "command": tracedecay_bin,
-        "args": ["serve"]
-    });
-
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        settings_path.display()
-    );
-    Ok(())
-}
-
-/// Register MCP server in a project `.vscode/mcp.json` file.
-fn install_workspace_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let backup = backup_config_file(settings_path)?;
-    let mut settings = match load_jsonc_file_strict(settings_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-    settings["servers"]["tracedecay"] = json!({
-        "type": "stdio",
-        "command": tracedecay_bin,
-        "args": ["serve"]
-    });
-
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        settings_path.display()
-    );
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
-// Uninstall helpers
+// Registration paths
 // ---------------------------------------------------------------------------
 
-/// Remove MCP server entry from VS Code settings.json.
-/// Does not delete the file even if the object becomes empty (other VS Code
-/// settings may still exist).
-fn uninstall_vscode_mcp_server(settings_path: &Path) {
-    if !settings_path.exists() {
-        eprintln!("  {} not found, skipping", settings_path.display());
-        return;
-    }
-
-    let mut settings = load_jsonc_file(settings_path);
-
-    let removed = if let Some(map) = settings
-        .get_mut("mcp")
-        .and_then(|mcp| mcp.get_mut("servers"))
-        .and_then(|servers| servers.as_object_mut())
-    {
-        map.remove("tracedecay").is_some()
-    } else {
-        false
-    };
-
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return;
-    }
-
-    // Clean up empty "servers" object
-    if let Some(mcp) = settings.get_mut("mcp") {
-        let servers_empty = mcp
-            .get("servers")
-            .and_then(|v| v.as_object())
-            .is_some_and(serde_json::Map::is_empty);
-        if servers_empty {
-            mcp.as_object_mut().map(|o| o.remove("servers"));
-        }
-
-        // Clean up empty "mcp" object
-        let mcp_empty = settings
-            .get("mcp")
-            .and_then(|v| v.as_object())
-            .is_some_and(serde_json::Map::is_empty);
-        if mcp_empty {
-            settings.as_object_mut().map(|o| o.remove("mcp"));
-        }
-    }
-
-    // Always write back (never delete settings.json — it has other VS Code settings).
-    // backup_and_write_json leaves a .bak so any mistake is recoverable (issue #63).
-    if backup_and_write_json(settings_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            settings_path.display()
-        );
-    }
+/// VS Code user settings — the TraceDecay-written half. No host CLI writes
+/// this file; see the module documentation.
+fn vscode_settings_path(home: &Path) -> PathBuf {
+    super::vscode_data_dir(home).join("User/settings.json")
 }
 
-/// Remove MCP server entry from Copilot CLI's ~/.copilot/mcp-config.json.
-fn uninstall_cli_mcp_server(settings_path: &Path) {
-    if !settings_path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(settings_path) else {
-        return;
+/// VS Code Insiders user settings, same ownership as [`vscode_settings_path`].
+fn vscode_insiders_settings_path(home: &Path) -> PathBuf {
+    super::vscode_insiders_data_dir(home).join("User/settings.json")
+}
+
+/// Copilot CLI's own MCP registry document.
+///
+/// Derived from the admitted profile home rather than any ambient Copilot
+/// environment variable: `host_cli::run_host_cli` clears the environment and
+/// admits `home` as the child's `HOME`, so the host command resolves its
+/// profile from exactly this directory. Reading it from anywhere else would
+/// let an isolated lifecycle inspect a different profile than the one the host
+/// command just wrote.
+fn copilot_cli_mcp_config_path(home: &Path) -> PathBuf {
+    super::copilot_cli_dir(home).join("mcp-config.json")
+}
+
+fn copilot_context_mcp_registration_state(
+    home: &Path,
+) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+    let Ok(config_bytes) = std::fs::read(copilot_cli_mcp_config_path(home)) else {
+        return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
     };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&config_bytes) else {
+        return super::host_bundle_v2::HostBundleRegistrationStateV1::Corrupt;
     };
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
+    let Some(server) = config
+        .pointer("/mcpServers/tracedecay")
+        .and_then(serde_json::Value::as_object)
     else {
-        return;
+        return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
     };
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return;
-    }
-    if servers.is_empty() {
-        settings.as_object_mut().map(|o| o.remove("mcpServers"));
-    }
-    let is_empty = settings.as_object().is_some_and(serde_json::Map::is_empty);
-    if is_empty {
-        std::fs::remove_file(settings_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            settings_path.display()
-        );
-    } else if backup_and_write_json(settings_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            settings_path.display()
-        );
+    let command_is_present = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| !command.is_empty());
+    if command_is_present && server_args_are_current(server) {
+        super::host_bundle_v2::HostBundleRegistrationStateV1::Current
+    } else {
+        super::host_bundle_v2::HostBundleRegistrationStateV1::Repairable
     }
 }
 
 // ---------------------------------------------------------------------------
-// Prompt rules helpers
+// Host-CLI-driven MCP registry lifecycle
 // ---------------------------------------------------------------------------
 
-/// Install-or-refresh prompt rules in a copilot-instructions.md file.
-fn install_prompt_rules(instructions_path: &Path) -> Result<()> {
-    let block = super::prompt_rules::standard_prompt_rules(
-        PROMPT_RULE_MARKER,
-        &PromptRulesOptions {
-            extra_paragraphs: &[],
+/// Resolve Copilot's own CLI, or fail with the typed requirement.
+///
+/// Copilot owns `~/.copilot/mcp-config.json` through `copilot mcp`. Its CLI is
+/// a hard requirement for that half of the lifecycle, not a preference with a
+/// config-editing fallback: emulating host-owned registry writes is precisely
+/// what the host-capability doctrine forbids.
+fn require_copilot_cli() -> Result<PathBuf> {
+    super::host_cli::require_host_cli(COPILOT_CLI, COPILOT_CLI_LIFECYCLE)
+}
+
+fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", path.display()),
+        }),
+    }
+}
+
+/// Drive Copilot's own registry to add the tracedecay MCP server.
+///
+/// Copilot's non-interactive form is
+/// `copilot mcp add <name> [-e KEY=VALUE] -- <command> <args…>`: everything
+/// after the `--` separator is the server's launch command line, so the
+/// command and [`MCP_SERVER_ARGS`] are passed as plain trailing words rather
+/// than as repeated flags. No `-e` pairs are passed; the tracedecay server
+/// needs no registry-supplied environment.
+///
+/// Split from the trait method so tests can supply a fake CLI and an isolated
+/// `HOME` without mutating the process environment.
+#[hotpath::measure(label = "copilot_mcp_install")]
+fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
+    let config_path = copilot_cli_mcp_config_path(home);
+    let previous_registration =
+        if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
+            let bytes = read_optional_config_bytes(&config_path)?.ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "{} disappeared while preparing the Copilot MCP refresh",
+                        config_path.display()
+                    ),
+                }
+            })?;
+            let metadata = super::capture_host_file_metadata(&config_path)?;
+            Some((bytes, metadata))
+        } else {
+            None
+        };
+    if previous_registration.is_some() {
+        copilot_mcp_remove_with(copilot_cli, home)?;
+    }
+    let mut args = vec!["mcp", "add", COPILOT_MCP_SERVER_NAME, "--", tracedecay_bin];
+    args.extend(MCP_SERVER_ARGS.iter().copied());
+    let result = run_mcp_registry_step(copilot_cli, &args, home);
+    let Err(add_error) = result else {
+        return Ok(());
+    };
+    let Some((previous_bytes, previous_metadata)) = previous_registration else {
+        return Err(add_error);
+    };
+    let current_bytes = read_optional_config_bytes(&config_path)?;
+    if let Err(restore_error) = super::text_file_transaction::restore_bytes_file_if_unchanged(
+        &config_path,
+        current_bytes.as_deref(),
+        &previous_bytes,
+        &previous_metadata,
+    ) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{add_error}; restoring the previous Copilot MCP registration also failed: \
+                 {restore_error}"
+            ),
+        });
+    }
+    Err(add_error)
+}
+
+/// Drive Copilot's own registry to drop the tracedecay MCP server.
+///
+/// ASSUMPTION: the removal verb is spelled `copilot mcp remove <name>`, the
+/// counterpart of the surveyed `copilot mcp add <name>` in the same `copilot
+/// mcp` command family. TraceDecay has no captured transcript of the removal
+/// command, so this spelling is unverified. It is safe to be wrong here in
+/// exactly one direction: an unknown subcommand exits non-zero and
+/// [`run_mcp_registry_step`] surfaces Copilot's own diagnosis instead of
+/// falling back to editing the host-owned registry. Should a capture show a
+/// different verb, change this one call site.
+fn copilot_mcp_remove_with(copilot_cli: &Path, home: &Path) -> Result<()> {
+    run_mcp_registry_step(
+        copilot_cli,
+        &["mcp", "remove", COPILOT_MCP_SERVER_NAME],
+        home,
+    )
+}
+
+fn run_mcp_registry_step(copilot_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
+    super::host_cli::run_mcp_registry_step_with_peer_projection(
+        copilot_cli,
+        args,
+        home,
+        &copilot_cli_mcp_config_path(home),
+        COPILOT_MCP_SERVER_NAME,
+        "Copilot CLI",
+        |peers| {
+            for server in peers
+                .values_mut()
+                .filter_map(serde_json::Value::as_object_mut)
+            {
+                let default_all_tools = server
+                    .get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tools| tools.len() == 1 && tools[0].as_str() == Some("*"));
+                if default_all_tools {
+                    server.remove("tools");
+                }
+            }
         },
-    );
-    super::prompt_rules::reconcile_prompt_rules(instructions_path, PROMPT_RULE_MARKER, &block)
-}
-
-/// Remove tracedecay rules from a copilot-instructions.md file.
-fn uninstall_prompt_rules(instructions_path: &Path) {
-    super::prompt_rules::remove_prompt_rules(instructions_path, PROMPT_RULE_MARKER);
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Check VS Code (or VS Code Insiders) settings.json has tracedecay MCP server registered.
+/// True when a registered server's `args` array carries every argument in
+/// [`MCP_SERVER_ARGS`].
+///
+/// Binding the doctor's expectation to the same constant the CLI invocation
+/// spells is what keeps the two from drifting: changing the launch arguments
+/// cannot silently leave the readback checking a stale word.
+fn server_args_are_current(server: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(args) = server.get("args").and_then(|value| value.as_array()) else {
+        return false;
+    };
+    MCP_SERVER_ARGS
+        .iter()
+        .all(|expected| args.iter().any(|arg| arg.as_str() == Some(*expected)))
+}
+
 fn doctor_check_vscode_settings(dc: &mut DoctorCounters, vscode_dir: &Path, label: &str) {
     let settings_path = vscode_dir.join("User/settings.json");
-
-    if !settings_path.exists() {
-        dc.warn(&format!(
+    doctor_check_mcp_document(
+        dc,
+        &settings_path,
+        load_jsonc_file,
+        |settings| {
+            settings
+                .get("mcp")
+                .and_then(|mcp| mcp.get("servers"))
+                .and_then(|servers| servers.get("tracedecay"))
+        },
+        &format!(
             "{} not found — run `tracedecay install --agent copilot` if you use GitHub Copilot in {label}",
             settings_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_jsonc_file(&settings_path);
-    let server = settings
-        .get("mcp")
-        .and_then(|v| v.get("servers"))
-        .and_then(|v| v.get("tracedecay"));
-
-    let Some(server) = server.and_then(|v| v.as_object()) else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent copilot`",
-            settings_path.display()
-        ));
-        return;
-    };
-    dc.pass(&format!(
-        "MCP server registered in {}",
-        settings_path.display()
-    ));
-
-    // Check args include "serve"
-    let has_serve = server
-        .get("args")
-        .and_then(|v| v.as_array())
-        .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("serve")));
-    if has_serve {
-        dc.pass("MCP server args include \"serve\"");
-    } else {
-        dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent copilot`");
-    }
+        ),
+    );
 }
 
-/// Check Copilot CLI mcp-config.json has tracedecay MCP server registered.
+/// Read-only: this document is written by `copilot mcp`, never by TraceDecay.
 fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
-    let settings_path = super::copilot_cli_dir(home).join("mcp-config.json");
-
-    if !settings_path.exists() {
-        dc.warn(&format!(
+    let settings_path = copilot_cli_mcp_config_path(home);
+    doctor_check_mcp_document(
+        dc,
+        &settings_path,
+        load_json_file,
+        |settings| {
+            settings
+                .get("mcpServers")
+                .and_then(|servers| servers.get("tracedecay"))
+        },
+        &format!(
             "{} not found — run `tracedecay install --agent copilot` if you use Copilot CLI",
             settings_path.display()
-        ));
+        ),
+    );
+}
+
+fn doctor_check_mcp_document(
+    dc: &mut DoctorCounters,
+    settings_path: &Path,
+    load: impl FnOnce(&Path) -> serde_json::Value,
+    lookup: impl FnOnce(&serde_json::Value) -> Option<&serde_json::Value>,
+    missing_file_warn: &str,
+) {
+    if !settings_path.exists() {
+        dc.warn(missing_file_warn);
         return;
     }
 
-    let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-
-    let Some(server) = server.and_then(|v| v.as_object()) else {
+    let settings = load(settings_path);
+    let Some(server) = lookup(&settings).and_then(serde_json::Value::as_object) else {
         dc.fail(&format!(
             "MCP server NOT registered in {} — run `tracedecay install --agent copilot`",
             settings_path.display()
@@ -543,13 +498,13 @@ fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
         settings_path.display()
     ));
 
-    let has_serve = server
-        .get("args")
-        .and_then(|v| v.as_array())
-        .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("serve")));
-    if has_serve {
+    if server_args_are_current(server) {
         dc.pass("MCP server args include \"serve\"");
     } else {
         dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent copilot`");
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;

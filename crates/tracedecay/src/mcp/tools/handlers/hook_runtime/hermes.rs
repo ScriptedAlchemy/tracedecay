@@ -1,0 +1,354 @@
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
+use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunStatus;
+use tracedecay_domain::errors::Result;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_host_admission::{SharedHostAdmissionBroker, TerminalReason};
+use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
+
+use super::required_str;
+use tracedecay_mcp::map_host_admission_outcome;
+
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.review")]
+pub(super) async fn user_review(
+    args: &Value,
+    profile_root: &Path,
+    session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
+) -> Result<Value> {
+    use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
+
+    let provider = required_str(args, "provider")?;
+    let session_id = args
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let run_id = args
+        .get("run_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let run = run_user_review(
+        profile_root,
+        Arc::clone(session_runtime_registry),
+        provider,
+        session_id,
+        run_id,
+        AutomationTrigger::HostReceipt,
+    )
+    .await?;
+    Ok(json!({
+        "action": "user_review",
+        "status": "completed",
+        "session_reflector": run.session_reflector.ledger_record.status,
+        "memory_curator": run.memory_curator.ledger_record.status,
+        "skill_writer": run.skill_writer.ledger_record.status,
+    }))
+}
+
+async fn run_user_review(
+    _profile_root: &std::path::Path,
+    _session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    _provider: &str,
+    _session_id: Option<String>,
+    _run_id: Option<String>,
+    _trigger: tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger,
+) -> Result<tracedecay_automation_runtime::automation::runner::UserSessionAutomationRun> {
+    Err(config_error(
+        "projectless Hermes review is unavailable: automation requires a pinned project configuration",
+    ))
+}
+
+async fn apply_projectless_hermes_receipt_plan(
+    profile_root: &Path,
+    plan: tracedecay_mcp::hook_events::HookEventPlan,
+) -> HostAdmissionOutcome {
+    let dashboard_root =
+        tracedecay_automation_runtime::automation::runner::user_automation_root(profile_root);
+    match plan {
+        tracedecay_mcp::hook_events::HookEventPlan::RecordTerminalReceipt { route, receipt } => {
+            match tracedecay_automation_runtime::automation::host_receipts::record(
+                &dashboard_root,
+                route,
+                receipt,
+            )
+            .await
+            {
+                Ok(true) => HostAdmissionOutcome::replay_completed(true, false),
+                Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
+                Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
+            }
+        }
+        tracedecay_mcp::hook_events::HookEventPlan::MarkTurnIngested {
+            route,
+            transcript_watermark,
+        } => match tracedecay_automation_runtime::automation::host_receipts::mark_turn_ingested(
+            &dashboard_root,
+            route,
+            &transcript_watermark,
+        )
+        .await
+        {
+            Ok(()) => HostAdmissionOutcome::replay_completed(true, false),
+            Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
+        },
+        _ => HostAdmissionOutcome::degraded("invalid_host_event_plan"),
+    }
+}
+
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.replay")]
+async fn replay_projectless_hermes_receipts(
+    broker: &SharedHostAdmissionBroker,
+    profile_root: &Path,
+    target_seq: Option<u64>,
+) -> std::result::Result<HostAdmissionOutcome, HostAdmissionOutcome> {
+    const MAX_RECORDS_PER_PASS: usize = 64;
+
+    let replay = broker.begin_replay().await?;
+    let mut attempted = HashSet::new();
+    let mut blocked_sources = HashSet::new();
+    let mut retained_leases = Vec::new();
+    let mut retained_outcome = None;
+    let mut target_outcome = None;
+    let mut terminal_outcome = None;
+    for _ in 0..MAX_RECORDS_PER_PASS {
+        let record = match replay.lease_next().await {
+            Ok(Some(record)) => record,
+            Ok(None) => break,
+            Err(outcome) => {
+                terminal_outcome = Some(outcome);
+                break;
+            }
+        };
+        if blocked_sources.contains(&record.source) {
+            retained_leases.push(record.seq);
+            continue;
+        }
+        if !attempted.insert(record.seq) {
+            let outcome = HostAdmissionOutcome::spool_ack_conflict();
+            blocked_sources.insert(record.source);
+            retained_leases.push(record.seq);
+            retained_outcome.get_or_insert(outcome.clone());
+            if target_seq == Some(record.seq) {
+                target_outcome = Some(outcome);
+            }
+            continue;
+        }
+        let plan =
+            match tracedecay_mcp::hook_events::decode_durable_hook_event_plan(&record.payload) {
+                Ok(plan) => plan,
+                Err(
+                    tracedecay_mcp::hook_events::DurableHookEventDecodeError::UnsupportedVersion,
+                ) => {
+                    let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
+                    blocked_sources.insert(record.source);
+                    retained_leases.push(record.seq);
+                    retained_outcome.get_or_insert(outcome.clone());
+                    if target_seq == Some(record.seq) {
+                        target_outcome = Some(outcome);
+                    }
+                    continue;
+                }
+                Err(tracedecay_mcp::hook_events::DurableHookEventDecodeError::Malformed) => {
+                    let outcome = HostAdmissionOutcome::durable_payload_malformed();
+                    match replay
+                        .quarantine(record.seq, TerminalReason::MalformedPayload)
+                        .await
+                    {
+                        Ok(_) => {
+                            retained_outcome.get_or_insert(outcome.clone());
+                            if target_seq == Some(record.seq) {
+                                target_outcome = Some(outcome);
+                            }
+                        }
+                        Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
+                            blocked_sources.insert(record.source);
+                            retained_leases.push(record.seq);
+                            retained_outcome.get_or_insert(failure.clone());
+                            if target_seq == Some(record.seq) {
+                                target_outcome = Some(failure);
+                            }
+                        }
+                        Err(failure) => {
+                            terminal_outcome = Some(failure);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            };
+        let canonical_outcome = apply_projectless_hermes_receipt_plan(profile_root, plan).await;
+        let outcome = if matches!(
+            canonical_outcome.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+        ) {
+            match replay.commit(record.seq).await {
+                Ok(_) => canonical_outcome,
+                Err(outcome) => {
+                    terminal_outcome = Some(outcome);
+                    break;
+                }
+            }
+        } else {
+            blocked_sources.insert(record.source);
+            retained_leases.push(record.seq);
+            retained_outcome.get_or_insert(canonical_outcome.clone());
+            canonical_outcome
+        };
+        if target_seq == Some(record.seq) {
+            target_outcome = Some(outcome);
+        }
+    }
+    for seq in retained_leases.into_iter().rev() {
+        replay.defer(seq).await?;
+    }
+    Ok(terminal_outcome
+        .or(target_outcome)
+        .or(retained_outcome)
+        .unwrap_or_else(HostAdmissionOutcome::accepted_for_replay))
+}
+
+pub(crate) async fn replay_projectless_hermes_host_admission(
+    broker: &SharedHostAdmissionBroker,
+    profile_root: &Path,
+) -> HostAdmissionOutcome {
+    replay_projectless_hermes_receipts(broker, profile_root, None)
+        .await
+        .unwrap_or_else(|outcome| outcome)
+}
+
+async fn continue_projectless_hermes_review(
+    profile_root: &Path,
+    session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
+    session_db: &RegisteredGlobalDb,
+) -> Result<Value> {
+    let dashboard_root =
+        tracedecay_automation_runtime::automation::runner::user_automation_root(profile_root);
+    let Some(ready) =
+        tracedecay_automation_runtime::automation::host_receipts::oldest_ready(&dashboard_root)
+            .await?
+    else {
+        return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
+    };
+    if session_db
+        .lcm_raw_message_store_id("hermes", &ready.transcript_watermark)
+        .await
+        .map_err(
+            |error| tracedecay_domain::errors::TraceDecayError::Database {
+                operation: "read Hermes transcript watermark".to_owned(),
+                message: error.to_string(),
+            },
+        )?
+        .is_none()
+    {
+        return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));
+    }
+    let session_id = ready
+        .pending
+        .route
+        .as_ref()
+        .and_then(|route| route.session_id.clone());
+    let run = run_user_review(
+        profile_root,
+        Arc::clone(session_runtime_registry),
+        "hermes",
+        session_id,
+        Some(format!("user_host_receipt_{}", ready.pending.generation)),
+        tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::HostReceipt,
+    )
+    .await?;
+    if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
+        && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
+        && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
+    {
+        tracedecay_automation_runtime::automation::host_receipts::mark_consumed(
+            &dashboard_root,
+            &ready.pending.session_key,
+            ready.pending.generation,
+        )
+        .await?;
+    }
+    Ok(json!({ "action": "hermes_receipt", "status": "reviewed" }))
+}
+
+#[hotpath::measure(future = true, label = "mcp.hook_runtime.hermes")]
+pub(super) async fn hermes_receipt(
+    args: &Value,
+    profile_root: &Path,
+    session_runtime_registry: Option<&Arc<DaemonSessionRuntimeRegistryV1>>,
+    session_db: &RegisteredGlobalDb,
+    broker: &SharedHostAdmissionBroker,
+) -> Result<Value> {
+    let event_value = args
+        .get("event")
+        .cloned()
+        .ok_or_else(|| config_error("missing required parameter `event`"))?;
+    let event: tracedecay_hooks::core_events::DaemonHookEvent =
+        serde_json::from_value(event_value.clone())?;
+    if event.receipt.is_none() {
+        return Err(config_error("Hermes event omitted receipt"));
+    }
+    let hook_event =
+        tracedecay_mcp::hook_events::parse_hook_event(Some(&event_value)).ok_or_else(|| {
+            config_error(format!("unsupported Hermes receipt event: {}", event.event))
+        })?;
+    let plan = tracedecay_mcp::hook_events::plan_hook_event(&hook_event, profile_root, None);
+    let is_turn_ingested = matches!(
+        plan,
+        tracedecay_mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
+    );
+    if !matches!(
+        plan,
+        tracedecay_mcp::hook_events::HookEventPlan::RecordTerminalReceipt { .. }
+            | tracedecay_mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
+    ) {
+        return Err(config_error(format!(
+            "unsupported Hermes receipt event: {}",
+            event.event
+        )));
+    }
+    if is_turn_ingested
+        && event
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.transcript_watermark.as_deref())
+            .is_none_or(str::is_empty)
+    {
+        return Err(config_error(
+            "Hermes turnIngested omitted transcript watermark",
+        ));
+    }
+    let payload = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan)
+        .map_err(|_| config_error("invalid Hermes receipt host event plan"))?;
+    let admitted = broker
+        .admit(&hook_event.admission_source(), &payload)
+        .await
+        .map_err(map_host_admission_outcome)?;
+    let outcome = replay_projectless_hermes_receipts(broker, profile_root, Some(admitted.seq))
+        .await
+        .map_err(map_host_admission_outcome)?;
+    if !matches!(
+        outcome.status,
+        HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+    ) {
+        return Err(map_host_admission_outcome(outcome));
+    }
+    if is_turn_ingested {
+        let session_runtime_registry = session_runtime_registry.ok_or_else(|| {
+            config_error("Hermes review requires retained profile runtime registry authority")
+        })?;
+        return continue_projectless_hermes_review(
+            profile_root,
+            session_runtime_registry,
+            session_db,
+        )
+        .await;
+    }
+    Ok(json!({ "action": "hermes_receipt", "status": "recorded" }))
+}
+
+#[cfg(test)]
+mod tests;

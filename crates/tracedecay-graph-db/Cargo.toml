@@ -1,0 +1,258 @@
+[package]
+name = "tracedecay-graph-db"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Embedded graph and vector storage boundary for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+include = ["/src/**"]
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-store/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+]
+test-helpers = ["graph-sealed-store"]
+eval-helpers = []
+
+# Opt-in tiered graph storage (never in `default`).
+#
+# Split in two on purpose, because grafeo 0.5.42 bundles two unrelated
+# things under the "tiered" name and only one of them is usable here.
+#
+# `graph-disk-tier` is the half that *could* be disk-backed:
+#   * `grafeo-engine/mmap` + `compact-store` compile in
+#     `database/compact_tiered.rs`, which serializes a `CompactStore`,
+#     mmaps it, and serves reads from the mapping.
+#   * `grafeo-engine/spill` enables the buffer manager's spill loop so
+#     `Config::with_spill_path` has any effect at all.
+# It also makes `GraphDbOpen` hand grafeo a spill directory and a bounded
+# memory budget; see `crates/tracedecay-graph-db/src/location.rs`.
+#
+# Compiling it in is not enough, and today it buys nothing. Reaching the
+# mmap tier takes an explicit `GrafeoDB::compact()` (grafeo-engine
+# `database/mod.rs`), which nothing in this crate calls, so the feature is
+# inert: measured against baseline at 100k/500k rows it moves peak RSS by
+# under 1%, inside run-to-run noise. Leave it off until something calls
+# `compact()`.
+#
+# Even then it would not tier the live graph. `SectionType::LpgStore` is
+# `mmap_able: false` (grafeo-common `storage/section.rs`), and
+# `SectionConsumer::can_spill()` returns exactly that flag, so every live
+# node and edge record is heap-resident by construction -- `TierOverride::
+# ForceDisk` on the LPG section is a silent no-op that frees zero bytes.
+# `compact()` freezes a columnar snapshot into the disk-eligible
+# `CompactStore`; all writes still land in a RAM-only `LpgStore` overlay.
+# Spilling covers the vector/text/ring index buffers and query scratch,
+# never LPG data.
+graph-disk-tier = [
+    "graph-sealed-store",
+    "grafeo-engine/mmap",
+    "grafeo-engine/compact-store",
+    "grafeo-engine/spill",
+]
+
+# Per-generation sealed compact stores (`src/sealed_store.rs`): at seal time
+# the verified generation's rows are copied into their own single-generation
+# Grafeo database, compacted with `GrafeoDB::compact()` (whose whole-database
+# scope then coincides exactly with the one immutable generation), and served
+# read-only after a recovered-digest proof. This is the narrow slice of the
+# grafeo storage features that lane needs: `compact-store` for `compact()`
+# and the columnar section, `mmap` for the mmap-backed base on reopen. It
+# deliberately excludes `spill`, so the staging database's memory behavior is
+# untouched — see `graph-disk-tier` above for that half.
+#
+# Without this feature the sealed-store lane is compiled out and every read
+# serves from the staging database exactly as before.
+graph-sealed-store = [
+    "grafeo-engine/mmap",
+    "grafeo-engine/compact-store",
+]
+
+# `graph-tiered-storage` adds grafeo-core's own `tiered-storage` feature on
+# top. Despite the name that feature is NOT about disk: it swaps the LPG
+# store's `FxHashMap<Id, VersionChain<Record>>` for an arena + `VersionIndex`
+# + compressed `EpochStore`, all of which are heap-resident (the arena calls
+# `std::alloc::alloc`; `EpochStore` holds `RwLock<HashMap<EpochId, ..>>`).
+#
+# This was unusable on published grafeo 0.5.42:
+# `Arena::alloc_value_with_offset` only ever allocated into `chunks.first()`,
+# because `HotVersionRef` addressed records by a u32 offset within a single
+# 1 MiB chunk that `LpgStore` had no way to enlarge. `NodeRecord` is 32
+# bytes, so an epoch hit a hard ceiling near 32 Ki records and then panicked
+# in `node_ops.rs` on `AllocError::InsufficientSpace`. The fork wired in
+# through `[patch.crates-io]` at the workspace root fixes it: the u32 is now
+# a flat address over the epoch's chunks, so an epoch grows to the 4 GiB a
+# u32 can reach and exhaustion is a typed error.
+#
+# The fix holds -- `tests/tiered_storage_rss.rs` commits 65,536-row pages,
+# twice the old ceiling, without panicking. It just does not pay off. The
+# arena costs resident memory rather than saving it, because nothing here is
+# ever written to disk: measured with that harness on the fork, live VmRSS
+# with the store open runs +22% at 100k rows, +32% at 500k, and +28% at 1M
+# (1873.8 -> 2405.7 MiB), and peak VmHWM +10%. Commit time is 3.3x worse at
+# 100k and roughly a wash by 1M.
+#
+# So this feature is a NO-GO for enabling, and the ceiling being gone is not
+# an argument for it. Keep it off; it exists to keep the fork exercised and
+# to make re-measuring cheap if grafeo ever gives `LpgStore` a real on-disk
+# representation.
+graph-tiered-storage = [
+    "graph-disk-tier",
+    "grafeo-core/tiered-storage",
+    "grafeo-core/mmap",
+]
+
+[dependencies]
+grafeo-adapters.workspace = true
+grafeo-common.workspace = true
+grafeo-core.workspace = true
+grafeo-engine.workspace = true
+grafeo-storage.workspace = true
+fs2 = "0.4"
+hex = "0.4"
+hotpath.workspace = true
+parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+# A rebuild the daemon pays for on every open is the failure this crate
+# is least able to notice from the inside: it is silent, correct, and
+# slow. The fallback paths say so out loud.
+tracing = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+tempfile = "3"
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+
+[[bench]]
+name = "native_state_100k"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "code_traversal"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "vector_search"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "mixed_read_write"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "vector_commit_refresh"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "replay_after_mismatch"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "publication_scale"
+harness = false
+required-features = ["test-helpers"]
+
+[[test]]
+name = "backup_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "cross_projection_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "durability_crash_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "open_error_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "point_read_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "projection_read_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "registry_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "runtime_contract"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "paged_relation_ids"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "semantic_vector_staging_contract"
+
+[[test]]
+name = "verified_generation_contract"
+required-features = ["test-helpers"]
+
+# Peak-RSS measurement harness for the tiered storage features. Every test in
+# it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.
+[[test]]
+name = "tiered_storage_rss"
+required-features = ["test-helpers"]
+
+# Residency probe for consecutive generation cycles (stage, retire, repeat)
+# on one incarnation — the issue #762 cross-cycle retention journey. Also
+# `#[ignore]`d.
+[[test]]
+name = "generation_cycle_rss"
+required-features = ["test-helpers"]
+
+# At-rest snapshot probe: reopen cost of a sealed generation, full LPG replay
+# vs a columnar CompactStore base. Also `#[ignore]`d. The `compact` half needs
+# `graph-disk-tier` for `GrafeoDB::compact()`; the `replay` baseline runs under
+# either feature state. See `docs/graph-at-rest/README.md`.
+[[test]]
+name = "at_rest_snapshot"
+required-features = ["test-helpers"]
+
+# Schema-neutral companion to `at_rest_snapshot`: the same close/reopen cycle
+# straight against grafeo, under a handful of shared labels instead of
+# TraceDecay's one-key-label-per-entity index. Prices the schema change.
+[[test]]
+name = "at_rest_grafeo_probe"
+required-features = ["test-helpers"]

@@ -1,0 +1,1323 @@
+#![allow(dead_code, unused_imports)]
+
+mod fixtures;
+
+pub(crate) use fixtures::{
+    SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_open_options, init_project,
+    read_artifact, seed_duplicate_facts, seed_project_session_activity,
+    seed_project_session_activity_at, seed_session_message_in_db,
+};
+#[cfg(feature = "test-transport")]
+pub(crate) use fixtures::{
+    project_session_runtime, seed_search_underuse_session_evidence, seed_session_activity,
+    seed_session_evidence,
+};
+
+pub(crate) use std::fs;
+pub(crate) use std::path::Path;
+pub(crate) use std::sync::Arc;
+use std::sync::Mutex;
+pub(crate) use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub(crate) use serde_json::{Value, json};
+pub(crate) use tempfile::tempdir;
+
+pub(crate) use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
+pub(crate) use tracedecay_automation_runtime::automation::automatic_facts::{
+    AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
+    record_session_automatic_facts,
+};
+pub(crate) use tracedecay_automation_runtime::automation::backend::{
+    AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+};
+pub(crate) use tracedecay_automation_runtime::automation::config::{
+    AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
+    AutomationTaskSet,
+};
+pub(crate) use tracedecay_automation_runtime::automation::managed_skills::{
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
+    ManagedSupportFile, create_managed_skill, load_managed_skill,
+};
+pub(crate) use tracedecay_automation_runtime::automation::run_ledger::{
+    AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
+    load_run_records, read_run_artifact_payload,
+};
+pub(crate) use tracedecay_automation_runtime::automation::runner::{
+    AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalEvidence,
+    AutomationTemporalEvidenceItem, AutomationTemporalRetrieval, CombinedReviewAutomationOptions,
+    CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
+    SkillWriterAutomationOptions, run_skill_writer_with_backend_and_retrieval,
+};
+pub(crate) use tracedecay_automation_runtime::automation::{
+    AutomationRunControl, AutomationRunError,
+};
+pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
+pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
+pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) fn test_automation_run_control(interrupted: Arc<AtomicBool>) -> AutomationRunControl {
+    let observed = Arc::clone(&interrupted);
+    AutomationRunControl::from_interrupted(Arc::new(move || observed.load(Ordering::Acquire)))
+}
+
+pub(crate) struct FixtureAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+}
+
+impl FixtureAutomationSessionRetrieval {
+    pub(crate) fn new(_cg: &TraceDecay) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("session-reflect-1").unwrap(),
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for FixtureAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move {
+            let provider = query.provider().unwrap_or("cursor").to_string();
+            let session_id = match query.retrieval_scope() {
+                tracedecay_session_memory::session::SessionRetrievalScope::Session(session_id) => {
+                    session_id.as_str().to_string()
+                }
+                tracedecay_session_memory::session::SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
+                    "session-reflect-1".to_string()
+                }
+            };
+            let message_id = if session_id == "project-reflect-1" {
+                "project-reflect-1-message-001"
+            } else {
+                "session-reflect-1-message-001"
+            };
+            AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
+                coverage: TemporalCoverageCountsV1 {
+                    visible: 1,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+                items: vec![AutomationTemporalEvidenceItem {
+                    anchor_id: "fixture-anchor-1".to_string(),
+                    stable_id: "fixture-stable-1".to_string(),
+                    provider,
+                    session_id,
+                    message_id: Some(message_id.to_string()),
+                    source_id: Some("fixture-occurrence-1".to_string()),
+                    store_id: Some(1),
+                    role: Some("user".to_string()),
+                    ordinal: Some(1),
+                    session_total_messages: Some(1),
+                    knowledge_at_micros: 1_715_000_000_000_000,
+                    normalized_score_micros: 1_000_000,
+                    snippet: json!({
+                        "provider": query.provider().unwrap_or("cursor"),
+                        "ordinal": 1,
+                        "session_total_messages": 1,
+                        "store_id": 1,
+                        "text": query.query(),
+                        "tool_names": "bash",
+                        "metadata_json": "{\"cmd\":\"rg automation src\"}",
+                    })
+                    .to_string(),
+                }],
+            })
+        })
+    }
+}
+
+pub(crate) struct StaticAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+    item: AutomationTemporalEvidenceItem,
+}
+
+impl StaticAutomationSessionRetrieval {
+    pub(crate) fn message(session_id: &str, message_id: &str, text: &str) -> Self {
+        Self::message_for_provider("cursor", session_id, message_id, text)
+    }
+
+    pub(crate) fn message_for_provider(
+        provider: &str,
+        session_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Self {
+        Self {
+            anchor_session_id: SessionId::new(session_id).unwrap(),
+            item: AutomationTemporalEvidenceItem {
+                anchor_id: "static-anchor".to_string(),
+                stable_id: "static-stable".to_string(),
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                message_id: Some(message_id.to_string()),
+                source_id: Some("static-occurrence".to_string()),
+                store_id: Some(1),
+                role: Some("user".to_string()),
+                ordinal: Some(1),
+                session_total_messages: Some(1),
+                knowledge_at_micros: 1_715_000_001_000_000,
+                normalized_score_micros: 1_000_000,
+                snippet: text.to_string(),
+            },
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for StaticAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move {
+            AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
+                items: vec![self.item.clone()],
+                coverage: TemporalCoverageCountsV1 {
+                    visible: 1,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+            })
+        })
+    }
+}
+
+pub(crate) struct RejectedAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+    reason: &'static str,
+}
+
+pub(crate) struct EmptyAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+}
+
+impl EmptyAutomationSessionRetrieval {
+    pub(crate) fn new() -> Self {
+        Self {
+            anchor_session_id: SessionId::new("empty-automation-fixture").unwrap(),
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for EmptyAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        _query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        Box::pin(async { AutomationTemporalRetrieval::CompleteZero })
+    }
+}
+
+impl RejectedAutomationSessionRetrieval {
+    pub(crate) fn new(reason: &'static str) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("rejected-automation-fixture").unwrap(),
+            reason,
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay_session_memory::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay_session_memory::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move { AutomationTemporalRetrieval::Rejected(self.reason) })
+    }
+}
+
+pub(crate) async fn run_session_reflector_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    backend: &dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+) -> Result<
+    tracedecay_automation_runtime::automation::runner::SessionReflectorAutomationRun,
+    AutomationRunError,
+> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
+        cg,
+        config,
+        run_control,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
+    )
+    .await
+}
+
+pub(crate) async fn run_skill_writer_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+) -> Result<
+    tracedecay_automation_runtime::automation::runner::SkillWriterAutomationRun,
+    AutomationRunError,
+> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
+    )
+    .await
+}
+
+pub(crate) async fn run_combined_review_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    backend: &dyn AgentTaskBackend,
+    options: CombinedReviewAutomationOptions,
+) -> tracedecay_domain::errors::Result<CombinedReviewDispatch> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
+        run_control,
+    )
+    .await
+}
+
+pub(crate) async fn run_memory_curator_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    backend: &dyn AgentTaskBackend,
+    options: MemoryCuratorAutomationOptions,
+) -> Result<
+    tracedecay_automation_runtime::automation::runner::MemoryCuratorAutomationRun,
+    AutomationRunError,
+> {
+    tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        options,
+        run_control,
+    )
+    .await
+}
+
+pub(crate) fn test_configuration_revision() -> ConfigurationRevisionId {
+    ConfigurationRevisionId::new("config.automation-test.v1").expect("configuration revision")
+}
+
+pub(crate) fn project_memory_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("initialized test project has an authoritative project id");
+    tracedecay_domain::FactOwnerV1::Project {
+        project_id: tracedecay_domain::ProjectId::new(project_id)
+            .expect("initialized test project id is valid"),
+    }
+}
+
+pub(crate) struct JsonBackend {
+    calls: AtomicUsize,
+    output: Value,
+    model: Option<String>,
+}
+
+impl JsonBackend {
+    pub(crate) fn new(output: Value) -> Self {
+        Self::new_with_model(output, Some("fixture-model"))
+    }
+
+    pub(crate) fn new_with_model(output: Value, model: Option<&str>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            output,
+            model: model.map(str::to_string),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for JsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, AgentTaskKind::MemoryCurator);
+        assert_request_contract(request, "memory_curator", "memory_curator:v1", "ops");
+        assert!(
+            request.prompt.contains("canonical current facts"),
+            "runner should build a task prompt from the curation messages"
+        );
+        assert_eq!(
+            request.context["llm_review"]["status"],
+            json!("needs_llm_review")
+        );
+        assert_eq!(request.context["apply"], json!(true));
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: self.model.clone(),
+            provider: self.model.as_ref().map(|_| "fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) struct SessionJsonBackend {
+    calls: AtomicUsize,
+    output: Value,
+}
+
+pub(crate) struct SkillJsonBackend {
+    calls: AtomicUsize,
+    output: Value,
+}
+
+pub(crate) struct SequentialJsonBackend {
+    calls: AtomicUsize,
+    outputs: Mutex<std::collections::VecDeque<Value>>,
+}
+
+impl SequentialJsonBackend {
+    pub(crate) fn new(outputs: Vec<Value>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            outputs: Mutex::new(outputs.into()),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for SequentialJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let output = self
+            .outputs
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("sequential backend output");
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: output.to_string(),
+            output_json: Some(output),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) struct SkillTextBackend {
+    calls: AtomicUsize,
+    output: &'static str,
+}
+
+pub(crate) struct InspectSkillWriterUsageBackend;
+
+pub(crate) struct InspectSkillWriterUnderusedBackend;
+
+pub(crate) struct FailingBackend {
+    calls: AtomicUsize,
+    task: AgentTaskKind,
+    message: &'static str,
+}
+
+pub(crate) struct MalformedTextBackend {
+    calls: AtomicUsize,
+    task: AgentTaskKind,
+    output: &'static str,
+}
+
+impl SkillJsonBackend {
+    pub(crate) fn new(output: Value) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            output,
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for SkillJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, AgentTaskKind::SkillWriter);
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        assert!(request.prompt.contains("managed skill creates or updates"));
+        assert_eq!(request.context["apply"], json!(true));
+        assert_eq!(
+            request.context["activation_policy"],
+            json!("validate_then_activate")
+        );
+        assert!(
+            request.context["skill_writer_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
+        let evidence = &request.context["skill_writer_evidence"];
+        assert!(evidence["skill_usage_summaries"].is_array());
+        assert!(evidence["stale_recommendations"].is_array());
+        assert!(evidence["skill_improvement_recommendations"].is_array());
+        if evidence["existing_managed_skills"]
+            .as_array()
+            .is_some_and(|skills| !skills.is_empty())
+        {
+            assert!(
+                evidence["skill_usage_summaries"]
+                    .as_array()
+                    .is_some_and(|summaries| !summaries.is_empty())
+            );
+            assert!(
+                evidence["stale_recommendations"]
+                    .as_array()
+                    .is_some_and(|recommendations| !recommendations.is_empty())
+            );
+            assert!(
+                evidence["skill_improvement_recommendations"]
+                    .as_array()
+                    .is_some_and(|recommendations| !recommendations.is_empty())
+            );
+        }
+        if let Some(support) = evidence["existing_managed_skills"]
+            .as_array()
+            .and_then(|skills| skills.first())
+            .and_then(|skill| skill["support_files"].as_array())
+            .and_then(|files| files.first())
+        {
+            assert_eq!(support["bytes"], json!(13));
+            assert!(support["sha256"].as_str().is_some_and(|hash| {
+                hash.starts_with("sha256:") && hash.len() == "sha256:".len() + 64
+            }));
+            assert_eq!(support["text_preview"], json!("old checklist"));
+            assert_eq!(support["text_preview_chars"], json!(1200));
+            assert_eq!(support["text_truncated"], json!(false));
+        }
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+impl SkillTextBackend {
+    pub(crate) fn new(output: &'static str) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            output,
+        }
+    }
+}
+
+impl AgentTaskBackend for InspectSkillWriterUsageBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        assert_eq!(request.task, AgentTaskKind::SkillWriter);
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        let summaries = request.context["skill_writer_evidence"]["skill_usage_summaries"]
+            .as_array()
+            .expect("skill usage summaries should be present");
+        let summary = summaries
+            .iter()
+            .find(|summary| summary["skill_id"] == "automation-run-review")
+            .expect("skill writer evidence should include automation-run-review usage");
+        assert_eq!(summary["view_count"], json!(1));
+        assert_eq!(summary["last_viewed_at"], json!(1_715_000_111_i64));
+        assert!(
+            summary["targets"]
+                .as_array()
+                .is_some_and(|targets| targets.contains(&json!("codex")))
+        );
+        let underused = request.context["skill_writer_evidence"]["underused_tool_families"]
+            .as_array()
+            .expect("underused tool families should be present");
+        let code_search = underused
+            .iter()
+            .find(|family| family["family"] == "code_search")
+            .expect("code_search family should be present");
+        assert_eq!(code_search["relevant_events"], json!(1));
+        assert_eq!(code_search["usage_events"], json!(0));
+        assert_eq!(code_search["underused"], json!(true));
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: json!({"skills": []}).to_string(),
+            output_json: Some(json!({"skills": []})),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        assert_eq!(request.task, AgentTaskKind::SkillWriter);
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        let families = request.context["skill_writer_evidence"]["underused_tool_families"]
+            .as_array()
+            .expect("underused tool family evidence should be present");
+        let code_search = families
+            .iter()
+            .find(|family| family["family"] == "code_search")
+            .expect("code_search underuse evidence should be present");
+        assert_eq!(code_search["relevant_events"], json!(1));
+        assert_eq!(code_search["usage_events"], json!(0));
+        assert_eq!(code_search["missed_events"], json!(1));
+        assert_eq!(code_search["underused"], json!(true));
+        let recommendations =
+            request.context["skill_writer_evidence"]["skill_improvement_recommendations"]
+                .as_array()
+                .expect("skill improvement recommendations should be present");
+        assert!(recommendations.iter().any(|recommendation| {
+            recommendation["id"] == "underused_tool_family:code_search"
+                && recommendation["recommendation"] == "diagnose_routing_or_tooling_gap"
+                && recommendation["source"] == "session_tool_usage"
+        }));
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: json!({"skills": []}).to_string(),
+            output_json: Some(json!({"skills": []})),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) use crate::common::EnvVarGuard;
+
+/// Pins the profile database override at the test project's isolated session
+/// store. Callers must hold [`ENV_LOCK`] while the guard is alive.
+pub(crate) fn isolate_global_db(cg: &TraceDecay) -> EnvVarGuard {
+    EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &cg.store_layout().sessions_db_path)
+}
+
+impl FailingBackend {
+    pub(crate) fn new(task: AgentTaskKind) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            task,
+            message: "codex app-server backend executable 'codex' was not found",
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for FailingBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, self.task);
+        Err(tracedecay_automation::backend::AgentTaskError::from_backend_message(self.message))
+    }
+}
+
+impl AgentTaskBackend for SkillTextBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, AgentTaskKind::SkillWriter);
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: None,
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+impl MalformedTextBackend {
+    pub(crate) fn new(task: AgentTaskKind, output: &'static str) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            task,
+            output,
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for MalformedTextBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, self.task);
+        let (task_key, prompt_version, required_property) = match self.task {
+            AgentTaskKind::MemoryCurator => ("memory_curator", "memory_curator:v1", "ops"),
+            AgentTaskKind::SessionReflector => {
+                ("session_reflector", "session_reflector:v2", "facts")
+            }
+            AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v2", "skills"),
+            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v1", "facts"),
+            AgentTaskKind::UserJob => unreachable!("user jobs are not strict-JSON tasks"),
+        };
+        assert_request_contract(request, task_key, prompt_version, required_property);
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: None,
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+impl SessionJsonBackend {
+    pub(crate) fn new(output: Value) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            output,
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for SessionJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, AgentTaskKind::SessionReflector);
+        assert_request_contract(
+            request,
+            "session_reflector",
+            "session_reflector:v2",
+            "facts",
+        );
+        if call_index == 0 {
+            assert!(request.prompt.contains("durable memory facts"));
+        } else {
+            assert!(
+                request
+                    .prompt
+                    .contains("Repair the previous session fact JSON")
+            );
+        }
+        assert_eq!(request.context["apply"], json!(true));
+        assert!(
+            request.context["session_reflection_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) struct CombinedJsonBackend {
+    calls: AtomicUsize,
+    output: Value,
+}
+
+impl CombinedJsonBackend {
+    pub(crate) fn new(output: Value) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            output,
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for CombinedJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.task, AgentTaskKind::CombinedReview);
+        assert_eq!(request.contract.task_key, "combined_review");
+        assert_eq!(request.contract.prompt_version, "combined_review:v1");
+        assert!(request.contract.strict_json);
+        assert_eq!(
+            request.contract.response_schema["required"],
+            json!(["facts", "skills"])
+        );
+        // The combined prompt must compose both per-task prompts.
+        assert!(request.prompt.contains("durable memory facts"));
+        assert!(request.prompt.contains("managed skill creates or updates"));
+        // The agentic curation cutover removed the human-approval gate:
+        // combined review dispatches with apply=true and terminal effects
+        // commit automatically (e76d8c237, 17dbee838, ed3775692).
+        assert_eq!(request.context["apply"], json!(true));
+        assert!(request.context["activation_policy"].is_string());
+        assert!(
+            request.context["session_reflection_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
+        assert!(
+            request.context["skill_writer_evidence"]["hits"]
+                .as_array()
+                .is_some_and(|hits| !hits.is_empty())
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) struct InspectSessionEvidenceBackend;
+
+impl AgentTaskBackend for InspectSessionEvidenceBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        assert_eq!(request.task, AgentTaskKind::SessionReflector);
+        assert_request_contract(
+            request,
+            "session_reflector",
+            "session_reflector:v2",
+            "facts",
+        );
+        let evidence = &request.context["session_reflection_evidence"];
+        assert!(evidence.get("storage_scope").is_none());
+        assert!(evidence.get("hermes_home").is_none());
+        assert_eq!(evidence["provider"], json!("cursor"));
+        assert!(
+            evidence["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("banana"))
+        );
+        assert_eq!(evidence["scope"], json!("session"));
+        assert_eq!(evidence["session_id"], json!("project-reflect-1"));
+        assert_eq!(evidence["include_summaries"], json!(false));
+        assert_eq!(evidence["sort"], json!("relevance"));
+        assert_eq!(evidence["source"], json!("project_lcm"));
+        assert_eq!(evidence["role"], json!("assistant"));
+        assert_eq!(evidence["start_time"], json!(1_715_100_000_i64));
+        assert_eq!(evidence["end_time"], json!(1_715_100_010_i64));
+        assert_eq!(evidence["evidence_mode"], json!("grep_only"));
+        assert_eq!(evidence["recent_session_slices"], json!(null));
+        let hits = evidence["hits"].as_array().expect("hits array");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["session_id"], json!("project-reflect-1"));
+        assert!(
+            hits[0]["snippet"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: json!({"facts": []}).to_string(),
+            output_json: Some(json!({"facts": []})),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+/// Asserts the session reflector received session-replay evidence for one
+/// recently active session (with no keyword grep hits) and replies with the
+/// configured facts output.
+pub(crate) struct SessionReplayEvidenceBackend {
+    output: Value,
+    expected_session_id: &'static str,
+    expected_message_id: &'static str,
+}
+
+impl SessionReplayEvidenceBackend {
+    pub(crate) fn new(
+        output: Value,
+        expected_session_id: &'static str,
+        expected_message_id: &'static str,
+    ) -> Self {
+        Self {
+            output,
+            expected_session_id,
+            expected_message_id,
+        }
+    }
+}
+
+impl AgentTaskBackend for SessionReplayEvidenceBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        assert_eq!(request.task, AgentTaskKind::SessionReflector);
+        assert_request_contract(
+            request,
+            "session_reflector",
+            "session_reflector:v2",
+            "facts",
+        );
+        let evidence = &request.context["session_reflection_evidence"];
+        assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
+        assert_eq!(
+            evidence["hits"][0]["message_id"],
+            json!(self.expected_message_id)
+        );
+        let slices = &evidence["recent_session_slices"];
+        assert_eq!(slices["mode"], json!("recent_sessions"));
+        assert_eq!(slices["session_selection"], json!("recent_activity"));
+        assert_eq!(slices["bounds"]["head_turns"], json!(4));
+        assert_eq!(slices["bounds"]["tail_turns"], json!(4));
+        let sessions = slices["sessions"].as_array().expect("replay sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0]["session_id"],
+            json!(self.expected_session_id),
+            "replay slice should target the recently active session"
+        );
+        let head = sessions[0]["head"].as_array().expect("head turns");
+        assert!(
+            head.iter()
+                .any(|message| message["message_id"] == json!(self.expected_message_id)),
+            "replayed head turns should include the seeded message"
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.to_string(),
+            output_json: Some(self.output.clone()),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+/// Asserts the skill writer received session-replay evidence (with no
+/// keyword grep hits) and replies with an empty skills array.
+pub(crate) struct SkillWriterReplayEvidenceBackend {
+    expected_session_id: &'static str,
+}
+
+impl SkillWriterReplayEvidenceBackend {
+    pub(crate) fn new(expected_session_id: &'static str) -> Self {
+        Self {
+            expected_session_id,
+        }
+    }
+}
+
+impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        assert_eq!(request.task, AgentTaskKind::SkillWriter);
+        assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
+        let evidence = &request.context["skill_writer_evidence"];
+        assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
+        assert_eq!(
+            evidence["hits"][0]["session_id"],
+            json!(self.expected_session_id)
+        );
+        let slices = &evidence["recent_session_slices"];
+        assert_eq!(slices["mode"], json!("recent_sessions"));
+        assert_eq!(slices["session_selection"], json!("recent_activity"));
+        let sessions = slices["sessions"].as_array().expect("replay sessions");
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session["session_id"] == json!(self.expected_session_id)),
+            "replay slices should include the recently active session"
+        );
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: json!({"skills": []}).to_string(),
+            output_json: Some(json!({"skills": []})),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
+}
+
+pub(crate) fn assert_request_contract(
+    request: &AgentTaskRequest,
+    task_key: &str,
+    prompt_version: &str,
+    required_property: &str,
+) {
+    assert_eq!(request.contract.task_key, task_key);
+    assert_eq!(request.contract.prompt_version, prompt_version);
+    assert!(request.contract.strict_json);
+    assert_eq!(request.contract.response_schema["type"], json!("object"));
+    assert_eq!(
+        request.contract.response_schema["required"][0],
+        json!(required_property)
+    );
+    assert_eq!(
+        request.contract.response_schema["properties"][required_property]["type"],
+        json!("array")
+    );
+    assert!(request.input_hash.starts_with("sha256:"));
+    assert_ne!(
+        request.evidence_hash.as_deref(),
+        Some(request.input_hash.as_str())
+    );
+}
+
+pub(crate) fn assert_noop_fallback_record(
+    record: &AutomationRunLedgerRecord,
+    task: AgentTaskKind,
+    task_key: &str,
+    expected_output: Value,
+) {
+    assert_eq!(record.task, task);
+    assert_eq!(record.task_key.as_deref(), Some(task_key));
+    assert_eq!(record.status, AutomationRunStatus::Failed);
+    assert_eq!(record.reviewed_count, 0);
+    assert_eq!(record.accepted_count, 0);
+    assert_eq!(record.rejected_count, 0);
+    assert_eq!(record.proposed_ops.as_ref(), Some(&expected_output));
+    assert!(
+        record
+            .output_hash
+            .as_deref()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    assert_eq!(
+        record.fallback_status.as_deref(),
+        Some("backend_failed_noop")
+    );
+    assert_eq!(
+        record.error_classification,
+        Some(AgentTaskFailureClass::Unavailable)
+    );
+    assert_eq!(record.error_retryable, Some(true));
+    assert!(record.evidence_hash.is_some());
+    assert!(record.input_hash.is_some());
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("executable"))
+    );
+}
+
+/// Standalone automation config with only the skill writer task enabled on a
+/// manual schedule; override fields with struct update syntax where needed.
+pub(crate) fn enabled_skill_writer_config() -> AutomationConfig {
+    AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    }
+}
+
+/// Manual-trigger skill writer options matching the seeded "automation" fixture
+/// evidence, rooted at the given managed-skill profile directory.
+pub(crate) fn manual_skill_writer_options(profile_root: &Path) -> SkillWriterAutomationOptions {
+    SkillWriterAutomationOptions {
+        provider: "cursor".to_string(),
+        query: "automation".to_string(),
+        evidence_limit: 5,
+        profile_root: Some(profile_root.to_path_buf()),
+        ..SkillWriterAutomationOptions::default()
+    }
+}
+
+pub(crate) fn scheduler_config(
+    interval_secs: Option<u64>,
+    cooldown_secs: Option<u64>,
+) -> AutomationConfig {
+    AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            memory_curator: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("interval".to_string()),
+                interval_secs,
+                cooldown_secs,
+                ..AutomationTaskConfig::default()
+            },
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("interval".to_string()),
+                interval_secs,
+                cooldown_secs,
+                ..AutomationTaskConfig::default()
+            },
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("interval".to_string()),
+                interval_secs,
+                cooldown_secs,
+                ..AutomationTaskConfig::default()
+            },
+        },
+        ..AutomationConfig::default()
+    }
+}
+
+pub(crate) fn scheduler_record(
+    run_id: &str,
+    status: AutomationRunStatus,
+    completed_at: i64,
+) -> AutomationRunLedgerRecord {
+    scheduler_record_for(run_id, AgentTaskKind::MemoryCurator, status, completed_at)
+}
+
+pub(crate) fn scheduler_record_for(
+    run_id: &str,
+    task: AgentTaskKind,
+    status: AutomationRunStatus,
+    completed_at: i64,
+) -> AutomationRunLedgerRecord {
+    AutomationRunLedgerRecord {
+        schema_version: 2,
+        run_id: run_id.to_string(),
+        trigger: AutomationTrigger::Scheduler,
+        task,
+        task_key: Some(test_task_key(task).to_string()),
+        backend: "codex_app_server".to_string(),
+        backend_identity: None,
+        host_mode: Some("standalone".to_string()),
+        prompt_version: Some(test_prompt_version(task).to_string()),
+        response_schema: None,
+        strict_json: None,
+        model: None,
+        status,
+        evidence_hash: None,
+        input_hash: None,
+        output_hash: None,
+        proposed_ops: None,
+        applied_ops: None,
+        rejected_ops: None,
+        validation_report: None,
+        reviewed_count: 0,
+        accepted_count: 0,
+        rejected_count: 0,
+        skipped_count: usize::from(status == AutomationRunStatus::Skipped),
+        error: None,
+        error_classification: None,
+        error_retryable: None,
+        backend_attempt_count: 0,
+        backend_attempts: Vec::new(),
+        fallback_status: None,
+        report_ref: None,
+        artifacts: Vec::new(),
+        started_at: (completed_at - 1).to_string(),
+        completed_at: completed_at.to_string(),
+        completed_at_micros: Some(completed_at.saturating_mul(1_000_000)),
+    }
+}
+pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
+    match task {
+        AgentTaskKind::MemoryCurator => "memory_curator",
+        AgentTaskKind::SessionReflector => "session_reflector",
+        AgentTaskKind::SkillWriter => "skill_writer",
+        AgentTaskKind::CombinedReview => "combined_review",
+        AgentTaskKind::UserJob => "user_job",
+    }
+}
+
+pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
+    match task {
+        AgentTaskKind::MemoryCurator => "memory_curator:v1",
+        AgentTaskKind::SessionReflector => "session_reflector:v2",
+        AgentTaskKind::SkillWriter => "skill_writer:v2",
+        AgentTaskKind::CombinedReview => "combined_review:v1",
+        AgentTaskKind::UserJob => "user_job:v1",
+    }
+}
+
+/// Authored routing examples are proposal input, not measured adoption results.
+pub(crate) fn skill_routing_validation(skill_id: &str) -> Value {
+    json!([
+        {
+            "id": format!("{skill_id}-positive"),
+            "category": "skill_routing",
+            "fixture": "main",
+            "status": "active",
+            "hosts": ["codex"],
+            "prompt": format!("Review the repeated workflow covered by {skill_id} using its run evidence."),
+            "ground_truth": ["The response identifies the recorded workflow failure and a supported remedy."],
+            "max_tool_calls": 8,
+            "expected_skill": skill_id
+        },
+        {
+            "id": format!("{skill_id}-neighbor"),
+            "category": "skill_routing",
+            "fixture": "main",
+            "status": "active",
+            "hosts": ["codex"],
+            "prompt": "Locate the pricing function and explain its callers.",
+            "ground_truth": ["The response identifies the pricing function and its actual callers."],
+            "max_tool_calls": 8,
+            "expected_skill": "tracing-functions"
+        },
+        {
+            "id": format!("{skill_id}-negative"),
+            "category": "skill_routing",
+            "fixture": "main",
+            "status": "active",
+            "hosts": ["codex"],
+            "prompt": "What is two plus two?",
+            "ground_truth": ["The response answers four without loading a skill."],
+            "max_tool_calls": 0,
+            "allowed_skills": []
+        }
+    ])
+}

@@ -1,0 +1,72 @@
+[package]
+name = "tracedecay-graph-query"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+description = "Generation-pinned verified code-graph queries and code-index-backed source readers"
+include = ["/src/**"]
+
+[dependencies]
+hotpath.workspace = true
+serde_json = "1"
+thiserror = "2"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+# Grammar-free entry only: `markdown_structure` compiles with no language
+# feature enabled, so section structure reaches retrieval without linking a
+# tree-sitter bundle into this crate.
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-session-memory/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+]
+# Explicit opt-in: exposes the fixture-only `VerifiedGraphQuery`
+# constructors (`from_fixture_reader`, `with_source`) to dependent crates'
+# test builds. Never part of `default`.
+test-helpers = []
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }

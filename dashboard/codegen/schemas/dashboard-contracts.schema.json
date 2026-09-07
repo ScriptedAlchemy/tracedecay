@@ -2168,6 +2168,71 @@
       "description": "Strongly typed canonical identity: `CatalogGenerationId`.",
       "type": "string"
     },
+    "CodeGraphServingReadinessV1": {
+      "description": "Interactive graph-serving state for the latest sealed generation.\n\nA sealed generation can expose truthful census statistics before its graph\nprojection is ready to serve queries, so readiness is reported separately.",
+      "oneOf": [
+        {
+          "description": "No graph-serving authority exists for this worktree or generation.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The sealed generation exists, but graph activation has not completed.",
+          "properties": {
+            "state": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Graph activation completed without a serving projection.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "refused",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The verified graph projection is installed for interactive reads.",
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CodeIndexBuildBlockedReasonV1": {
       "description": "A typed reason an otherwise active generation cannot make durable progress.",
       "enum": [
@@ -2367,6 +2432,42 @@
       ],
       "type": "object"
     },
+    "CodeIndexConvergenceParkedV1": {
+      "description": "A deterministic contract violation that parked background convergence.\n\nParked is not dead: the worker keeps re-observing the violation on its\nordinary wake cadence, so an operator fix (for example restoring an\nowner-private mode) is picked up on the next wake without a restart. The\nstate exists so `status`, doctor, and the dashboard report the violation\ntyped instead of an indefinite \"warming\".",
+      "properties": {
+        "observed_passes": {
+          "description": "Background passes that re-observed the violation since parking.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parked_at_micros": {
+          "description": "When the violation was first observed (microseconds since the Unix epoch).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Exact typed failure that parked convergence.",
+          "type": "string"
+        },
+        "remediation": {
+          "description": "Operator action that clears the violation.",
+          "type": "string"
+        },
+        "retries_on_wake": {
+          "description": "Whether the worker re-checks this violation on every ordinary wake.\nTrue for filesystem/contract violations an operator fix clears in\nplace; false for an abnormal task failure that only changed input (a\nnew sealed generation) retries.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reason",
+        "remediation",
+        "parked_at_micros",
+        "observed_passes",
+        "retries_on_wake"
+      ],
+      "type": "object"
+    },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
         "note": {
@@ -2382,6 +2483,40 @@
       "required": [
         "worktrees",
         "note"
+      ],
+      "type": "object"
+    },
+    "CodeIndexGenerationRecoveryServingV1": {
+      "description": "Serving disposition of an incompatible generation during recovery.",
+      "enum": [
+        "preserved",
+        "refused"
+      ],
+      "type": "string"
+    },
+    "CodeIndexGenerationRecoveryV1": {
+      "description": "Recovery state for a durable generation sealed under a different production\nowner configuration.",
+      "properties": {
+        "incompatibilities": {
+          "description": "Stable owner-input reason codes reported by the code-index authority.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "incompatible_generation_id": {
+          "description": "Generation retired from incremental reuse.",
+          "type": "string"
+        },
+        "serving": {
+          "$ref": "#/$defs/CodeIndexGenerationRecoveryServingV1",
+          "description": "Whether the prior generation may continue serving while its replacement\nbuilds under the current configuration."
+        }
+      },
+      "required": [
+        "incompatible_generation_id",
+        "incompatibilities",
+        "serving"
       ],
       "type": "object"
     },
@@ -2504,9 +2639,31 @@
     "CodeIndexWorktreeFreshnessV1": {
       "description": "Freshness/generation state for one mounted worktree.\n\n`Deserialize` is part of the wire contract: the CLI status command decodes\nexactly this type back out of the daemon's `tracedecay_status` response,\nkeeping one authority for the freshness shape.",
       "properties": {
+        "code_graph_serving": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeGraphServingReadinessV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether that generation's verified graph projection can serve reads."
+        },
         "coverage": {
           "description": "Whether this read covers the complete mounted scheduler state.",
           "type": "string"
+        },
+        "generation_recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexGenerationRecoveryV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "One-shot owner-configuration recovery currently replacing an\nincompatible durable generation."
         },
         "hook_hint_count": {
           "description": "Pending hook-hint count, when cheaply available.",
@@ -2532,6 +2689,17 @@
             "null"
           ]
         },
+        "parked": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexConvergenceParkedV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Deterministic contract violation currently parking background\nconvergence, when one is observed. `staleness_state` reads `parked`\nwhile this is set and no generation serves."
+        },
         "progress": {
           "anyOf": [
             {
@@ -2542,6 +2710,11 @@
             }
           ],
           "description": "Latest committed progress for the active generation, if one is mounted."
+        },
+        "rebuild_in_flight": {
+          "default": false,
+          "description": "Whether the exact scheduler route owns a reconcile pass or has a\npending wake. A stale seated generation with this false is stalled,\nnot in a routine rebuild window.",
+          "type": "boolean"
         },
         "repository_id": {
           "description": "Stable repository identity resolved by the scheduler.",
@@ -2609,9 +2782,11 @@
         "sealed_at_micros",
         "last_reconcile_micros",
         "staleness_state",
+        "rebuild_in_flight",
         "hook_hint_count",
         "coverage",
-        "progress"
+        "progress",
+        "parked"
       ],
       "type": "object"
     },

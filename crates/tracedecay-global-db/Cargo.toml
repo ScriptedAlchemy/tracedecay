@@ -1,0 +1,144 @@
+[package]
+name = "tracedecay-global-db"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "TraceDecay user-level global database: project registry, observations, session temporal store"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+include = ["/src/**"]
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-application/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-session-temporal-store/hotpath",
+    "tracedecay-lcm/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-session-temporal-store/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-session-temporal-store/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+]
+# Explicit opt-in (same policy as the query kernel): exposes the registered
+# global-db harness to dependent crates' test builds only.
+test-helpers = [
+    "tracedecay-runtime-core/test-helpers",
+    "tracedecay-session-temporal-store/test-helpers",
+    "dep:tempfile",
+    "dep:tracedecay-private-fs",
+]
+
+[dependencies]
+base64 = "0.22"
+futures-util = "0.3.33"
+getrandom = "0.2"
+hex = "0.4"
+hmac = { version = "0.13.0", features = ["zeroize"] }
+hotpath.workspace = true
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+zeroize = "1.9.0"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+# Test-only harnesses in this crate build temporary stores. Optional and
+# activated by `test-helpers` (the only non-`cfg(test)` consumer is the
+# re-exported `tests::` harness); the crate's own `cfg(test)` builds resolve
+# it from dev-dependencies, so production builds never link it.
+tempfile = { version = "3", optional = true }
+# Same policy: the shared harness installs the process background CPU
+# authority; production code in this crate never touches it.
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+# Test-only helper surfaces this crate's test targets reach across crate
+# boundaries: engine fixtures, session normalizers, and temporal page requests.
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+# `test-transport` exposes the maintenance-authority fixture publisher this
+# crate's WAL reclaim tests need to prove exclusive-maintenance truncation.
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers", "test-transport"] }
+# The shared harness (`src/tests/harness.rs`) installs the process background
+# CPU authority for this crate's own `cfg(test)` builds.
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
+
+[[bench]]
+name = "session_activity_reads"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "lcm_expansion"
+harness = false
+required-features = ["test-helpers"]
+
+# Exercises this crate's existing `#[hotpath::measure]` labels in both
+# feature modes; needs the registered-store harness, never `default`.
+[[test]]
+name = "hotpath_coverage"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "schema_convergence_hotpath"
+required-features = ["test-helpers", "hotpath-alloc"]
+
+[[bench]]
+name = "stack_delivery_batch"
+harness = false
+required-features = ["test-helpers"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

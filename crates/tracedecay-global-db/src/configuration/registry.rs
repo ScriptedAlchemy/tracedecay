@@ -1,0 +1,1169 @@
+//! Typed configuration registry for the final control plane.
+
+use std::collections::BTreeMap;
+
+use thiserror::Error;
+use tracedecay_domain::DomainError;
+use tracedecay_domain::configuration::{
+    ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
+    AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+    CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
+    ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
+    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
+    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
+    SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
+    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
+};
+use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+use tracedecay_semantic_contracts::SemanticConfig;
+#[cfg(test)]
+use tracedecay_semantic_contracts::{
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticProfileSelection, SemanticResourceCeilings,
+};
+
+/// Canonical default for configured-tier proximity warnings.
+pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
+pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
+
+/// Registry schema revision. Increment only when setting-definition semantics
+/// change, not when a setting value changes.
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 6;
+
+#[derive(Debug, Error)]
+pub enum ConfigurationRegistryError {
+    #[error("configuration definition is invalid: {0}")]
+    InvalidDefinition(#[from] DomainError),
+    #[error("setting key already registered: {0}")]
+    DuplicateSetting(SettingKey),
+    #[error("setting key is not registered: {0}")]
+    UnknownSetting(SettingKey),
+    #[error("setting value kind does not match {key}: expected {expected:?}, got {actual:?}")]
+    ValueKindMismatch {
+        key: SettingKey,
+        expected: ConfigurationValueKindV1,
+        actual: ConfigurationValueKindV1,
+    },
+    #[error("setting {key} value {actual} is outside [{minimum}, {maximum}]")]
+    UnsignedValueOutOfRange {
+        key: SettingKey,
+        minimum: u64,
+        maximum: u64,
+        actual: u64,
+    },
+    #[error("setting {key} payload is invalid: {reason}")]
+    InvalidSettingPayload {
+        key: SettingKey,
+        reason: InvalidSettingPayloadReason,
+    },
+    #[error("setting {key} cannot be written in layer {layer:?}")]
+    InvalidLayer {
+        key: SettingKey,
+        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1,
+    },
+}
+
+/// Static, field-level reason a typed setting payload was refused.
+///
+/// Variants never carry caller-supplied text, paths, or model ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum InvalidSettingPayloadReason {
+    #[error("malformed json")]
+    MalformedJson,
+    #[error("unknown field")]
+    UnknownField,
+    #[error("invalid artifact_digest")]
+    InvalidArtifactDigest,
+    #[error("invalid payload")]
+    InvalidPayload,
+}
+
+/// Immutable mapping of every supported setting to its typed definition.
+#[derive(Clone, Debug)]
+pub struct ConfigurationRegistry {
+    definitions: BTreeMap<SettingKey, SettingDefinitionV1>,
+}
+
+impl ConfigurationRegistry {
+    /// Build the core registry. In addition to authority, policy,
+    /// collection, analyzer, and topology definitions, this includes every
+    /// project-scoped runtime scalar.
+    pub fn core() -> Result<Self, ConfigurationRegistryError> {
+        let mut registry = Self {
+            definitions: BTreeMap::new(),
+        };
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(SOURCE_BINDINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::SourceBindings,
+            default_value: ConfigurationValueV1::SourceBindings(Vec::new()),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(ACCESS_RULES_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::AccessRules,
+            default_value: ConfigurationValueV1::AccessRules(Vec::new()),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        register_project_stored_user_profile_settings(&mut registry)?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(ANALYZER_SETTINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::AnalyzerSettings,
+            default_value: ConfigurationValueV1::AnalyzerSettings(AnalyzerSettingsV1::empty()),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::AnalyzerRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(WORK_TOPOLOGY_POLICY_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::WorkTopologyPolicy,
+            default_value: ConfigurationValueV1::WorkTopologyPolicy(Box::new(
+                safe_work_topology_policy_v1(),
+            )),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::DaemonRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(WORK_EXECUTABLE_BINDINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::WorkExecutableBindings,
+            default_value: ConfigurationValueV1::WorkExecutableBindings(Vec::new()),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::DaemonRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::WorkExpertiseConsent,
+            default_value: ConfigurationValueV1::WorkExpertiseConsent(
+                WorkExpertiseConsentV1::disabled(),
+            ),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(CONTEXT_SCOUT_SETTINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::ContextScoutSettings,
+            default_value: ConfigurationValueV1::ContextScoutSettings(
+                ContextScoutSettingsV1::disabled(),
+            ),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(AUTOMATION_SETTINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::AutomationSettings,
+            default_value: ConfigurationValueV1::AutomationSettings(Box::default()),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::Unsigned,
+            default_value: ConfigurationValueV1::Unsigned(
+                DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1,
+            ),
+            sensitivity: SettingSensitivityV1::Public,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        let semantic_default = SemanticConfig::default();
+        semantic_default.validate().map_err(|_| {
+            ConfigurationRegistryError::InvalidDefinition(DomainError::NonCanonical {
+                field: "semantic runtime default",
+            })
+        })?;
+        let semantic_default = serde_json::to_string(&semantic_default).map_err(|_| {
+            ConfigurationRegistryError::InvalidDefinition(DomainError::NonCanonical {
+                field: "semantic runtime default encoding",
+            })
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(SEMANTIC_RUNTIME_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::Text,
+            default_value: ConfigurationValueV1::Text(semantic_default),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::AnalyzerRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        register_project_settings(&mut registry)?;
+        let expected = CONFIGURATION_SETTING_KEYS_V1
+            .iter()
+            .filter(|key| **key != USER_CODE_INDEX_WORKERS_SETTING_KEY)
+            .map(|key| setting_key(key))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        let actual = registry
+            .definitions
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if actual != expected {
+            return Err(ConfigurationRegistryError::InvalidDefinition(
+                DomainError::NonCanonical {
+                    field: "configuration registry key inventory",
+                },
+            ));
+        }
+        Ok(registry)
+    }
+
+    /// Build the exact profile-session registry for the daemon-wide code-index
+    /// worker selection. This setting must be available before any project is
+    /// opened, so it cannot share the project-session snapshot authority.
+    pub fn profile_code_index_workers() -> Result<Self, ConfigurationRegistryError> {
+        let mut registry = Self {
+            definitions: BTreeMap::new(),
+        };
+        registry.register(code_index_worker_definition()?)?;
+        Ok(registry)
+    }
+
+    pub fn register(
+        &mut self,
+        definition: SettingDefinitionV1,
+    ) -> Result<(), ConfigurationRegistryError> {
+        definition.validate()?;
+        if self.definitions.contains_key(&definition.key) {
+            return Err(ConfigurationRegistryError::DuplicateSetting(definition.key));
+        }
+        self.definitions.insert(definition.key.clone(), definition);
+        Ok(())
+    }
+
+    pub fn definition(
+        &self,
+        key: &SettingKey,
+    ) -> Result<&SettingDefinitionV1, ConfigurationRegistryError> {
+        self.definitions
+            .get(key)
+            .ok_or_else(|| ConfigurationRegistryError::UnknownSetting(key.clone()))
+    }
+
+    pub fn definitions(&self) -> impl Iterator<Item = &SettingDefinitionV1> {
+        self.definitions.values()
+    }
+
+    pub fn validate_value(
+        &self,
+        key: &SettingKey,
+        value: &ConfigurationValueV1,
+    ) -> Result<(), ConfigurationRegistryError> {
+        let definition = self.definition(key)?;
+        let actual = value.kind();
+        if actual != definition.value_kind {
+            return Err(ConfigurationRegistryError::ValueKindMismatch {
+                key: key.clone(),
+                expected: definition.value_kind,
+                actual,
+            });
+        }
+        value.validate()?;
+        if key.as_str() == PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1 {
+            let ConfigurationValueV1::Unsigned(actual) = value else {
+                return Err(ConfigurationRegistryError::ValueKindMismatch {
+                    key: key.clone(),
+                    expected: ConfigurationValueKindV1::Unsigned,
+                    actual: value.kind(),
+                });
+            };
+            if *actual > MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 {
+                return Err(ConfigurationRegistryError::UnsignedValueOutOfRange {
+                    key: key.clone(),
+                    minimum: 0,
+                    maximum: MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1,
+                    actual: *actual,
+                });
+            }
+        }
+        if matches!(
+            key.as_str(),
+            USER_WATCHER_DEBOUNCE_MS_SETTING_KEY | USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY
+        ) {
+            let ConfigurationValueV1::Unsigned(actual) = value else {
+                return Err(ConfigurationRegistryError::ValueKindMismatch {
+                    key: key.clone(),
+                    expected: ConfigurationValueKindV1::Unsigned,
+                    actual: value.kind(),
+                });
+            };
+            if *actual == 0 {
+                return Err(ConfigurationRegistryError::UnsignedValueOutOfRange {
+                    key: key.clone(),
+                    minimum: 1,
+                    maximum: u64::MAX,
+                    actual: *actual,
+                });
+            }
+        }
+        if key.as_str() == SEMANTIC_RUNTIME_SETTING_KEY {
+            validate_semantic_runtime_payload(key, value)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_layer(
+        &self,
+        key: &SettingKey,
+        layer: &tracedecay_domain::configuration::ConfigurationLayerIdV1,
+    ) -> Result<(), ConfigurationRegistryError> {
+        use tracedecay_domain::configuration::{ConfigurationLayerKindV1, SettingScopeV1};
+
+        let definition = self.definition(key)?;
+        let valid = matches!(
+            (definition.scope, layer.kind()),
+            (
+                SettingScopeV1::UserProfile,
+                ConfigurationLayerKindV1::UserProfile
+            ) | (SettingScopeV1::Project, ConfigurationLayerKindV1::Project)
+                | (
+                    SettingScopeV1::Collection,
+                    ConfigurationLayerKindV1::Collection
+                )
+        );
+        if valid {
+            Ok(())
+        } else {
+            Err(ConfigurationRegistryError::InvalidLayer {
+                key: key.clone(),
+                layer: layer.clone(),
+            })
+        }
+    }
+}
+
+/// Lower bound the daemon clamps PR-branch auto-tracking polling up to.
+///
+/// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
+pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
+
+fn register_project_stored_user_profile_settings(
+    registry: &mut ConfigurationRegistry,
+) -> Result<(), ConfigurationRegistryError> {
+    registry.register(SettingDefinitionV1 {
+        key: setting_key(USER_WORK_EXPERTISE_CONSENT_SETTING_KEY)?,
+        schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+        value_kind: ConfigurationValueKindV1::WorkExpertiseConsent,
+        default_value: ConfigurationValueV1::WorkExpertiseConsent(
+            WorkExpertiseConsentV1::disabled(),
+        ),
+        sensitivity: SettingSensitivityV1::Sensitive,
+        scope: SettingScopeV1::UserProfile,
+        restart_requirement: RestartRequirementV1::None,
+        deprecation: DeprecationStateV1::Active,
+    })?;
+    for (key, default_value, restart_requirement) in [
+        (
+            USER_UPLOAD_ENABLED_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
+            RestartRequirementV1::None,
+        ),
+        (
+            USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(2_000),
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(60),
+            RestartRequirementV1::DaemonRestart,
+        ),
+    ] {
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(key)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: default_value.kind(),
+            default_value,
+            sensitivity: SettingSensitivityV1::Public,
+            scope: SettingScopeV1::UserProfile,
+            restart_requirement,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+    }
+    Ok(())
+}
+
+fn code_index_worker_definition() -> Result<SettingDefinitionV1, ConfigurationRegistryError> {
+    Ok(SettingDefinitionV1 {
+        key: setting_key(USER_CODE_INDEX_WORKERS_SETTING_KEY)?,
+        schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+        value_kind: ConfigurationValueKindV1::CodeIndexWorkerSelection,
+        default_value: ConfigurationValueV1::CodeIndexWorkerSelection(
+            CodeIndexWorkerSelectionV1::Automatic {},
+        ),
+        sensitivity: SettingSensitivityV1::Public,
+        scope: SettingScopeV1::UserProfile,
+        restart_requirement: RestartRequirementV1::DaemonRestart,
+        deprecation: DeprecationStateV1::Active,
+    })
+}
+
+/// Canonical defaults for the project-scoped runtime settings.
+struct ProjectDefaults {
+    exclude: Vec<String>,
+    include: Vec<String>,
+    max_file_size: u64,
+    extract_docstrings: bool,
+    track_call_sites: bool,
+    git_ignore: bool,
+    diagnostics_prewarm: bool,
+    native_graph_activation: bool,
+    telemetry_timings: bool,
+    sync: SyncDefaults,
+}
+
+#[derive(Clone, Copy)]
+struct SyncDefaults {
+    auto_watch: bool,
+    watch_linked_worktrees: bool,
+    watch_debounce_ms: u64,
+    watch_max_delay_ms: u64,
+    watch_max_projects: usize,
+    read_refresh: bool,
+    read_cooldown_secs: u64,
+    session_start_sync: bool,
+    session_start_stale_threshold_secs: u64,
+    backstop_interval_mins: u64,
+    full_sync_escalation_files: usize,
+    max_concurrent_syncs: usize,
+    branch_gc_days: u64,
+    orphan_db_gc_days: u64,
+    auto_init: bool,
+    auto_track_pr_branches: bool,
+    auto_track_pr_poll_secs: u64,
+}
+
+impl Default for SyncDefaults {
+    fn default() -> Self {
+        Self {
+            auto_watch: false,
+            watch_linked_worktrees: false,
+            watch_debounce_ms: 2000,
+            watch_max_delay_ms: 30000,
+            watch_max_projects: 32,
+            read_refresh: true,
+            read_cooldown_secs: 30,
+            session_start_sync: true,
+            session_start_stale_threshold_secs: 600,
+            backstop_interval_mins: 15,
+            full_sync_escalation_files: 500,
+            max_concurrent_syncs: 2,
+            branch_gc_days: 14,
+            orphan_db_gc_days: 7,
+            auto_init: true,
+            auto_track_pr_branches: false,
+            auto_track_pr_poll_secs: 300,
+        }
+    }
+}
+
+impl Default for ProjectDefaults {
+    fn default() -> Self {
+        let mut exclude: Vec<String> = vec![
+            ".git/**".to_string(),
+            ".tracedecay/**".to_string(),
+            "bin/**".to_string(),
+            "**/*.min.*".to_string(),
+        ];
+        for segment in tracedecay_runtime_core::config::GENERATED_DIR_SEGMENTS {
+            exclude.push(format!("{segment}/**"));
+            exclude.push(format!("**/{segment}/**"));
+        }
+        Self {
+            exclude,
+            include: Vec::new(),
+            max_file_size: 1_048_576,
+            extract_docstrings: true,
+            track_call_sites: true,
+            git_ignore: true,
+            diagnostics_prewarm: false,
+            native_graph_activation: true,
+            telemetry_timings: true,
+            sync: SyncDefaults::default(),
+        }
+    }
+}
+
+/// Register every project scalar in the sole typed registry.
+fn register_project_settings(
+    registry: &mut ConfigurationRegistry,
+) -> Result<(), ConfigurationRegistryError> {
+    let defaults = ProjectDefaults::default();
+    let sync = defaults.sync;
+    let settings = vec![
+        (
+            INDEX_EXCLUDE_SETTING_KEY,
+            ConfigurationValueV1::StringList(defaults.exclude),
+            SettingSensitivityV1::Sensitive,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            INDEX_INCLUDE_SETTING_KEY,
+            ConfigurationValueV1::StringList(defaults.include),
+            SettingSensitivityV1::Sensitive,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            INDEX_MAX_FILE_SIZE_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(defaults.max_file_size),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+            ConfigurationValueV1::Boolean(defaults.extract_docstrings),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            INDEX_TRACK_CALL_SITES_SETTING_KEY,
+            ConfigurationValueV1::Boolean(defaults.track_call_sites),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            INDEX_GIT_IGNORE_SETTING_KEY,
+            ConfigurationValueV1::Boolean(defaults.git_ignore),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            DIAGNOSTICS_PREWARM_SETTING_KEY,
+            ConfigurationValueV1::Boolean(defaults.diagnostics_prewarm),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::None,
+        ),
+        (
+            INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+            ConfigurationValueV1::Boolean(defaults.native_graph_activation),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_AUTO_WATCH_SETTING_KEY,
+            ConfigurationValueV1::Boolean(sync.auto_watch),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+            ConfigurationValueV1::Boolean(sync.watch_linked_worktrees),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.watch_debounce_ms),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.watch_max_delay_ms),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.watch_max_projects as u64),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_READ_REFRESH_SETTING_KEY,
+            ConfigurationValueV1::Boolean(sync.read_refresh),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.read_cooldown_secs),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_SESSION_START_SYNC_SETTING_KEY,
+            ConfigurationValueV1::Boolean(sync.session_start_sync),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.session_start_stale_threshold_secs),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.backstop_interval_mins),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.full_sync_escalation_files as u64),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.max_concurrent_syncs as u64),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.branch_gc_days),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_AUTO_INIT_SETTING_KEY,
+            ConfigurationValueV1::Boolean(sync.auto_init),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+            ConfigurationValueV1::Boolean(sync.auto_track_pr_branches),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(
+                sync.auto_track_pr_poll_secs
+                    .max(MIN_AUTO_TRACK_PR_POLL_SECS),
+            ),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            TELEMETRY_TIMINGS_SETTING_KEY,
+            ConfigurationValueV1::Boolean(defaults.telemetry_timings),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::None,
+        ),
+    ];
+
+    for (key, default_value, sensitivity, restart_requirement) in settings {
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(key)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: default_value.kind(),
+            default_value,
+            sensitivity,
+            scope: SettingScopeV1::Project,
+            restart_requirement,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+    }
+    Ok(())
+}
+
+fn setting_key(value: &str) -> Result<SettingKey, ConfigurationRegistryError> {
+    Ok(SettingKey::new(value)?)
+}
+
+fn validate_semantic_runtime_payload(
+    key: &SettingKey,
+    value: &ConfigurationValueV1,
+) -> Result<(), ConfigurationRegistryError> {
+    let ConfigurationValueV1::Text(payload) = value else {
+        return Err(ConfigurationRegistryError::ValueKindMismatch {
+            key: key.clone(),
+            expected: ConfigurationValueKindV1::Text,
+            actual: value.kind(),
+        });
+    };
+    let parsed = serde_json::from_str::<SemanticConfig>(payload).map_err(|error| {
+        ConfigurationRegistryError::InvalidSettingPayload {
+            key: key.clone(),
+            reason: classify_semantic_json_error(&error),
+        }
+    })?;
+    if semantic_config_has_invalid_artifact_digest(&parsed) {
+        return Err(ConfigurationRegistryError::InvalidSettingPayload {
+            key: key.clone(),
+            reason: InvalidSettingPayloadReason::InvalidArtifactDigest,
+        });
+    }
+    parsed
+        .validate()
+        .map_err(|_| ConfigurationRegistryError::InvalidSettingPayload {
+            key: key.clone(),
+            reason: InvalidSettingPayloadReason::InvalidPayload,
+        })
+}
+
+fn classify_semantic_json_error(error: &serde_json::Error) -> InvalidSettingPayloadReason {
+    if error.is_syntax() || error.is_eof() {
+        return InvalidSettingPayloadReason::MalformedJson;
+    }
+    if error.is_data() && error.to_string().starts_with("unknown field") {
+        return InvalidSettingPayloadReason::UnknownField;
+    }
+    if error.is_data() {
+        InvalidSettingPayloadReason::InvalidPayload
+    } else {
+        InvalidSettingPayloadReason::MalformedJson
+    }
+}
+
+fn semantic_config_has_invalid_artifact_digest(config: &SemanticConfig) -> bool {
+    config
+        .active_profile
+        .as_ref()
+        .into_iter()
+        .chain(config.rollback_profile.as_ref())
+        .any(|profile| {
+            !tracedecay_domain::canonical_text::is_lowercase_hex(&profile.artifact_digest, 64)
+        })
+}
+
+#[cfg(test)]
+mod proximity_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn proximity_threshold_has_one_bounded_project_default() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1).expect("key");
+        let definition = registry.definition(&key).expect("definition");
+
+        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Unsigned);
+        assert_eq!(
+            definition.default_value,
+            ConfigurationValueV1::Unsigned(DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1)
+        );
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+        assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
+        assert!(
+            registry
+                .validate_value(&key, &ConfigurationValueV1::Unsigned(0))
+                .is_ok()
+        );
+        assert!(
+            registry
+                .validate_value(
+                    &key,
+                    &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1),
+                )
+                .is_ok()
+        );
+        assert!(matches!(
+            registry.validate_value(
+                &key,
+                &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 + 1),
+            ),
+            Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod user_profile_settings_tests {
+    use super::*;
+
+    #[test]
+    fn editable_profile_settings_are_registered_with_exact_scope_and_restart_semantics() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        for (raw_key, kind, restart) in [
+            (
+                USER_UPLOAD_ENABLED_SETTING_KEY,
+                ConfigurationValueKindV1::Boolean,
+                RestartRequirementV1::None,
+            ),
+            (
+                USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+                ConfigurationValueKindV1::Unsigned,
+                RestartRequirementV1::DaemonRestart,
+            ),
+            (
+                USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+                ConfigurationValueKindV1::Unsigned,
+                RestartRequirementV1::DaemonRestart,
+            ),
+        ] {
+            let definition = registry
+                .definition(&SettingKey::new(raw_key).expect("key"))
+                .expect("definition");
+            assert_eq!(definition.scope, SettingScopeV1::UserProfile);
+            assert_eq!(definition.value_kind, kind);
+            assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+            assert_eq!(definition.restart_requirement, restart);
+        }
+        assert!(matches!(
+            registry.validate_value(
+                &SettingKey::new(USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY).unwrap(),
+                &ConfigurationValueV1::Unsigned(0),
+            ),
+            Err(ConfigurationRegistryError::UnsignedValueOutOfRange { minimum: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn code_index_workers_default_is_automatic_and_zero_exact_is_denied() {
+        assert_eq!(CONFIGURATION_REGISTRY_SCHEMA_REVISION, 6);
+        let key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).expect("key");
+        let project_registry = ConfigurationRegistry::core().expect("project registry");
+        assert!(matches!(
+            project_registry.definition(&key),
+            Err(ConfigurationRegistryError::UnknownSetting(_))
+        ));
+
+        let registry =
+            ConfigurationRegistry::profile_code_index_workers().expect("profile registry");
+        assert_eq!(registry.definitions().count(), 1);
+        let definition = registry.definition(&key).expect("definition");
+
+        assert_eq!(definition.scope, SettingScopeV1::UserProfile);
+        assert_eq!(
+            definition.value_kind,
+            ConfigurationValueKindV1::CodeIndexWorkerSelection
+        );
+        assert_eq!(
+            definition.default_value,
+            ConfigurationValueV1::CodeIndexWorkerSelection(
+                CodeIndexWorkerSelectionV1::Automatic {}
+            )
+        );
+        assert_eq!(
+            definition.restart_requirement,
+            RestartRequirementV1::DaemonRestart
+        );
+        assert!(
+            registry
+                .validate_value(
+                    &key,
+                    &ConfigurationValueV1::CodeIndexWorkerSelection(
+                        CodeIndexWorkerSelectionV1::Exact { workers: 0 },
+                    ),
+                )
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod automation_defaults_tests {
+    use super::*;
+    use tracedecay_domain::configuration::AutomationBackendV1;
+
+    #[test]
+    fn fresh_snapshot_resolves_the_active_automation_default() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).expect("automation key");
+        let definition = registry.definition(&key).expect("automation definition");
+        let ConfigurationValueV1::AutomationSettings(settings) = &definition.default_value else {
+            panic!("automation registry entry must retain its typed value");
+        };
+
+        assert!(settings.enabled);
+        assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert!(settings.tasks.memory_curator.enabled);
+        assert!(settings.tasks.session_reflector.enabled);
+        assert!(settings.tasks.skill_writer.enabled);
+    }
+}
+
+#[cfg(test)]
+mod sync_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn linked_worktree_watching_requires_explicit_project_opt_in() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).expect("setting key");
+        let definition = registry.definition(&key).expect("setting definition");
+
+        assert_eq!(
+            definition.default_value,
+            ConfigurationValueV1::Boolean(false)
+        );
+        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Boolean);
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+        assert_eq!(
+            definition.restart_requirement,
+            RestartRequirementV1::DaemonRestart
+        );
+    }
+
+    #[test]
+    fn orphan_database_retention_has_one_exact_project_default() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY).expect("setting key");
+        let definition = registry.definition(&key).expect("setting definition");
+
+        assert_eq!(definition.default_value, ConfigurationValueV1::Unsigned(7));
+        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Unsigned);
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+        assert_eq!(
+            definition.restart_requirement,
+            RestartRequirementV1::DaemonRestart
+        );
+        assert_eq!(
+            CONFIGURATION_SETTING_KEYS_V1
+                .iter()
+                .filter(|candidate| **candidate == SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod work_expertise_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn expertise_consent_defaults_are_disabled_at_both_required_scopes() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+
+        for (raw_key, expected_scope) in [
+            (
+                USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+                SettingScopeV1::UserProfile,
+            ),
+            (
+                PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+                SettingScopeV1::Project,
+            ),
+        ] {
+            let definition = registry
+                .definition(&SettingKey::new(raw_key).expect("setting key"))
+                .expect("setting definition");
+            assert_eq!(definition.scope, expected_scope);
+            assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
+            assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
+            assert_eq!(
+                definition.default_value,
+                ConfigurationValueV1::WorkExpertiseConsent(WorkExpertiseConsentV1::disabled())
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_scout_tests {
+    use super::*;
+    use tracedecay_domain::configuration::{
+        ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
+    };
+
+    #[test]
+    fn stock_context_scout_configuration_is_explicitly_disabled() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let definition = registry
+            .definition(&SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).unwrap())
+            .unwrap();
+        let ConfigurationValueV1::ContextScoutSettings(settings) = &definition.default_value else {
+            panic!("Context Scout registry entry must retain its typed value");
+        };
+        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Disabled);
+        assert_eq!(
+            settings.mode,
+            ContextScoutConfigurationModeV1::Deterministic
+        );
+        assert_eq!(settings.model_path, None);
+        settings.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod semantic_runtime_payload_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use tracedecay_domain::ManifestDigest;
+    use tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES;
+
+    fn semantic_runtime_key() -> SettingKey {
+        SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).expect("semantic runtime key")
+    }
+
+    /// Host-absolute fixture path: `artifact_path` validation requires
+    /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+    fn absolute_fixture_path(posix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+        } else {
+            PathBuf::from(posix)
+        }
+    }
+
+    fn realistic_activation_config() -> SemanticConfig {
+        let artifact_digest = "ab".repeat(32);
+        SemanticConfig {
+            selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+            auto_download: true,
+            active_profile: Some(SemanticProfileSelection {
+                profile_id: "jina-embeddings-v2-base-code".to_owned(),
+                accepted_profile_digest: ManifestDigest::new(format!("sha256:{artifact_digest}"))
+                    .expect("accepted profile digest"),
+                artifact_digest,
+                artifact_path: absolute_fixture_path(concat!(
+                    "/var/lib/tracedecay/semantic-models/",
+                    "jina-embeddings-v2-base-code/",
+                    "revision-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+                    "onnx/model.onnx"
+                )),
+            }),
+            rollback_profile: None,
+            resources: SemanticResourceCeilings {
+                max_model_bytes: 700 * 1024 * 1024,
+                max_tokenizer_bytes: 64 * 1024 * 1024,
+                max_resident_bytes: 2 * 1024 * 1024 * 1024,
+                max_threads: 8,
+                max_concurrent_sessions: 4,
+                max_batch_size: 32,
+                max_sequence_length: 512,
+                load_deadline_ms: 30_000,
+            },
+            document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,
+        }
+    }
+
+    fn encoded_activation_payload() -> String {
+        let encoded =
+            serde_json::to_string(&realistic_activation_config()).expect("semantic runtime JSON");
+        assert!(
+            encoded.len() > CANONICAL_TEXT_MAX_BYTES,
+            "activation payload must exceed the 512-byte label bound, got {}",
+            encoded.len()
+        );
+        encoded
+    }
+
+    #[test]
+    fn semantic_runtime_accepts_a_realistic_activation_payload() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let payload = encoded_activation_payload();
+        registry
+            .validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            )
+            .expect("realistic semantic.runtime.v1 payload");
+    }
+
+    #[test]
+    fn semantic_runtime_rejects_malformed_json() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        assert!(matches!(
+            registry.validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text("{".to_owned()),
+            ),
+            Err(ConfigurationRegistryError::InvalidSettingPayload {
+                reason: InvalidSettingPayloadReason::MalformedJson,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn semantic_runtime_rejects_an_unknown_field() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let mut document = serde_json::to_value(realistic_activation_config()).expect("json value");
+        document
+            .as_object_mut()
+            .expect("object")
+            .insert("unexpected_field".to_owned(), serde_json::json!(true));
+        let payload = serde_json::to_string(&document).expect("unknown-field JSON");
+        assert!(matches!(
+            registry.validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            ),
+            Err(ConfigurationRegistryError::InvalidSettingPayload {
+                reason: InvalidSettingPayloadReason::UnknownField,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn semantic_runtime_accepts_an_explicitly_disabled_selected_model() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let config = SemanticConfig {
+            selected_model: None,
+            ..SemanticConfig::default()
+        };
+        let payload = serde_json::to_string(&config).expect("disabled semantic runtime JSON");
+        registry
+            .validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            )
+            .expect("selected_model null disables the semantic lane");
+    }
+
+    #[test]
+    fn semantic_runtime_rejects_an_invalid_artifact_digest() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let mut config = realistic_activation_config();
+        if let Some(profile) = config.active_profile.as_mut() {
+            profile.artifact_digest = "0".repeat(63);
+        }
+        let payload = serde_json::to_string(&config).expect("invalid digest JSON");
+        assert!(matches!(
+            registry.validate_value(
+                &semantic_runtime_key(),
+                &ConfigurationValueV1::Text(payload),
+            ),
+            Err(ConfigurationRegistryError::InvalidSettingPayload {
+                reason: InvalidSettingPayloadReason::InvalidArtifactDigest,
+                ..
+            })
+        ));
+    }
+}

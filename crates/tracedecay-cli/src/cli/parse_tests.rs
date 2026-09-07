@@ -1,0 +1,2112 @@
+use super::{
+    AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunsAction,
+    AutomationSkillsAction, BranchAction, Cli, Commands, DaemonAction, FeedbackRollbackAction,
+    HostBundleAction, LspAction, MemoryAction, PackageHookAction, ProfileStorageAction,
+    RemoteAction, ScoopPackageHookAction, SemanticAction, SessionsAction, SessionsRefreshAction,
+};
+use clap::{Parser, error::ErrorKind};
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| value.to_string()).collect()
+}
+
+#[test]
+fn hidden_scoop_package_hook_contract_parses_both_operations() {
+    for operation in ["prepare", "restore"] {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "package-hook",
+            "scoop",
+            operation,
+            "--package-id",
+            "tracedecay-beta",
+            "--state-file",
+            r"C:\state\scoop.json",
+        ])
+        .expect("hidden Scoop package hook should parse");
+        let Some(Commands::PackageHook {
+            action:
+                PackageHookAction::Scoop {
+                    action:
+                        ScoopPackageHookAction::Prepare {
+                            package_id,
+                            state_file,
+                        }
+                        | ScoopPackageHookAction::Restore {
+                            package_id,
+                            state_file,
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("unexpected hidden Scoop package hook command");
+        };
+        assert_eq!(package_id, "tracedecay-beta");
+        assert_eq!(state_file, std::path::Path::new(r"C:\state\scoop.json"));
+    }
+}
+
+#[test]
+fn first_class_git_status_parses_as_a_cli_journey() {
+    let parsed = Cli::try_parse_from(["tracedecay", "git", "status", "--json"]);
+
+    assert!(
+        parsed.is_ok(),
+        "catalogued Git status must be available without the generic tool escape hatch"
+    );
+}
+
+#[test]
+fn first_class_git_hunks_carries_no_preview_binding_arguments() {
+    // The daemon captures exact repository state itself and mints the preview
+    // binding; the public CLI must not accept caller-supplied preview
+    // identities or snapshot digests.
+    let parsed = Cli::try_parse_from([
+        "tracedecay",
+        "git",
+        "hunks",
+        "--preview-id",
+        "preview.manual",
+    ]);
+
+    assert!(
+        parsed.is_err(),
+        "git hunks must reject caller-supplied preview bindings"
+    );
+    assert!(Cli::try_parse_from(["tracedecay", "git", "hunks", "--scope", "staged"]).is_ok());
+}
+
+#[test]
+fn tool_command_preserves_trailing_help_and_reserved_args() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "tool",
+        "--project",
+        "/tmp/project",
+        "search",
+        "--help",
+        "--json",
+        "--args",
+        r#"{"query":"foo"}"#,
+        "@payload.json",
+    ])
+    .expect("tool command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Tool { project, name, args })
+            if project.as_deref() == Some("/tmp/project")
+                && name.as_deref() == Some("search")
+                && args
+                    == vec![
+                        "--help".to_string(),
+                        "--json".to_string(),
+                        "--args".to_string(),
+                        r#"{"query":"foo"}"#.to_string(),
+                        "@payload.json".to_string(),
+                    ]
+    ));
+}
+
+#[test]
+fn semantic_activate_parses_with_defaults_and_explicit_selection() {
+    let cli = Cli::try_parse_from(["tracedecay", "semantic", "activate"])
+        .expect("bare semantic activate should parse");
+    let Some(Commands::Semantic {
+        action:
+            SemanticAction::Activate {
+                profile,
+                no_rollback,
+                project,
+                json,
+            },
+    }) = cli.command
+    else {
+        panic!("unexpected Semantic command");
+    };
+    assert_eq!(profile, "hybrid-conservative");
+    assert!(!no_rollback);
+    assert_eq!(project, None);
+    assert!(!json);
+
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "semantic",
+        "activate",
+        "--profile",
+        "hybrid-conservative",
+        "--no-rollback",
+        "--project",
+        "/tmp/project",
+        "--json",
+    ])
+    .expect("explicit semantic activate should parse");
+    let Some(Commands::Semantic {
+        action:
+            SemanticAction::Activate {
+                profile,
+                no_rollback,
+                project,
+                json,
+            },
+    }) = cli.command
+    else {
+        panic!("unexpected Semantic command");
+    };
+    assert_eq!(profile, "hybrid-conservative");
+    assert!(no_rollback);
+    assert_eq!(project.as_deref(), Some("/tmp/project"));
+    assert!(json);
+}
+
+#[test]
+fn workflow_command_binds_one_closed_typed_operation() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "workflow",
+        "register-definition",
+        "--request-file",
+        "workflow.json",
+        "--project",
+        "/tmp/project",
+        "--json",
+    ])
+    .expect("Workflow command should parse");
+
+    let Some(Commands::Workflow { invocation }) = cli.command else {
+        panic!("unexpected Workflow command");
+    };
+    assert_eq!(
+        invocation.operation,
+        tracedecay_api::WorkflowOperation::RegisterDefinition
+    );
+    assert_eq!(
+        invocation.request_file,
+        std::path::Path::new("workflow.json")
+    );
+    assert_eq!(invocation.project.as_deref(), Some("/tmp/project"));
+    assert!(invocation.json);
+}
+
+#[test]
+fn removed_host_cli_aliases_are_invalid_subcommands() {
+    for alias in ["claude-install", "update-plugins", "claude-uninstall"] {
+        let error = match Cli::try_parse_from(["tracedecay", alias]) {
+            Ok(_) => panic!("removed host CLI alias must fail: {alias}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "alias: {alias}");
+    }
+}
+
+#[test]
+fn removed_manual_memory_curation_command_is_invalid() {
+    let error = match Cli::try_parse_from(["tracedecay", "memory", "curate"]) {
+        Ok(_) => panic!("manual memory curation must stay removed from final-V2"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    assert!(Cli::try_parse_from(["tracedecay", "memory", "status", "--json"]).is_ok());
+}
+
+#[test]
+fn removed_hermes_install_selectors_are_unknown_arguments() {
+    for args in [
+        vec![
+            "tracedecay",
+            "install",
+            "--agent",
+            "hermes",
+            "--profile",
+            "dev",
+        ],
+        vec![
+            "tracedecay",
+            "install",
+            "--agent",
+            "hermes",
+            "--all-profiles",
+        ],
+        vec![
+            "tracedecay",
+            "install",
+            "--agent",
+            "hermes",
+            "--project-root",
+            "/tmp/project",
+        ],
+        vec![
+            "tracedecay",
+            "uninstall",
+            "--agent",
+            "hermes",
+            "--profile",
+            "dev",
+        ],
+        vec![
+            "tracedecay",
+            "uninstall",
+            "--agent",
+            "hermes",
+            "--all-profiles",
+        ],
+    ] {
+        let error = match Cli::try_parse_from(args.clone()) {
+            Ok(_) => panic!("removed flag must fail: {args:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "args: {args:?}");
+    }
+}
+
+#[test]
+fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
+    let update = Cli::try_parse_from(["tracedecay", "update"]).expect("update should parse");
+    let upgrade = Cli::try_parse_from(["tracedecay", "upgrade"]).expect("upgrade should parse");
+    let update_plugin =
+        Cli::try_parse_from(["tracedecay", "update-plugin"]).expect("update-plugin should parse");
+
+    assert!(matches!(
+        update.command,
+        Some(Commands::Update {
+            no_reinstall: false
+        })
+    ));
+    assert!(matches!(
+        upgrade.command,
+        Some(Commands::Upgrade {
+            no_reinstall: false
+        })
+    ));
+    assert!(matches!(
+        update_plugin.command,
+        Some(Commands::UpdatePlugin {
+            local: false,
+            agent: None
+        })
+    ));
+}
+
+#[test]
+fn project_local_lifecycle_commands_require_and_preserve_agent_scope() {
+    let reinstall =
+        Cli::try_parse_from(["tracedecay", "reinstall", "--local", "--agent", "opencode"]).unwrap();
+    assert!(matches!(
+        reinstall.command,
+        Some(Commands::Reinstall {
+            local: true,
+            agent: Some(ref agent)
+        }) if agent == "opencode"
+    ));
+    let update =
+        Cli::try_parse_from(["tracedecay", "update-plugin", "--local", "--agent", "kimi"]).unwrap();
+    assert!(matches!(
+        update.command,
+        Some(Commands::UpdatePlugin {
+            local: true,
+            agent: Some(ref agent)
+        }) if agent == "kimi"
+    ));
+    let uninstall =
+        Cli::try_parse_from(["tracedecay", "uninstall", "--local", "--agent", "roo-code"]).unwrap();
+    assert!(matches!(
+        uninstall.command,
+        Some(Commands::Uninstall {
+            local: true,
+            agent: Some(ref agent)
+        }) if agent == "roo-code"
+    ));
+    assert!(Cli::try_parse_from(["tracedecay", "reinstall", "--local"]).is_err());
+}
+
+#[test]
+fn feedback_rollback_commands_parse_confirmation_and_state_paths() {
+    let dry_run = Cli::try_parse_from([
+        "tracedecay",
+        "feedback-rollback",
+        "dry-run",
+        "--agent",
+        "kimi",
+    ])
+    .unwrap();
+    assert!(matches!(
+        dry_run.command,
+        Some(Commands::FeedbackRollback {
+            action: FeedbackRollbackAction::DryRun { ref agent }
+        }) if agent == "kimi"
+    ));
+    let apply = Cli::try_parse_from([
+        "tracedecay",
+        "feedback-rollback",
+        "apply",
+        "--agent",
+        "opencode",
+        "--state",
+        ".tracedecay/feedback-opencode.json",
+        "--yes",
+    ])
+    .unwrap();
+    assert!(matches!(
+        apply.command,
+        Some(Commands::FeedbackRollback {
+            action: FeedbackRollbackAction::Apply {
+                ref agent,
+                ref state,
+                yes: true
+            }
+        }) if agent == "opencode" && state == ".tracedecay/feedback-opencode.json"
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "tracedecay",
+            "feedback-rollback",
+            "restore",
+            "--state",
+            "state.json"
+        ])
+        .is_ok(),
+        "confirmation is enforced by the handler so dry parsing remains inspectable"
+    );
+}
+
+#[test]
+fn host_bundle_recovery_commands_parse_agent_scope_and_quarantine() {
+    let status = Cli::try_parse_from(["tracedecay", "host-bundle", "status"]).unwrap();
+    assert!(matches!(
+        status.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::Status
+        })
+    ));
+    let recover = Cli::try_parse_from([
+        "tracedecay",
+        "host-bundle",
+        "recover",
+        "--agent",
+        "opencode",
+        "--quarantine",
+        "--yes",
+    ])
+    .unwrap();
+    assert!(recover.yes);
+    assert!(matches!(
+        recover.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::Recover {
+                agent: Some(ref agent),
+                quarantine: true,
+            }
+        }) if agent == "opencode"
+    ));
+    let all_hosts = Cli::try_parse_from(["tracedecay", "host-bundle", "recover", "--dry-run"])
+        .expect("--dry-run needs no --component on the recovery verb");
+    assert!(all_hosts.dry_run);
+    assert!(matches!(
+        all_hosts.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::Recover {
+                agent: None,
+                quarantine: false,
+            }
+        })
+    ));
+}
+
+#[test]
+fn host_bundle_artifact_commands_parse_explicit_scope_and_confirmation() {
+    let backup = Cli::try_parse_from([
+        "tracedecay",
+        "host-bundle",
+        "artifact-backup",
+        "--agent",
+        "opencode",
+        "--component",
+        "agent",
+        "--yes",
+    ])
+    .expect("artifact backup is an explicit host-component command");
+    assert!(backup.yes);
+    assert_eq!(backup.component, Some(super::HostBundleComponentArg::Agent));
+    assert!(matches!(
+        backup.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::ArtifactBackup { ref agent }
+        }) if agent == "opencode"
+    ));
+
+    let restore = Cli::try_parse_from([
+        "tracedecay",
+        "host-bundle",
+        "artifact-restore",
+        "--agent",
+        "opencode",
+        "--component",
+        "agent",
+        "--backup-id",
+        "01010101010101010101010101010101",
+        "--yes",
+    ])
+    .expect("artifact restore names its durable backup receipt");
+    assert!(restore.yes);
+    assert_eq!(
+        restore.component,
+        Some(super::HostBundleComponentArg::Agent)
+    );
+    assert!(matches!(
+        restore.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::ArtifactRestore {
+                ref agent,
+                ref backup_id,
+            }
+        }) if agent == "opencode" && backup_id == "01010101010101010101010101010101"
+    ));
+}
+
+#[test]
+fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
+    let upgrade = Cli::try_parse_from(["tracedecay", "upgrade", "--no-reinstall"])
+        .expect("upgrade --no-reinstall should parse");
+    let update = Cli::try_parse_from(["tracedecay", "update", "--no-reinstall"])
+        .expect("update --no-reinstall should parse");
+    let post_update = Cli::try_parse_from(["tracedecay", "post-update", "--no-reinstall"])
+        .expect("post-update --no-reinstall should parse");
+
+    assert!(matches!(
+        upgrade.command,
+        Some(Commands::Upgrade { no_reinstall: true })
+    ));
+    assert!(matches!(
+        update.command,
+        Some(Commands::Update { no_reinstall: true })
+    ));
+    assert!(matches!(
+        post_update.command,
+        Some(Commands::PostUpdate {
+            no_reinstall: true,
+            lifecycle_lease_token: None,
+        })
+    ));
+}
+
+#[test]
+fn lsp_servers_command_parses_json_flag() {
+    let cli = Cli::try_parse_from(["tracedecay", "lsp", "servers", "--json"])
+        .expect("lsp servers should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Lsp {
+            action: LspAction::Servers { json: true }
+        })
+    ));
+}
+
+#[test]
+fn lsp_bridge_accepts_explicit_project_or_initialize_root() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "lsp",
+        "bridge",
+        "--stdio",
+        "--project",
+        "/workspace/project",
+    ])
+    .expect("lsp bridge should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Lsp {
+            action: LspAction::Bridge {
+                stdio: true,
+                project,
+            }
+        }) if project.as_deref() == Some("/workspace/project")
+    ));
+    let initialize_routed = Cli::try_parse_from(["tracedecay", "lsp", "bridge", "--stdio"])
+        .expect("initialize-routed LSP bridge should parse");
+    assert!(matches!(
+        initialize_routed.command,
+        Some(Commands::Lsp {
+            action: LspAction::Bridge {
+                stdio: true,
+                project: None,
+            }
+        })
+    ));
+}
+
+#[test]
+fn codex_install_automation_flag_parses_without_extra_knobs() {
+    let cli = Cli::try_parse_from(["tracedecay", "install", "--agent", "codex", "--automation"])
+        .expect("Codex automation install should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Install {
+            agent,
+            automation,
+            ..
+        }) if agent.as_deref() == Some("codex") && automation
+    ));
+}
+
+#[test]
+fn daemon_install_service_command_parses_socket_and_no_start() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "daemon",
+        "install-service",
+        "--socket",
+        "/tmp/tracedecay.sock",
+        "--no-start",
+    ])
+    .expect("daemon install-service should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::InstallService {
+                socket,
+                no_start,
+                remote_listen: None,
+                remote_tls_cert: None,
+                remote_tls_key: None,
+            }
+        }) if socket.as_deref() == Some("/tmp/tracedecay.sock") && no_start
+    ));
+
+    let remote = Cli::try_parse_from([
+        "tracedecay",
+        "daemon",
+        "install-service",
+        "--remote-listen",
+        "192.0.2.10:7443",
+        "--remote-tls-cert",
+        "/run/tracedecay/remote.crt",
+        "--remote-tls-key",
+        "/run/tracedecay/remote.key",
+    ])
+    .expect("managed Remote Brain TLS service should parse");
+    assert!(matches!(
+        remote.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::InstallService {
+                remote_listen: Some(listen),
+                remote_tls_cert: Some(certificate),
+                remote_tls_key: Some(private_key),
+                ..
+            }
+        }) if listen.to_string() == "192.0.2.10:7443"
+            && certificate == "/run/tracedecay/remote.crt"
+            && private_key == "/run/tracedecay/remote.key"
+    ));
+
+    assert!(
+        Cli::try_parse_from([
+            "tracedecay",
+            "daemon",
+            "install-service",
+            "--remote-tls-cert",
+            "/run/tracedecay/remote.crt",
+        ])
+        .is_err(),
+        "partial managed Remote Brain TLS configuration must fail admission"
+    );
+}
+
+#[test]
+fn daemon_run_start_and_stop_commands_parse_lifecycle_options() {
+    let run = Cli::try_parse_from([
+        "tracedecay",
+        "daemon",
+        "run",
+        "--profile-root",
+        r"C:\Users\trace\AppData\Local\TraceDecay",
+    ])
+    .expect("daemon run profile root should parse");
+    assert!(matches!(
+        run.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Run {
+                socket: None,
+                profile_root: Some(profile_root),
+                remote_listen: None,
+                remote_tls_cert: None,
+                remote_tls_key: None,
+            }
+        }) if profile_root == r"C:\Users\trace\AppData\Local\TraceDecay"
+    ));
+
+    let remote = Cli::try_parse_from([
+        "tracedecay",
+        "daemon",
+        "run",
+        "--remote-listen",
+        "192.0.2.10:7443",
+        "--remote-tls-cert",
+        "/run/tracedecay/remote.crt",
+        "--remote-tls-key",
+        "/run/tracedecay/remote.key",
+    ])
+    .expect("complete Remote Brain TLS listener should parse");
+    assert!(matches!(
+        remote.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Run {
+                remote_listen: Some(listen),
+                remote_tls_cert: Some(certificate),
+                remote_tls_key: Some(private_key),
+                ..
+            }
+        }) if listen.to_string() == "192.0.2.10:7443"
+            && certificate == "/run/tracedecay/remote.crt"
+            && private_key == "/run/tracedecay/remote.key"
+    ));
+
+    assert!(
+        Cli::try_parse_from([
+            "tracedecay",
+            "daemon",
+            "run",
+            "--remote-listen",
+            "192.0.2.10:7443",
+        ])
+        .is_err(),
+        "partial Remote Brain TLS configuration must fail during argument admission"
+    );
+
+    let start =
+        Cli::try_parse_from(["tracedecay", "daemon", "start"]).expect("daemon start should parse");
+    assert!(matches!(
+        start.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Start
+        })
+    ));
+
+    let stop =
+        Cli::try_parse_from(["tracedecay", "daemon", "stop"]).expect("daemon stop should parse");
+    assert!(matches!(
+        stop.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Stop
+        })
+    ));
+}
+
+#[test]
+fn status_and_branch_add_commands_dispatch_to_expected_variants() {
+    let status = Cli::try_parse_from([
+        "tracedecay",
+        "status",
+        "/tmp/project",
+        "--json",
+        "--short",
+        "--runtime",
+    ])
+    .expect("status command should parse");
+    assert!(matches!(
+        status.command,
+        Some(Commands::Status {
+            path,
+            project_id,
+            project_path,
+            json,
+            short,
+            runtime,
+        }) if path.as_deref() == Some("/tmp/project")
+            && project_id.is_none()
+            && project_path.is_none()
+            && json
+            && short
+            && runtime
+    ));
+
+    let branch = Cli::try_parse_from([
+        "tracedecay",
+        "branch",
+        "add",
+        "feature/dispatch-tests",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("branch add should parse");
+    assert!(matches!(
+        branch.command,
+        Some(Commands::Branch {
+            action: BranchAction::Add { name, path }
+        }) if name.as_deref() == Some("feature/dispatch-tests")
+            && path.as_deref() == Some("/tmp/project")
+    ));
+}
+
+#[test]
+fn branch_autotrack_enable_parses_poll_secs_and_path() {
+    use super::BranchAutotrackAction;
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "branch",
+        "autotrack",
+        "enable",
+        "--poll-secs",
+        "120",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("branch autotrack enable should parse");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Branch {
+            action: BranchAction::Autotrack {
+                action: BranchAutotrackAction::Enable { poll_secs, path }
+            }
+        }) if poll_secs == Some(120) && path.as_deref() == Some("/tmp/project")
+    ));
+}
+
+#[test]
+fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
+    // `-p, --path` is documented (see TOP_LEVEL_AFTER_HELP) and already works
+    // on `dashboard`, `gitignore`, and `bench`; `init` previously only took
+    // PATH positionally and rejected `-p`/`--path` outright.
+    let short = Cli::try_parse_from(["tracedecay", "init", "-p", "/tmp/project"])
+        .expect("init -p PATH should parse");
+    assert!(matches!(
+        short.command,
+        Some(Commands::Init {
+            path: None,
+            path_flag,
+            ..
+        }) if path_flag.as_deref() == Some("/tmp/project")
+    ));
+
+    let long = Cli::try_parse_from(["tracedecay", "init", "--path", "/tmp/project"])
+        .expect("init --path PATH should parse");
+    assert!(matches!(
+        long.command,
+        Some(Commands::Init {
+            path: None,
+            path_flag,
+            ..
+        }) if path_flag.as_deref() == Some("/tmp/project")
+    ));
+
+    // The positional form keeps working unchanged.
+    let positional = Cli::try_parse_from(["tracedecay", "init", "/tmp/project"])
+        .expect("init PATH should still parse positionally");
+    assert!(matches!(
+        positional.command,
+        Some(Commands::Init {
+            path,
+            path_flag: None,
+            ..
+        }) if path.as_deref() == Some("/tmp/project")
+    ));
+
+    // Supplying both the positional PATH and `-p`/`--path` is refused rather
+    // than silently picking one — clap's `conflicts_with` rejects it.
+    // `Cli` does not derive `Debug`, so match directly instead of
+    // `.expect_err(...)` (which requires the `Ok` type to be `Debug`).
+    let conflict =
+        match Cli::try_parse_from(["tracedecay", "init", "/tmp/project", "--path", "/tmp/other"]) {
+            Ok(_) => panic!("init PATH and --path together should be rejected as a conflict"),
+            Err(error) => error,
+        };
+    assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn init_and_sync_parse_runtime_skip_and_include_folders() {
+    let init = Cli::try_parse_from([
+        "tracedecay",
+        "init",
+        "/tmp/project",
+        "--skip-folder",
+        "vendor",
+        "dist",
+        "--include-folder",
+        "dist/generated",
+    ])
+    .expect("init skip/include folders should parse");
+    assert!(matches!(
+        init.command,
+        Some(Commands::Init {
+            path,
+            path_flag: None,
+            skip_folders,
+            include_folders,
+            adopt_project: None,
+            fresh: false,
+        }) if path.as_deref() == Some("/tmp/project")
+            && skip_folders == strings(&["vendor", "dist"])
+            && include_folders == strings(&["dist/generated"])
+    ));
+
+    let sync = Cli::try_parse_from([
+        "tracedecay",
+        "sync",
+        "/tmp/project",
+        "--force",
+        "--include-folder",
+        "dist",
+        "vendor/generated",
+    ])
+    .expect("sync include folders should parse");
+    assert!(matches!(
+        sync.command,
+        Some(Commands::Sync {
+            path,
+            force,
+            skip_folders,
+            include_folders,
+            ..
+        }) if path.as_deref() == Some("/tmp/project")
+            && force
+            && skip_folders.is_empty()
+            && include_folders == strings(&["dist", "vendor/generated"])
+    ));
+}
+
+#[test]
+fn init_parses_adopt_project_flag() {
+    let adopt = Cli::try_parse_from([
+        "tracedecay",
+        "init",
+        "/tmp/moved",
+        "--adopt-project",
+        "proj_nongit_moved",
+    ])
+    .expect("init --adopt-project should parse");
+    assert!(matches!(
+        adopt.command,
+        Some(Commands::Init {
+            path,
+            adopt_project,
+            fresh: false,
+            ..
+        }) if path.as_deref() == Some("/tmp/moved")
+            && adopt_project.as_deref() == Some("proj_nongit_moved")
+    ));
+}
+
+#[test]
+fn init_parses_fresh_flag() {
+    let fresh = Cli::try_parse_from(["tracedecay", "init", "/tmp/new", "--fresh"])
+        .expect("init --fresh should parse");
+    assert!(matches!(
+        fresh.command,
+        Some(Commands::Init {
+            path,
+            adopt_project: None,
+            fresh: true,
+            ..
+        }) if path.as_deref() == Some("/tmp/new")
+    ));
+}
+
+#[test]
+fn init_and_sync_parse_repeated_include_folder_flags() {
+    let init = Cli::try_parse_from([
+        "tracedecay",
+        "init",
+        "/tmp/project",
+        "--include-folder",
+        "dist",
+        "--include-folder",
+        "vendor/generated",
+    ])
+    .expect("repeated init include folders should parse");
+    assert!(matches!(
+        init.command,
+        Some(Commands::Init {
+            path,
+            include_folders,
+            ..
+        }) if path.as_deref() == Some("/tmp/project")
+            && include_folders == strings(&["dist", "vendor/generated"])
+    ));
+
+    let sync = Cli::try_parse_from([
+        "tracedecay",
+        "sync",
+        "/tmp/project",
+        "--include-folder",
+        "dist",
+        "--include-folder",
+        "vendor/generated",
+    ])
+    .expect("repeated sync include folders should parse");
+    assert!(matches!(
+        sync.command,
+        Some(Commands::Sync {
+            path,
+            include_folders,
+            ..
+        }) if path.as_deref() == Some("/tmp/project")
+            && include_folders == strings(&["dist", "vendor/generated"])
+    ));
+}
+
+#[test]
+fn memory_status_command_dispatches_to_expected_variant() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "memory",
+        "status",
+        "--json",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("memory status command should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Memory {
+            action: MemoryAction::Status {
+                json,
+                path,
+                project_id,
+                project_path,
+            }
+        }) if json
+            && path.as_deref() == Some("/tmp/project")
+            && project_id.is_none()
+            && project_path.is_none()
+    ));
+}
+
+#[test]
+fn automation_config_commands_parse_project_sidecar_flags() {
+    let get = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "config",
+        "get",
+        "--json",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("automation config get should parse");
+    assert!(matches!(
+        get.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Config {
+                    action:
+                        AutomationConfigAction::Get {
+                            scope: AutomationConfigScope::Project,
+                            json,
+                            path
+                        }
+                }
+        }) if json && path.as_deref() == Some("/tmp/project")
+    ));
+
+    let explain = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "config",
+        "explain",
+        "--json",
+        "--scope",
+        "global",
+    ])
+    .expect("automation config explain should parse");
+    assert!(matches!(
+        explain.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Config {
+                    action:
+                        AutomationConfigAction::Explain {
+                            scope: AutomationConfigScope::Global,
+                            json,
+                            path
+                        }
+                }
+        }) if json && path.is_none()
+    ));
+
+    let enable = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "config",
+        "enable",
+        "--scope",
+        "global",
+    ])
+    .expect("automation config enable should parse");
+    assert!(matches!(
+        enable.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Config {
+                    action:
+                        AutomationConfigAction::Enable {
+                            scope: AutomationConfigScope::Global,
+                            path
+                        }
+                }
+        }) if path.is_none()
+    ));
+
+    let disable = Cli::try_parse_from(["tracedecay", "automation", "config", "disable"])
+        .expect("automation config disable should parse");
+    assert!(matches!(
+        disable.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Config {
+                    action:
+                        AutomationConfigAction::Disable {
+                            scope: AutomationConfigScope::Project,
+                            path
+                        }
+                }
+        }) if path.is_none()
+    ));
+
+    let set = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "config",
+        "set",
+        "--backend",
+        "codex-app-server",
+        "--host-mode",
+        "delegated-host",
+        "--timeout-secs",
+        "120",
+        "--scheduler-tick-secs",
+        "30",
+        "--memory-curator",
+        "true",
+        "--memory-curator-schedule",
+        "manual",
+        "--memory-curator-interval-secs",
+        "900",
+        "--memory-curator-cooldown-secs",
+        "300",
+        "--memory-curator-min-idle-secs",
+        "120",
+        "--memory-curator-stale-lock-secs",
+        "3600",
+        "--session-reflector",
+        "true",
+        "--session-reflector-schedule",
+        "interval",
+        "--session-reflector-interval-secs",
+        "1800",
+        "--session-reflector-cooldown-secs",
+        "600",
+        "--session-reflector-min-idle-secs",
+        "60",
+        "--session-reflector-stale-lock-secs",
+        "7200",
+        "--skill-writer",
+        "true",
+        "--skill-writer-schedule",
+        "manual",
+        "--skill-writer-interval-secs",
+        "",
+        "--skill-writer-cooldown-secs",
+        "none",
+    ])
+    .expect("automation config set should parse");
+    let Some(Commands::Automation {
+        action:
+            AutomationAction::Config {
+                action:
+                    AutomationConfigAction::Set {
+                        scope,
+                        backend,
+                        host_mode,
+                        timeout_secs,
+                        scheduler_tick_secs,
+                        memory_curator,
+                        memory_curator_schedule,
+                        memory_curator_interval_secs,
+                        memory_curator_cooldown_secs,
+                        memory_curator_min_idle_secs,
+                        memory_curator_stale_lock_secs,
+                        session_reflector,
+                        session_reflector_schedule,
+                        session_reflector_interval_secs,
+                        session_reflector_cooldown_secs,
+                        session_reflector_min_idle_secs,
+                        session_reflector_stale_lock_secs,
+                        skill_writer,
+                        skill_writer_schedule,
+                        skill_writer_interval_secs,
+                        skill_writer_cooldown_secs,
+                        skill_writer_min_idle_secs,
+                        skill_writer_stale_lock_secs,
+                        path,
+                    },
+            },
+    }) = set.command
+    else {
+        panic!("automation config set should parse into Set action");
+    };
+    assert_eq!(scope, AutomationConfigScope::Project);
+    assert_eq!(backend.as_deref(), Some("codex-app-server"));
+    assert_eq!(host_mode.as_deref(), Some("delegated-host"));
+    assert_eq!(timeout_secs, Some(120));
+    assert_eq!(scheduler_tick_secs, Some(30));
+    assert_eq!(memory_curator, Some(true));
+    assert_eq!(memory_curator_schedule.as_deref(), Some("manual"));
+    assert_eq!(memory_curator_interval_secs.as_deref(), Some("900"));
+    assert_eq!(memory_curator_cooldown_secs.as_deref(), Some("300"));
+    assert_eq!(memory_curator_min_idle_secs.as_deref(), Some("120"));
+    assert_eq!(memory_curator_stale_lock_secs.as_deref(), Some("3600"));
+    assert_eq!(session_reflector, Some(true));
+    assert_eq!(session_reflector_schedule.as_deref(), Some("interval"));
+    assert_eq!(session_reflector_interval_secs.as_deref(), Some("1800"));
+    assert_eq!(session_reflector_cooldown_secs.as_deref(), Some("600"));
+    assert_eq!(session_reflector_min_idle_secs.as_deref(), Some("60"));
+    assert_eq!(session_reflector_stale_lock_secs.as_deref(), Some("7200"));
+    assert_eq!(skill_writer, Some(true));
+    assert_eq!(skill_writer_schedule.as_deref(), Some("manual"));
+    assert_eq!(skill_writer_interval_secs.as_deref(), Some(""));
+    assert_eq!(skill_writer_cooldown_secs.as_deref(), Some("none"));
+    assert!(skill_writer_min_idle_secs.is_none());
+    assert!(skill_writer_stale_lock_secs.is_none());
+    assert!(path.is_none());
+}
+
+#[test]
+fn automation_config_rejects_retired_curation_policy_flags() {
+    for (flag, value) in [
+        ("--memory-apply-policy", "validate_then_apply"),
+        ("--skill-activation-policy", "validate_then_activate"),
+        ("--auto-apply-memory-ops", "true"),
+        ("--auto-enable-skills", "true"),
+    ] {
+        let error = Cli::try_parse_from(["tracedecay", "automation", "config", "set", flag, value])
+            .err()
+            .expect("curation policy flags must stay removed");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "flag: {flag}");
+    }
+}
+
+#[test]
+fn automation_install_rejects_removed_auto_apply_flag() {
+    let error = Cli::try_parse_from([
+        "tracedecay",
+        "install",
+        "--agent",
+        "codex",
+        "--automation",
+        "--auto-apply",
+    ])
+    .err()
+    .expect("install-time approval bypass must stay removed");
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn automation_run_memory_curation_is_replaced_by_fact_store_curate() {
+    let error = Cli::try_parse_from(["tracedecay", "automation", "run", "memory-curation"])
+        .err()
+        .expect("dedicated curation launcher must be removed");
+    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+}
+
+#[test]
+fn automation_facts_rejects_removed_mutation_commands() {
+    for action in ["apply", "reject"] {
+        let error = Cli::try_parse_from(["tracedecay", "automation", "facts", action, "fact-7"])
+            .err()
+            .expect("automation fact mutation commands must stay removed");
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+}
+
+#[test]
+fn automation_rejects_removed_raw_run_launchers() {
+    for task in ["session-reflection", "skill-writing"] {
+        let error = match Cli::try_parse_from(["tracedecay", "automation", "run", task]) {
+            Ok(_) => panic!("raw automation run launcher must remain absent: {task}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+}
+
+#[test]
+fn automation_runs_commands_parse_history_flags() {
+    let list = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "runs",
+        "list",
+        "--limit",
+        "5",
+        "--json",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("automation runs list should parse");
+
+    assert!(matches!(
+        list.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Runs {
+                    action:
+                        AutomationRunsAction::List {
+                            limit,
+                            json,
+                            path,
+                        }
+                }
+        }) if limit == 5 && json && path.as_deref() == Some("/tmp/project")
+    ));
+
+    let view = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "runs",
+        "view",
+        "run-123",
+        "--json",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("automation runs view should parse");
+
+    assert!(matches!(
+        view.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Runs {
+                    action:
+                        AutomationRunsAction::View { run_id, json, path }
+                }
+        }) if run_id == "run-123" && json && path.as_deref() == Some("/tmp/project")
+    ));
+
+    let artifact = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "runs",
+        "artifact",
+        "run-123",
+        "codex_handoff",
+        "--json",
+        "--path",
+        "/tmp/project",
+    ])
+    .expect("automation runs artifact should parse");
+
+    assert!(matches!(
+        artifact.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Runs {
+                    action:
+                        AutomationRunsAction::Artifact {
+                            run_id,
+                            kind,
+                            json,
+                            path
+                        }
+                }
+        }) if run_id == "run-123"
+            && kind == "codex_handoff"
+            && json
+            && path.as_deref() == Some("/tmp/project")
+    ));
+}
+
+#[test]
+fn automation_skills_commands_parse_lifecycle_flags() {
+    let create = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "skills",
+        "create",
+        "--id",
+        "repo-hygiene",
+        "--title",
+        "Repository hygiene",
+        "--summary",
+        "Keep checks focused",
+        "--routing-description",
+        "Use when selecting focused repository checks.",
+        "--category",
+        "maintenance",
+        "--body",
+        "Run focused tests.",
+        "--pinned",
+    ])
+    .expect("automation skills create should parse");
+    assert!(matches!(
+        create.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Skills {
+                    action:
+                        AutomationSkillsAction::Create {
+                            id,
+                            title,
+                            summary,
+                            routing_description,
+                            category,
+                            body,
+                            pinned,
+                        }
+                }
+        }) if id == "repo-hygiene"
+            && title == "Repository hygiene"
+            && summary == "Keep checks focused"
+            && routing_description == "Use when selecting focused repository checks."
+            && category == "maintenance"
+            && body == "Run focused tests."
+            && pinned
+    ));
+
+    let update = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "skills",
+        "update",
+        "repo-hygiene",
+        "--summary",
+        "Updated",
+        "--routing-description",
+        "Use when reviewing focused check selection.",
+        "--pinned",
+        "false",
+    ])
+    .expect("automation skills update should parse");
+    assert!(matches!(
+        update.command,
+        Some(Commands::Automation {
+            action:
+                AutomationAction::Skills {
+                    action:
+                        AutomationSkillsAction::Update {
+                            id,
+                            summary,
+                            routing_description,
+                            pinned,
+                            ..
+                        }
+                }
+        }) if id == "repo-hygiene"
+            && summary.as_deref() == Some("Updated")
+            && routing_description.as_deref() == Some("Use when reviewing focused check selection.")
+            && pinned == Some(false)
+    ));
+
+    let approve = Cli::try_parse_from([
+        "tracedecay",
+        "automation",
+        "skills",
+        "approve",
+        "repo-hygiene",
+    ])
+    .err()
+    .expect("automation skills approve must stay removed");
+    assert_eq!(approve.kind(), ErrorKind::InvalidSubcommand);
+
+    let install = Cli::try_parse_from(["tracedecay", "automation", "skills", "install"])
+        .err()
+        .expect("managed skills deploy automatically; manual install must stay removed");
+    assert_eq!(install.kind(), ErrorKind::InvalidSubcommand);
+}
+
+#[test]
+fn project_selector_flags_parse_for_cli_read_surfaces() {
+    let status =
+        Cli::try_parse_from(["tracedecay", "status", "--project-id", "proj_123", "--json"])
+            .expect("status project selector should parse");
+    assert!(matches!(
+        status.command,
+        Some(Commands::Status {
+            path,
+            project_id,
+            project_path,
+            json,
+            ..
+        }) if path.is_none()
+            && project_id.as_deref() == Some("proj_123")
+            && project_path.is_none()
+            && json
+    ));
+
+    let memory = Cli::try_parse_from([
+        "tracedecay",
+        "memory",
+        "status",
+        "--project-path",
+        "/tmp/project",
+    ])
+    .expect("memory status project selector should parse");
+    assert!(matches!(
+        memory.command,
+        Some(Commands::Memory {
+            action:
+                MemoryAction::Status {
+                    path,
+                    project_id,
+                    project_path,
+                    ..
+                }
+        }) if path.is_none()
+            && project_id.is_none()
+            && project_path.as_deref() == Some("/tmp/project")
+    ));
+
+    let sessions = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "needle",
+        "--project-id",
+        "proj_123",
+    ])
+    .expect("sessions search project selector should parse");
+    assert!(matches!(
+        sessions.command,
+        Some(Commands::Sessions {
+            action: SessionsAction::Search(args)
+        }) if args.project_id.as_deref() == Some("proj_123") && args.project_path.is_none()
+    ));
+}
+
+#[test]
+fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
+    let report = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "report",
+        "--profile-root",
+        "/tmp/profile",
+        "--project-id",
+        "proj_a",
+        "--project-root",
+        "/repos/a",
+        "--json",
+    ])
+    .expect("storage report should parse");
+
+    assert!(matches!(
+        report.command,
+        Some(Commands::Storage {
+            action: ProfileStorageAction::StorageReport {
+                profile_root,
+                project_id,
+                project_root,
+                json,
+            }
+        }) if profile_root.as_deref() == Some("/tmp/profile")
+            && project_id.as_deref() == Some("proj_a")
+            && project_root.as_deref() == Some("/repos/a")
+            && json
+    ));
+
+    let backup = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "backup",
+        "--to",
+        "/tmp/backups",
+        "--backup-id",
+        "backup_2026_08_11",
+    ])
+    .expect("storage backup should parse");
+
+    assert!(matches!(
+        backup.command,
+        Some(Commands::Storage {
+            action: ProfileStorageAction::BackupProfile {
+                to,
+                backup_id,
+            }
+        }) if to == "/tmp/backups" && backup_id == "backup_2026_08_11"
+    ));
+
+    let rehearsal = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "rehearse-backup",
+        "--backup",
+        "/tmp/backups/backup_2026_08_11",
+        "--restore",
+        "/tmp/restore",
+    ])
+    .expect("storage rehearse-backup should parse");
+
+    assert!(matches!(
+        rehearsal.command,
+        Some(Commands::Storage {
+            action: ProfileStorageAction::RehearseProfileBackup {
+                backup,
+                restore,
+            }
+        }) if backup == "/tmp/backups/backup_2026_08_11" && restore == "/tmp/restore"
+    ));
+
+    let reset = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "reset-authority",
+        "observations",
+        "--db",
+        "/tmp/profile/user-sessions.db",
+    ])
+    .expect("storage reset-authority should parse");
+
+    assert!(matches!(
+        reset.command,
+        Some(Commands::Storage {
+            action: ProfileStorageAction::ResetAuthority { authority, db }
+        }) if authority == "observations"
+            && db.as_deref() == Some("/tmp/profile/user-sessions.db")
+    ));
+
+    for args in [
+        vec![
+            "tracedecay",
+            "storage",
+            "storage-report",
+            "--profile-root",
+            "/tmp/profile",
+        ],
+        vec![
+            "tracedecay",
+            "storage",
+            "backup-profile",
+            "--to",
+            "/tmp/backups",
+            "--backup-id",
+            "backup_2026_08_11",
+        ],
+        vec![
+            "tracedecay",
+            "storage",
+            "rehearse-profile-backup",
+            "--backup",
+            "/tmp/backups/backup_2026_08_11",
+            "--restore",
+            "/tmp/restore",
+        ],
+    ] {
+        let error = match Cli::try_parse_from(args.clone()) {
+            Ok(_) => panic!("legacy storage spelling must be rejected: {args:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "args: {args:?}");
+    }
+}
+
+#[test]
+fn storage_cleanup_sources_is_not_a_supported_subcommand() {
+    let err = match Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "cleanup-sources",
+        "--manifest",
+        "/tmp/migration-manifest.json",
+        "--confirm-token",
+        "confirm",
+    ]) {
+        Ok(_) => panic!("cleanup-sources must not parse"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+}
+
+#[test]
+fn branch_remove_requires_a_branch_name() {
+    let err = match Cli::try_parse_from(["tracedecay", "branch", "remove"]) {
+        Ok(_) => panic!("branch remove should require a name"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn parses_sessions_import_and_search_commands() {
+    let import = Cli::try_parse_from(["tracedecay", "sessions", "import"]).unwrap();
+    match import.command {
+        Some(Commands::Sessions {
+            action:
+                SessionsAction::Import {
+                    project_id,
+                    project_path,
+                },
+        }) => {
+            assert!(project_id.is_none());
+            assert!(project_path.is_none());
+        }
+        _ => panic!("expected sessions import command"),
+    }
+
+    let search = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "needle",
+        "--provider",
+        "codex",
+        "--limit",
+        "5",
+    ])
+    .unwrap();
+    match search.command {
+        Some(Commands::Sessions {
+            action: SessionsAction::Search(args),
+        }) => {
+            assert_eq!(args.query, "needle");
+            assert_eq!(args.provider.as_deref(), Some("codex"));
+            assert_eq!(args.scope, "all");
+            assert_eq!(args.message_type, "all");
+            assert!(args.parent_session_id.is_none());
+            assert_eq!(args.limit, 5);
+            assert!(args.project_id.is_none());
+            assert!(args.project_path.is_none());
+            assert!(args.since.is_none());
+            assert!(args.until.is_none());
+            assert!(args.branch.is_none());
+            assert!(args.worktree.is_none());
+            assert!(args.commit.is_none());
+        }
+        _ => panic!("expected sessions search command"),
+    }
+
+    let time_filtered_search = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "needle",
+        "--since",
+        "last hour",
+        "--until",
+        "2026-07-04T00:00:00Z",
+    ])
+    .unwrap();
+    match time_filtered_search.command {
+        Some(Commands::Sessions {
+            action: SessionsAction::Search(args),
+        }) => {
+            assert_eq!(args.since.as_deref(), Some("last hour"));
+            assert_eq!(args.until.as_deref(), Some("2026-07-04T00:00:00Z"));
+        }
+        _ => panic!("expected sessions search command"),
+    }
+
+    let all_provider_search =
+        Cli::try_parse_from(["tracedecay", "sessions", "search", "needle"]).unwrap();
+    match all_provider_search.command {
+        Some(Commands::Sessions {
+            action: SessionsAction::Search(args),
+        }) => {
+            assert_eq!(args.query, "needle");
+            assert!(args.provider.is_none());
+            assert_eq!(args.limit, 10);
+        }
+        _ => panic!("expected sessions search command"),
+    }
+
+    let filtered_search = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "needle",
+        "--scope",
+        "subagents_only",
+        "--message-type",
+        "direct_user",
+        "--parent-session-id",
+        "parent-1",
+    ])
+    .unwrap();
+    assert!(matches!(
+        filtered_search.command,
+        Some(Commands::Sessions {
+            action: SessionsAction::Search(args)
+        }) if args.scope == "subagents_only"
+            && args.message_type == "direct_user"
+            && args.parent_session_id.as_deref() == Some("parent-1")
+    ));
+}
+
+/// `--json` is not a sessions-search flag. Clap must reject it at parse
+/// time; a hang after the usage error is a process-lifetime defect, not
+/// this check.
+#[test]
+fn sessions_search_rejects_json_at_parse() {
+    let error = match Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "tracedecay",
+        "--limit",
+        "3",
+        "--json",
+    ]) {
+        Ok(_) => panic!("sessions search does not accept --json"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn sessions_refresh_parses_exact_lifecycle_selectors() {
+    let begin = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "refresh",
+        "begin",
+        "--project-id",
+        "project.tracedecay",
+        "--session-id",
+        "session.refresh",
+        "--provider",
+        "cursor",
+        "--source",
+        "4",
+        "--target",
+        "9",
+        "--json",
+    ])
+    .expect("project-scoped refresh begin should parse");
+    assert!(matches!(
+        begin.command,
+        Some(Commands::Sessions {
+            action:
+                SessionsAction::Refresh {
+                    action: SessionsRefreshAction::Begin(args)
+                }
+        }) if args.selectors.project_id.as_deref() == Some("project.tracedecay")
+            && args.selectors.project_path.is_none()
+            && args.selectors.profile_id.is_none()
+            && args.selectors.session_id == "session.refresh"
+            && args.selectors.provider == "cursor"
+            && args.selectors.source == 4
+            && args.selectors.target == 9
+            && args.json
+    ));
+
+    let status = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "refresh",
+        "status",
+        "--profile-id",
+        "profile.primary",
+        "--session-id",
+        "session.refresh",
+        "--provider",
+        "cursor",
+        "--source",
+        "4",
+        "--target",
+        "9",
+        "--handle",
+        "refresh.abc",
+    ])
+    .expect("profile-scoped refresh status should parse");
+    assert!(matches!(
+        status.command,
+        Some(Commands::Sessions {
+            action:
+                SessionsAction::Refresh {
+                    action: SessionsRefreshAction::Status(args)
+                }
+        }) if args.selectors.project_id.is_none()
+            && args.selectors.project_path.is_none()
+            && args.selectors.profile_id.as_deref() == Some("profile.primary")
+            && args.selectors.session_id == "session.refresh"
+            && args.selectors.provider == "cursor"
+            && args.selectors.source == 4
+            && args.selectors.target == 9
+            && args.handle == "refresh.abc"
+            && !args.json
+    ));
+
+    let cancel = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "refresh",
+        "cancel",
+        "--project-path",
+        "/repo/tracedecay",
+        "--session-id",
+        "session.refresh",
+        "--provider",
+        "cursor",
+        "--source",
+        "4",
+        "--target",
+        "9",
+        "--operation-id",
+        "refresh.abc",
+        "--json",
+    ])
+    .expect("project-path refresh cancel should parse");
+    assert!(matches!(
+        cancel.command,
+        Some(Commands::Sessions {
+            action:
+                SessionsAction::Refresh {
+                    action: SessionsRefreshAction::Cancel(args)
+                }
+        }) if args.selectors.project_id.is_none()
+            && args.selectors.project_path.as_deref() == Some("/repo/tracedecay")
+            && args.selectors.profile_id.is_none()
+            && args.handle == "refresh.abc"
+            && args.json
+    ));
+}
+
+#[test]
+fn sessions_refresh_never_falls_back_to_the_current_directory() {
+    for args in [
+        vec![
+            "tracedecay",
+            "sessions",
+            "refresh",
+            "begin",
+            "--session-id",
+            "session.refresh",
+            "--provider",
+            "cursor",
+            "--source",
+            "4",
+            "--target",
+            "9",
+        ],
+        vec![
+            "tracedecay",
+            "sessions",
+            "refresh",
+            "status",
+            "--session-id",
+            "session.refresh",
+            "--provider",
+            "cursor",
+            "--source",
+            "4",
+            "--target",
+            "9",
+            "--operation-id",
+            "refresh.abc",
+        ],
+        vec![
+            "tracedecay",
+            "sessions",
+            "refresh",
+            "cancel",
+            "--session-id",
+            "session.refresh",
+            "--provider",
+            "cursor",
+            "--source",
+            "4",
+            "--target",
+            "9",
+            "--operation-id",
+            "refresh.abc",
+        ],
+    ] {
+        let error = match Cli::try_parse_from(args.clone()) {
+            Ok(_) => panic!("refresh must require a project or profile selector"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            ErrorKind::MissingRequiredArgument,
+            "args: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn remote_status_parses_json_flag() {
+    let cli = Cli::try_parse_from(["tracedecay", "remote", "status", "--json"])
+        .expect("remote status should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Remote {
+            action: RemoteAction::Status { json: true }
+        })
+    ));
+    assert!(Cli::try_parse_from(["tracedecay", "remote", "status"]).is_ok());
+}
+
+#[test]
+fn remote_protocol_actions_require_endpoint_credential_and_request_file() {
+    for action in [
+        "enroll",
+        "capture",
+        "query",
+        "transfer-frame",
+        "replay",
+        "backup",
+        "restore",
+        "failover",
+    ] {
+        let error = match Cli::try_parse_from(["tracedecay", "remote", action]) {
+            Ok(_) => panic!("{action} must require authority flags"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            ErrorKind::MissingRequiredArgument,
+            "{action} must require endpoint, credential-file, and request-file"
+        );
+    }
+
+    let enroll_without_enrollment_credential = match Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "enroll",
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "grant.bin",
+        "--request-file",
+        "enroll.json",
+    ]) {
+        Ok(_) => panic!("enroll must require --enrollment-credential-file"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        enroll_without_enrollment_credential.kind(),
+        ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn remote_replay_parses_request_file_and_optional_trust_root() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "replay",
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "cred.bin",
+        "--trust-root-file",
+        "root.pem",
+        "--timeout-secs",
+        "45",
+        "--request-file",
+        "-",
+        "--json",
+    ])
+    .expect("remote replay should parse");
+
+    let Some(Commands::Remote {
+        action: RemoteAction::Replay { authority },
+    }) = cli.command
+    else {
+        panic!("unexpected remote replay command");
+    };
+    assert_eq!(authority.endpoint, "https://brain.example/remote/");
+    assert_eq!(authority.credential_file, std::path::Path::new("cred.bin"));
+    assert_eq!(
+        authority.trust_root_file.as_deref(),
+        Some(std::path::Path::new("root.pem"))
+    );
+    assert_eq!(authority.timeout_secs, 45);
+    assert_eq!(authority.request_file, std::path::Path::new("-"));
+    assert!(authority.json);
+}
+
+#[test]
+fn remote_capture_query_and_transfer_frame_parse_authority_flags() {
+    for (action, expected) in [
+        ("capture", "capture"),
+        ("query", "query"),
+        ("transfer-frame", "transfer_frame"),
+    ] {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "remote",
+            action,
+            "--endpoint",
+            "https://node.example/remote/",
+            "--credential-file",
+            "cred.bin",
+            "--request-file",
+            "request.json",
+            "--json",
+        ])
+        .unwrap_or_else(|error| panic!("remote {action} should parse: {error}"));
+
+        let Some(Commands::Remote { action: parsed }) = cli.command else {
+            panic!("unexpected remote {action} command");
+        };
+        let authority = match (&parsed, expected) {
+            (RemoteAction::Capture { authority }, "capture")
+            | (RemoteAction::Query { authority }, "query")
+            | (RemoteAction::TransferFrame { authority }, "transfer_frame") => authority,
+            _ => panic!("remote {action} parsed into the wrong action"),
+        };
+        assert_eq!(authority.endpoint, "https://node.example/remote/");
+        assert_eq!(authority.credential_file, std::path::Path::new("cred.bin"));
+        assert_eq!(authority.request_file, std::path::Path::new("request.json"));
+        assert!(authority.json);
+    }
+}
+
+#[test]
+fn remote_status_rejects_protocol_request_file_flags() {
+    let error = match Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "status",
+        "--request-file",
+        "request.json",
+    ]) {
+        Ok(_) => panic!("status must not accept --request-file"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn remote_enroll_parses_both_credential_files() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "remote",
+        "enroll",
+        "--endpoint",
+        "https://brain.example/remote/",
+        "--credential-file",
+        "grant.bin",
+        "--enrollment-credential-file",
+        "enroll.bin",
+        "--request-file",
+        "enroll.json",
+    ])
+    .expect("remote enroll should parse");
+
+    let Some(Commands::Remote {
+        action:
+            RemoteAction::Enroll {
+                authority,
+                enrollment_credential_file,
+            },
+    }) = cli.command
+    else {
+        panic!("unexpected remote enroll command");
+    };
+    assert_eq!(authority.credential_file, std::path::Path::new("grant.bin"));
+    assert_eq!(
+        enrollment_credential_file,
+        std::path::Path::new("enroll.bin")
+    );
+    assert_eq!(authority.request_file, std::path::Path::new("enroll.json"));
+    assert!(!authority.json);
+}

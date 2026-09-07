@@ -1,0 +1,702 @@
+[package]
+name = "tracedecay"
+version.workspace = true
+publish = false
+edition.workspace = true
+description = "Local semantic code intelligence, project memory, and workflow context for AI coding agents."
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+homepage = "https://github.com/ScriptedAlchemy/tracedecay"
+readme = "../../README.md"
+keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "semantic-search"]
+categories = ["development-tools", "command-line-utilities"]
+# Explicit source-archive whitelist retained for local distribution validation.
+# Frontend sources and the prebuilt dashboard/app-dist are deliberately
+# excluded: the CLI package stages and embeds the dashboard bundle and
+# registers it into this library at process start.
+include = [
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+    "/rust-toolchain.toml",
+    "/.cargo/config.toml",
+    "/src/**",
+    "/benches/**",
+    "/examples/**",
+    "/tests/fixtures/analytics/**",
+    "/tests/fixtures/packaged_host_events/**",
+    "/tests/fixtures/provider_normalization/**",
+    "/tests/fixtures/redundancy_eval_labeled.json",
+    "/tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json",
+    "/tests/fixtures/transcript_golden/cline_like/**",
+    "/benchmark_data/queries/default.toml",
+    "/benchmark_data/claude-observation/**",
+    "/benchmark_data/session-temporal/**",
+    "/benchmark_data/query-code-index/**",
+    "/benchmark_data/search-quality/query-fallback-report-v1.json",
+    "/scripts/run-session-temporal-benchmark.sh",
+    "/plugin/.claude-plugin/**",
+    "/plugin/.cursor-plugin/**",
+    "/plugin/.codex-plugin/**",
+    "/plugin/.kimi-plugin/**",
+    "/plugin/.lsp.json",
+    "/plugin/.mcp.json",
+    "/plugin/README*.md",
+    "/plugin/agents/**",
+    "/plugin/commands/**",
+    "/plugin/hooks/**",
+    "/plugin/mcp-cursor.json",
+    "/plugin/opencode/**",
+    "/plugin/overlays/**",
+    "/plugin/rules/**",
+    "/plugin/skills/**",
+    "/plugin/cursor-native-extension/package.json",
+    "/plugin/cursor-native-extension/README.md",
+    "/plugin/cursor-native-extension/LICENSE",
+    "/plugin/cursor-native-extension/embedded/extension.js",
+    "/vendor/**",
+    "/dashboard/hermes-wrapper/manifest.json",
+    "/dashboard/hermes-wrapper/plugin_api.py",
+    "/dashboard/hermes-wrapper/src/**",
+]
+
+[features]
+# Default and explicitly selected production artifacts resolve through the
+# same feature. Release packaging selects exactly `production`; profiling is a
+# separate feature-enabled build because Hotpath 0.24 has no runtime-off mode.
+# `--all-features` is test-only because it includes `test-transport`.
+default = ["production"]
+
+# Opt-in profiling. Never in `default` and never in `production`: with no
+# profiling feature selected every hotpath macro expands to a no-op, so the
+# instrumented call sites below compile identically in both modes.
+#
+# `hotpath` alone gives wall-clock timing. The other three layer on top of it:
+# `hotpath-alloc` installs the counting global allocator, `hotpath-cpu` adds
+# on-CPU sampling, and `hotpath-mcp` exposes the live query server (port 6771
+# by default, `HOTPATH_MCP_PORT` overrides). `hotpath/tokio` is required by
+# `hotpath::tokio_runtime!`, which this binary registers with the explicit
+# runtime handle it builds in `async_main`.
+#
+# The per-crate passthroughs matter because the profiling features change what
+# `#[hotpath::measure]` expands to: a library crate compiled without them
+# reports no allocation or CPU samples even when the binary enables profiling.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    # The daemon serves its HTTP application surface with axum 0.8 and reaches
+    # GitHub through ureq 3, and hotpath instruments both natively. Matching the
+    # versions we already depend on, so no second HTTP stack is introduced.
+    "hotpath/axum-0-8",
+    "hotpath/ureq-3",
+    "tracedecay-agent-hosts/hotpath",
+    "tracedecay-api/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-automation/hotpath",
+    "tracedecay-automation-runtime/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-code-index-retention/hotpath",
+    "tracedecay-code-index-runtime/hotpath",
+    "tracedecay-configuration/hotpath",
+    "tracedecay-dashboard-api/hotpath",
+    "tracedecay-daemon-control/hotpath",
+    "tracedecay-daemon-identity/hotpath",
+    "tracedecay-daemon-protocol/hotpath",
+    "tracedecay-daemon-service/hotpath",
+    "tracedecay-framing/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-graph-query/hotpath",
+    "tracedecay-hooks/hotpath",
+    "tracedecay-host-admission/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-maintenance/hotpath",
+    "tracedecay-mcp/hotpath",
+    "tracedecay-policy/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-rusqlite-runtime/hotpath",
+    "tracedecay-search-eval/hotpath",
+    "tracedecay-semantic/hotpath",
+    "tracedecay-session-memory/hotpath",
+    "tracedecay-session-runtime/hotpath",
+    "tracedecay-store-runtime/hotpath",
+    "tracedecay-session-temporal-store/hotpath",
+    "tracedecay-lcm/hotpath",
+    "tracedecay-sessions/hotpath",
+    "tracedecay-source-edit/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-temporal-query/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-agent-hosts/hotpath-alloc",
+    "tracedecay-api/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-automation/hotpath-alloc",
+    "tracedecay-automation-runtime/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-code-index-retention/hotpath-alloc",
+    "tracedecay-code-index-runtime/hotpath-alloc",
+    "tracedecay-configuration/hotpath-alloc",
+    "tracedecay-dashboard-api/hotpath-alloc",
+    "tracedecay-daemon-control/hotpath-alloc",
+    "tracedecay-daemon-identity/hotpath-alloc",
+    "tracedecay-daemon-protocol/hotpath-alloc",
+    "tracedecay-daemon-service/hotpath-alloc",
+    "tracedecay-framing/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-graph-query/hotpath-alloc",
+    "tracedecay-hooks/hotpath-alloc",
+    "tracedecay-host-admission/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-maintenance/hotpath-alloc",
+    "tracedecay-mcp/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-rusqlite-runtime/hotpath-alloc",
+    "tracedecay-search-eval/hotpath-alloc",
+    "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-session-runtime/hotpath-alloc",
+    "tracedecay-store-runtime/hotpath-alloc",
+    "tracedecay-session-temporal-store/hotpath-alloc",
+    "tracedecay-lcm/hotpath-alloc",
+    "tracedecay-sessions/hotpath-alloc",
+    "tracedecay-source-edit/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-temporal-query/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-agent-hosts/hotpath-cpu",
+    "tracedecay-api/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-automation/hotpath-cpu",
+    "tracedecay-automation-runtime/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-code-index-retention/hotpath-cpu",
+    "tracedecay-code-index-runtime/hotpath-cpu",
+    "tracedecay-configuration/hotpath-cpu",
+    "tracedecay-dashboard-api/hotpath-cpu",
+    "tracedecay-daemon-control/hotpath-cpu",
+    "tracedecay-daemon-identity/hotpath-cpu",
+    "tracedecay-daemon-protocol/hotpath-cpu",
+    "tracedecay-daemon-service/hotpath-cpu",
+    "tracedecay-framing/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-graph-query/hotpath-cpu",
+    "tracedecay-hooks/hotpath-cpu",
+    "tracedecay-host-admission/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-maintenance/hotpath-cpu",
+    "tracedecay-mcp/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-rusqlite-runtime/hotpath-cpu",
+    "tracedecay-search-eval/hotpath-cpu",
+    "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-session-runtime/hotpath-cpu",
+    "tracedecay-store-runtime/hotpath-cpu",
+    "tracedecay-session-temporal-store/hotpath-cpu",
+    "tracedecay-lcm/hotpath-cpu",
+    "tracedecay-sessions/hotpath-cpu",
+    "tracedecay-source-edit/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-temporal-query/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
+# Binary-only: the live query server runs in this process, so no library crate
+# needs a passthrough for it.
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+# Opt-in tiered graph storage. Never in `default` or `production`: both give
+# the graph buffer manager a spill directory and a bounded budget, so they are
+# deliberate build choices rather than silent defaults.
+#
+# `graph-disk-tier` is the usable half. `graph-tiered-storage` additionally
+# turns on grafeo-core's `tiered-storage` LPG arena, which is known broken at
+# grafeo 0.5.42 (1 MiB per-epoch record ceiling, then a panic).
+# See `crates/tracedecay-graph-db/Cargo.toml` for the detail.
+graph-disk-tier = ["tracedecay-graph-db/graph-disk-tier"]
+
+# Per-generation sealed compact stores: at seal time each verified generation
+# gets its own isolated, digest-proven store beside the staging database
+# (compacted when the pinned engine round-trips its scalars). Production
+# default; `TRACEDECAY_GRAPH_SEALED_STORE=off` is the runtime kill-switch.
+graph-sealed-store = ["tracedecay-graph-db/graph-sealed-store"]
+graph-tiered-storage = ["tracedecay-graph-db/graph-tiered-storage"]
+
+production = [
+    "token-counting",
+    "lite",
+    "full",
+    "semantic-fastembed",
+    "semantic-model2vec",
+    "graph-sealed-store",
+]
+
+# Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
+# Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
+# vocab decoding is lazy (first count pays it, idle servers never do).
+# Disable for a leaner binary — cost estimation falls back to chars/4.
+token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard-api/token-counting"]
+
+# Lite tier (11 languages) — always compiled, no feature flag needed:
+# Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift.
+# Markdown joins them: documentation is architecture content, every repository
+# has it, and a build that indexes code but not its docs is not a shippable
+# tier. Its grammar lives in the (monolithic) large bundle, so `lite` now links
+# that bundle — the compile-weight cost of making docs unconditional.
+lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
+
+medium = ["tracedecay-code-index/medium"]
+full = ["tracedecay-code-index/full", "tracedecay-code-index-runtime/full"]
+
+# These aliases are intentionally repeated at the binary boundary: Cargo
+# cannot expose a dependency feature as a caller-selectable local feature.
+# Tier membership remains owned by tracedecay-code-extraction and reaches this
+# package through the aggregate forwards above.
+lang-dart = ["tracedecay-code-index/lang-dart"]
+lang-pascal = ["tracedecay-code-index/lang-pascal"]
+lang-php = ["tracedecay-code-index/lang-php"]
+lang-ruby = ["tracedecay-code-index/lang-ruby"]
+lang-bash = ["tracedecay-code-index/lang-bash"]
+lang-protobuf = ["tracedecay-code-index/lang-protobuf"]
+lang-powershell = ["tracedecay-code-index/lang-powershell"]
+lang-nix = ["tracedecay-code-index/lang-nix"]
+lang-vbnet = ["tracedecay-code-index/lang-vbnet"]
+lang-lua = ["tracedecay-code-index/lang-lua"]
+lang-zig = ["tracedecay-code-index/lang-zig"]
+lang-objc = ["tracedecay-code-index/lang-objc"]
+lang-perl = ["tracedecay-code-index/lang-perl"]
+lang-batch = ["tracedecay-code-index/lang-batch"]
+lang-fortran = ["tracedecay-code-index/lang-fortran"]
+lang-cobol = ["tracedecay-code-index/lang-cobol"]
+lang-msbasic2 = ["tracedecay-code-index/lang-msbasic2"]
+lang-gwbasic = ["tracedecay-code-index/lang-gwbasic"]
+lang-qbasic = ["tracedecay-code-index/lang-qbasic"]
+lang-dockerfile = ["tracedecay-code-index/lang-dockerfile"]
+lang-glsl = ["tracedecay-code-index/lang-glsl"]
+lang-wgsl = ["tracedecay-code-index/lang-wgsl"]
+lang-hlsl = ["tracedecay-code-index/lang-hlsl"]
+lang-metal = ["tracedecay-code-index/lang-metal"]
+lang-markdown = ["tracedecay-code-index/lang-markdown"]
+lang-r = ["tracedecay-code-index/lang-r"]
+lang-sql = ["tracedecay-code-index/lang-sql"]
+lang-julia = ["tracedecay-code-index/lang-julia"]
+lang-haskell = ["tracedecay-code-index/lang-haskell"]
+lang-ocaml = ["tracedecay-code-index/lang-ocaml"]
+lang-clojure = ["tracedecay-code-index/lang-clojure"]
+lang-erlang = ["tracedecay-code-index/lang-erlang"]
+lang-elixir = ["tracedecay-code-index/lang-elixir"]
+lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
+lang-quint = ["tracedecay-code-index/lang-quint"]
+lang-toml = ["tracedecay-code-index/lang-toml"]
+lang-lean = ["tracedecay-code-index/lang-lean"]
+# Integration fixture surface. `HostAdmissionTestRuntimeV1` and the registered
+# database scaffolding it owns are assembled by the composition root, so they
+# live in the product library rather than a test crate. This feature keeps them
+# out of a default or `production` build: they compile only under `cfg(test)`
+# or when a consumer asks for them explicitly.
+test-helpers = [
+    "tracedecay-automation-runtime/test-helpers",
+    "tracedecay-code-index-runtime/test-helpers",
+    "tracedecay-daemon-service/test-helpers",
+    "tracedecay-host-admission/test-helpers",
+    "tracedecay-maintenance/test-helpers",
+    "tracedecay-runtime-core/test-helpers",
+    "tracedecay-session-runtime/test-helpers",
+    "tracedecay-sessions/test-helpers",
+    "tracedecay-store-runtime/test-helpers",
+]
+
+test-transport = [
+    "test-helpers",
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-runtime-core/test-transport",
+    "tracedecay-agent-hosts/test-transport",
+    "tracedecay-automation-runtime/test-transport",
+    "tracedecay-dashboard-api/test-transport",
+    "tracedecay-host-admission/test-transport",
+    "tracedecay-usecases/test-transport",
+    "tracedecay-graph-query/test-helpers",
+    "tracedecay-mcp/test-transport",
+    # The observation-seed fixture bridge (`dashboard::observation_seed`) is
+    # test-transport-gated and drives the global-db session-temporal refresh
+    # helpers; plain builds (no dev-dep feature unification) need the forward.
+    "tracedecay-global-db/test-helpers",
+    "tracedecay-session-temporal-store/test-helpers",
+    # The graph-projection fixture bridge
+    # (`dashboard::graph_projection_fixture`) publishes the hermetic code-graph
+    # generation dashboard neighbor reads take their adjacency from.
+    "tracedecay-code-index/test-helpers",
+    "tracedecay-code-index-runtime/test-helpers",
+    "tracedecay-code-index-runtime/test-transport",
+]
+
+# The typed RMCP benchmark is the only consumer of the client-side RMCP
+# transport. Keep that surface out of ordinary integration-fixture builds:
+# the benchmark enables its complete client/runtime dependency set explicitly.
+rmcp-benchmark = [
+    "test-transport",
+    "rmcp/client",
+    "rmcp/transport-async-rw",
+]
+
+# SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
+# image defaults disabled. Runtime inference still loads only from locally
+# verified artifact bytes; daemon-owned acquisition uses hf-hub against the
+# immutable catalog pins, never query-time ambient cache discovery. The
+# adapter itself lives in `tracedecay-semantic`, which owns the pins.
+semantic-fastembed = [
+    "tracedecay-semantic/semantic-fastembed",
+    "tracedecay-usecases/semantic-fastembed",
+    "tracedecay-code-index-runtime/semantic-fastembed",
+]
+# SEMANTIC Model2Vec static-embedding backend: a safetensors token table
+# mean-pooled in-process, no ONNX Runtime. Selected per model by the catalog
+# entry's declared backend; ships in `production` alongside FastEmbed so the
+# cataloged `PotionCode16MV2` selection is servable, not merely listed.
+semantic-model2vec = [
+    "tracedecay-semantic/semantic-model2vec",
+    "tracedecay-usecases/semantic-model2vec",
+    "tracedecay-code-index-runtime/semantic-model2vec",
+]
+# Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
+# request: CoreML on macOS, CUDA on Linux). Not part of `production`; a
+# default build, and a GPU-featured build left at the runtime default
+# (`TRACEDECAY_EMBED_EXECUTION_PROVIDER` unset), stay byte-identical to the
+# CPU-only adapter. See `tracedecay-semantic/src/execution_provider.rs`.
+semantic-gpu-coreml = [
+    "tracedecay-semantic/semantic-gpu-coreml",
+    "tracedecay-usecases/semantic-gpu-coreml",
+]
+semantic-gpu-cuda = [
+    "tracedecay-semantic/semantic-gpu-cuda",
+    "tracedecay-usecases/semantic-gpu-cuda",
+]
+
+[lib]
+name = "tracedecay"
+
+# Integration harnesses that intentionally exercise in-process daemon/test
+# transport seams stay out of the default production feature graph.
+[[test]]
+name = "dashboard_api_test"
+path = "tests/dashboard_api_test/main.rs"
+required-features = ["test-transport"]
+
+# Former single-file test-transport targets, compiled as modules of one binary.
+[[test]]
+name = "transport_acceptance_suite"
+path = "tests/transport_acceptance_suite/main.rs"
+required-features = ["test-transport"]
+
+# Shared with the extracted rusqlite-runtime package's restart/parity tests;
+# keep one repository-level source while preserving this package target.
+[[test]]
+name = "storage_runtime_rusqlite_suite"
+path = "../../tests/storage_runtime_rusqlite_suite/main.rs"
+
+[dependencies]
+axum = "0.8"
+hotpath.workspace = true
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
+tower = "0.5"
+tree-sitter = "0.26"
+constant_time_eq = "0.5.0"
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0" }
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["source-analysis"] }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+clap = { version = "4.6", features = ["derive"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+base64 = "0.22"
+toml = "1"
+ureq = { version = "3", features = ["json"] }
+url = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+sha2 = "0.11"
+glob = "0.3"
+walkdir = "2"
+ignore = "0.4"
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+dirs = "6"
+hex = "0.4"
+fs2 = "0.4"
+same-file = "1"
+# Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
+# We deliberately use the raw watcher (not notify-debouncer-full) and debounce
+# ourselves so a monorepo's git-ref churn coalesces into a single sync.
+notify = "6"
+zeroize = "1.9.0"
+keyring = { version = "4.1.5", features = ["v1"] }
+tempfile = "3"
+cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
+schemars = "1.2.1"
+futures-util = "0.3.33"
+tokio-util = { version = "0.7.19", features = ["codec"] }
+rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+# `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
+# resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such
+# file, and `MNT_LOCAL` is the kernel's direct answer to "is this volume local".
+[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+sha2 = "0.11"
+hex = "0.4"
+regex = "1.12.3"
+filetime = "0.2"
+rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+# test-util enables tokio::test(start_paused = true) so timer-driven unit
+# tests (daemon restart-grace windows) run on virtual time instead of real
+# sleeps.
+tokio = { version = "1", features = ["full", "test-util"] }
+jsonschema = { version = "0.46.8", default-features = false }
+tracedecay-sdk = { path = "../tracedecay-sdk", version = "0.1.0" }
+tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
+# Test builds opt into the query kernel's `*_for_test` constructors; the
+# feature stays off for production builds.
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
+# Production already forwards `lite`/`full` through the `production` feature.
+# Keep this edge grammar-free so tests do not also pull `medium` (code-index
+# defaults) and so the test graph matches the CLI lane plus `test-helpers`.
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers", "test-transport"] }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
+# Same policy for the extracted global-db harness the root test suite drives.
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0", features = ["test-helpers"] }
+# The root's cfg(test) host-admission support composes the dashboard test
+# authority, which lives behind the dashboard-api test-transport feature.
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0", features = ["test-transport"] }
+# ChannelTransport used to be cfg(test) in this crate. After the move it lives
+# behind tracedecay-mcp's test-transport feature, so root unit tests must
+# enable that feature without putting it on the production CLI lane.
+tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0", features = ["test-transport"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-host-admission = { path = "../tracedecay-host-admission", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }
+# Journal tests in the composition root call effect_runtime journal internals
+# that stay crate-private in production and compile only under test-helpers.
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0", features = ["test-helpers"] }
+# Root lib tests call daemon-service fixture constructors (`invoke`,
+# publication gates). Feature unification keeps them off the CLI lane.
+tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0", features = ["test-helpers"] }
+# Root host-admission integration tests drive session-runtime worker pass
+# internals; the fixture surface stays off the CLI lane.
+tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0", features = ["test-helpers"] }
+# Root store-runtime integration tests drive schema-convergence gates that
+# stay off the CLI lane.
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0", features = ["test-helpers"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
+
+[[bench]]
+name = "large_repos"
+path = "benches/large_repos.rs"
+harness = false
+required-features = ["test-transport"]
+
+[[bench]]
+name = "queries"
+path = "benches/queries.rs"
+required-features = ["test-transport"]
+
+[[bench]]
+name = "session_temporal"
+path = "benches/session_temporal.rs"
+harness = false
+# The harness module is gated out of the shipped library, so the bench selects
+# it the same way the integration lanes do.
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "transcript_ingest"
+path = "benches/transcript_ingest.rs"
+harness = false
+# Sandboxed per-item ingest throughput over the same fixture surface as the
+# transcript-ingest integration suite.
+required-features = ["test-helpers"]
+# The custom benchmark CLI is not a libtest harness and cannot answer the
+# `--list --format terse` probe used by `cargo test` and nextest.
+test = false
+
+[[bench]]
+name = "mcp_connection_pipeline"
+path = "benches/mcp_connection_pipeline.rs"
+harness = false
+required-features = ["test-transport"]
+test = false
+
+[[bench]]
+name = "rmcp_connection_pipeline"
+path = "benches/rmcp_connection_pipeline.rs"
+harness = false
+required-features = ["rmcp-benchmark"]
+test = false
+
+[[bench]]
+name = "mcp_server_construction"
+path = "benches/mcp_server_construction.rs"
+harness = false
+required-features = ["rmcp-benchmark"]
+test = false
+
+[[test]]
+name = "runtime_acceptance_suite"
+path = "tests/runtime_acceptance_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "agent_suite"
+path = "tests/agent_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "automation_runner_test"
+path = "tests/automation_runner_test/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "daemon_suite"
+path = "tests/daemon_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "hermes_suite"
+path = "tests/hermes_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "hooks_lsp_suite"
+path = "tests/hooks_lsp_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "mcp_suite"
+path = "tests/mcp_suite/main.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "memory_suite"
+path = "tests/memory_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "search_quality_suite"
+path = "tests/search_quality_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_suite"
+path = "tests/session_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "cursor_observation_identity_fallback"
+path = "tests/cursor_observation_identity_fallback.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "storage_suite"
+path = "tests/storage_suite/main.rs"
+required-features = ["test-helpers"]
+
+# Both reach the shared `tests/common` harness, which builds the host-admission
+# fixture runtime. The other integration targets stay ungated on purpose so a
+# default-feature `cargo test -p tracedecay` still runs everything that does not
+# need the fixture surface.
+[[test]]
+name = "graph_suite"
+path = "tests/graph_suite/main.rs"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "transcript_ingest_suite"
+path = "tests/transcript_ingest_suite/main.rs"
+required-features = ["test-helpers"]
+
+# Former standalone default-feature singles, compiled as modules of one binary.
+[[test]]
+name = "product_surface_suite"
+path = "tests/product_surface_suite/main.rs"

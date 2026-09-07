@@ -1,0 +1,189 @@
+[package]
+name = "tracedecay-code-index-runtime"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Daemon code-index scheduler, git watch, git transactions, and semantic evaluation runtime"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "hotpath/hotpath",
+    "hotpath/tokio",
+    "tracedecay-application/hotpath",
+    "tracedecay-code-extraction/hotpath",
+    "tracedecay-code-index/hotpath",
+    "tracedecay-code-index-retention/hotpath",
+    "tracedecay-lsp/hotpath",
+    "tracedecay-dashboard-api/hotpath",
+    "tracedecay-domain/hotpath",
+    "tracedecay-global-db/hotpath",
+    "tracedecay-graph-db/hotpath",
+    "tracedecay-policy/hotpath",
+    "tracedecay-private-fs/hotpath",
+    "tracedecay-query/hotpath",
+    "tracedecay-runtime-core/hotpath",
+    "tracedecay-search-eval/hotpath",
+    "tracedecay-semantic/hotpath",
+    "tracedecay-session-memory/hotpath",
+    "tracedecay-session-temporal-store/hotpath",
+    "tracedecay-store/hotpath",
+    "tracedecay-tool-catalog/hotpath",
+    "tracedecay-usecases/hotpath",
+]
+hotpath-alloc = [
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-code-extraction/hotpath-alloc",
+    "tracedecay-code-index/hotpath-alloc",
+    "tracedecay-code-index-retention/hotpath-alloc",
+    "tracedecay-lsp/hotpath-alloc",
+    "tracedecay-dashboard-api/hotpath-alloc",
+    "tracedecay-domain/hotpath-alloc",
+    "tracedecay-global-db/hotpath-alloc",
+    "tracedecay-graph-db/hotpath-alloc",
+    "tracedecay-policy/hotpath-alloc",
+    "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-query/hotpath-alloc",
+    "tracedecay-runtime-core/hotpath-alloc",
+    "tracedecay-search-eval/hotpath-alloc",
+    "tracedecay-semantic/hotpath-alloc",
+    "tracedecay-session-memory/hotpath-alloc",
+    "tracedecay-session-temporal-store/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+    "tracedecay-tool-catalog/hotpath-alloc",
+    "tracedecay-usecases/hotpath-alloc",
+]
+hotpath-cpu = [
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-code-extraction/hotpath-cpu",
+    "tracedecay-code-index/hotpath-cpu",
+    "tracedecay-code-index-retention/hotpath-cpu",
+    "tracedecay-lsp/hotpath-cpu",
+    "tracedecay-dashboard-api/hotpath-cpu",
+    "tracedecay-domain/hotpath-cpu",
+    "tracedecay-global-db/hotpath-cpu",
+    "tracedecay-graph-db/hotpath-cpu",
+    "tracedecay-policy/hotpath-cpu",
+    "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-query/hotpath-cpu",
+    "tracedecay-runtime-core/hotpath-cpu",
+    "tracedecay-search-eval/hotpath-cpu",
+    "tracedecay-semantic/hotpath-cpu",
+    "tracedecay-session-memory/hotpath-cpu",
+    "tracedecay-session-temporal-store/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+    "tracedecay-tool-catalog/hotpath-cpu",
+    "tracedecay-usecases/hotpath-cpu",
+]
+lite = [
+    "tracedecay-code-extraction/lite",
+    "tracedecay-code-index/lite",
+    "tracedecay-search-eval/lite",
+]
+full = ["tracedecay-code-extraction/full", "tracedecay-code-index/full"]
+semantic-fastembed = [
+    "tracedecay-semantic/semantic-fastembed",
+    "tracedecay-usecases/semantic-fastembed",
+]
+semantic-model2vec = [
+    "tracedecay-semantic/semantic-model2vec",
+    "tracedecay-usecases/semantic-model2vec",
+]
+# Forwards the kernel test-transport seam so this crate's unit tests can
+# reach `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test`.
+test-transport = ["tracedecay-runtime-core/test-transport"]
+test-helpers = [
+    "tracedecay-code-index/test-helpers",
+    "tracedecay-global-db/test-helpers",
+    "tracedecay-graph-db/test-helpers",
+    "tracedecay-runtime-core/test-helpers",
+    "tracedecay-semantic/test-helpers",
+    "tracedecay-usecases/test-helpers",
+]
+
+[dependencies]
+futures-util = "0.3.33"
+gix = { version = "=0.86.0", default-features = false, features = [
+    "revision",
+    "blob-diff",
+    "parallel",
+    "sha1",
+    "sha256",
+    "status",
+] }
+hex = "0.4"
+hotpath.workspace = true
+rayon = "1"
+same-file = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["codec"] }
+tracing = "0.1"
+url = "2"
+walkdir = "2"
+
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = [
+    "native-git",
+] }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
+tracedecay-semantic-contracts.workspace = true
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
+
+[target.'cfg(unix)'.dependencies]
+notify = "6"
+
+[dev-dependencies]
+filetime = "0.2"
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = [
+    "test-helpers",
+    "lite",
+] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = [
+    "test-helpers",
+] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = [
+    "test-helpers",
+] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = [
+    "test-helpers",
+] }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = [
+    "test-helpers",
+] }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0", features = [
+    "test-helpers",
+] }

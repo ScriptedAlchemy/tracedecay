@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interface Cluster Development"
+  short_description: "Coordinate conflict-free parallel interface migrations"
+  default_prompt: "Use $interface-cluster-development to partition this migration into interface-owned parallel work and integrate it conflict-free."

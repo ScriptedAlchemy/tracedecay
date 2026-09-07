@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::errors::{Result, TraceDecayError};
+use crate::db::is_lock_contended;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const LIFECYCLE_LOCK_FILENAME: &str = "lifecycle.lock";
 const EXCLUSIVE_LEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -35,6 +36,22 @@ pub enum SharedLeaseAttempt {
     Busy,
 }
 
+/// Outcome of a non-blocking exclusive acquisition. Contention is a typed
+/// state, not an error, so a caller can coordinate with the holder (for
+/// example by quiescing the managed daemon, which retains a shared lease for
+/// its whole lifetime) instead of telling the operator to retry against a
+/// process that may never exit.
+#[derive(Debug)]
+pub enum ExclusiveLeaseAttempt {
+    Acquired(LifecycleLease),
+    /// Another live process holds the lease. `owner_operation` is the
+    /// recorded operation of an exclusive owner; shared holders (the managed
+    /// daemon, doctor, hooks) record no owner metadata.
+    Busy {
+        owner_operation: Option<String>,
+    },
+}
+
 impl LifecycleLease {
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
@@ -48,9 +65,61 @@ impl LifecycleLease {
         let expected = profile_root.join(LIFECYCLE_LOCK_FILENAME);
         canonical_or_original(&self.lock_path) == canonical_or_original(&expected)
     }
+
+    pub fn downgrade_to_shared(&mut self) -> Result<()> {
+        if !self.exclusive {
+            return Ok(());
+        }
+
+        let LeaseHold::File(file) = &mut self.hold else {
+            return Err(TraceDecayError::Config {
+                message: "cannot downgrade an inherited lifecycle lease".to_string(),
+            });
+        };
+
+        let owner = read_owner(file, &self.lock_path);
+        #[cfg(windows)]
+        fs2::FileExt::unlock(file)
+            .map_err(|error| lock_error(&self.lock_path, "downgrade", &error))?;
+        if let Err(error) = fs2::FileExt::lock_shared(file) {
+            let downgrade_error = lock_error(&self.lock_path, "downgrade", &error);
+            fs2::FileExt::lock_exclusive(file)
+                .and_then(|()| {
+                    owner.as_deref().map_or(Ok(()), |owner| {
+                        write_owner_metadata(file, &self.lock_path, owner)
+                    })
+                })
+                .map_err(|restore_error| {
+                    failed_downgrade_restore_error(&downgrade_error, &restore_error)
+                })?;
+            return Err(downgrade_error);
+        }
+        if let Err(error) = clear_owner_metadata(file, &self.lock_path) {
+            let downgrade_error = owner_write_error(&error);
+            #[cfg(windows)]
+            fs2::FileExt::unlock(file).map_err(|restore_error| {
+                failed_downgrade_restore_error(&downgrade_error, &restore_error)
+            })?;
+            fs2::FileExt::lock_exclusive(file)
+                .and_then(|()| {
+                    owner.as_deref().map_or(Ok(()), |owner| {
+                        write_owner_metadata(file, &self.lock_path, owner)
+                    })
+                })
+                .map_err(|restore_error| {
+                    failed_downgrade_restore_error(&downgrade_error, &restore_error)
+                })?;
+            return Err(downgrade_error);
+        }
+        if let Some(token) = self.token.take() {
+            unregister_process_token(&token);
+        }
+        self.exclusive = false;
+        Ok(())
+    }
 }
 
-fn canonical_or_original(path: &Path) -> PathBuf {
+pub fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -93,8 +162,39 @@ pub fn acquire_exclusive_for_profile(
     acquire_exclusive_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
-pub fn acquire_shared(operation: &str) -> Result<LifecycleLease> {
-    acquire_shared_at(&lifecycle_lock_path()?, operation)
+/// Attempts the exclusive profile lease without blocking, reporting
+/// contention as [`ExclusiveLeaseAttempt::Busy`] instead of a refusal error.
+pub fn try_acquire_exclusive_for_profile(
+    profile_root: &Path,
+    operation: &str,
+) -> Result<ExclusiveLeaseAttempt> {
+    let path = lifecycle_lock_path_for_profile(profile_root)?;
+    let mut file = open_lock_file(&path)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => own_exclusive(file, &path, operation).map(ExclusiveLeaseAttempt::Acquired),
+        Err(error) if is_lock_contended(&error) => Ok(ExclusiveLeaseAttempt::Busy {
+            owner_operation: read_owner(&mut file, &path)
+                .as_deref()
+                .and_then(|owner| owner.split('\t').nth(1))
+                .map(str::to_string),
+        }),
+        Err(error) => Err(lock_error(&path, operation, &error)),
+    }
+}
+
+/// Waits for the current exclusive owner to finish, then acquires a shared
+/// lease. Reserved for restoring a daemon that was stopped before a losing
+/// exclusive-acquisition race.
+pub fn acquire_shared_blocking(operation: &str) -> Result<LifecycleLease> {
+    let path = lifecycle_lock_path()?;
+    let file = open_lock_file(&path)?;
+    fs2::FileExt::lock_shared(&file).map_err(|error| lock_error(&path, operation, &error))?;
+    Ok(LifecycleLease {
+        hold: LeaseHold::File(file),
+        token: None,
+        lock_path: path,
+        exclusive: false,
+    })
 }
 
 /// Holds ordinary database activity open for one explicit profile. The
@@ -102,11 +202,6 @@ pub fn acquire_shared(operation: &str) -> Result<LifecycleLease> {
 /// overlap any daemon-owned database handle.
 pub fn acquire_shared_for_profile(profile_root: &Path, operation: &str) -> Result<LifecycleLease> {
     acquire_shared_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
-}
-
-/// Attempts to acquire a non-inherited shared lease without blocking.
-pub fn try_acquire_shared(operation: &str) -> Result<SharedLeaseAttempt> {
-    try_acquire_shared_at(&lifecycle_lock_path()?, operation)
 }
 
 pub fn try_acquire_shared_for_profile(
@@ -121,23 +216,6 @@ pub fn try_acquire_shared_for_profile(
 pub fn acquire_shared_or_inherited(operation: &str) -> Result<LifecycleLease> {
     let path = lifecycle_lock_path()?;
     acquire_shared_or_inherited_at(&path, operation)
-}
-
-/// Attempts to acquire a shared lifecycle lease without blocking. A live
-/// unrelated exclusive owner is reported as [`SharedLeaseAttempt::Busy`];
-/// lock-file and profile configuration failures remain errors.
-pub fn try_acquire_shared_or_inherited(operation: &str) -> Result<SharedLeaseAttempt> {
-    let path = lifecycle_lock_path()?;
-    try_acquire_shared_or_inherited_at(&path, operation)
-}
-
-/// Explicit-profile counterpart used when ambient HOME/profile resolution is
-/// not authoritative.
-pub fn try_acquire_shared_or_inherited_for_profile(
-    profile_root: &Path,
-    operation: &str,
-) -> Result<SharedLeaseAttempt> {
-    try_acquire_shared_or_inherited_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
 fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
@@ -167,33 +245,6 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
     }
 }
 
-fn try_acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<SharedLeaseAttempt> {
-    let mut file = open_lock_file(path)?;
-    match fs2::FileExt::try_lock_shared(&file) {
-        Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
-            hold: LeaseHold::File(file),
-            token: None,
-            lock_path: path.to_path_buf(),
-            exclusive: false,
-        })),
-        Err(error) if is_lock_contended(&error) => {
-            let owner = read_owner(&mut file, path);
-            let owner_token = owner.as_deref().and_then(|line| line.split('\t').next());
-            if owner_token.is_some_and(process_owns_token) {
-                Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
-                    hold: LeaseHold::Inherited,
-                    token: None,
-                    lock_path: path.to_path_buf(),
-                    exclusive: false,
-                }))
-            } else {
-                Ok(SharedLeaseAttempt::Busy)
-            }
-        }
-        Err(error) => Err(lock_error(path, operation, &error)),
-    }
-}
-
 /// Acquires the lifecycle lease, or proves that this process is the
 /// post-update child of the process that still owns it.
 pub fn acquire_exclusive_or_inherited(
@@ -207,6 +258,13 @@ pub fn acquire_exclusive_or_inherited(
     )
 }
 
+#[cfg_attr(
+    windows,
+    allow(
+        clippy::needless_pass_by_value,
+        reason = "non-Windows inheritance validation consumes the token"
+    )
+)]
 fn acquire_exclusive_or_inherited_at(
     path: &Path,
     operation: &str,
@@ -250,22 +308,44 @@ fn lifecycle_lock_path() -> Result<PathBuf> {
         message: "could not determine TraceDecay user data directory for lifecycle lease"
             .to_string(),
     })?;
+    let root_existed = root.exists();
     std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
         message: format!(
             "failed to create TraceDecay user data directory '{}': {error}",
             root.display()
         ),
     })?;
+    if !root_existed {
+        crate::storage::set_private_dir_permissions(&root).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to secure TraceDecay user data directory '{}': {error}",
+                    root.display()
+                ),
+            }
+        })?;
+    }
     Ok(root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
 fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
+    let root_existed = profile_root.exists();
     std::fs::create_dir_all(profile_root).map_err(|error| TraceDecayError::Config {
         message: format!(
             "failed to create TraceDecay profile root '{}': {error}",
             profile_root.display()
         ),
     })?;
+    if !root_existed {
+        crate::storage::set_private_dir_permissions(profile_root).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to secure TraceDecay profile root '{}': {error}",
+                    profile_root.display()
+                ),
+            }
+        })?;
+    }
     Ok(profile_root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
@@ -273,6 +353,7 @@ fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> 
     acquire_exclusive_at_with_timeout(path, operation, Duration::ZERO)
 }
 
+#[hotpath::measure(label = "runtime_core.lifecycle.acquire_exclusive")]
 fn acquire_exclusive_at_with_timeout(
     path: &Path,
     operation: &str,
@@ -296,6 +377,7 @@ fn acquire_exclusive_at_with_timeout(
     }
 }
 
+#[hotpath::measure(label = "runtime_core.lifecycle.acquire_shared")]
 fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_shared(&file) {
@@ -337,14 +419,7 @@ fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<Lifecyc
     );
     #[cfg(windows)]
     let owner = format!("{token}\t{operation}\t{pid}\n");
-    file.set_len(0).map_err(|error| owner_write_error(&error))?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|error| owner_write_error(&error))?;
-    file.write_all(owner.as_bytes())
-        .map_err(|error| owner_write_error(&error))?;
-    file.flush().map_err(|error| owner_write_error(&error))?;
-    #[cfg(windows)]
-    std::fs::write(owner_sidecar_path(path), owner).map_err(|error| owner_write_error(&error))?;
+    write_owner_metadata(&mut file, path, &owner).map_err(|error| owner_write_error(&error))?;
     register_process_token(&token);
     Ok(LifecycleLease {
         hold: LeaseHold::File(file),
@@ -352,6 +427,44 @@ fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<Lifecyc
         lock_path: path.to_path_buf(),
         exclusive: true,
     })
+}
+
+fn write_owner_metadata(file: &mut File, path: &Path, owner: &str) -> std::io::Result<()> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(owner.as_bytes())?;
+    file.flush()?;
+    #[cfg(windows)]
+    std::fs::write(owner_sidecar_path(path), owner)?;
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
+}
+
+fn clear_owner_metadata(file: &mut File, path: &Path) -> std::io::Result<()> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.flush()?;
+    #[cfg(windows)]
+    match std::fs::remove_file(owner_sidecar_path(path)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
+}
+
+fn failed_downgrade_restore_error(
+    downgrade_error: &TraceDecayError,
+    restore_error: &std::io::Error,
+) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "{downgrade_error}; failed to restore the exclusive lifecycle lease: {restore_error}"
+        ),
+    }
 }
 
 fn register_process_token(token: &str) {
@@ -418,20 +531,6 @@ fn open_lock_file(path: &Path) -> Result<File> {
     options
         .open(path)
         .map_err(|error| lock_error(path, "open", &error))
-}
-
-fn is_lock_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        // LockFileEx reports lock contention as ERROR_LOCK_VIOLATION, which
-        // std currently classifies as Uncategorized rather than WouldBlock.
-        return error.raw_os_error() == Some(33);
-    }
-    #[cfg(not(windows))]
-    false
 }
 
 fn read_owner(file: &mut File, _path: &Path) -> Option<String> {
@@ -516,10 +615,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SharedLeaseAttempt, acquire_exclusive_at, acquire_exclusive_at_with_timeout,
-        acquire_exclusive_or_inherited_at, acquire_shared_at, acquire_shared_or_inherited_at,
-        try_acquire_shared_at, try_acquire_shared_or_inherited_at,
-        try_acquire_shared_or_inherited_for_profile,
+        ExclusiveLeaseAttempt, SharedLeaseAttempt, acquire_exclusive_at,
+        acquire_exclusive_at_with_timeout, acquire_exclusive_or_inherited_at, acquire_shared_at,
+        acquire_shared_or_inherited_at, try_acquire_exclusive_for_profile, try_acquire_shared_at,
+        try_acquire_shared_for_profile,
     };
 
     #[test]
@@ -585,16 +684,72 @@ mod tests {
     }
 
     #[test]
+    fn downgraded_lease_admits_readers_and_rejects_mutators() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let mut held = acquire_exclusive_at(&path, "update").unwrap();
+        held.downgrade_to_shared().unwrap();
+
+        assert!(!held.is_exclusive());
+        assert!(held.token().is_none());
+        let reader = acquire_shared_at(&path, "daemon").unwrap();
+        assert!(!reader.is_exclusive());
+        let error = acquire_exclusive_at(&path, "upgrade").unwrap_err();
+
+        assert!(error.to_string().contains("another lifecycle operation"));
+        drop((held, reader));
+        acquire_exclusive_at(&path, "upgrade").unwrap();
+    }
+
+    #[test]
+    fn downgraded_lease_clears_exclusive_owner_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let mut held = acquire_exclusive_at(&path, "update").unwrap();
+        held.downgrade_to_shared().unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        #[cfg(windows)]
+        assert!(!super::owner_sidecar_path(&path).exists());
+
+        let error = acquire_exclusive_at(&path, "upgrade").unwrap_err();
+        assert!(!error.to_string().contains("update"));
+        drop(held);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn failed_downgrade_retains_exclusive_inherited_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let parent = acquire_exclusive_at(&path, "post-update").unwrap();
+        let token = parent.token().unwrap().to_string();
+        let mut inherited =
+            acquire_exclusive_or_inherited_at(&path, "child", Some(token.clone())).unwrap();
+
+        let error = inherited.downgrade_to_shared().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot downgrade an inherited lifecycle lease")
+        );
+        assert!(inherited.is_exclusive());
+        assert_eq!(inherited.token(), Some(token.as_str()));
+        assert!(acquire_exclusive_at(&path, "other").is_err());
+        drop(inherited);
+        assert!(acquire_exclusive_at(&path, "other").is_err());
+        drop(parent);
+        acquire_exclusive_at(&path, "other").unwrap();
+    }
+
+    #[test]
     fn nested_doctor_joins_the_process_owned_exclusive_lease() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("lifecycle.lock");
         let _parent = acquire_exclusive_at(&path, "post-update").unwrap();
 
         acquire_shared_or_inherited_at(&path, "doctor").unwrap();
-        assert!(matches!(
-            try_acquire_shared_or_inherited_at(&path, "hook").unwrap(),
-            SharedLeaseAttempt::Acquired(_)
-        ));
     }
 
     #[test]
@@ -613,7 +768,7 @@ mod tests {
         external.flush().unwrap();
 
         assert!(matches!(
-            try_acquire_shared_or_inherited_at(&path, "hook").unwrap(),
+            try_acquire_shared_at(&path, "hook").unwrap(),
             SharedLeaseAttempt::Busy
         ));
     }
@@ -631,13 +786,60 @@ mod tests {
     }
 
     #[test]
+    fn nonblocking_exclusive_attempt_reports_a_shared_holder_as_busy_without_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let path = profile.join("lifecycle.lock");
+        let daemon_like = acquire_shared_at(&path, "daemon run").unwrap();
+
+        let attempt = try_acquire_exclusive_for_profile(&profile, "wipe").unwrap();
+
+        // Shared holders record no owner metadata, so the busy state carries
+        // no operation — the caller must not pretend to know the holder.
+        match attempt {
+            ExclusiveLeaseAttempt::Busy { owner_operation } => {
+                assert_eq!(owner_operation, None);
+            }
+            ExclusiveLeaseAttempt::Acquired(_) => {
+                panic!("a live shared holder must report Busy")
+            }
+        }
+        drop(daemon_like);
+        assert!(matches!(
+            try_acquire_exclusive_for_profile(&profile, "wipe").unwrap(),
+            ExclusiveLeaseAttempt::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn nonblocking_exclusive_attempt_names_an_exclusive_owner_operation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let path = profile.join("lifecycle.lock");
+        let owner = acquire_exclusive_at(&path, "upgrade").unwrap();
+
+        let attempt = try_acquire_exclusive_for_profile(&profile, "wipe").unwrap();
+
+        match attempt {
+            ExclusiveLeaseAttempt::Busy { owner_operation } => {
+                assert_eq!(owner_operation.as_deref(), Some("upgrade"));
+            }
+            ExclusiveLeaseAttempt::Acquired(_) => {
+                panic!("a live exclusive owner must report Busy")
+            }
+        }
+        drop(owner);
+    }
+
+    #[test]
     fn nonblocking_shared_attempt_preserves_profile_io_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let not_a_directory = tmp.path().join("profile-file");
         std::fs::write(&not_a_directory, "not a directory").unwrap();
 
-        let error =
-            try_acquire_shared_or_inherited_for_profile(&not_a_directory, "hook").unwrap_err();
+        let error = try_acquire_shared_for_profile(&not_a_directory, "hook").unwrap_err();
 
         assert!(
             error

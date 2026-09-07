@@ -1,0 +1,322 @@
+//! Driver-neutral ownership seam for one physical shard runtime.
+
+use std::fmt;
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tracedecay_rusqlite_runtime::{CheckpointPressure, CheckpointStatus};
+use tracedecay_store::{
+    CommitSequenceV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
+    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StoreRuntimeBindingV1,
+};
+
+use super::StoreRuntimeRegistryFailure;
+
+/// Cumulative, path-free facts sampled from one retained writer authority.
+///
+/// The horizon begins when this writer starts and ends when the registry closes
+/// it. These counters are not process-lifetime totals; presence in the parent
+/// snapshot is the coverage signal for this writer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PhysicalWriterRuntimeSnapshot {
+    pub offered_operations: u64,
+    pub admitted_operations: u64,
+    pub completed_operations: u64,
+    pub shed_operations: u64,
+    pub retried_operations: u64,
+    pub cancelled_operations: u64,
+    pub deadline_exceeded_operations: u64,
+    pub conflicted_operations: u64,
+    pub committed_batches: u64,
+    pub queue_wait_micros: u64,
+    pub transaction_micros: u64,
+    pub error_events: u64,
+    pub health_lane_services: u64,
+    pub commit_sequence: CommitSequenceV1,
+    pub checkpoint_status: CheckpointStatus,
+    pub checkpoint_pressure: CheckpointPressure,
+    pub checkpoint_hard_retry_wakes: u64,
+}
+
+/// Bounded, path-free facts sampled from the physical writer/read runtime.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PhysicalRuntimeSnapshot {
+    pub healthy: bool,
+    pub writer_present: bool,
+    pub reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
+    pub queued_operations: u32,
+    pub queued_bytes: u64,
+    pub writer_busy_events: u64,
+    pub writer: Option<PhysicalWriterRuntimeSnapshot>,
+    pub wal_bytes: Option<u64>,
+    pub memory_estimate_bytes: Option<u64>,
+}
+
+impl PhysicalRuntimeSnapshot {
+    #[hotpath::skip]
+    pub const fn is_drained(&self) -> bool {
+        !self.writer_present
+            && self.reader_handles == 0
+            && self.queued_operations == 0
+            && self.queued_bytes == 0
+    }
+}
+
+/// Opaque owner of driver resources. Implementations live behind the daemon
+/// boundary and must not expose a connection or a driver-specific type.
+pub trait PhysicalRuntimeAttachment: Send + Sync {
+    fn snapshot(&self) -> PhysicalRuntimeSnapshot;
+
+    /// Exact rusqlite writer/reader snapshot when this attachment is a
+    /// repository runtime. Other attachments leave this unset.
+    fn writer_telemetry_snapshot(
+        &self,
+    ) -> Option<tracedecay_rusqlite_runtime::repository::RepositoryRuntimePhysicalSnapshot> {
+        None
+    }
+
+    /// Physical identity captured from a descriptor held across `SQLite` worker
+    /// startup. Implementations must not derive this from a later pathname
+    /// stat.
+    fn opened_file_identity(&self) -> Result<u64, String> {
+        Err("physical runtime has no opened SQLite file identity".to_owned())
+    }
+
+    /// Stops admission and drains writer/read work. Returning success promises
+    /// that a following snapshot has no writer, readers, or queued work.
+    fn drain(&self) -> Result<(), String>;
+
+    /// Closes all physical handles and joins owned workers. Called exactly once
+    /// by the registry after a successful drain has been verified.
+    fn close_and_join(&self) -> Result<(), String>;
+
+    /// Exact SQL channel bound to this already-verified attachment.
+    ///
+    /// Implementations must return a handle over their owned writer/readers;
+    /// they must never reopen the locator path.
+    fn exact_sql_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, String> {
+        Err("physical runtime has no exact SQL channel".to_owned())
+    }
+
+    /// Reads the retained attachment's bounded reserved-health telemetry.
+    ///
+    /// Implementations must use their already-open reader pool. Reopening the
+    /// locator path or accepting caller-provided SQL is forbidden.
+    fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
+        let _ = reader_wait;
+        Err("physical runtime has no store-size telemetry port".to_owned())
+    }
+
+    /// Runs one typed, page-bounded incremental compaction on the retained
+    /// writer. The authority is sampled by the writer at admission, dequeue,
+    /// and before commit; no SQL or path crosses this port.
+    fn run_bounded_incremental_compaction<'a>(
+        &'a self,
+        max_pages: u32,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StoreRuntimeRegistryFailure>> + Send + 'a>> {
+        let _ = (max_pages, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "run bounded incremental compaction",
+                message: "physical runtime has no typed compaction port".to_owned(),
+            })
+        })
+    }
+
+    fn run_checkpoint<'a>(
+        &'a self,
+        request: tracedecay_rusqlite_runtime::CheckpointRequest,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_rusqlite_runtime::CheckpointOutcome,
+                        StoreRuntimeRegistryFailure,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = (request, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "run checkpoint",
+                message: "physical runtime has no typed checkpoint port".to_owned(),
+            })
+        })
+    }
+
+    fn snapshot_to<'a>(
+        &'a self,
+        destination: PathBuf,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_rusqlite_runtime::OnlineBackupReceipt,
+                        StoreRuntimeRegistryFailure,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = (destination, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "snapshot database",
+                message: "physical runtime has no typed online-backup port".to_owned(),
+            })
+        })
+    }
+
+    fn snapshot_to_interruptible<'a>(
+        &'a self,
+        destination: PathBuf,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_rusqlite_runtime::OnlineBackupReceipt,
+                        StoreRuntimeRegistryFailure,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = (destination, probe, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "snapshot database",
+                message: "physical runtime has no interruptible online-backup port".to_owned(),
+            })
+        })
+    }
+
+    fn dispatch_submit<'a>(
+        &'a self,
+        request: RuntimeSubmitRequestV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let _ = (request, probe, authority);
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "dispatch submit",
+                message: "physical runtime has no write data port".to_owned(),
+            })
+        })
+    }
+
+    fn dispatch_read(
+        &self,
+        request: RuntimeReadRequestV1,
+        probe: &dyn RuntimeRequestProbeV1,
+    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
+        let _ = (request, probe);
+        Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "dispatch read",
+            message: "physical runtime has no read data port".to_owned(),
+        })
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct EmptyPhysicalRuntimeAttachment;
+
+#[cfg(test)]
+impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
+    fn snapshot(&self) -> PhysicalRuntimeSnapshot {
+        PhysicalRuntimeSnapshot {
+            healthy: true,
+            ..PhysicalRuntimeSnapshot::default()
+        }
+    }
+
+    fn opened_file_identity(&self) -> Result<u64, String> {
+        Ok(1)
+    }
+
+    fn drain(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn close_and_join(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The publisher's atomic, non-cloneable transfer of logical lifecycle plus
+/// physical lifetime. The registry is the first code allowed to retain either
+/// resource behind an `Arc`.
+pub struct PublishedShardRuntime {
+    runtime: crate::store_runtime::shard::ShardRuntime,
+    attachment: Box<dyn PhysicalRuntimeAttachment>,
+}
+
+impl PublishedShardRuntime {
+    pub fn new(
+        runtime: crate::store_runtime::shard::ShardRuntime,
+        attachment: Box<dyn PhysicalRuntimeAttachment>,
+    ) -> Self {
+        Self {
+            runtime,
+            attachment,
+        }
+    }
+
+    pub(super) fn binding(&self) -> &StoreRuntimeBindingV1 {
+        self.runtime.binding()
+    }
+
+    pub fn opened_file_identity(&self) -> Result<u64, String> {
+        self.attachment.opened_file_identity()
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        Arc<crate::store_runtime::shard::ShardRuntime>,
+        Arc<dyn PhysicalRuntimeAttachment>,
+    ) {
+        (Arc::new(self.runtime), Arc::from(self.attachment))
+    }
+}
+
+impl fmt::Debug for PublishedShardRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublishedShardRuntime")
+            .field("binding", self.runtime.binding())
+            .field("physical", &self.attachment.snapshot())
+            .finish()
+    }
+}
+
+pub(super) fn attachment_failure(
+    operation: &'static str,
+    message: impl Into<String>,
+) -> StoreRuntimeRegistryFailure {
+    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+        operation,
+        message: message.into(),
+    }
+}

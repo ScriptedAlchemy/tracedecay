@@ -1,0 +1,28 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:03:00Z",
+    "method": "GET",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/421/reviews/4669021204",
+    "api_version": "2022-11-28",
+    "documentation": "https://docs.github.com/en/rest/pulls/reviews#get-a-review-for-a-pull-request"
+  },
+  "response": {
+    "id": 4669021204,
+    "node_id": "PRR_kwDOSzKG2s8AAAABFkucFA",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/ScriptedAlchemy/tracedecay/pull/421#pullrequestreview-4669021204",
+    "pull_request_url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/421",
+    "author_association": "NONE",
+    "submitted_at": "2026-07-10T06:16:12Z",
+    "commit_id": "986f25cca6d2e703e889fb57326696b0d92c965f",
+    "user": {
+      "id": 199175422,
+      "node_id": "BOT_kgDOC98s_g",
+      "type": "Bot",
+      "site_admin": false
+    }
+  },
+  "redacted": {
+    "body": "omitted_review_prose"
+  }
+}

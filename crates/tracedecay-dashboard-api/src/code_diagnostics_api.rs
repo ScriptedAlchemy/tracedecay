@@ -1,24 +1,31 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::collections::BTreeMap;
 
 use axum::Json;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Extension, Path as AxumPath, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
-use super::DashboardState;
-use super::util::{JsonError, http_detail};
-use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
-use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState, NodeSpan};
-use crate::diagnostics::lsp::settings::{IdleBackfillMode, save_settings};
+use super::util::{JsonError, http_detail, internal_error};
+use super::{DashboardHttpRequestControlV1, DashboardState};
+use crate::application::dashboard_diagnostics::{
+    DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
+};
+use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
+use tracedecay_domain::ManifestDigest;
+use tracedecay_lsp::analyzer::adapters::LspAdapterDefinition;
+use tracedecay_lsp::analyzer::broker::DiagnosticsSnapshot;
+use tracedecay_lsp::analyzer::settings::IdleBackfillMode;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SettingsPatch {
+    /// The `settings_revision` the editor read. Required: without it the route
+    /// cannot tell an edit of the current settings from one that would
+    /// overwrite a writer the caller never saw.
+    expected_revision: ManifestDigest,
     #[serde(default)]
     idle_backfill: Option<IdleBackfillMode>,
     #[serde(default)]
@@ -43,318 +50,140 @@ enum CommandOverridePatch {
     Value(String),
 }
 
-pub async fn overview(State(state): State<DashboardState>) -> ApiResult {
-    let snapshot = diagnostics_snapshot(&state).await?;
-    maybe_spawn_idle_backfill(&state, &snapshot);
-    Ok(Json(json!(snapshot)))
+#[hotpath::measure(label = "dashboard_api.diagnostics.overview", future = true)]
+pub async fn overview(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> ApiResult {
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
+    let snapshot = authority(&state)?
+        .overview(request)
+        .await
+        .map_err(authority_error)?;
+    snapshot_response(&snapshot)
 }
 
+#[hotpath::measure(label = "dashboard_api.diagnostics.patch", future = true)]
 pub async fn patch_settings(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<SettingsPatch>(patch)
-        .map_err(|err| bad_request(&format!("invalid code diagnostics settings patch: {err}")))?;
-    let mut settings = state.code_diagnostics.read().await.snapshot().settings;
-    if let Some(mode) = patch.idle_backfill {
-        settings.idle_backfill = mode;
-    }
-    for (language, language_patch) in patch.languages {
-        let language_settings = settings.languages.entry(language).or_default();
-        if let Some(enabled) = language_patch.enabled {
-            language_settings.enabled = enabled;
-        }
-        match language_patch.command_override {
-            CommandOverridePatch::Missing => {}
-            CommandOverridePatch::Null => {
-                language_settings.command_override = None;
+    let patch = serde_json::from_value::<SettingsPatch>(patch).map_err(|error| {
+        bad_request(&format!("invalid code diagnostics settings patch: {error}"))
+    })?;
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
+    let snapshot = authority(&state)?
+        .update_settings(&request, &patch.expected_revision, |settings| {
+            if let Some(mode) = patch.idle_backfill {
+                settings.idle_backfill = mode;
             }
-            CommandOverridePatch::Value(command_override) => {
-                language_settings.command_override = Some(command_override);
+            for (language, language_patch) in patch.languages {
+                let language_settings = settings.languages.entry(language).or_default();
+                if let Some(enabled) = language_patch.enabled {
+                    language_settings.enabled = enabled;
+                }
+                match language_patch.command_override {
+                    CommandOverridePatch::Missing => {}
+                    CommandOverridePatch::Null => language_settings.command_override = None,
+                    CommandOverridePatch::Value(command_override) => {
+                        language_settings.command_override = Some(command_override);
+                    }
+                }
             }
-        }
-    }
-    if let Some(custom_adapters) = patch.custom_adapters {
-        settings.custom_adapters = custom_adapters;
-    }
-    save_settings(&state.dashboard_root, &settings)
+            if let Some(custom_adapters) = patch.custom_adapters {
+                settings.custom_adapters = custom_adapters;
+            }
+        })
         .await
-        .map_err(|err| internal_error(&err))?;
-    let mut adapters = crate::diagnostics::lsp::adapters::builtin_adapters();
-    adapters.extend(settings.custom_adapters.clone());
-    let mut broker = state.code_diagnostics.write().await;
-    broker.update_adapters(adapters);
-    broker.update_settings(settings);
-    drop(broker);
-    let snapshot = diagnostics_snapshot(&state).await?;
-    Ok(Json(json!(snapshot)))
+        .map_err(authority_error)?;
+    snapshot_response(&snapshot)
 }
 
-pub async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
-    let languages = refreshable_languages(&state).await?;
-    for language in languages {
-        refresh_one_reconciled(&state, &language).await?;
-    }
-    let snapshot = diagnostics_snapshot(&state).await?;
-    Ok(Json(json!(snapshot)))
+#[hotpath::measure(label = "dashboard_api.diagnostics.refresh", future = true)]
+pub async fn refresh_all(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> ApiResult {
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
+    let snapshot = authority(&state)?
+        .refresh_all(&request)
+        .await
+        .map_err(authority_error)?;
+    snapshot_response(&snapshot)
 }
 
+#[hotpath::measure(label = "dashboard_api.diagnostics.refresh_language", future = true)]
 pub async fn refresh_language(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
-    refresh_one(&state, &language).await?;
-    let snapshot = diagnostics_snapshot(&state).await?;
-    Ok(Json(json!(snapshot)))
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
+    let snapshot = authority(&state)?
+        .refresh_language(&request, &language)
+        .await
+        .map_err(authority_error)?;
+    snapshot_response(&snapshot)
 }
 
-async fn refresh_one(state: &DashboardState, language: &str) -> std::result::Result<(), JsonError> {
-    reconcile_project_language_activity(state).await?;
-    refresh_one_reconciled(state, language).await
+/// The snapshot plus the compare-and-set token for its settings. Every read
+/// publishes it, so an editor always holds the revision its next write must
+/// be checked against.
+fn snapshot_response(snapshot: &DiagnosticsSnapshot) -> ApiResult {
+    let revision = settings_revision(&snapshot.settings).map_err(internal_error)?;
+    let mut payload = json!(snapshot);
+    payload["settings_revision"] = json!(revision);
+    Ok(Json(payload))
 }
 
-async fn refresh_one_reconciled(
+fn authority(
     state: &DashboardState,
-    language: &str,
-) -> std::result::Result<(), JsonError> {
-    let snapshot = state.code_diagnostics.read().await.snapshot();
-    if !snapshot.settings.language_enabled(language) {
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .set_language_enabled(language, false);
-        return Ok(());
-    }
-    let Some(adapter) = state.code_diagnostics.read().await.adapter_for(language) else {
-        return Err(bad_request(&format!(
-            "no code diagnostics adapter registered for language '{language}'"
-        )));
-    };
-    let files = indexed_files(&state.graph_conn)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let documents = documents_for_adapter(&state.project_root, &adapter, files)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let document_count = documents.len();
-    state
-        .code_diagnostics
-        .write()
-        .await
-        .record_backfill_progress(language, document_count, document_count, 0, None);
-    if documents.is_empty() {
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .record_backfill_progress(
-                language,
-                0,
-                0,
-                0,
-                Some(crate::tracedecay::current_timestamp()),
-            );
-        return Ok(());
-    }
-    let prepared = state
-        .code_diagnostics
-        .write()
-        .await
-        .prepare_refresh(language, documents);
-    let mut progress_recorded_in_task = false;
-    let refresh_ok = match prepared {
-        Ok(Some(prepared)) => {
-            progress_recorded_in_task = true;
-            let state_for_refresh = state.clone();
-            let language_for_refresh = language.to_string();
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
-                let refresh_ok = completed.is_ok();
-                {
-                    let mut broker = state_for_refresh.code_diagnostics.write().await;
-                    let _ = broker.finish_refresh(completed);
-                    let graph_conn = state_for_refresh.graph_conn.clone();
-                    broker
-                        .resolve_enclosing_nodes(move |file| {
-                            let graph_conn = graph_conn.clone();
-                            async move { node_spans_for_file(&graph_conn, &file).await }
-                        })
-                        .await;
-                    let snapshot = broker.snapshot();
-                    let files_with_diagnostics =
-                        files_with_diagnostics(&snapshot, &language_for_refresh);
-                    broker.record_backfill_progress(
-                        &language_for_refresh,
-                        document_count,
-                        document_count,
-                        files_with_diagnostics,
-                        refresh_ok.then(crate::tracedecay::current_timestamp),
-                    );
-                }
-                let _ = tx.send(refresh_ok);
-            });
-            rx.await.unwrap_or(false)
-        }
-        Ok(None) => true,
-        Err(_) => false,
-    };
-    if !progress_recorded_in_task {
-        let snapshot = state.code_diagnostics.read().await.snapshot();
-        let files_with_diagnostics = files_with_diagnostics(&snapshot, language);
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .record_backfill_progress(
-                language,
-                document_count,
-                document_count,
-                files_with_diagnostics,
-                refresh_ok.then(crate::tracedecay::current_timestamp),
-            );
-    }
-    Ok(())
-}
-
-fn files_with_diagnostics(snapshot: &DiagnosticsSnapshot, language: &str) -> usize {
-    snapshot
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.language == language)
-        .map(|diagnostic| diagnostic.file.as_str())
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
-fn maybe_spawn_idle_backfill(state: &DashboardState, snapshot: &DiagnosticsSnapshot) {
-    if snapshot.settings.idle_backfill != IdleBackfillMode::Idle {
-        return;
-    }
-    let languages = backfill_languages(snapshot);
-    if languages.is_empty() {
-        return;
-    }
-    if state
-        .code_diagnostics_backfill_started
-        .swap(true, Ordering::AcqRel)
-    {
-        return;
-    }
-    let state = state.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(750)).await;
-        for language in languages {
-            let _ = refresh_one(&state, &language).await;
-            tokio::task::yield_now().await;
-        }
-    });
-}
-
-async fn diagnostics_snapshot(
-    state: &DashboardState,
-) -> std::result::Result<DiagnosticsSnapshot, JsonError> {
-    reconcile_project_language_activity(state).await?;
-    Ok(state.code_diagnostics.read().await.snapshot())
-}
-
-async fn refreshable_languages(
-    state: &DashboardState,
-) -> std::result::Result<Vec<String>, JsonError> {
-    let snapshot = diagnostics_snapshot(state).await?;
-    Ok(backfill_languages(&snapshot))
-}
-
-fn backfill_languages(snapshot: &DiagnosticsSnapshot) -> Vec<String> {
-    snapshot
-        .engines
-        .iter()
-        .filter(|engine| {
-            engine.enabled
-                && !matches!(
-                    engine.state,
-                    EngineState::Disabled | EngineState::Inactive | EngineState::Unavailable
-                )
-        })
-        .map(|engine| engine.language.clone())
-        .collect()
-}
-
-async fn reconcile_project_language_activity(
-    state: &DashboardState,
-) -> std::result::Result<(), JsonError> {
-    let files = indexed_files(&state.graph_conn)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let adapters = {
-        let broker = state.code_diagnostics.read().await;
-        broker
-            .snapshot()
-            .engines
-            .into_iter()
-            .filter_map(|engine| broker.adapter_for(&engine.language))
-            .collect::<Vec<_>>()
-    };
-    let active_languages = active_languages_for_files(&state.project_root, &adapters, &files);
-    state
-        .code_diagnostics
-        .write()
-        .await
-        .update_project_languages(active_languages);
-    Ok(())
-}
-
-/// Loads the indexed symbol spans for a file so a diagnostic can be attributed
-/// to its smallest enclosing node. Returns an empty vec (leaving the diagnostic
-/// unattributed) when the file isn't indexed or the query fails — the enclosing
-/// node is a best-effort annotation, never a hard dependency of a refresh.
-async fn node_spans_for_file(conn: &libsql::Connection, file: &str) -> Vec<NodeSpan> {
-    let mut spans = Vec::new();
-    let Ok(mut rows) = conn
-        .query(
-            "SELECT start_line, end_line, qualified_name FROM nodes WHERE file_path = ?1",
-            libsql::params![file],
+) -> std::result::Result<&DashboardDiagnosticsAuthorityV1, JsonError> {
+    state.code_diagnostics_authority.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(http_detail(
+                "canonical daemon diagnostics authority is unavailable",
+            )),
         )
-        .await
-    else {
-        return spans;
-    };
-    while let Ok(Some(row)) = rows.next().await {
-        let (Ok(start_line), Ok(end_line), Ok(qualified_name)) =
-            (row.get::<i64>(0), row.get::<i64>(1), row.get::<String>(2))
-        else {
-            continue;
-        };
-        spans.push(NodeSpan {
-            start_line: start_line.max(0) as u32,
-            end_line: end_line.max(0) as u32,
-            qualified_name,
-        });
-    }
-    spans
+    })
 }
 
-async fn indexed_files(conn: &libsql::Connection) -> crate::errors::Result<Vec<String>> {
-    let mut rows = conn
-        .query("SELECT path FROM files ORDER BY path ASC", ())
-        .await?;
-    let mut files = Vec::new();
-    while let Some(row) = rows.next().await? {
-        if let Ok(path) = row.get::<String>(0) {
-            files.push(path);
-        }
-    }
-    Ok(files)
-}
-
-fn bad_request(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": err.to_string(),
-        })),
+fn diagnostics_request(
+    control: &DashboardHttpRequestControlV1,
+) -> std::result::Result<
+    crate::application::dashboard_diagnostics::DashboardDiagnosticsGraphRequestV1,
+    JsonError,
+> {
+    let operation = callable_code_operation(CallableCodeOperationKind::SourceMetadata)
+        .map_err(internal_error)?;
+    Ok(
+        crate::application::dashboard_diagnostics::DashboardDiagnosticsGraphRequestV1::new(
+            operation,
+            control.request_id(),
+            control.deadline(),
+            control.cancellation().clone(),
+            control.observed_at(),
+        ),
     )
+}
+
+fn request_control(
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> std::result::Result<DashboardHttpRequestControlV1, JsonError> {
+    control.map(|Extension(control)| control).ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(http_detail(
+                "dashboard HTTP request admission is unavailable",
+            )),
+        )
+    })
 }
 
 fn deserialize_command_override_patch<'de, D>(
@@ -369,9 +198,226 @@ where
     })
 }
 
-fn internal_error(err: &impl ToString) -> JsonError {
+fn bad_request(error: &impl ToString) -> JsonError {
     (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "detail": error.to_string(),
+        })),
     )
+}
+
+fn authority_error(error: DashboardDiagnosticsErrorV1) -> JsonError {
+    match &error {
+        DashboardDiagnosticsErrorV1::AdapterUnavailable { .. }
+        | DashboardDiagnosticsErrorV1::LanguageDisabled { .. } => bad_request(&error),
+        DashboardDiagnosticsErrorV1::RevisionConflict { expected, actual } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "code": "code_diagnostics_revision_conflict",
+                "detail": error.to_string(),
+                "expected_revision": expected,
+                "actual_revision": actual,
+            })),
+        ),
+        DashboardDiagnosticsErrorV1::Runtime(runtime) => {
+            if let Some((authority, reason)) = runtime.reset_required_context() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "code": "code_graph_reset_required",
+                        "detail": reason,
+                        "authority": authority,
+                        "retryable": false,
+                    })),
+                );
+            }
+            if let Some((reason_code, retryable, detail)) = runtime.project_route_context() {
+                let status = match reason_code {
+                    "code-graph-denied" => StatusCode::FORBIDDEN,
+                    "code-graph-invalid-request" => StatusCode::BAD_REQUEST,
+                    "code-graph-cancelled" => StatusCode::REQUEST_TIMEOUT,
+                    "code-graph-timed-out" => StatusCode::GATEWAY_TIMEOUT,
+                    _ => StatusCode::SERVICE_UNAVAILABLE,
+                };
+                return (
+                    status,
+                    Json(json!({
+                        "code": reason_code,
+                        "detail": detail,
+                        "retryable": retryable,
+                    })),
+                );
+            }
+            internal_error(error)
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::application::dashboard_diagnostics::diagnostic_broker;
+    use crate::graph::{
+        CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
+        CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture,
+        CodeGraphReadRequest,
+    };
+    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_domain::UtcMicros;
+    use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
+
+    struct UnavailableGraphPort;
+
+    impl CodeGraphReadAdmissionPort for UnavailableGraphPort {
+        fn admit<'a>(
+            &'a self,
+            _request: CodeGraphReadAdmissionRequest<'a>,
+        ) -> CodeGraphReadAdmissionFuture<'a> {
+            Box::pin(async {
+                Err(CodeGraphReadError::Unavailable {
+                    detail: "test graph admission is intentionally unavailable".to_owned(),
+                })
+            })
+        }
+    }
+
+    impl CodeGraphProjectionReadPort for UnavailableGraphPort {
+        fn open<'a>(&'a self, _request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+            Box::pin(async {
+                Err(CodeGraphReadError::Unavailable {
+                    detail: "test graph projection is intentionally unavailable".to_owned(),
+                })
+            })
+        }
+    }
+
+    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
+        crate::events_api::dashboard_state_fixture("project.dashboard-code-diagnostics").await
+    }
+
+    fn request_control() -> DashboardHttpRequestControlV1 {
+        let observed_at = UtcMicros(1_000_000);
+        DashboardHttpRequestControlV1 {
+            request_id: RequestId::new("request.dashboard-diagnostics-test")
+                .expect("request identity"),
+            deadline: Deadline::new(UtcMicros(2_000_000)).expect("request deadline"),
+            cancellation: CancellationSignal::active("cancel.dashboard-diagnostics-test")
+                .expect("request cancellation"),
+            observed_at,
+        }
+    }
+
+    fn authority_with_settings(
+        state: &DashboardState,
+        settings: CodeDiagnosticsSettings,
+    ) -> DashboardDiagnosticsAuthorityV1 {
+        let graph = Arc::new(UnavailableGraphPort);
+        DashboardDiagnosticsAuthorityV1::new(
+            state.project_root.clone(),
+            state.dashboard_root.clone(),
+            Arc::clone(&graph) as Arc<dyn CodeGraphReadAdmissionPort>,
+            graph as Arc<dyn CodeGraphProjectionReadPort>,
+            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
+                state.project_root.clone(),
+                settings,
+            ))),
+        )
+    }
+
+    #[test]
+    fn snapshot_response_publishes_the_exact_settings_revision() {
+        let mut settings = CodeDiagnosticsSettings {
+            idle_backfill: IdleBackfillMode::Off,
+            ..CodeDiagnosticsSettings::default()
+        };
+        settings.set_language_enabled("rust", false);
+        let expected = diagnostic_broker(std::path::PathBuf::from("project"), settings).snapshot();
+        let Json(actual) = snapshot_response(&expected).expect("diagnostics overview");
+
+        assert_eq!(actual["settings"]["idle_backfill"], json!("off"));
+        assert_eq!(actual["settings"]["languages"]["rust"]["enabled"], false);
+        // Every read publishes the compare-and-set token for the settings it
+        // just reported, so the next write is checked against this exact state.
+        assert_eq!(
+            actual["settings_revision"],
+            json!(settings_revision(&expected.settings).expect("settings revision"))
+        );
+        let mut without_revision = actual.clone();
+        without_revision
+            .as_object_mut()
+            .expect("overview object")
+            .remove("settings_revision");
+        assert_eq!(without_revision, json!(expected));
+    }
+
+    #[tokio::test]
+    async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        state.code_diagnostics_authority = Some(authority_with_settings(
+            &state,
+            CodeDiagnosticsSettings::default(),
+        ));
+
+        let (status, Json(body)) = patch_settings(
+            State(state),
+            Some(Extension(request_control())),
+            Json(json!({
+                "expected_revision": format!("sha256:{}", "0".repeat(64)),
+                "idle_backfill": "off",
+            })),
+        )
+        .await
+        .expect_err("a stale revision must not apply");
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "code_diagnostics_revision_conflict");
+        assert_ne!(body["actual_revision"], body["expected_revision"]);
+    }
+
+    #[tokio::test]
+    async fn settings_patch_without_a_revision_is_rejected_before_any_write() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        state.code_diagnostics_authority = Some(authority_with_settings(
+            &state,
+            CodeDiagnosticsSettings::default(),
+        ));
+
+        let (status, Json(body)) = patch_settings(
+            State(state),
+            Some(Extension(request_control())),
+            Json(json!({ "idle_backfill": "off" })),
+        )
+        .await
+        .expect_err("a write with no revision must not apply");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("expected_revision")),
+            "the rejection must name the missing revision: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn overview_returns_service_unavailable_without_mounted_authority() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let (_project, state) = state_for_test().await;
+
+        let (status, Json(body)) = overview(State(state), Some(Extension(request_control())))
+            .await
+            .expect_err("unmounted authority must fail closed");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["detail"],
+            "canonical daemon diagnostics authority is unavailable"
+        );
+    }
 }

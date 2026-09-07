@@ -1,0 +1,11 @@
+{
+  "committed_row_count": 129,
+  "expected": {
+    "checkpointed_less_than_log_while_blocked": true,
+    "hard_drain_required": true,
+    "wal_frames_minimum": 1
+  },
+  "lease_id": "snapshot.s11.wal-pressure",
+  "schema": "tracedecay.storage-runtime-evidence.wal-blocker.v1",
+  "snapshot_row_count": 1
+}

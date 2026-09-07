@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "provider": "hermes",
+  "sources": [
+    {
+      "kind": "checked_in_provider_capture",
+      "path": "tests/fixtures/host_events/hermes/baseline.json"
+    },
+    {
+      "kind": "authentic_native_shell_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
+    },
+    {
+      "kind": "authentic_native_shell_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"
+    },
+    {
+      "kind": "production_adapter_projection",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json",
+      "source_capture": "crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
+    },
+    {
+      "kind": "official_documented_shell_wire",
+      "url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks",
+      "sections": ["post_tool_call", "on_session_end", "JSON wire protocol"],
+      "retrieved_at": "2026-07-21"
+    }
+  ],
+  "events": [
+    {
+      "identity": "turn_ingested",
+      "family": "session_boundary",
+      "support": "native",
+      "request": {
+        "agent": "hermes",
+        "event": "turnIngested",
+        "session_id": "<SESSION_ID>",
+        "cwd": "<PROJECT_ROOT>",
+        "route": {
+          "cwd": "<PROJECT_ROOT>"
+        },
+        "receipt": {
+          "turn_id": "<TURN_ID>",
+          "status": "completed",
+          "transcript_watermark": "<WATERMARK>"
+        }
+      }
+    },
+    {
+      "identity": "tool_completed",
+      "family": "tool_lifecycle",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json",
+      "adapter_projection_path": "crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json",
+      "request": {
+        "cwd": "<PROJECT_ROOT>",
+        "extra": {
+          "api_request_id": "<API_REQUEST_ID>",
+          "duration_ms": 297,
+          "error_message": null,
+          "error_type": null,
+          "middleware_trace": [],
+          "result": "{\"bytes_written\": 37, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"<SAVED_PATH>\", \"files_modified\": [\"<SAVED_PATH>\"]}",
+          "status": "ok",
+          "task_id": "<TASK_ID>",
+          "telemetry_schema_version": "hermes.observer.v1",
+          "tool_call_id": "<TOOL_CALL_ID>",
+          "turn_id": "<TURN_ID>"
+        },
+        "hook_event_name": "post_tool_call",
+        "session_id": "<SESSION_ID>",
+        "tool_input": {
+          "content": "<REDACTED_CONTENT>",
+          "path": "<SAVED_PATH>"
+        },
+        "tool_name": "write_file"
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json",
+      "request": {
+        "cwd": "<PROJECT_ROOT>",
+        "extra": {
+          "completed": true,
+          "interrupted": false,
+          "model": "<MODEL>",
+          "platform": "cli",
+          "task_id": "<TASK_ID>",
+          "telemetry_schema_version": "hermes.observer.v1",
+          "turn_id": "<TURN_ID>"
+        },
+        "hook_event_name": "on_session_end",
+        "session_id": "<SESSION_ID>",
+        "tool_input": null,
+        "tool_name": null
+      }
+    }
+  ]
+}

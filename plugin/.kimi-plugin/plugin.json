@@ -1,0 +1,38 @@
+{
+  "name": "tracedecay",
+  "version": "0.0.0",
+  "description": "Kimi Code integration for TraceDecay semantic code intelligence: MCP and CLI clients that preserve explicit daemon lifecycle state.",
+  "skills": [
+    "./skills/"
+  ],
+  "commands": "./commands/",
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "matcher": "Edit|Write|NotebookEdit|MultiEdit",
+      "command": "__TRACEDECAY_SYNC__",
+      "timeout": 5
+    },
+    {
+      "event": "Stop",
+      "matcher": "",
+      "command": "__TRACEDECAY_STOP__",
+      "timeout": 5
+    }
+  ],
+  "mcpServers": {
+    "tracedecay": {
+      "command": "tracedecay",
+      "args": [
+        "serve"
+      ]
+    }
+  },
+  "interface": {
+    "displayName": "TraceDecay",
+    "shortDescription": "Semantic code intelligence and memory for Kimi Code.",
+    "longDescription": "TraceDecay adds a code graph MCP server and Kimi Code skills for cheap code reading, impact analysis, project memory, and context-saving workflows.",
+    "developerName": "ScriptedAlchemy",
+    "websiteURL": "https://github.com/ScriptedAlchemy/tracedecay"
+  }
+}

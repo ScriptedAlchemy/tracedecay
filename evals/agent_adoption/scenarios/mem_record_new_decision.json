@@ -11,7 +11,7 @@
   "prompt": "We just agreed that SKU strings are free-form text with no format validation before v2 -- make sure that's remembered for later.",
   "expected_tools": {
     "required_first": [
-      "tracedecay_fact_store"
+      "tracedecay_fact_store_add"
     ],
     "acceptable": [
       "tracedecay_context"
@@ -33,5 +33,5 @@
   },
   "ground_truth": [],
   "max_tool_calls": 4,
-  "notes": "fact add; neutral phrasing ('make sure that's remembered') should still route to tracedecay_fact_store. No ground_truth text check -- graded on tool choice, since confirmation phrasing varies by model."
+  "notes": "fact add; neutral phrasing ('make sure that's remembered') should still route to tracedecay_fact_store_add. No ground_truth text check -- graded on tool choice, since confirmation phrasing varies by model."
 }

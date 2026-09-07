@@ -1,0 +1,55 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:04:13Z",
+    "method": "GET",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/actions/runs/29871723703",
+    "api_version": "2022-11-28",
+    "documentation": "https://docs.github.com/en/rest/actions/workflow-runs#get-a-workflow-run"
+  },
+  "response": {
+    "id": 29871723703,
+    "node_id": "WFR_kwLOSzKG2s8AAAAG9H5Utw",
+    "name": "CI",
+    "head_branch": "codex/tracedecay-total-redesign-plan",
+    "head_sha": "e29900448db98ae58e90d08770a3bb8bfa710846",
+    "path": ".github/workflows/ci.yml",
+    "run_number": 2599,
+    "event": "pull_request",
+    "status": "in_progress",
+    "conclusion": null,
+    "workflow_id": 290572396,
+    "check_suite_id": 80912696679,
+    "check_suite_node_id": "CS_kwDOSzKG2s8AAAAS1sXFZw",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/actions/runs/29871723703",
+    "html_url": "https://github.com/ScriptedAlchemy/tracedecay/actions/runs/29871723703",
+    "pull_requests": [
+      {
+        "id": 4026204542,
+        "number": 421,
+        "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/421",
+        "base": {
+          "ref": "master",
+          "sha": "8339371d01311289e2b7cd7b0669ea3549308b8c",
+          "repo": {
+            "id": 1261602522,
+            "name": "tracedecay",
+            "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay"
+          }
+        },
+        "head": {
+          "ref": "codex/tracedecay-total-redesign-plan",
+          "sha": "e29900448db98ae58e90d08770a3bb8bfa710846",
+          "repo": {
+            "id": 1261602522,
+            "name": "tracedecay",
+            "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay"
+          }
+        }
+      }
+    ],
+    "created_at": "2026-07-21T21:53:31Z",
+    "updated_at": "2026-07-21T22:04:13Z",
+    "run_attempt": 1,
+    "referenced_workflows": []
+  }
+}

@@ -1,0 +1,3934 @@
+//! Shared transport adapter contracts for the first callable application surfaces.
+//!
+//! The adapters resolve catalog bindings and preserve canonical application
+//! problem envelopes. They do not open stores, run queries, or bypass the
+//! daemon-owned Git transaction authority.
+
+mod git_surface;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use axum::body::Body;
+use axum::extract::{Extension, Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{get, post};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+use tokio_stream::StreamExt;
+use tracedecay_api::{
+    CanonicalInvocationResult, HandoffOperation, HttpApplicationControls,
+    HttpApplicationInvocationFuture, HttpApplicationRequest, WorkOperation, WorkflowOperation,
+    application_problem_response, is_http_application_operation_exposed, sse_response,
+};
+pub use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_application::git::{
+    GitHubStackSignalExpandSurfaceRequest, NativeWorktreeSurfaceRequest,
+};
+use tracedecay_application::handlers::CanonicalApplicationDispatcher;
+use tracedecay_application::retrieval::{HealthDeltaRequest, PrimitiveRequest};
+use tracedecay_application::{
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
+    ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
+    ApplicationResult, CancellationContext, CancellationSignal, CancellationStage,
+    ConfigurationWireRequestV1, Deadline, HealthReadRequest, LegalAction, ObservatoryReadRequestV1,
+    OperationTermination, PageRequest, ProblemOwningLayer, RequestContext, RequestId,
+    ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, SessionLookupRequest,
+    SourceLinesRequest, StreamEvent, StreamEventKind,
+    configuration_wire_request_from_invocation_payload,
+};
+pub use tracedecay_daemon_protocol::{
+    ContextScoutCancelSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutDeliverySurfaceRequest, ContextScoutExactAddressSurfaceRequest,
+    ContextScoutFeedbackSurfaceRequest, ContextScoutRecentSurfaceRequest,
+    ContextScoutSurfaceRequest, GitReadSurfaceRequest,
+};
+use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1,
+    CatalogValidationError, FeatureId, IdentifierError, ProfileId, RouteExposureV1, SchemaId,
+    SurfaceOperationName, UseCaseId,
+};
+
+use crate::catalog_composition::{
+    ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
+    compose_application_catalog_with,
+};
+use tracedecay_application::feedback::observations::{
+    FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
+};
+use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+pub use tracedecay_application::{
+    CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
+    CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
+    NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+};
+use tracedecay_daemon_protocol::{
+    BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
+    DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
+    InvocationControls, ResolvedBinding, ScopeSelector, resolve_dispatch,
+};
+use tracedecay_daemon_protocol::{RequestedOutputFormat, requested_output_format};
+use tracedecay_usecases::operation_stream::{
+    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    OperationRequestControls,
+};
+use tracedecay_usecases::primitives::{
+    CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
+    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, QualifiedNamePrimitiveRequest,
+    SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest, StorageStatusPrimitiveRequest,
+};
+
+mod configuration_wire;
+mod handoff;
+mod multi_root_http;
+mod registered_http;
+mod request_control;
+pub(crate) mod retained;
+mod work;
+mod workflow;
+
+use configuration_wire::{
+    CONFIGURATION_WIRE_OPERATIONS, build_configuration_wire_schema_registry,
+    configuration_invocation_payload, is_configuration_operation, validate_configuration_outcome,
+};
+use handoff::router_with_executor as handoff_application_router_with_executor;
+use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
+pub(crate) use registered_http::RegisteredHttpOperation;
+use registered_http::validated_daemon_outcome;
+use request_control::{
+    ActiveHttpRequest, HttpCancellationRegistry, RequestControlError, accepts_supplied_request_id,
+    supplied_request_id,
+};
+pub(crate) use workflow::invoke_workflow_operation;
+use workflow::router_with_executor as workflow_application_router_with_executor;
+
+const DEFAULT_PAGE_SIZE: u32 = 10;
+const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
+const APPLICATION_PROTOCOL_REVISION: u32 = 1;
+const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
+const MAX_REQUEST_HANDLE_BYTES: usize = 256;
+
+/// Transport keys every surface adapter accepts but no reviewed application
+/// request schema declares. `format` selects the rendered output and
+/// `__mcp_request_id` carries protocol identity; both are stripped here so
+/// that `deny_unknown_fields` request schemas never see them.
+const SURFACE_TRANSPORT_ARGUMENT_KEYS: [&str; 2] = ["format", "__mcp_request_id"];
+
+/// A reviewed application request body together with the presentation format
+/// that travelled alongside it in the caller's argument object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NormalizedApplicationToolArgs {
+    pub request: Value,
+    pub requested_format: RequestedOutputFormat,
+}
+
+/// Normalizes compatibility tool arguments before every CLI/MCP transport
+/// parses the canonical application request.
+#[hotpath::measure(label = "application_surface.normalize")]
+pub fn normalize_application_tool_args(
+    tool_name: &str,
+    mut args: Value,
+) -> Result<NormalizedApplicationToolArgs, ApplicationSurfaceAdapterError> {
+    if let Some(format) = args.get("format")
+        && !matches!(format.as_str(), Some("markdown" | "json"))
+    {
+        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    }
+    let requested_format = requested_output_format(&args);
+    if let Some(object) = args.as_object_mut() {
+        for key in SURFACE_TRANSPORT_ARGUMENT_KEYS {
+            object.remove(key);
+        }
+    }
+    let request = if tool_name == "tracedecay_diagnostics" {
+        compatibility_diagnostics_request(&args)?
+    } else {
+        args
+    };
+    Ok(NormalizedApplicationToolArgs {
+        request,
+        requested_format,
+    })
+}
+
+/// Rewrites the compatibility `tracedecay_diagnostics` argument shape into the
+/// reviewed `diagnostics_read` request body.
+fn compatibility_diagnostics_request(
+    args: &Value,
+) -> Result<Value, ApplicationSurfaceAdapterError> {
+    let scope = match args
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("workspace")
+    {
+        "workspace" => serde_json::json!("workspace"),
+        "package" => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        "file" => serde_json::json!({
+            "file": args
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+        }),
+        _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    Ok(serde_json::json!({
+        "scope": scope,
+        "maximum_diagnostics": args
+            .get("maximum_diagnostics")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(1000)),
+        "cursor": args.get("cursor").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+pub type FeedbackSurfaceRequest = tracedecay_application::feedback::FeedbackHandleRequestV1;
+
+/// Canonical explicit advisory trigger. Project/root/scope/provider identities and
+/// the resulting read handle are all minted by the authenticated daemon.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackAdvisoryCycleSurfaceRequest {
+    pub document_uri: String,
+}
+
+impl FeedbackAdvisoryCycleSurfaceRequest {
+    fn validate(&self) -> Result<(), ApplicationSurfaceAdapterError> {
+        if self.document_uri.is_empty()
+            || self.document_uri.trim() != self.document_uri
+            || self.document_uri.len() > MAX_REQUEST_HANDLE_BYTES * 16
+            || self.document_uri.chars().any(char::is_control)
+        {
+            return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AffectedTestsSurfaceRequest {
+    pub request_handle: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackImpactSurfaceRequest {
+    pub request_handle: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestResultsSurfaceRequest {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ApplicationSurfaceRequest {
+    GitRead(GitReadSurfaceRequest),
+    GitPreview(GitPreviewSurfaceRequest),
+    GitApply(GitApplySurfaceRequest),
+    GitHubStackSignalExpand(GitHubStackSignalExpandSurfaceRequest),
+    NativeIntegration(NativeIntegrationSurfaceRequest),
+    Feedback(FeedbackSurfaceRequest),
+    FeedbackAdvisoryCycle(FeedbackAdvisoryCycleSurfaceRequest),
+    FeedbackImpact(FeedbackImpactSurfaceRequest),
+    AffectedTests(AffectedTestsSurfaceRequest),
+    TestResults(TestResultsSurfaceRequest),
+    CallableCode(CallableCodeSurfaceRequest),
+    PrimitiveCode(PrimitiveCodeSurfaceRequest),
+    Primitive(PrimitiveRequest),
+    ObservatoryRead(ObservatoryReadRequestV1),
+    Configuration(ConfigurationWireRequestV1),
+    ContextScout(ContextScoutSurfaceRequest),
+    Retained(tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1),
+}
+
+pub struct ApplicationSurfaceInvocationResult {
+    pub operation: ApplicationSurfaceOperation,
+    pub binding_id: tracedecay_tool_catalog::BindingId,
+    pub result: ApplicationResult<Value>,
+    pub requested_format: RequestedOutputFormat,
+}
+
+struct HttpApplicationCatalogDispatcher {
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+    catalog: Arc<CatalogSnapshotV1>,
+}
+
+struct CatalogBoundHttpApplicationRequest {
+    capability_id: CapabilityId,
+    use_case_id: UseCaseId,
+    surface: BindingSurface,
+    request: HttpApplicationRequest,
+}
+
+impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
+    for HttpApplicationCatalogDispatcher
+{
+    type Output = HttpApplicationInvocationFuture;
+
+    fn invoke(
+        &self,
+        operation: &ApplicationOperation,
+        request: CatalogBoundHttpApplicationRequest,
+    ) -> Self::Output {
+        assert_eq!(operation.capability_id(), &request.capability_id);
+        assert_eq!(operation.use_case_id(), &request.use_case_id);
+        let executor = Arc::clone(&self.executor);
+        let catalog = self.catalog.clone();
+        Box::pin(async move {
+            invoke_application_adapter_request(
+                request.request,
+                request.surface,
+                executor.as_ref(),
+                &catalog,
+            )
+            .await
+        })
+    }
+}
+
+#[hotpath::measure(label = "application_surface.invoker_assemble")]
+fn application_invoker_for_surface(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+    surface: BindingSurface,
+    required_operations: &[ApplicationSurfaceOperation],
+) -> Result<
+    impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
+    ApplicationSurfaceAdapterError,
+> {
+    let composition = Arc::new(compose_application_catalog_with(|catalog| {
+        HttpApplicationCatalogDispatcher {
+            executor,
+            catalog: Arc::new(catalog.clone()),
+        }
+    })?);
+    let resolver = CatalogBindingResolver::new(composition.snapshot());
+    let configuration_schemas = (surface == BindingSurface::Http
+        || required_operations
+            .iter()
+            .copied()
+            .any(is_configuration_operation))
+    .then(|| build_configuration_wire_schema_registry(composition.snapshot()))
+    .transpose()?;
+    // The HTTP mount is the whole canonical operation family by definition, so
+    // it validates the authority's own list and ignores the caller's; every
+    // other surface validates exactly the operations its caller declared.
+    let operations: &[ApplicationSurfaceOperation] = if surface == BindingSurface::Http {
+        &ApplicationSurfaceOperation::ALL
+    } else {
+        required_operations
+    };
+    for &operation in operations {
+        // Only the HTTP enumeration walks operations the mount is not meant to
+        // publish; a caller-supplied list is required exactly as it was given.
+        if surface == BindingSurface::Http && !is_http_application_operation_exposed(operation) {
+            continue;
+        }
+        let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        };
+        if is_configuration_operation(operation)
+            && configuration_schemas
+                .as_ref()
+                .and_then(|schemas| schemas.get(&binding.binding_id))
+                .is_none()
+        {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        }
+    }
+    Ok(move |request| invoke_catalog_bound_application_request(request, surface, &composition))
+}
+
+#[hotpath::measure(label = "application_surface.multi_root.invoke", future = true)]
+pub(crate) async fn invoke_multi_root_surface_request(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    page: PageRequest,
+    deadline: Deadline,
+    cancellation: tracedecay_application::CancellationSignal,
+    body: Value,
+) -> Result<Value, ApplicationSurfaceAdapterError> {
+    let request = parse_application_surface_request(operation, body)?;
+    let dispatched = resolve_application_surface_dispatch_with_controls(
+        BindingSurface::Http,
+        operation,
+        request_id,
+        request,
+        page,
+        Some(deadline),
+        cancellation,
+        RequestedOutputFormat::Json,
+    )?;
+    let response =
+        execute_application_surface(operation, dispatched, Some(executor.as_ref())).await?;
+    let envelope = response
+        .result
+        .map_err(|_| ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    serde_json::to_value(envelope.outcome)
+        .ok()
+        .and_then(|value| value.get("value")?.get("payload").cloned())
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
+}
+
+fn work_application_router_with_executor(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    work::router_with_executor(executor)
+}
+
+/// Invoke the Work owner shared by the HTTP router and the MCP adapter.
+///
+/// The caller supplies transport-normalized controls; typed Work decoding,
+/// registry binding resolution, cancellation policy, and canonical result
+/// encoding remain here so transports cannot grow their own Work dispatcher.
+pub(crate) async fn invoke_work_operation(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    request: tracedecay_api::WorkHttpRequest,
+) -> Response {
+    work::invoke_work_operation(Some(executor), request).await
+}
+
+/// Refuse a registered request that never reached dispatch in the canonical envelope.
+///
+/// Everything before the executor call is adapter territory: the catalog would
+/// not build, the operation is not advertised, or its binding carries no public
+/// route. A bare status here would answer a registered route with an empty body no
+/// client can read a code, a retry directive or a request id out of, so these
+/// failures are reported as the same `ApplicationProblemEnvelope` the dispatched
+/// path returns, owned by the adapter layer rather than the runtime.
+fn registered_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
+    let Ok(schema_id) = SchemaId::new("schema.tracedecay.http.adapter-problem.v1") else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(contract) = ResultContractRef::new(schema_id, 1) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match ApplicationProblemEnvelope::new(
+        contract,
+        request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: code.to_owned(),
+            message: message.to_owned(),
+        }),
+    ) {
+        Ok(problem) => tracedecay_api::application_problem_response(
+            problem.with_owning_layer(ProblemOwningLayer::Adapter),
+        ),
+        Err(error) => application_contract_error_response(error),
+    }
+}
+
+fn application_contract_error_response(error: ApplicationContractError) -> Response {
+    tracing::error!(%error, "application problem envelope violated its canonical contract");
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+/// Dispatch one registered operation and encode its canonical result.
+///
+/// Core and attempt operations differ only in which daemon payload carries them
+/// and which outcome they answer with, so both arrive here: one binding lookup,
+/// one cancellation policy, one problem taxonomy.
+impl RegisteredHttpOperation for WorkOperation {
+    fn operation_id(self) -> String {
+        WorkOperation::operation_id_str(self).to_owned()
+    }
+
+    fn is_read_only(self) -> bool {
+        WorkOperation::is_read_only(self)
+    }
+
+    fn problem_family(self) -> &'static str {
+        "work"
+    }
+
+    fn display_family(self) -> &'static str {
+        "Work"
+    }
+
+    fn registry(
+        self,
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
+        tracedecay_application::work_executable_binding_registry()
+            .map(std::borrow::Cow::Borrowed)
+            .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
+    }
+}
+
+impl RegisteredHttpOperation for WorkflowOperation {
+    fn operation_id(self) -> String {
+        WorkflowOperation::operation_id_str(self).to_owned()
+    }
+
+    fn is_read_only(self) -> bool {
+        false
+    }
+
+    fn problem_family(self) -> &'static str {
+        "workflow"
+    }
+
+    fn display_family(self) -> &'static str {
+        "Workflow"
+    }
+
+    fn registry(
+        self,
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
+        tracedecay_application::workflow_executable_binding_registry()
+            .map(std::borrow::Cow::Borrowed)
+            .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
+    }
+}
+
+impl RegisteredHttpOperation for HandoffOperation {
+    fn operation_id(self) -> String {
+        HandoffOperation::operation_id_str(self).to_owned()
+    }
+
+    fn is_read_only(self) -> bool {
+        // Not a blanket `false` any more: enumeration reads the grant store
+        // without issuing or consuming anything, and treating it as a mutation
+        // here would deny a safe read the retry and replay handling a read is
+        // entitled to.
+        HandoffOperation::is_read_only(self)
+    }
+
+    fn problem_family(self) -> &'static str {
+        "handoff"
+    }
+
+    fn display_family(self) -> &'static str {
+        "handoff-open"
+    }
+
+    fn registry(
+        self,
+    ) -> Result<
+        std::borrow::Cow<'static, tracedecay_tool_catalog::ExecutableBindingRegistryV1>,
+        ApplicationSurfaceAdapterError,
+    > {
+        tracedecay_application::handoff_executable_binding_registry()
+            .map(std::borrow::Cow::Owned)
+            .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
+    }
+}
+
+/// Return the same typed result-contract envelope used after daemon dispatch
+/// when a caller has no authenticated daemon executor to invoke.
+///
+/// MCP can be constructed before the daemon route is attached. That state is
+/// still an application failure of the named family, not an MCP tool-resolution
+/// failure, so the response must retain the operation's registered result
+/// schema and canonical runtime problem taxonomy.
+pub(crate) fn registered_executor_unavailable<T, O>(operation: O, request_id: RequestId) -> Response
+where
+    T: Serialize,
+    O: RegisteredHttpOperation,
+{
+    let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
+    let family = operation.display_family();
+    let registry = match operation.registry() {
+        Ok(registry) => registry,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("catalog_unavailable"),
+                &format!("The {family} capability catalog is unavailable"),
+            );
+        }
+    };
+    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
+        Ok(operation_id) => operation_id,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("operation_identity_unavailable"),
+                &format!("The {family} operation identity is unavailable"),
+            );
+        }
+    };
+    let Some(binding) = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+    else {
+        return registered_adapter_unavailable(
+            request_id,
+            &problem_code("binding_unavailable"),
+            &format!("The {family} operation is not advertised by this build"),
+        );
+    };
+    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+        return registered_adapter_unavailable(
+            request_id,
+            &problem_code("route_unavailable"),
+            &format!("The {family} operation binding carries no public route"),
+        );
+    };
+    let result_contract = match ResultContractRef::new(
+        binding.result_schema().schema_ref().schema_id().clone(),
+        binding.result_schema().schema_ref().revision(),
+    ) {
+        Ok(contract) => contract,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("result_contract_unavailable"),
+                &format!("The {family} operation result contract is unavailable"),
+            );
+        }
+    };
+    let problem = match ApplicationProblemEnvelope::new(
+        result_contract,
+        request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: problem_code("transport_unavailable"),
+            message: format!("The {family} application transport is unavailable"),
+        }),
+    ) {
+        Ok(problem) => problem.with_owning_layer(ProblemOwningLayer::Runtime),
+        Err(error) => return application_contract_error_response(error),
+    };
+    CanonicalInvocationResult::<T>::new(binding_id.clone(), Err(problem)).into_http_response()
+}
+
+#[hotpath::measure(label = "application_surface.registered.invoke")]
+async fn invoke_registered_http<T, O>(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    operation: O,
+    request_id: RequestId,
+    controls: HttpApplicationControls,
+    invocation: tracedecay_daemon_protocol::DaemonInvocationRequest,
+    select_outcome: impl FnOnce(
+        tracedecay_daemon_protocol::DaemonInvocationOutcome,
+    ) -> Option<(
+        tracedecay_application::ResolvedScope,
+        tracedecay_application::ApplicationOutcome<T>,
+    )>,
+) -> Response
+where
+    T: Serialize,
+    O: RegisteredHttpOperation,
+{
+    let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
+    let family = operation.display_family();
+    let registry = match operation.registry() {
+        Ok(registry) => registry,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("catalog_unavailable"),
+                &format!("The {family} capability catalog is unavailable"),
+            );
+        }
+    };
+    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
+        Ok(operation_id) => operation_id,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("operation_identity_unavailable"),
+                &format!("The {family} operation identity is unavailable"),
+            );
+        }
+    };
+    let Some(binding) = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+    else {
+        return registered_adapter_unavailable(
+            request_id,
+            &problem_code("binding_unavailable"),
+            &format!("The {family} operation is not advertised by this build"),
+        );
+    };
+    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+        return registered_adapter_unavailable(
+            request_id,
+            &problem_code("route_unavailable"),
+            &format!("The {family} operation binding carries no public route"),
+        );
+    };
+    let result_contract = match ResultContractRef::new(
+        binding.result_schema().schema_ref().schema_id().clone(),
+        binding.result_schema().schema_ref().revision(),
+    ) {
+        Ok(contract) => contract,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("result_contract_unavailable"),
+                &format!("The {family} operation result contract is unavailable"),
+            );
+        }
+    };
+    let binding_id = binding_id.clone();
+    let policy = if operation.is_read_only() {
+        InvocationCancellationPolicy::ReadOnly
+    } else {
+        InvocationCancellationPolicy::AuthoritativeEffect
+    };
+    let response = hotpath::future!(
+        executor.invoke_controlled(invocation, controls.deadline, controls.cancellation, policy),
+        label = "application_surface.registered.dispatch"
+    )
+    .await;
+    let outcome = hotpath::measure_block!(
+        "application_surface.registered.assemble",
+        validated_daemon_outcome(operation, &request_id, response)
+    );
+    let owning_layer = match &outcome {
+        Ok(
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { .. }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplicationProblem {
+                ..
+            },
+        ) => ProblemOwningLayer::Application,
+        _ => ProblemOwningLayer::Runtime,
+    };
+    let problem = match outcome {
+        Ok(outcome) => match outcome {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                problem
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplicationProblem {
+                problem,
+                ..
+            } => problem,
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => match problem {
+                tracedecay_daemon_protocol::DaemonInvocationProblem::InvalidRequest
+                | tracedecay_daemon_protocol::DaemonInvocationProblem::UnsupportedRevision => {
+                    ApplicationProblem::InvalidRequest {
+                        diagnostic: SafeDiagnostic {
+                            code: problem_code("invalid_request"),
+                            message: format!("The {family} application request is invalid"),
+                        },
+                        retry: RetryDirective::Never,
+                        legal_actions: vec![LegalAction::CorrectRequest],
+                    }
+                }
+                tracedecay_daemon_protocol::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+                }
+                tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired => {
+                    ApplicationProblem::reset_required(SafeDiagnostic {
+                        code: problem_code("reset_required"),
+                        message: format!("The {family} store requires an explicit reset"),
+                    })
+                }
+                tracedecay_daemon_protocol::DaemonInvocationProblem::ApplicationContractViolation => {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: problem_code("application_contract_violation"),
+                        message: format!(
+                            "The {family} application result violated its canonical contract"
+                        ),
+                    })
+                }
+                tracedecay_daemon_protocol::DaemonInvocationProblem::Unavailable => {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: problem_code("unavailable"),
+                        message: format!("The {family} application runtime is unavailable"),
+                    })
+                }
+            },
+            outcome => match select_outcome(outcome) {
+                Some((scope, outcome)) => {
+                    return CanonicalInvocationResult::new(
+                        binding_id,
+                        Ok(ApplicationEnvelope {
+                            contract: result_contract,
+                            request_id,
+                            scope,
+                            outcome,
+                        }),
+                    )
+                    .into_http_response();
+                }
+                None => ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: problem_code("protocol_unavailable"),
+                    message: format!("The {family} application protocol is unavailable"),
+                }),
+            },
+        },
+        Err(problem) => problem,
+    };
+    let problem = match ApplicationProblemEnvelope::new(result_contract, request_id, problem) {
+        Ok(problem) => problem.with_owning_layer(owning_layer),
+        Err(error) => return application_contract_error_response(error),
+    };
+    CanonicalInvocationResult::<T>::new(binding_id, Err(problem)).into_http_response()
+}
+
+const DASHBOARD_FEEDBACK_OPERATIONS: [ApplicationSurfaceOperation; 3] = [
+    ApplicationSurfaceOperation::FeedbackGet,
+    ApplicationSurfaceOperation::FeedbackExpand,
+    ApplicationSurfaceOperation::FeedbackList,
+];
+
+pub fn http_application_router(
+    client: tracedecay_daemon_protocol::DaemonInvocationClient,
+    operation_events: OperationEventAuthority,
+    active_project_id: ProjectId,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    http_application_router_with_executor(Arc::new(client), operation_events, active_project_id)
+}
+
+#[hotpath::measure(label = "application_surface.http.router")]
+pub fn http_application_router_with_executor(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+    operation_events: OperationEventAuthority,
+    active_project_id: ProjectId,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    Ok(with_hotpath_server_layer(assemble_http_application_router(
+        executor,
+        operation_events,
+        active_project_id,
+    )?))
+}
+
+/// Complete HTTP application routes without the process HTTP-server layer.
+///
+/// Dashboard nests this under `/api/application` and applies one Axum layer
+/// after the full dashboard router is assembled.
+pub(crate) fn assemble_http_application_router(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+    operation_events: OperationEventAuthority,
+    active_project_id: ProjectId,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
+    let event_executor = Arc::clone(&executor);
+    let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
+    let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
+    let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
+    let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor))?;
+    let retained_router = retained::router_with_executor(Arc::clone(&executor))?;
+    Ok(
+        tracedecay_api::application_router(application_invoker_for_surface(
+            executor,
+            BindingSurface::Http,
+            &ApplicationSurfaceOperation::ALL,
+        )?)
+        .merge(work_router)
+        .merge(workflow_router)
+        .merge(handoff_router)
+        .merge(multi_root_router)
+        .merge(retained_router)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&cancellations),
+            application_http_context,
+        ))
+        .merge(http_operation_event_router(
+            operation_events,
+            active_project_id,
+            cancellations,
+            Some(event_executor),
+        )),
+    )
+}
+
+/// Build the dashboard's public Work mount.
+///
+/// It is the core route subset of the application Work router: the same
+/// descriptor, the same owner, the same dispatch and problem taxonomy. The
+/// attempt-runtime routes are simply not registered here, so the lease protocol
+/// is unreachable from the dashboard rather than merely undocumented.
+#[hotpath::measure(label = "application_surface.http.dashboard_work_router")]
+pub fn dashboard_work_application_router_with_executor(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
+    Ok(
+        work::dashboard_router_with_executor(executor)?.layer(
+            axum::middleware::from_fn_with_state(cancellations, application_http_context),
+        ),
+    )
+}
+
+#[hotpath::measure(label = "application_surface.http.dashboard_configuration_router")]
+pub fn dashboard_configuration_application_router_with_executor(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
+    Ok(
+        tracedecay_api::configuration_application_router(application_invoker_for_surface(
+            executor,
+            BindingSurface::Dashboard,
+            &CONFIGURATION_WIRE_OPERATIONS,
+        )?)
+        .layer(axum::middleware::from_fn_with_state(
+            cancellations,
+            application_http_context,
+        )),
+    )
+}
+
+#[hotpath::measure(label = "application_surface.http.dashboard_feedback_router")]
+pub fn dashboard_feedback_application_router_with_executor(
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
+    let invoker = application_invoker_for_surface(
+        executor,
+        BindingSurface::Dashboard,
+        &DASHBOARD_FEEDBACK_OPERATIONS,
+    )?;
+    Ok(tracedecay_api::feedback_application_router(invoker).layer(
+        axum::middleware::from_fn_with_state(cancellations, application_http_context),
+    ))
+}
+
+/// Attach Hotpath only after a production HTTP router has its complete route
+/// and middleware assembly. Leaf routers remain unlayered so merged routes
+/// emit exactly one server event and enter exactly one route scope.
+#[cfg(feature = "hotpath")]
+pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(hotpath::AxumLayer::new())
+}
+
+#[cfg(not(feature = "hotpath"))]
+pub(crate) fn with_hotpath_server_layer<S>(router: axum::Router<S>) -> axum::Router<S> {
+    router
+}
+
+#[hotpath::measure(label = "application_surface.http_context")]
+async fn application_http_context(
+    State(cancellations): State<HttpCancellationRegistry>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    let supplied_request_id = match supplied_request_id(request.headers()) {
+        Ok(request_id) => request_id,
+        Err(RequestControlError::DuplicateHeader | RequestControlError::InvalidHeader) => {
+            return invalid_http_request_control_response();
+        }
+        Err(RequestControlError::ActiveCollision | RequestControlError::RegistryUnavailable) => {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if supplied_request_id.is_some() && !accepts_supplied_request_id(request.uri().path()) {
+        return invalid_http_request_control_response();
+    }
+    let request_id = match supplied_request_id {
+        Some(request_id) => request_id,
+        None => {
+            let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            request_id
+        }
+    };
+    let Ok(cancellation) =
+        CancellationSignal::active(format!("cancellation.http.{}", request_id.as_str()))
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Ok(observed_at) = current_micros() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let default_expires_at = observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS);
+    let caller_expires_at = match request.headers().get(HTTP_DEADLINE_HEADER) {
+        Some(value) => match value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(expires_at) => expires_at,
+            None => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        None => default_expires_at,
+    };
+    let effective_expires_at = caller_expires_at.min(default_expires_at);
+    let Ok(deadline) = Deadline::new(UtcMicros(effective_expires_at)) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let active = match ActiveHttpRequest::register(
+        Arc::clone(&cancellations),
+        request_id.clone(),
+        cancellation.clone(),
+    ) {
+        Ok(active) => active,
+        Err(RequestControlError::ActiveCollision) => {
+            return retained::active_request_conflict_response(request_id);
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    request.extensions_mut().insert(request_id.clone());
+    request.extensions_mut().insert(cancellation.clone());
+    request.extensions_mut().insert(HttpApplicationControls {
+        deadline,
+        cancellation: cancellation.clone(),
+    });
+    let response = hotpath::future!(
+        next.run(request),
+        label = "application_surface.http.dispatch"
+    )
+    .await;
+    active.finish();
+    response
+}
+
+fn invalid_http_request_control_response() -> Response {
+    match mint_global_request_id(GlobalRequestSurface::Http) {
+        Ok(request_id) => tracedecay_api::retained_invalid_request_response(request_id),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Clone)]
+struct HttpOperationEventState {
+    authority: OperationEventAuthority,
+    active_project_id: ProjectId,
+    cancellations: HttpCancellationRegistry,
+    executor: Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
+}
+
+struct SseDisconnectObserver {
+    executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+    subject: ManifestDigest,
+    terminal: Arc<AtomicBool>,
+}
+
+impl Drop for SseDisconnectObserver {
+    fn drop(&mut self) {
+        if self.terminal.load(Ordering::Relaxed) {
+            return;
+        }
+        let executor = Arc::clone(&self.executor);
+        let subject = self.subject.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = executor
+                    .observe_feedback(
+                        subject,
+                        current_micros().unwrap_or(UtcMicros(1)),
+                        FeedbackSourceEventV1::SseLifecycle {
+                            lifecycle: FeedbackSseLifecycleV1::Disconnected,
+                            sequence: None,
+                            item_count: 0,
+                            duration_micros: None,
+                        },
+                    )
+                    .await;
+            });
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpOperationEventQuery {
+    #[serde(default)]
+    next_sequence: Option<u64>,
+    #[serde(default)]
+    resume_token: Option<ResumeToken>,
+}
+
+fn operation_event_next_sequence(
+    explicit_next_sequence: Option<u64>,
+    headers: &HeaderMap,
+) -> Result<u64, OperationEventError> {
+    let invalid_cursor = || {
+        OperationEventError::InvalidContext(
+            "operation-event resume cursor is invalid or conflicting".to_owned(),
+        )
+    };
+    let mut last_event_ids = headers.get_all("last-event-id").iter();
+    let last_event_next_sequence = match last_event_ids.next() {
+        None => None,
+        Some(value) => {
+            if last_event_ids.next().is_some() {
+                return Err(invalid_cursor());
+            }
+            let value = value.to_str().map_err(|_| invalid_cursor())?;
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid_cursor());
+            }
+            let event_id = value.parse::<u64>().map_err(|_| invalid_cursor())?;
+            Some(event_id.checked_add(1).ok_or_else(invalid_cursor)?)
+        }
+    };
+
+    match (explicit_next_sequence, last_event_next_sequence) {
+        (Some(explicit), Some(from_header)) if explicit != from_header => Err(invalid_cursor()),
+        (Some(explicit), _) => Ok(explicit),
+        (None, Some(from_header)) => Ok(from_header),
+        (None, None) => Ok(0),
+    }
+}
+
+#[derive(Serialize)]
+struct HttpOperationCancelResponse {
+    status: &'static str,
+}
+
+#[derive(Deserialize)]
+struct HttpOperationPath {
+    operation_id: String,
+}
+
+fn http_operation_event_router(
+    authority: OperationEventAuthority,
+    active_project_id: ProjectId,
+    cancellations: HttpCancellationRegistry,
+    executor: Option<Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>>,
+) -> axum::Router {
+    axum::Router::new()
+        .route(
+            "/operations/{operation_id}/events",
+            get(http_operation_events),
+        )
+        .route(
+            "/operations/{operation_id}/cancel",
+            post(http_operation_cancel),
+        )
+        .with_state(HttpOperationEventState {
+            authority,
+            active_project_id,
+            cancellations: Arc::clone(&cancellations),
+            executor,
+        })
+        .layer(axum::middleware::from_fn_with_state(
+            cancellations,
+            application_http_context,
+        ))
+}
+
+async fn resolve_authenticated_http_request_context(
+    state: &HttpOperationEventState,
+    operation_id: &OperationId,
+    request_id: RequestId,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+    observed_at: UtcMicros,
+    resume_token: Option<&ResumeToken>,
+) -> Result<RequestContext, OperationEventError> {
+    hotpath::future!(
+        state.authority.resolve_request_context(
+            operation_id,
+            &state.active_project_id,
+            OperationRequestControls::new(
+                request_id,
+                deadline,
+                cancellation,
+                observed_at,
+                resume_token,
+            ),
+        ),
+        label = "application_surface.http.events.resolve_context"
+    )
+    .await
+}
+
+fn sse_observation_subject(request_id: &RequestId, operation_id: &str) -> Option<ManifestDigest> {
+    canonical_sha256(&(
+        "tracedecay.feedback.sse-observation.v1",
+        request_id.as_str(),
+        operation_id,
+    ))
+    .ok()
+}
+
+async fn emit_http_feedback_observation(
+    state: &HttpOperationEventState,
+    subject: Option<&ManifestDigest>,
+    observed_at: UtcMicros,
+    event: FeedbackSourceEventV1,
+) {
+    if let (Some(subject), Some(executor)) = (subject, state.executor.as_ref()) {
+        let _ = executor
+            .observe_feedback(subject.clone(), observed_at, event)
+            .await;
+    }
+}
+
+fn feedback_sse_stream_event<T>(
+    event: &StreamEvent<T>,
+) -> Option<(FeedbackSseLifecycleV1, u32, bool)> {
+    match &event.kind {
+        StreamEventKind::Item(_) => Some((FeedbackSseLifecycleV1::EventDelivered, 1, false)),
+        StreamEventKind::Progress { .. } => None,
+        StreamEventKind::Gap(_) => Some((FeedbackSseLifecycleV1::Gap, 0, false)),
+        StreamEventKind::Terminal(terminal) => Some((
+            match terminal.termination {
+                OperationTermination::Completed => FeedbackSseLifecycleV1::Completed,
+                OperationTermination::Cancelled => FeedbackSseLifecycleV1::Cancelled,
+                OperationTermination::TimedOut => FeedbackSseLifecycleV1::TimedOut,
+                OperationTermination::Failed | OperationTermination::EffectUnknown => {
+                    FeedbackSseLifecycleV1::Failed
+                }
+                OperationTermination::Unavailable => FeedbackSseLifecycleV1::Unavailable,
+                OperationTermination::Partial => FeedbackSseLifecycleV1::Partial,
+            },
+            0,
+            true,
+        )),
+    }
+}
+
+async fn http_operation_events_through_executor(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    operation_id: &OperationId,
+    request_id: &RequestId,
+    controls: &HttpApplicationControls,
+    next_sequence: u64,
+) -> Response {
+    let context = match tracedecay_application::ApplicationInvocationContext::new(
+        request_id.clone(),
+        tracedecay_application::InvocationTarget::CurrentProject,
+        controls.deadline.clone(),
+        controls.cancellation.clone(),
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let request = match tracedecay_application::ApplicationRequest::operation_events(
+        operation_id.request_id().clone(),
+        256,
+        next_sequence.checked_sub(1),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let invocation = match tracedecay_application::ApplicationInvocation::new(context, request) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let response = hotpath::future!(
+        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+        label = "application_surface.http.events.invoke"
+    )
+    .await;
+    let tracedecay_application::ApplicationResponse::Stream(response) = (match response {
+        Ok(response) => response,
+        Err(error) => return operation_event_invocation_failure(request_id, error),
+    }) else {
+        return operation_event_problem(request_id, OperationEventError::ResumeUnavailable);
+    };
+    sse_response(
+        request_id.clone(),
+        response.stream.frontier,
+        tokio_stream::iter(response.stream.events),
+    )
+    .into_response()
+}
+
+enum OperationEventInvocationFailure {
+    Stream(OperationEventError),
+    Application(ApplicationProblem),
+}
+
+fn operation_event_failure_from_invocation(
+    error: tracedecay_application::InvocationError,
+) -> OperationEventInvocationFailure {
+    match error {
+        tracedecay_application::InvocationError::Denied => {
+            OperationEventInvocationFailure::Stream(OperationEventError::NotFoundOrNotAuthorized)
+        }
+        tracedecay_application::InvocationError::Cancelled
+        | tracedecay_application::InvocationError::DeadlineExceeded => {
+            OperationEventInvocationFailure::Stream(OperationEventError::RequestNotAdmitted)
+        }
+        tracedecay_application::InvocationError::Conflict => {
+            OperationEventInvocationFailure::Stream(OperationEventError::InvalidFrontier)
+        }
+        tracedecay_application::InvocationError::InvalidRequest
+        | tracedecay_application::InvocationError::Unavailable
+        | tracedecay_application::InvocationError::Unreachable { .. } => {
+            OperationEventInvocationFailure::Stream(OperationEventError::ResumeUnavailable)
+        }
+        tracedecay_application::InvocationError::Problem(problem) => match problem.kind() {
+            tracedecay_application::ApplicationProblemKind::NotFoundOrNotAuthorized => {
+                OperationEventInvocationFailure::Stream(
+                    OperationEventError::NotFoundOrNotAuthorized,
+                )
+            }
+            tracedecay_application::ApplicationProblemKind::Cancelled
+            | tracedecay_application::ApplicationProblemKind::TimedOut => {
+                OperationEventInvocationFailure::Stream(OperationEventError::RequestNotAdmitted)
+            }
+            tracedecay_application::ApplicationProblemKind::Conflict
+            | tracedecay_application::ApplicationProblemKind::Stale => {
+                OperationEventInvocationFailure::Stream(OperationEventError::InvalidFrontier)
+            }
+            tracedecay_application::ApplicationProblemKind::InvalidRequest
+            | tracedecay_application::ApplicationProblemKind::Unsupported
+            | tracedecay_application::ApplicationProblemKind::Unavailable
+            | tracedecay_application::ApplicationProblemKind::Saturated => {
+                OperationEventInvocationFailure::Stream(OperationEventError::ResumeUnavailable)
+            }
+            tracedecay_application::ApplicationProblemKind::PartialEffect
+            | tracedecay_application::ApplicationProblemKind::ExecutionFailed
+            | tracedecay_application::ApplicationProblemKind::ResetRequired => {
+                OperationEventInvocationFailure::Application(*problem)
+            }
+        },
+    }
+}
+
+fn operation_event_invocation_failure(
+    request_id: &RequestId,
+    error: tracedecay_application::InvocationError,
+) -> Response {
+    match operation_event_failure_from_invocation(error) {
+        OperationEventInvocationFailure::Stream(error) => {
+            operation_event_problem(request_id, error)
+        }
+        OperationEventInvocationFailure::Application(problem) => {
+            operation_event_application_problem(request_id, problem)
+        }
+    }
+}
+
+#[hotpath::measure(label = "application_surface.http.events")]
+async fn http_operation_events(
+    State(state): State<HttpOperationEventState>,
+    AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(controls): Extension<HttpApplicationControls>,
+    headers: HeaderMap,
+    Query(query): Query<HttpOperationEventQuery>,
+) -> Response {
+    let observation_subject = sse_observation_subject(&request_id, &operation_id);
+    let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
+        OperationId::from_request(operation_id)
+    } else {
+        emit_http_feedback_observation(
+            &state,
+            observation_subject.as_ref(),
+            current_micros().unwrap_or(UtcMicros(1)),
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: FeedbackOperationV1::SseStream,
+                route: Some(FeedbackDeliveryRouteV1::Http),
+                argument: FeedbackRejectedArgumentV1::RequestHandle,
+                rejection: FeedbackArgumentRejectionClassV1::InvalidShape,
+                schema_revision: 1,
+                outcome: FeedbackOutcomeV1::Rejected,
+            },
+        )
+        .await;
+        return operation_event_problem(&request_id, OperationEventError::NotFoundOrNotAuthorized);
+    };
+    let next_sequence = match operation_event_next_sequence(query.next_sequence, &headers) {
+        Ok(next_sequence) => next_sequence,
+        Err(error) => return operation_event_problem(&request_id, error),
+    };
+    let observed_at = match current_micros() {
+        Ok(observed_at) => observed_at,
+        Err(error) => {
+            return operation_event_problem(
+                &request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    // Same owner rule as cancellation: this authority answers for the
+    // operations it began, and only an operation it does not own is delegated
+    // to the daemon executor. A resume token is always redeemed locally — the
+    // token names this authority's own retained frontier.
+    let context = match resolve_authenticated_http_request_context(
+        &state,
+        &operation_id,
+        request_id.clone(),
+        controls.deadline.clone(),
+        controls.cancellation.context(),
+        observed_at,
+        query.resume_token.as_ref(),
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            if matches!(error, OperationEventError::NotFoundOrNotAuthorized)
+                && query.resume_token.is_none()
+                && let Some(executor) = state.executor.as_deref()
+            {
+                return http_operation_events_through_executor(
+                    executor,
+                    &operation_id,
+                    &request_id,
+                    &controls,
+                    next_sequence,
+                )
+                .await;
+            }
+            emit_http_feedback_observation(
+                &state,
+                observation_subject.as_ref(),
+                observed_at,
+                FeedbackSourceEventV1::SurfaceArgumentRejected {
+                    operation: FeedbackOperationV1::SseStream,
+                    route: Some(FeedbackDeliveryRouteV1::Http),
+                    argument: FeedbackRejectedArgumentV1::RequestHandle,
+                    rejection: FeedbackArgumentRejectionClassV1::Unauthorized,
+                    schema_revision: 1,
+                    outcome: FeedbackOutcomeV1::Denied,
+                },
+            )
+            .await;
+            return operation_event_problem(&request_id, error);
+        }
+    };
+    emit_http_feedback_observation(
+        &state,
+        observation_subject.as_ref(),
+        observed_at,
+        FeedbackSourceEventV1::Dispatch {
+            operation: FeedbackOperationV1::SseStream,
+            outcome: FeedbackOutcomeV1::Admitted,
+            capacity: 1,
+            admitted: 1,
+        },
+    )
+    .await;
+    let subscription = match hotpath::future!(
+        state.authority.subscribe(
+            &operation_id,
+            &context,
+            observed_at,
+            next_sequence,
+            query.resume_token.as_ref(),
+        ),
+        label = "application_surface.http.events.subscribe"
+    )
+    .await
+    {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            if matches!(&error, OperationEventError::Saturated) {
+                emit_http_feedback_observation(
+                    &state,
+                    observation_subject.as_ref(),
+                    observed_at,
+                    FeedbackSourceEventV1::Dispatch {
+                        operation: FeedbackOperationV1::SseStream,
+                        outcome: FeedbackOutcomeV1::AtCapacity,
+                        capacity: 1,
+                        admitted: 0,
+                    },
+                )
+                .await;
+            }
+            let lifecycle = if matches!(
+                &error,
+                OperationEventError::FrontierExpired | OperationEventError::ResumeExpired
+            ) {
+                FeedbackSseLifecycleV1::Expired
+            } else {
+                FeedbackSseLifecycleV1::Failed
+            };
+            emit_http_feedback_observation(
+                &state,
+                observation_subject.as_ref(),
+                observed_at,
+                FeedbackSourceEventV1::SseLifecycle {
+                    lifecycle,
+                    sequence: None,
+                    item_count: 0,
+                    duration_micros: None,
+                },
+            )
+            .await;
+            return operation_event_problem(&request_id, error);
+        }
+    };
+    emit_http_feedback_observation(
+        &state,
+        observation_subject.as_ref(),
+        observed_at,
+        FeedbackSourceEventV1::SseLifecycle {
+            lifecycle: FeedbackSseLifecycleV1::Opened,
+            sequence: None,
+            item_count: 0,
+            duration_micros: None,
+        },
+    )
+    .await;
+    let (correlation_id, frontier, stream) = subscription.into_sse_parts();
+    let observer = observation_subject
+        .zip(state.executor.clone())
+        .map(|(subject, executor)| {
+            Arc::new(SseDisconnectObserver {
+                executor,
+                subject,
+                terminal: Arc::new(AtomicBool::new(false)),
+            })
+        });
+    let observed_stream = stream.then(move |event| {
+        let observer = observer.clone();
+        async move {
+            if let (Some(observer), Some((lifecycle, item_count, is_terminal))) =
+                (observer, feedback_sse_stream_event(&event))
+            {
+                if is_terminal {
+                    observer.terminal.store(true, Ordering::Relaxed);
+                }
+                let _ = observer
+                    .executor
+                    .observe_feedback(
+                        observer.subject.clone(),
+                        current_micros().unwrap_or(UtcMicros(1)),
+                        FeedbackSourceEventV1::SseLifecycle {
+                            lifecycle,
+                            sequence: Some(event.sequence),
+                            item_count,
+                            duration_micros: None,
+                        },
+                    )
+                    .await;
+            }
+            event
+        }
+    });
+    sse_response(correlation_id, frontier, observed_stream).into_response()
+}
+
+async fn http_operation_cancel_through_executor(
+    state: &HttpOperationEventState,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    operation_id: &OperationId,
+    request_id: &RequestId,
+    controls: &HttpApplicationControls,
+    observed_at: UtcMicros,
+) -> Response {
+    let context = match tracedecay_application::ApplicationInvocationContext::new(
+        request_id.clone(),
+        tracedecay_application::InvocationTarget::CurrentProject,
+        controls.deadline.clone(),
+        controls.cancellation.clone(),
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let request = match tracedecay_application::ApplicationRequest::operation_cancel(
+        operation_id.request_id().clone(),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let invocation = match tracedecay_application::ApplicationInvocation::new(context, request) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let response = hotpath::future!(
+        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+        label = "application_surface.http.cancel.invoke"
+    )
+    .await;
+    let tracedecay_application::ApplicationResponse::Cancellation(response) = (match response {
+        Ok(response) => response,
+        Err(error) => return operation_event_invocation_failure(request_id, error),
+    }) else {
+        return operation_event_problem(request_id, OperationEventError::ResumeUnavailable);
+    };
+    if response.cancelled {
+        if let Some(cancellation) = state
+            .cancellations
+            .lock()
+            .ok()
+            .and_then(|active| active.get(operation_id.request_id()).cloned())
+        {
+            let _ = cancellation.cancel(observed_at);
+        }
+        (
+            StatusCode::ACCEPTED,
+            Json(HttpOperationCancelResponse {
+                status: "requested",
+            }),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::OK,
+            Json(HttpOperationCancelResponse {
+                status: "already_terminal",
+            }),
+        )
+            .into_response()
+    }
+}
+
+#[hotpath::measure(label = "application_surface.http.cancel")]
+async fn http_operation_cancel(
+    State(state): State<HttpOperationEventState>,
+    AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(controls): Extension<HttpApplicationControls>,
+) -> Response {
+    let observation_subject = sse_observation_subject(&request_id, &operation_id);
+    let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
+        OperationId::from_request(operation_id)
+    } else {
+        emit_http_feedback_observation(
+            &state,
+            observation_subject.as_ref(),
+            current_micros().unwrap_or(UtcMicros(1)),
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: FeedbackOperationV1::SseStream,
+                route: Some(FeedbackDeliveryRouteV1::Http),
+                argument: FeedbackRejectedArgumentV1::RequestHandle,
+                rejection: FeedbackArgumentRejectionClassV1::InvalidShape,
+                schema_revision: 1,
+                outcome: FeedbackOutcomeV1::Rejected,
+            },
+        )
+        .await;
+        return operation_event_problem(&request_id, OperationEventError::NotFoundOrNotAuthorized);
+    };
+    let observed_at = match current_micros() {
+        Ok(observed_at) => observed_at,
+        Err(error) => {
+            return operation_event_problem(
+                &request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    // The canonical owner of an operation is whichever authority began it. The
+    // daemon mounts these routes with its *own* process-global authority and an
+    // invocation client pointed back at its own socket, so delegating first
+    // sent every cancel on a round trip out of the process and back to reach
+    // in-memory state this handler already holds — and reported the typed
+    // `operation_event.unavailable` whenever that socket was momentarily
+    // unreachable. Resolve locally first; delegate only for an operation this
+    // authority does not own.
+    let context = match resolve_authenticated_http_request_context(
+        &state,
+        &operation_id,
+        request_id.clone(),
+        controls.deadline.clone(),
+        controls.cancellation.context(),
+        observed_at,
+        None,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            if matches!(error, OperationEventError::NotFoundOrNotAuthorized)
+                && let Some(executor) = state.executor.as_deref()
+            {
+                return http_operation_cancel_through_executor(
+                    &state,
+                    executor,
+                    &operation_id,
+                    &request_id,
+                    &controls,
+                    observed_at,
+                )
+                .await;
+            }
+            emit_http_feedback_observation(
+                &state,
+                observation_subject.as_ref(),
+                observed_at,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Denied,
+                },
+            )
+            .await;
+            return operation_event_problem(&request_id, error);
+        }
+    };
+    let target_cancellation = state
+        .cancellations
+        .lock()
+        .ok()
+        .and_then(|active| active.get(operation_id.request_id()).cloned());
+    match hotpath::future!(
+        state.authority.cancel(&operation_id, &context, observed_at),
+        label = "application_surface.http.cancel.authority"
+    )
+    .await
+    {
+        Ok(OperationCancelOutcome::Requested) => {
+            if let Some(cancellation) = target_cancellation {
+                let _ = cancellation.cancel(observed_at);
+            }
+            emit_http_feedback_observation(
+                &state,
+                observation_subject.as_ref(),
+                observed_at,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Accepted,
+                },
+            )
+            .await;
+            (
+                StatusCode::ACCEPTED,
+                Json(HttpOperationCancelResponse {
+                    status: "requested",
+                }),
+            )
+                .into_response()
+        }
+        Ok(OperationCancelOutcome::AlreadyRequested) => {
+            if let Some(cancellation) = target_cancellation {
+                let _ = cancellation.cancel(observed_at);
+            }
+            emit_http_feedback_observation(
+                &state,
+                observation_subject.as_ref(),
+                observed_at,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Duplicate,
+                },
+            )
+            .await;
+            (
+                StatusCode::OK,
+                Json(HttpOperationCancelResponse {
+                    status: "already_requested",
+                }),
+            )
+                .into_response()
+        }
+        Ok(OperationCancelOutcome::AlreadyTerminal) => {
+            emit_http_feedback_observation(
+                &state,
+                observation_subject.as_ref(),
+                observed_at,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Completed,
+                },
+            )
+            .await;
+            (
+                StatusCode::OK,
+                Json(HttpOperationCancelResponse {
+                    status: "already_terminal",
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            emit_http_feedback_observation(
+                &state,
+                observation_subject.as_ref(),
+                observed_at,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: if matches!(&error, OperationEventError::Saturated) {
+                        FeedbackOutcomeV1::AtCapacity
+                    } else {
+                        FeedbackOutcomeV1::Failed
+                    },
+                },
+            )
+            .await;
+            operation_event_problem(&request_id, error)
+        }
+    }
+}
+
+fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -> Response {
+    let problem = match error {
+        OperationEventError::NotFoundOrNotAuthorized => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        OperationEventError::FrontierExpired | OperationEventError::ResumeExpired => {
+            ApplicationProblem::Stale {
+                diagnostic: SafeDiagnostic {
+                    code: "operation_event.resume_expired".to_owned(),
+                    message: "The operation-event resume frontier has expired".to_owned(),
+                },
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            }
+        }
+        OperationEventError::InvalidFrontier => ApplicationProblem::Conflict {
+            diagnostic: SafeDiagnostic {
+                code: "operation_event.invalid_frontier".to_owned(),
+                message: "The requested operation-event frontier is invalid".to_owned(),
+            },
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        },
+        OperationEventError::RequestNotAdmitted => ApplicationProblem::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
+        OperationEventError::Saturated => ApplicationProblem::Saturated {
+            diagnostic: SafeDiagnostic {
+                code: "operation_event.saturated".to_owned(),
+                message: "Operation-event capacity is temporarily saturated".to_owned(),
+            },
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+        },
+        // Permanently invalid input: the same request can never succeed, so the
+        // client must correct it rather than retry.
+        OperationEventError::InvalidContext(_)
+        | OperationEventError::InvalidProgress
+        | OperationEventError::InvalidTerminal(_)
+        | OperationEventError::InvalidTestRunEvent => ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "operation_event.invalid_request".to_owned(),
+                message: "The operation-event request is invalid".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        },
+        // Idempotency facts: the identity or terminal receipt is already
+        // published, so the client re-reads current state instead of retrying
+        // the same publish.
+        OperationEventError::AlreadyBound | OperationEventError::TerminalAlreadyPublished => {
+            ApplicationProblem::Conflict {
+                diagnostic: SafeDiagnostic {
+                    code: "operation_event.already_published".to_owned(),
+                    message: "The operation-event identity is already published".to_owned(),
+                },
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            }
+        }
+        // A misconfigured authority is a deterministic, process-lifetime
+        // failure. It is not the caller's request that is wrong and no amount
+        // of retrying will change the outcome.
+        OperationEventError::InvalidConfiguration => ApplicationProblem::Unsupported {
+            diagnostic: SafeDiagnostic {
+                code: "operation_event.unsupported".to_owned(),
+                message: "The operation-event authority is not configured for this operation"
+                    .to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+        },
+        // Genuinely transient: the resume-token authority could not answer.
+        OperationEventError::ResumeUnavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "operation_event.unavailable".to_owned(),
+            message: "The operation-event service is unavailable".to_owned(),
+        }),
+    };
+    let Ok(schema_id) = SchemaId::new("schema.tracedecay.operation-event.problem.v1") else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(contract) = ResultContractRef::new(schema_id, 1) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let envelope = match ApplicationProblemEnvelope::new(contract, request_id.clone(), problem) {
+        Ok(envelope) => envelope,
+        Err(error) => return application_contract_error_response(error),
+    };
+    let envelope = envelope.with_owning_layer(ProblemOwningLayer::Runtime);
+    let envelope = if envelope.problem.kind() == ApplicationProblemKind::Saturated {
+        let Ok(envelope) = envelope.with_retry_after_millis(Some(250)) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        envelope
+    } else {
+        envelope
+    };
+    application_problem_response(envelope)
+}
+
+fn operation_event_application_problem(
+    request_id: &RequestId,
+    problem: ApplicationProblem,
+) -> Response {
+    let Ok(schema_id) = SchemaId::new("schema.tracedecay.operation-event.problem.v1") else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(contract) = ResultContractRef::new(schema_id, 1) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match ApplicationProblemEnvelope::new(contract, request_id.clone(), problem) {
+        Ok(envelope) => {
+            application_problem_response(envelope.with_owning_layer(ProblemOwningLayer::Runtime))
+        }
+        Err(error) => application_contract_error_response(error),
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ApplicationSurfaceAdapterError {
+    #[error("application catalog could not be composed: {0}")]
+    Catalog(#[from] CatalogCompositionError),
+    #[error("application surface contract is invalid: {0}")]
+    Contract(#[from] ApplicationContractError),
+    #[error("application surface identifier is invalid: {0}")]
+    Identifier(#[from] IdentifierError),
+    #[error("application surface catalog input is invalid: {0}")]
+    CatalogValidation(#[from] CatalogValidationError),
+    #[error("application surface request handle is invalid")]
+    InvalidRequestHandle,
+    #[error("application surface request does not match its reviewed schema")]
+    InvalidSurfaceRequest,
+    #[error("owning daemon application service is unavailable")]
+    DaemonUnavailable,
+    /// No daemon accepted the connection after the transport's restart grace;
+    /// the request was never sent. Surfaced as a dispatch error — not a
+    /// retryable problem envelope — so dispatchers fail fast with the typed
+    /// connect diagnostic instead of re-dispatching until their deadline.
+    #[error("{detail}")]
+    DaemonUnreachable { reason_code: String, detail: String },
+    #[error("application surface was not found or is not authorized")]
+    UnknownOrNotAuthorized,
+}
+
+/// Process-immutable application catalog snapshot.
+///
+/// The catalog is composed entirely from `const` application specs, so nothing
+/// about it can change while the process runs. Composition still collects and
+/// sorts every contribution, validates the handler/contribution bijection, and
+/// derives all four profiles, so rebuilding it per call made a single dispatch
+/// pay for the whole pipeline twice: once to resolve the binding and again to
+/// re-validate it before execution. The snapshot is built once here and
+/// borrowed from then on; the per-call binding identity comparison in
+/// [`validate_current_application_binding`] is unchanged and now runs against
+/// this cached snapshot.
+static APPLICATION_SURFACE_CATALOG: LazyLock<Result<CatalogSnapshotV1, CatalogCompositionError>> =
+    LazyLock::new(build_application_catalog_snapshot);
+
+/// Borrow the process-wide catalog snapshot without recomposing it.
+pub(crate) fn application_surface_catalog_ref()
+-> Result<&'static CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
+    match &*APPLICATION_SURFACE_CATALOG {
+        Ok(catalog) => Ok(catalog),
+        Err(error) => Err(ApplicationSurfaceAdapterError::Catalog(error.clone())),
+    }
+}
+
+pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
+    application_surface_catalog_ref().cloned()
+}
+
+pub fn application_surface_dispatch_input_with_controls(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    page: PageRequest,
+    deadline: Option<Deadline>,
+    cancellation: CancellationSignal,
+    requested_format: RequestedOutputFormat,
+) -> Result<DispatchInput<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
+    if !request.matches(operation) {
+        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    }
+    Ok(DispatchInput {
+        request_id,
+        binding: BindingResolution {
+            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?,
+            operation: SurfaceOperationName::new(operation.as_str())?,
+            protocol_revision: APPLICATION_PROTOCOL_REVISION,
+            negotiated_features: application_negotiated_features(),
+        },
+        request,
+        controls: InvocationControls {
+            scope: ScopeSelector::CurrentProject,
+            page,
+            deadline,
+            cancellation,
+            requested_format,
+        },
+    })
+}
+
+impl ApplicationSurfaceRequest {
+    fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
+        if let Self::Retained(request) = self {
+            return request.operation().as_str() == operation.as_str();
+        }
+        matches!(
+            (self, operation),
+            (
+                Self::GitRead(_),
+                ApplicationSurfaceOperation::GitStatus
+                    | ApplicationSurfaceOperation::GitDiff
+                    | ApplicationSurfaceOperation::GitHistory
+                    | ApplicationSurfaceOperation::GitBlame
+                    | ApplicationSurfaceOperation::GitHunks
+            ) | (
+                Self::GitHubStackSignalExpand(_),
+                ApplicationSurfaceOperation::GitHubStackSignalExpand
+            ) | (Self::GitPreview(_), ApplicationSurfaceOperation::GitPreview)
+                | (Self::GitApply(_), ApplicationSurfaceOperation::GitApply)
+                | (
+                    Self::NativeIntegration(_),
+                    ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+                        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+                        | ApplicationSurfaceOperation::NativeIntegrationApprove
+                        | ApplicationSurfaceOperation::NativeIntegrationApply
+                        | ApplicationSurfaceOperation::NativeIntegrationStatus
+                        | ApplicationSurfaceOperation::NativeIntegrationCancel
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
+                )
+                | (
+                    Self::Feedback(_),
+                    ApplicationSurfaceOperation::FeedbackDiagnostics
+                        | ApplicationSurfaceOperation::FeedbackGet
+                        | ApplicationSurfaceOperation::FeedbackExpand
+                        | ApplicationSurfaceOperation::FeedbackList
+                )
+                | (
+                    Self::FeedbackAdvisoryCycle(_),
+                    ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+                )
+                | (
+                    Self::FeedbackImpact(_),
+                    ApplicationSurfaceOperation::FeedbackImpact
+                )
+                | (
+                    Self::AffectedTests(_),
+                    ApplicationSurfaceOperation::AffectedTests
+                )
+                | (
+                    Self::TestResults(_),
+                    ApplicationSurfaceOperation::TestResults
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::ExactOccurrence(_)),
+                    ApplicationSurfaceOperation::CodeExactOccurrence
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::PhraseSearch(_)),
+                    ApplicationSurfaceOperation::CodePhraseSearch
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Callees(_)),
+                    ApplicationSurfaceOperation::CodeCallees
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Facets(_)),
+                    ApplicationSurfaceOperation::CodeFacets
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Timeline(_)),
+                    ApplicationSurfaceOperation::CodeTimeline
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Declaration(_)),
+                    ApplicationSurfaceOperation::CodeDeclaration
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Definition(_)),
+                    ApplicationSurfaceOperation::CodeDefinition
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::TypeDefinition(_)),
+                    ApplicationSurfaceOperation::CodeTypeDefinition
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::References(_)),
+                    ApplicationSurfaceOperation::CodeReferences
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(_)),
+                    ApplicationSurfaceOperation::CodeSymbolSearch
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::SignatureSearch(_)),
+                    ApplicationSurfaceOperation::CodeSignatureSearch
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::Implementations(_)),
+                    ApplicationSurfaceOperation::CodeImplementations
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::TypeHierarchy(_)),
+                    ApplicationSurfaceOperation::CodeTypeHierarchy
+                )
+                | (
+                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::Callers(_)),
+                    ApplicationSurfaceOperation::CodeCallers
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::SessionLookup(_)),
+                    ApplicationSurfaceOperation::SessionLookup
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::QualifiedName(_)),
+                    ApplicationSurfaceOperation::QualifiedName
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::CallChain(_)),
+                    ApplicationSurfaceOperation::CallChain
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::FileDependents(_)),
+                    ApplicationSurfaceOperation::FileDependents
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::SourceLines(_)),
+                    ApplicationSurfaceOperation::SourceLines
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::SourceBody(_)),
+                    ApplicationSurfaceOperation::SourceBody
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::SourceOutline(_)),
+                    ApplicationSurfaceOperation::SourceOutline
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::ModuleApi(_)),
+                    ApplicationSurfaceOperation::ModuleApi
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::FileMetadata(_)),
+                    ApplicationSurfaceOperation::FileMetadata
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::HealthRead(_)),
+                    ApplicationSurfaceOperation::HealthRead
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::HealthDelta(_)),
+                    ApplicationSurfaceOperation::HealthDelta
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::StorageStatus(_)),
+                    ApplicationSurfaceOperation::StorageStatus
+                )
+                | (
+                    Self::Primitive(PrimitiveRequest::DiagnosticsRead(_)),
+                    ApplicationSurfaceOperation::DiagnosticsRead
+                )
+                | (
+                    Self::ObservatoryRead(_),
+                    ApplicationSurfaceOperation::ObservatoryRead
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::List(_)),
+                    ApplicationSurfaceOperation::ConfigurationList
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::Explain(_)),
+                    ApplicationSurfaceOperation::ConfigurationExplain
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::Get(_)),
+                    ApplicationSurfaceOperation::ConfigurationGet
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::Set(_)),
+                    ApplicationSurfaceOperation::ConfigurationSet
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::Unset(_)),
+                    ApplicationSurfaceOperation::ConfigurationUnset
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::Batch(_)),
+                    ApplicationSurfaceOperation::ConfigurationBatch
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::WriteCredential(_)),
+                    ApplicationSurfaceOperation::ConfigurationWriteCredential
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::ObservedState(_)),
+                    ApplicationSurfaceOperation::ConfigurationObservedState
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::ProtectedPreview(_)),
+                    ApplicationSurfaceOperation::ConfigurationProtectedPreview
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::ProtectedApply(_)),
+                    ApplicationSurfaceOperation::ConfigurationProtectedApply
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::RollbackPreview(_)),
+                    ApplicationSurfaceOperation::ConfigurationRollbackPreview
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::RollbackApply(_)),
+                    ApplicationSurfaceOperation::ConfigurationRollbackApply
+                )
+                | (
+                    Self::Configuration(ConfigurationWireRequestV1::Audit(_)),
+                    ApplicationSurfaceOperation::ConfigurationAudit
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Status(_)),
+                    ApplicationSurfaceOperation::ContextScoutStatus
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Recent(_)),
+                    ApplicationSurfaceOperation::ContextScoutRecent
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Explain(_)),
+                    ApplicationSurfaceOperation::ContextScoutExplain
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Capability(_)),
+                    ApplicationSurfaceOperation::ContextScoutCapability
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Budget(_)),
+                    ApplicationSurfaceOperation::ContextScoutBudget
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Pause(_)),
+                    ApplicationSurfaceOperation::ContextScoutPause
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Resume(_)),
+                    ApplicationSurfaceOperation::ContextScoutResume
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Cancel(_)),
+                    ApplicationSurfaceOperation::ContextScoutCancel
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Claim(_)),
+                    ApplicationSurfaceOperation::ContextScoutClaim
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Delivery(_)),
+                    ApplicationSurfaceOperation::ContextScoutDelivery
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Feedback(_)),
+                    ApplicationSurfaceOperation::ContextScoutFeedback
+                )
+        )
+    }
+}
+
+/// Parse one native-integration request into its exact typed shape.
+///
+/// `deny_unknown_fields` on every request type means an unexpected key is a
+/// rejection rather than a silently ignored hint.
+fn parse_native_integration_surface_request(
+    operation: ApplicationSurfaceOperation,
+    value: Value,
+) -> Result<NativeIntegrationSurfaceRequest, ApplicationSurfaceAdapterError> {
+    let invalid = |_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest;
+    match operation {
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot => {
+            serde_json::from_value(value)
+                .map(NativeIntegrationSurfaceRequest::StackSnapshot)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationPreflight => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Preflight)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationApprove => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Approve)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationApply => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Apply)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationStatus => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Status)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationCancel => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Cancel)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Inventory)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Inspect)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Confirm)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Remove)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Reconcile)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    }
+}
+
+#[hotpath::measure(label = "application_surface.parse")]
+pub fn parse_application_surface_request(
+    operation: ApplicationSurfaceOperation,
+    value: Value,
+) -> Result<ApplicationSurfaceRequest, ApplicationSurfaceAdapterError> {
+    match operation {
+        ApplicationSurfaceOperation::GitStatus
+        | ApplicationSurfaceOperation::GitDiff
+        | ApplicationSurfaceOperation::GitHistory
+        | ApplicationSurfaceOperation::GitBlame
+        | ApplicationSurfaceOperation::GitHunks => {
+            git_surface::parse_git_read_surface_request(operation, value)
+                .map(ApplicationSurfaceRequest::GitRead)
+        }
+        ApplicationSurfaceOperation::GitHubStackSignalExpand => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::GitHubStackSignalExpand)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::GitPreview => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::GitPreview)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::GitApply => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::GitApply)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApprove
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
+            parse_native_integration_surface_request(operation, value)
+                .map(ApplicationSurfaceRequest::NativeIntegration)
+        }
+        ApplicationSurfaceOperation::AffectedTests => {
+            let request: AffectedTestsSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            FeedbackSurfaceRequest::new(request.request_handle.clone())
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?;
+            Ok(ApplicationSurfaceRequest::AffectedTests(request))
+        }
+        ApplicationSurfaceOperation::FeedbackImpact => {
+            let request: FeedbackImpactSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            FeedbackSurfaceRequest::new(request.request_handle.clone())
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?;
+            Ok(ApplicationSurfaceRequest::FeedbackImpact(request))
+        }
+        ApplicationSurfaceOperation::TestResults => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::TestResults)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::CodeExactOccurrence => {
+            serde_json::from_value::<CodeExactOccurrenceSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::ExactOccurrence)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodePhraseSearch => {
+            serde_json::from_value::<CodePhraseSearchSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::PhraseSearch)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeSymbolSearch => {
+            serde_json::from_value::<CodeSymbolSearchSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::SymbolSearch)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeSignatureSearch => {
+            serde_json::from_value::<CodeSignatureSearchSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::SignatureSearch)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeImplementations => {
+            serde_json::from_value::<CodeImplementationsSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::Implementations)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeTypeHierarchy => {
+            serde_json::from_value::<CodeTypeHierarchySurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::TypeHierarchy)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeCallers => {
+            serde_json::from_value::<CodeCallersSurfaceRequest>(value)
+                .map(PrimitiveCodeSurfaceRequest::Callers)
+                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeCallees => {
+            serde_json::from_value::<CodeCalleesSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Callees)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeFacets => {
+            serde_json::from_value::<CodeFacetSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Facets)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeTimeline => {
+            serde_json::from_value::<CodeTimelineSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Timeline)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeDeclaration => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Declaration)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeDefinition => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Definition)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeTypeDefinition => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::TypeDefinition)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeReferences => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::References)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::SessionLookup => {
+            serde_json::from_value::<SessionLookupRequest>(value)
+                .map(PrimitiveRequest::SessionLookup)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::QualifiedName => {
+            serde_json::from_value::<QualifiedNamePrimitiveRequest>(value)
+                .map(PrimitiveRequest::QualifiedName)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CallChain => {
+            serde_json::from_value::<CallChainPrimitiveRequest>(value)
+                .map(PrimitiveRequest::CallChain)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::FileDependents => {
+            serde_json::from_value::<FileDependentsPrimitiveRequest>(value)
+                .map(PrimitiveRequest::FileDependents)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::SourceLines => {
+            serde_json::from_value::<SourceLinesRequest>(value)
+                .map(PrimitiveRequest::SourceLines)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::SourceBody => {
+            serde_json::from_value::<SourceBodyPrimitiveRequest>(value)
+                .map(PrimitiveRequest::SourceBody)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::SourceOutline => {
+            serde_json::from_value::<SourceOutlinePrimitiveRequest>(value)
+                .map(PrimitiveRequest::SourceOutline)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::ModuleApi => {
+            serde_json::from_value::<ModuleApiPrimitiveRequest>(value)
+                .map(PrimitiveRequest::ModuleApi)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::FileMetadata => {
+            serde_json::from_value::<FileMetadataPrimitiveRequest>(value)
+                .map(PrimitiveRequest::FileMetadata)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::HealthRead => {
+            serde_json::from_value::<HealthReadRequest>(value)
+                .map(PrimitiveRequest::HealthRead)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::HealthDelta => {
+            serde_json::from_value::<HealthDeltaRequest>(value)
+                .map(PrimitiveRequest::HealthDelta)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::StorageStatus => {
+            serde_json::from_value::<StorageStatusPrimitiveRequest>(value)
+                .map(PrimitiveRequest::StorageStatus)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::DiagnosticsRead => {
+            serde_json::from_value::<DiagnosticsPrimitiveRequest>(value)
+                .map(PrimitiveRequest::DiagnosticsRead)
+                .map(ApplicationSurfaceRequest::Primitive)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::ObservatoryRead => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::ObservatoryRead)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit => {
+            configuration_wire_request_from_invocation_payload(operation.as_str(), value)
+                .map(ApplicationSurfaceRequest::Configuration)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Status)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutRecent => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Recent)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutExplain => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Explain)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutCapability => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Capability)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutBudget => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Budget)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutPause => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Pause)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutResume => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Resume)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutCancel => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Cancel)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutClaim => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Claim)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutDelivery => serde_json::from_value(value)
+            .map(|request| ContextScoutSurfaceRequest::Delivery(Box::new(request)))
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutFeedback => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Feedback)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::FeedbackDiagnostics
+        | ApplicationSurfaceOperation::FeedbackGet
+        | ApplicationSurfaceOperation::FeedbackExpand
+        | ApplicationSurfaceOperation::FeedbackList => {
+            let request: FeedbackSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            Ok(ApplicationSurfaceRequest::Feedback(
+                FeedbackSurfaceRequest::new(request.request_handle)
+                    .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?,
+            ))
+        }
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => {
+            let request: FeedbackAdvisoryCycleSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            request.validate()?;
+            Ok(ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request))
+        }
+    }
+}
+
+#[hotpath::measure(label = "application_surface.execute")]
+pub async fn execute_application_surface(
+    operation: ApplicationSurfaceOperation,
+    dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    validate_current_application_binding(operation, &dispatched)?;
+    let result_contract = ResultContractRef::from_schema(&dispatched.invocation.result_schema);
+    let binding_id = dispatched.invocation.binding_id.clone();
+    let request_id = dispatched.request_id;
+    let surface = dispatched.surface;
+    let delivery_route = feedback_delivery_route(dispatched.surface);
+    let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
+    let observed_at = current_micros()?;
+    let (
+        deadline_ceiling_micros,
+        cancellation_contract,
+        terminal_states,
+        receipt_contract,
+        reconciliation_contract,
+        catalog_effect,
+    ) = hotpath::measure_block!("application_surface.execute.catalog", {
+        let catalog = application_surface_catalog_ref()?;
+        let capability = catalog
+            .capabilities()
+            .find(|capability| capability.binding_ids().contains(&binding_id))
+            .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+        (
+            i64::try_from(capability.deadline().maximum_millis())
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+                .saturating_mul(1_000),
+            capability.cancellation().clone(),
+            capability.terminal_states().clone(),
+            capability.receipt(),
+            capability.reconciliation(),
+            capability.effect().is_effect(),
+        )
+    });
+    let maximum_deadline_at = UtcMicros(observed_at.0.saturating_add(deadline_ceiling_micros));
+    let effective_deadline_at = invocation
+        .deadline
+        .as_ref()
+        .map(|deadline| deadline.expires_at)
+        .filter(|expires_at| *expires_at <= maximum_deadline_at)
+        .unwrap_or(maximum_deadline_at);
+    let deadline = Deadline::new(effective_deadline_at)?;
+    let cancellation = invocation.cancellation;
+    let cancellation_context = cancellation.context();
+    let resolved_scope = match &invocation.scope {
+        tracedecay_application::InvocationTarget::CurrentProject => None,
+        tracedecay_application::InvocationTarget::Resolved(scope) => Some(scope.clone()),
+    };
+    let request_deadline = deadline.clone();
+    let migrated_payload = match (&operation, &invocation.request) {
+        (
+            ApplicationSurfaceOperation::ConfigurationGet
+            | ApplicationSurfaceOperation::ConfigurationSet
+            | ApplicationSurfaceOperation::ConfigurationUnset
+            | ApplicationSurfaceOperation::ConfigurationBatch,
+            ApplicationSurfaceRequest::Configuration(request),
+        ) => Some(configuration_invocation_payload(request)?),
+        (
+            ApplicationSurfaceOperation::FeedbackGet,
+            ApplicationSurfaceRequest::Feedback(request),
+        ) => Some(
+            serde_json::to_value(request)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+        ),
+        _ => None,
+    };
+    if let Some(payload) = migrated_payload {
+        let Some(executor) = executor else {
+            return Ok(ApplicationSurfaceInvocationResult {
+                operation,
+                binding_id,
+                result: Err(ApplicationProblemEnvelope::new(
+                    result_contract,
+                    request_id,
+                    ApplicationProblem::unavailable(SafeDiagnostic::new(
+                        "application.transport.unavailable",
+                        "The daemon application transport is unavailable",
+                    )?),
+                )?),
+                requested_format,
+            });
+        };
+        let binding = tracedecay_application::ApplicationInvocationBinding::new(
+            binding_id.clone(),
+            surface,
+            SurfaceOperationName::new(operation.as_str())?,
+            result_contract.clone(),
+            invocation.page,
+        )?;
+        let context = tracedecay_application::ApplicationInvocationContext::new(
+            request_id.clone(),
+            invocation.scope,
+            deadline,
+            cancellation,
+        )?;
+        let request = tracedecay_application::ApplicationRequest::surface(binding, payload)?;
+        let invocation = tracedecay_application::ApplicationInvocation::new(context, request)?;
+        let result = match hotpath::future!(
+            tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation),
+            label = "application_surface.execute.invoke"
+        )
+        .await
+        {
+            Ok(response) => match response
+                .envelope()
+                .filter(|envelope| {
+                    validate_configuration_outcome(
+                        operation,
+                        &envelope.outcome,
+                        &cancellation_contract,
+                        &terminal_states,
+                        receipt_contract,
+                        reconciliation_contract,
+                    )
+                })
+                .cloned()
+            {
+                Some(envelope) => Ok(envelope),
+                None => Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "application.surface.invalid_response".to_owned(),
+                        message: "The daemon returned an invalid application response".to_owned(),
+                    }),
+                )?),
+            },
+            // Same dispatch-failure contract as the non-migrated arm below: an
+            // unreachable daemon never saw the request, so it is an error, not
+            // a retryable problem envelope.
+            Err(tracedecay_application::InvocationError::Unreachable {
+                reason_code,
+                detail,
+            }) => {
+                return Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
+                    reason_code,
+                    detail,
+                });
+            }
+            Err(error) => Err(ApplicationProblemEnvelope::new(
+                result_contract,
+                request_id,
+                invocation_contract_problem(error)?,
+            )?),
+        };
+        return Ok(ApplicationSurfaceInvocationResult {
+            operation,
+            binding_id,
+            result,
+            requested_format,
+        });
+    }
+    let request = hotpath::measure_block!("application_surface.execute.request_build", {
+        match invocation.request {
+            ApplicationSurfaceRequest::GitRead(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::git_read(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::GitPreview(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::git_preview(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::GitApply(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::GitHubStackSignalExpand(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::github_stack_signal_expand(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::NativeIntegration(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::native_integration(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::Feedback(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
+                    request_id.as_str(),
+                    operation,
+                    request.request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback_advisory_cycle(
+                    request_id.as_str(),
+                    request.document_uri,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::FeedbackImpact(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
+                    request_id.as_str(),
+                    ApplicationSurfaceOperation::FeedbackImpact,
+                    request.request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::AffectedTests(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
+                    request_id.as_str(),
+                    ApplicationSurfaceOperation::AffectedTests,
+                    request.request_handle,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::TestResults(_) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
+                    request_id.as_str(),
+                    operation,
+                    PrimitiveRequest::RecentTestResults(invocation.page),
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::CallableCode(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::callable_code(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    invocation.page,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::PrimitiveCode(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive_code(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    invocation.page,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::Primitive(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::primitive(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::ObservatoryRead(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::observatory_read(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+                .with_resolved_scope(resolved_scope)
+            }
+            ApplicationSurfaceRequest::Configuration(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::configuration(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::ContextScout(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::context_scout(
+                    request_id.as_str(),
+                    operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+            ApplicationSurfaceRequest::Retained(request) => {
+                tracedecay_daemon_protocol::DaemonInvocationRequest::retained_application(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation_context,
+                )
+            }
+        }
+        .with_delivery_route(delivery_route)
+    });
+    let Some(executor) = executor else {
+        return Ok(ApplicationSurfaceInvocationResult {
+            operation,
+            binding_id,
+            result: Err(ApplicationProblemEnvelope::new(
+                result_contract,
+                request_id,
+                ApplicationProblem::unavailable(SafeDiagnostic::new(
+                    "application.transport.unavailable",
+                    "The daemon application transport is unavailable",
+                )?),
+            )?),
+            requested_format,
+        });
+    };
+    let policy = if (is_configuration_operation(operation) && catalog_effect)
+        || matches!(
+            operation,
+            ApplicationSurfaceOperation::GitApply
+                | ApplicationSurfaceOperation::NativeIntegrationApprove
+                | ApplicationSurfaceOperation::NativeIntegrationApply
+                | ApplicationSurfaceOperation::NativeIntegrationCancel
+                | ApplicationSurfaceOperation::ContextScoutPause
+                | ApplicationSurfaceOperation::ContextScoutResume
+                | ApplicationSurfaceOperation::ContextScoutCancel
+                | ApplicationSurfaceOperation::ContextScoutClaim
+                | ApplicationSurfaceOperation::ContextScoutDelivery
+                | ApplicationSurfaceOperation::ContextScoutFeedback
+        ) {
+        InvocationCancellationPolicy::AuthoritativeEffect
+    } else {
+        InvocationCancellationPolicy::ReadOnly
+    };
+    let response = hotpath::future!(
+        executor.invoke_controlled(request, request_deadline, cancellation, policy),
+        label = "application_surface.execute.invoke"
+    )
+    .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            // An unreachable daemon is a dispatch failure, not an answer:
+            // wrapping it in a retryable problem envelope made every CLI
+            // surface re-dispatch (and re-pay the connect grace) until its
+            // deadline — 128 s against a dead socket — while sibling
+            // compatibility tools failed typed in one grace. The feedback
+            // observation below rides the same dead transport, so it is
+            // skipped too: it would pay one more full connect grace to
+            // observe that the daemon it reports to is down.
+            if let DaemonInvocationError::Unreachable {
+                reason_code,
+                detail,
+            } = error
+            {
+                return Err(ApplicationSurfaceAdapterError::DaemonUnreachable {
+                    reason_code,
+                    detail,
+                });
+            }
+            if feedback_surface_is_observable(operation)
+                && let Ok(subject_digest) = canonical_sha256(&(
+                    "tracedecay.feedback.transport-observation.v1",
+                    request_id.as_str(),
+                    operation.as_str(),
+                    delivery_route,
+                ))
+                && let Ok(observed_at) = current_micros()
+            {
+                let event = match &error {
+                    DaemonInvocationError::Cancelled { .. } => {
+                        FeedbackSourceEventV1::Cancellation {
+                            operation: feedback_surface_operation(operation),
+                            outcome: FeedbackOutcomeV1::Cancelled,
+                        }
+                    }
+                    DaemonInvocationError::TimedOut { .. } => FeedbackSourceEventV1::Cancellation {
+                        operation: feedback_surface_operation(operation),
+                        outcome: FeedbackOutcomeV1::TimedOut,
+                    },
+                    DaemonInvocationError::Unavailable
+                    | DaemonInvocationError::Unreachable { .. } => {
+                        FeedbackSourceEventV1::Delivery {
+                            operation: feedback_surface_operation(operation),
+                            route: delivery_route,
+                            outcome: FeedbackOutcomeV1::Unavailable,
+                            item_count: 0,
+                            duration_micros: None,
+                        }
+                    }
+                };
+                let _ = executor
+                    .observe_feedback(subject_digest, observed_at, event)
+                    .await;
+            }
+            return Ok(ApplicationSurfaceInvocationResult {
+                operation,
+                binding_id,
+                result: Err(ApplicationProblemEnvelope::new(
+                    result_contract,
+                    request_id,
+                    error.into_application_problem(),
+                )?),
+                requested_format,
+            });
+        }
+    };
+    let result = hotpath::measure_block!("application_surface.execute.assemble", {
+        match response.outcome {
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitRead { scope, result } => {
+                Ok(ApplicationEnvelope::evidence(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    result.into_application(),
+                ))
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitPreview { scope, preview } => {
+                Ok(ApplicationEnvelope::preview(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    preview.into_application_result()?,
+                ))
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitApply { scope, effect } => {
+                Ok(ApplicationEnvelope::effect(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    effect.into_application_result()?,
+                ))
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Feedback { scope, result }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::Primitive { scope, result }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ObservatoryRead {
+                scope,
+                result,
+            } => Ok(ApplicationEnvelope::evidence(
+                result_contract.clone(),
+                request_id.clone(),
+                scope,
+                result.into_application(),
+            )),
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::CallableCode { scope, result } => {
+                Ok(ApplicationEnvelope::evidence(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    scope,
+                    result.into_application(),
+                ))
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Configuration {
+                scope,
+                outcome,
+            } => {
+                if validate_configuration_outcome(
+                    operation,
+                    &outcome,
+                    &cancellation_contract,
+                    &terminal_states,
+                    receipt_contract,
+                    reconciliation_contract,
+                ) {
+                    Ok(ApplicationEnvelope {
+                        contract: result_contract.clone(),
+                        request_id: request_id.clone(),
+                        scope,
+                        outcome,
+                    })
+                } else {
+                    Err(ApplicationProblemEnvelope::new(
+                        result_contract.clone(),
+                        request_id.clone(),
+                        ApplicationProblem::unavailable(SafeDiagnostic::new(
+                            "application.surface.invalid_configuration_response",
+                            "The daemon returned a configuration result that did not match its wire contract",
+                        )?),
+                    )?)
+                }
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::GitHubStackSignalExpand {
+                scope,
+                outcome,
+            }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::NativeIntegration {
+                scope,
+                outcome,
+            }
+            | tracedecay_daemon_protocol::DaemonInvocationOutcome::ContextScout {
+                scope,
+                outcome,
+            } => Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome,
+            }),
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::RetainedApplication {
+                scope,
+                outcome,
+            } => Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome: retained::outcome_value(outcome)?,
+            }),
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    problem,
+                )?)
+            }
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => {
+                Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    invocation_problem(problem)?,
+                )?)
+            }
+            _ => Err(ApplicationProblemEnvelope::new(
+                result_contract.clone(),
+                request_id.clone(),
+                ApplicationProblem::unavailable(SafeDiagnostic::new(
+                    "application.surface.invalid_response",
+                    "The daemon returned an invalid application response",
+                )?),
+            )?),
+        }
+    });
+
+    Ok(ApplicationSurfaceInvocationResult {
+        operation,
+        binding_id,
+        result,
+        requested_format,
+    })
+}
+
+fn feedback_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
+    match surface {
+        BindingSurface::Cli => FeedbackDeliveryRouteV1::Cli,
+        BindingSurface::Mcp => FeedbackDeliveryRouteV1::Mcp,
+        BindingSurface::Http | BindingSurface::Dashboard => FeedbackDeliveryRouteV1::Http,
+        BindingSurface::Lsp => FeedbackDeliveryRouteV1::Lsp,
+    }
+}
+
+fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> FeedbackOperationV1 {
+    match operation {
+        ApplicationSurfaceOperation::FeedbackDiagnostics => {
+            FeedbackOperationV1::FeedbackDiagnostics
+        }
+        ApplicationSurfaceOperation::FeedbackGet => FeedbackOperationV1::FeedbackGet,
+        ApplicationSurfaceOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
+        ApplicationSurfaceOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => FeedbackOperationV1::FeedbackCycle,
+        ApplicationSurfaceOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
+        ApplicationSurfaceOperation::AffectedTests => FeedbackOperationV1::PrimitiveAffectedTests,
+        ApplicationSurfaceOperation::TestResults => FeedbackOperationV1::PrimitiveTestResults,
+        ApplicationSurfaceOperation::GitStatus
+        | ApplicationSurfaceOperation::GitDiff
+        | ApplicationSurfaceOperation::GitHistory
+        | ApplicationSurfaceOperation::GitBlame
+        | ApplicationSurfaceOperation::GitHunks
+        | ApplicationSurfaceOperation::GitPreview
+        | ApplicationSurfaceOperation::GitApply
+        | ApplicationSurfaceOperation::GitHubStackSignalExpand
+        | ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApprove
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
+        | ApplicationSurfaceOperation::CodeExactOccurrence
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences
+        | ApplicationSurfaceOperation::SessionLookup
+        | ApplicationSurfaceOperation::QualifiedName
+        | ApplicationSurfaceOperation::CallChain
+        | ApplicationSurfaceOperation::FileDependents
+        | ApplicationSurfaceOperation::SourceLines
+        | ApplicationSurfaceOperation::SourceBody
+        | ApplicationSurfaceOperation::SourceOutline
+        | ApplicationSurfaceOperation::ModuleApi
+        | ApplicationSurfaceOperation::FileMetadata
+        | ApplicationSurfaceOperation::HealthRead
+        | ApplicationSurfaceOperation::HealthDelta
+        | ApplicationSurfaceOperation::StorageStatus
+        | ApplicationSurfaceOperation::DiagnosticsRead
+        | ApplicationSurfaceOperation::ObservatoryRead
+        | ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationExplain
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationWriteCredential
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit
+        | ApplicationSurfaceOperation::ContextScoutStatus
+        | ApplicationSurfaceOperation::ContextScoutRecent
+        | ApplicationSurfaceOperation::ContextScoutExplain
+        | ApplicationSurfaceOperation::ContextScoutCapability
+        | ApplicationSurfaceOperation::ContextScoutBudget
+        | ApplicationSurfaceOperation::ContextScoutPause
+        | ApplicationSurfaceOperation::ContextScoutResume
+        | ApplicationSurfaceOperation::ContextScoutCancel
+        | ApplicationSurfaceOperation::ContextScoutClaim
+        | ApplicationSurfaceOperation::ContextScoutDelivery
+        | ApplicationSurfaceOperation::ContextScoutFeedback => FeedbackOperationV1::FeedbackCycle,
+    }
+}
+
+fn feedback_surface_is_observable(operation: ApplicationSurfaceOperation) -> bool {
+    matches!(
+        operation,
+        ApplicationSurfaceOperation::FeedbackDiagnostics
+            | ApplicationSurfaceOperation::FeedbackGet
+            | ApplicationSurfaceOperation::FeedbackExpand
+            | ApplicationSurfaceOperation::FeedbackList
+            | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+            | ApplicationSurfaceOperation::FeedbackImpact
+            | ApplicationSurfaceOperation::AffectedTests
+            | ApplicationSurfaceOperation::TestResults
+            | ApplicationSurfaceOperation::SessionLookup
+            | ApplicationSurfaceOperation::QualifiedName
+            | ApplicationSurfaceOperation::CallChain
+            | ApplicationSurfaceOperation::FileDependents
+            | ApplicationSurfaceOperation::SourceLines
+            | ApplicationSurfaceOperation::SourceBody
+            | ApplicationSurfaceOperation::SourceOutline
+            | ApplicationSurfaceOperation::ModuleApi
+            | ApplicationSurfaceOperation::FileMetadata
+            | ApplicationSurfaceOperation::HealthRead
+            | ApplicationSurfaceOperation::HealthDelta
+            | ApplicationSurfaceOperation::StorageStatus
+            | ApplicationSurfaceOperation::DiagnosticsRead
+    )
+}
+
+pub async fn observe_surface_argument_rejection(
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+    surface: BindingSurface,
+    operation: ApplicationSurfaceOperation,
+    request_id: &RequestId,
+    error: &ApplicationSurfaceAdapterError,
+) {
+    if !feedback_surface_is_observable(operation) {
+        return;
+    }
+    let Some((argument, rejection, outcome)) = surface_rejection_metadata(error) else {
+        return;
+    };
+    let (Some(executor), Ok(subject_digest), Ok(observed_at)) = (
+        executor,
+        canonical_sha256(&(
+            "tracedecay.feedback.surface-rejection.v1",
+            request_id.as_str(),
+            surface,
+            operation,
+        )),
+        current_micros(),
+    ) else {
+        return;
+    };
+    let _ = executor
+        .observe_feedback(
+            subject_digest,
+            observed_at,
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: feedback_surface_operation(operation),
+                route: Some(feedback_delivery_route(surface)),
+                argument,
+                rejection,
+                schema_revision: 1,
+                outcome,
+            },
+        )
+        .await;
+}
+
+fn surface_rejection_metadata(
+    error: &ApplicationSurfaceAdapterError,
+) -> Option<(
+    FeedbackRejectedArgumentV1,
+    FeedbackArgumentRejectionClassV1,
+    FeedbackOutcomeV1,
+)> {
+    match error {
+        ApplicationSurfaceAdapterError::InvalidRequestHandle => Some((
+            FeedbackRejectedArgumentV1::RequestHandle,
+            FeedbackArgumentRejectionClassV1::InvalidShape,
+            FeedbackOutcomeV1::Rejected,
+        )),
+        ApplicationSurfaceAdapterError::InvalidSurfaceRequest => Some((
+            FeedbackRejectedArgumentV1::RequestBody,
+            FeedbackArgumentRejectionClassV1::InvalidShape,
+            FeedbackOutcomeV1::Rejected,
+        )),
+        ApplicationSurfaceAdapterError::UnknownOrNotAuthorized => Some((
+            FeedbackRejectedArgumentV1::Operation,
+            FeedbackArgumentRejectionClassV1::Unauthorized,
+            FeedbackOutcomeV1::Denied,
+        )),
+        ApplicationSurfaceAdapterError::Catalog(_)
+        | ApplicationSurfaceAdapterError::Contract(_)
+        | ApplicationSurfaceAdapterError::Identifier(_)
+        | ApplicationSurfaceAdapterError::CatalogValidation(_)
+        | ApplicationSurfaceAdapterError::DaemonUnavailable
+        | ApplicationSurfaceAdapterError::DaemonUnreachable { .. } => None,
+    }
+}
+
+#[hotpath::measure(label = "application_surface.resolve.http", future = true)]
+pub async fn resolve_http_application_surface(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    let dispatched = match resolve_http_application_surface_dispatch(
+        operation,
+        request_id.clone(),
+        request,
+        requested_format,
+    ) {
+        Ok(dispatched) => dispatched,
+        Err(error) => {
+            observe_surface_argument_rejection(
+                executor,
+                BindingSurface::Http,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    execute_application_surface(operation, dispatched, executor).await
+}
+
+/// Resolve a dashboard action through the same catalog entry and daemon-owned
+/// application handler as CLI, MCP, and HTTP. Dashboard adapters may shape
+/// presentation responses around this result, but they do not own mutation
+/// validation, authorization, CAS, receipts, or rollback semantics.
+#[hotpath::measure(label = "application_surface.resolve.dashboard", future = true)]
+pub async fn resolve_dashboard_application_surface(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+    executor: Option<&dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
+) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    let dispatched = resolve_application_surface_dispatch(
+        BindingSurface::Dashboard,
+        operation,
+        request_id,
+        request,
+        requested_format,
+    )?;
+    execute_application_surface(operation, dispatched, executor).await
+}
+
+pub fn resolve_http_application_surface_dispatch(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+) -> Result<DispatchedInvocation<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
+    resolve_application_surface_dispatch(
+        BindingSurface::Http,
+        operation,
+        request_id,
+        request,
+        requested_format,
+    )
+}
+
+pub fn resolve_application_surface_dispatch(
+    surface: BindingSurface,
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+) -> Result<DispatchedInvocation<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
+    let cancellation = CancellationSignal::active(format!("cancellation.{}", request_id.as_str()))?;
+    resolve_application_surface_dispatch_with_controls(
+        surface,
+        operation,
+        request_id,
+        request,
+        PageRequest::first(DEFAULT_PAGE_SIZE)?,
+        None,
+        cancellation,
+        requested_format,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "application_surface.dispatch")]
+pub fn resolve_application_surface_dispatch_with_controls(
+    surface: BindingSurface,
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    page: PageRequest,
+    deadline: Option<Deadline>,
+    cancellation: CancellationSignal,
+    requested_format: RequestedOutputFormat,
+) -> Result<DispatchedInvocation<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
+    let catalog = application_surface_catalog_ref()?;
+    let resolver = CatalogBindingResolver::new(catalog);
+    let input = application_surface_dispatch_input_with_controls(
+        operation,
+        request_id,
+        request,
+        page,
+        deadline,
+        cancellation,
+        requested_format,
+    )?;
+    let dispatched = resolve_dispatch(&resolver, surface, input).map_err(map_dispatch_error)?;
+    Ok(dispatched)
+}
+
+fn invoke_catalog_bound_application_request(
+    request: HttpApplicationRequest,
+    surface: BindingSurface,
+    composition: &ApplicationCatalogComposition<HttpApplicationCatalogDispatcher>,
+) -> HttpApplicationInvocationFuture {
+    let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)
+        .unwrap_or_else(|_| panic!("the application profile id is static"));
+    let operation_name = SurfaceOperationName::new(request.operation.as_str())
+        .unwrap_or_else(|_| panic!("the application operation name is static"));
+    let capability = composition
+        .snapshot()
+        .resolve_binding(&profile_id, surface, &operation_name, 1, &BTreeSet::new())
+        .unwrap_or_else(|| {
+            panic!("surface bindings are validated before the application router is mounted")
+        });
+    let handler = composition
+        .handler(capability.use_case_id())
+        .unwrap_or_else(|| panic!("catalog composition validates every callable handler"));
+    handler.invoke(CatalogBoundHttpApplicationRequest {
+        capability_id: capability.capability_id().clone(),
+        use_case_id: capability.use_case_id().clone(),
+        surface,
+        request,
+    })
+}
+
+#[hotpath::measure(label = "application_surface.adapter.invoke", future = true)]
+async fn invoke_application_adapter_request(
+    request: HttpApplicationRequest,
+    surface: BindingSurface,
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    catalog: &CatalogSnapshotV1,
+) -> std::result::Result<CanonicalInvocationResult<Value>, ApplicationContractError> {
+    let operation = request.operation;
+    let resolver = CatalogBindingResolver::new(catalog);
+    let binding = resolve_application_binding(&resolver, surface, operation).unwrap_or_else(|| {
+        panic!("surface bindings are validated before the application router is mounted")
+    });
+    let binding_id = binding.binding_id;
+    let result_contract = ResultContractRef::from_schema(&binding.result_schema);
+    let request_id = request.request_id;
+    let body = apply_http_page_to_surface_body(operation, request.body, &request.page);
+    let application_request = match parse_application_surface_request(operation, body) {
+        Ok(request) => request,
+        Err(error) => {
+            observe_surface_argument_rejection(
+                Some(executor),
+                surface,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
+            return Ok(CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(result_contract, request_id, error)?),
+            ));
+        }
+    };
+    let input = match application_surface_dispatch_input_with_controls(
+        operation,
+        request_id.clone(),
+        application_request,
+        request.page,
+        request.deadline,
+        request.cancellation,
+        RequestedOutputFormat::Json,
+    ) {
+        Ok(input) => input,
+        Err(error) => {
+            observe_surface_argument_rejection(
+                Some(executor),
+                surface,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
+            return Ok(CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(result_contract, request_id, error)?),
+            ));
+        }
+    };
+    let dispatched = match resolve_dispatch(&resolver, surface, input) {
+        Ok(dispatched) => dispatched,
+        Err(error) => {
+            let error = map_dispatch_error(error);
+            observe_surface_argument_rejection(
+                Some(executor),
+                surface,
+                operation,
+                &request_id,
+                &error,
+            )
+            .await;
+            return Ok(CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(result_contract, request_id, error)?),
+            ));
+        }
+    };
+    Ok(
+        match execute_application_surface(operation, dispatched, Some(executor)).await {
+            Ok(result) => CanonicalInvocationResult::new(result.binding_id, result.result),
+            Err(error) => CanonicalInvocationResult::new(
+                binding_id,
+                Err(http_adapter_problem(result_contract, request_id, error)?),
+            ),
+        },
+    )
+}
+
+/// Where an HTTP page request lands inside an operation's request body.
+///
+/// The projection follows the request family the operation decodes into in
+/// [`parse_application_surface_request`], which is what decides where the page
+/// controls are readable at all: the callable- and primitive-code families
+/// decode into requests carrying a [`CallableCodeSurfaceMeta`], so a
+/// continuation cursor rides in `meta`; the diagnostics read decodes into a
+/// request whose page controls are plain body fields; nothing else takes page
+/// input from the transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpPageProjection {
+    /// The continuation cursor is written into the request's `meta` object.
+    MetaCursor,
+    /// The page size and cursor are written as top-level body fields.
+    BodyPageControls,
+    /// The operation accepts no page input.
+    Unpaged,
+}
+
+/// The single authority for how an operation receives an HTTP page request.
+///
+/// [`apply_http_page_to_surface_body`] asks this and nothing else, so the
+/// cursor-carrying family and the diagnostics body-field case are stated in one
+/// place instead of a boolean allowlist plus a stray operation comparison.
+fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProjection {
+    match operation {
+        ApplicationSurfaceOperation::CodeExactOccurrence
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences => HttpPageProjection::MetaCursor,
+        ApplicationSurfaceOperation::DiagnosticsRead => HttpPageProjection::BodyPageControls,
+        _ => HttpPageProjection::Unpaged,
+    }
+}
+
+fn apply_http_page_to_surface_body(
+    operation: ApplicationSurfaceOperation,
+    mut body: Value,
+    page: &PageRequest,
+) -> Value {
+    match http_page_projection(operation) {
+        HttpPageProjection::MetaCursor => {
+            if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut)
+                && let Some(cursor) = page.cursor.as_ref()
+            {
+                meta.insert("cursor".to_owned(), Value::from(cursor.as_str()));
+            }
+        }
+        HttpPageProjection::BodyPageControls => {
+            if let Some(object) = body.as_object_mut() {
+                object.insert(
+                    "maximum_diagnostics".to_owned(),
+                    Value::from(page.page_size),
+                );
+                object.insert(
+                    "cursor".to_owned(),
+                    page.cursor
+                        .as_ref()
+                        .map_or(Value::Null, |cursor| Value::from(cursor.as_str())),
+                );
+            }
+        }
+        HttpPageProjection::Unpaged => {}
+    }
+    body
+}
+
+fn resolve_application_binding(
+    resolver: &impl BindingResolver,
+    surface: BindingSurface,
+    operation: ApplicationSurfaceOperation,
+) -> Option<tracedecay_daemon_protocol::ResolvedBinding> {
+    resolve_named_binding(resolver, surface, operation.as_str())
+}
+
+fn resolve_named_binding(
+    resolver: &impl BindingResolver,
+    surface: BindingSurface,
+    operation: &str,
+) -> Option<ResolvedBinding> {
+    let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).ok()?;
+    let operation = SurfaceOperationName::new(operation).ok()?;
+    resolver.resolve_binding(
+        surface,
+        &BindingResolution {
+            profile_id,
+            operation,
+            protocol_revision: APPLICATION_PROTOCOL_REVISION,
+            negotiated_features: application_negotiated_features(),
+        },
+    )
+}
+
+/// Resolves a public tool name through the application catalog for one host surface.
+///
+/// Typed application surfaces continue through [`ApplicationSurfaceOperation`];
+/// compatibility-owned tools use this boundary before entering their retained
+/// execution adapter, so catalog metadata remains the single binding authority.
+#[hotpath::measure(label = "application_surface.catalog_binding")]
+pub fn resolve_catalog_tool_binding(
+    surface: BindingSurface,
+    tool_name: &str,
+) -> Result<Option<ResolvedBinding>, ApplicationSurfaceAdapterError> {
+    let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
+    let catalog = application_surface_catalog_ref()?;
+    let resolver = CatalogBindingResolver::new(catalog);
+    Ok(resolve_named_binding(&resolver, surface, operation))
+}
+
+fn application_negotiated_features() -> BTreeSet<FeatureId> {
+    BTreeSet::new()
+}
+
+fn validate_current_application_binding(
+    operation: ApplicationSurfaceOperation,
+    dispatched: &DispatchedInvocation<ApplicationSurfaceRequest>,
+) -> Result<(), ApplicationSurfaceAdapterError> {
+    let catalog = application_surface_catalog_ref()?;
+    let resolver = CatalogBindingResolver::new(catalog);
+    let current = resolve_application_binding(&resolver, dispatched.surface, operation)
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    if current.binding_id != dispatched.invocation.binding_id
+        || current.request_schema != dispatched.invocation.request_schema
+        || current.result_schema != dispatched.invocation.result_schema
+        || !dispatched.invocation.invocation.request.matches(operation)
+    {
+        return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+    }
+    Ok(())
+}
+
+fn http_adapter_problem(
+    contract: ResultContractRef,
+    request_id: RequestId,
+    error: ApplicationSurfaceAdapterError,
+) -> std::result::Result<ApplicationProblemEnvelope, ApplicationContractError> {
+    let problem = match error {
+        ApplicationSurfaceAdapterError::UnknownOrNotAuthorized => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        ApplicationSurfaceAdapterError::InvalidRequestHandle
+        | ApplicationSurfaceAdapterError::InvalidSurfaceRequest => {
+            ApplicationProblem::InvalidRequest {
+                diagnostic: SafeDiagnostic {
+                    code: "application.surface.invalid_request".to_owned(),
+                    message: "The application request is invalid".to_owned(),
+                },
+                retry: RetryDirective::Never,
+                legal_actions: Vec::new(),
+            }
+        }
+        // Catalog composition is derived from `const` application specs, so
+        // these failures are deterministic for the lifetime of the process.
+        // Reporting them as `unavailable` told clients to retry a request that
+        // can never succeed.
+        ApplicationSurfaceAdapterError::Catalog(_)
+        | ApplicationSurfaceAdapterError::Contract(_)
+        | ApplicationSurfaceAdapterError::Identifier(_)
+        | ApplicationSurfaceAdapterError::CatalogValidation(_) => ApplicationProblem::Unsupported {
+            diagnostic: SafeDiagnostic {
+                code: "application.surface.catalog_unavailable".to_owned(),
+                message: "The application catalog for this operation could not be composed"
+                    .to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+        },
+        // Genuinely transient: the owning daemon transport is not answering.
+        ApplicationSurfaceAdapterError::DaemonUnavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "application.surface.unavailable".to_owned(),
+                message: "The application service for this operation is unavailable".to_owned(),
+            })
+        }
+        // Also transient, with the connect diagnostic preserved: no daemon
+        // accepted the connection, so the request was never sent.
+        ApplicationSurfaceAdapterError::DaemonUnreachable {
+            reason_code,
+            detail,
+        } => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: reason_code,
+            message: detail,
+        }),
+    };
+    ApplicationProblemEnvelope::new(contract, request_id, problem)
+        .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Adapter))
+}
+
+/// The canonical typed terminal for an MCP `tools/call` whose project open
+/// was refused because the store requires an explicit reset.
+///
+/// The refusal settles before any project server exists, so the MCP boundary
+/// cannot route the call to its handler; the truthful answer for the named
+/// operation is the reset-required terminal under its own mounted MCP result
+/// contract. Returns `None` for tools without a mounted application binding.
+pub(crate) fn mcp_project_open_reset_refusal(
+    tool_name: &str,
+    request_id: RequestId,
+    authority: &str,
+    reason: &str,
+) -> Option<ApplicationProblemEnvelope> {
+    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    let catalog = application_surface_catalog_ref().ok()?;
+    let resolver = CatalogBindingResolver::new(catalog);
+    let binding = resolve_application_binding(&resolver, BindingSurface::Mcp, operation)?;
+    let contract = ResultContractRef::from_schema(&binding.result_schema);
+    let problem = ApplicationProblem::reset_required(SafeDiagnostic {
+        code: "application.surface.reset_required".to_owned(),
+        message: format!("The {authority} requires an explicit reset: {reason}"),
+    });
+    ApplicationProblemEnvelope::new(contract, request_id, problem)
+        .ok()
+        .map(|envelope| envelope.with_owning_layer(ProblemOwningLayer::Runtime))
+}
+
+pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+    let now = i64::try_from(now.as_micros()).unwrap_or(i64::MAX);
+    Ok(UtcMicros(now))
+}
+
+fn invocation_problem(
+    problem: tracedecay_daemon_protocol::DaemonInvocationProblem,
+) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
+    Ok(match problem {
+        tracedecay_daemon_protocol::DaemonInvocationProblem::InvalidRequest
+        | tracedecay_daemon_protocol::DaemonInvocationProblem::UnsupportedRevision => {
+            ApplicationProblem::InvalidRequest {
+                diagnostic: SafeDiagnostic::new(
+                    "application.surface.invalid_request",
+                    "The daemon rejected the application request",
+                )?,
+                retry: RetryDirective::Never,
+                legal_actions: Vec::new(),
+            }
+        }
+        tracedecay_daemon_protocol::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired => {
+            ApplicationProblem::reset_required(SafeDiagnostic::new(
+                "application.surface.reset_required",
+                "The application store requires an explicit reset",
+            )?)
+        }
+        tracedecay_daemon_protocol::DaemonInvocationProblem::ApplicationContractViolation => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.contract_violation",
+                "The application result violated its canonical contract",
+            )?)
+        }
+        tracedecay_daemon_protocol::DaemonInvocationProblem::Unavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.unavailable",
+                "The application service for this operation is unavailable",
+            )?)
+        }
+    })
+}
+
+fn invocation_contract_problem(
+    error: tracedecay_application::InvocationError,
+) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
+    Ok(match error {
+        tracedecay_application::InvocationError::Denied => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        tracedecay_application::InvocationError::Cancelled => {
+            ApplicationProblem::cancelled_before_admission()
+        }
+        tracedecay_application::InvocationError::DeadlineExceeded => {
+            ApplicationProblem::timed_out_before_admission()
+        }
+        tracedecay_application::InvocationError::InvalidRequest => {
+            ApplicationProblem::InvalidRequest {
+                diagnostic: SafeDiagnostic::new(
+                    "application.surface.invalid_request",
+                    "The daemon rejected the application request",
+                )?,
+                retry: RetryDirective::Never,
+                legal_actions: Vec::new(),
+            }
+        }
+        tracedecay_application::InvocationError::Conflict => ApplicationProblem::Conflict {
+            diagnostic: SafeDiagnostic::new(
+                "application.surface.conflict",
+                "The application request conflicts with current state",
+            )?,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        },
+        tracedecay_application::InvocationError::Unavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.unavailable",
+                "The application service for this operation is unavailable",
+            )?)
+        }
+        // Dispatchers intercept unreachable before republishing problems; this
+        // projection keeps the connect diagnostic for any caller that still
+        // renders it as a problem.
+        tracedecay_application::InvocationError::Unreachable {
+            reason_code,
+            detail,
+        } => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: reason_code,
+            message: detail,
+        }),
+        // The daemon's typed problem is the authority; republishing it keeps
+        // its diagnostic (e.g. `configuration.conflict`) intact instead of
+        // substituting a generic surface code.
+        tracedecay_application::InvocationError::Problem(problem) => *problem,
+    })
+}
+
+pub fn map_dispatch_error(error: DispatchError) -> ApplicationSurfaceAdapterError {
+    match error {
+        DispatchError::UnknownOrNotAuthorized => {
+            ApplicationSurfaceAdapterError::UnknownOrNotAuthorized
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

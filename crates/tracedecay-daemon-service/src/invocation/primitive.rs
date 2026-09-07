@@ -1,0 +1,981 @@
+//! application primitive, callable-code, and context-scout daemon invocation handlers.
+
+use super::*;
+use tracedecay_agent_hosts::agents::context_scout_v2::{
+    ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
+};
+use tracedecay_application::CallableCodeSurfaceRequest;
+use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutDeliveryWindowV1, ContextScoutLeaseV1,
+};
+use tracedecay_daemon_protocol::{
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+
+mod context_scout_registry;
+
+pub use context_scout_registry::{
+    DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
+};
+
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.primitive.execute", future = true)]
+pub(super) async fn execute_primitive(
+    service: &DaemonInvocationService,
+    project_root: Option<&Path>,
+    wire_request_id: String,
+    surface_operation: ApplicationSurfaceOperation,
+    request: PrimitiveRequest,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(project_root) = project_root else {
+        return concealed_application_problem(wire_request_id);
+    };
+    // The route reaching here already passed project resolution and an
+    // admitted project open, so a missing per-project runtime is the
+    // registration still mounting behind the core publication — a retryable
+    // unavailable state. Concealing it as not-found would misreport an
+    // authenticated project the caller is standing in.
+    let dispatch = service
+        .project_runtimes
+        .read(project_root, PrimitiveProjectRuntime::dispatch)
+        .await;
+    let Some(dispatch) = dispatch else {
+        return runtime_mounting_problem(wire_request_id);
+    };
+    let registered = service
+        .project_runtimes
+        .get::<RegisteredCallableCodeRuntime>(project_root)
+        .await;
+    let Some(registered) = registered else {
+        return runtime_mounting_problem(wire_request_id);
+    };
+    let access = match registered.authorization.current(observed_at).await {
+        Ok(access) if access.scope == registered.scope => access,
+        Ok(_) | Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    let Ok(Some(operation)) =
+        tracedecay_application::feedback::feedback_surface_operation(surface_operation.as_str())
+            .and_then(|operation| {
+                operation.map_or_else(
+                    || {
+                        tracedecay_application::retrieval::catalog::primitive_read_operation(
+                            surface_operation.as_str(),
+                        )
+                    },
+                    |operation| Ok(Some(operation)),
+                )
+            })
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    };
+    let context = match callable_code_request_context(
+        &registered.scope,
+        &access,
+        &wire_request_id,
+        &operation,
+        observed_at,
+        deadline,
+        cancellation,
+    ) {
+        Ok(context) => context,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let authorization = registered.authorization.authorize(access);
+    let admission = match authorization.admit(&context, &operation, observed_at).await {
+        Ok(admission) => admission,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let mut result = match dispatch
+        .dispatch(
+            PrimitiveInvocation {
+                operation: operation.clone(),
+                request,
+            },
+            context.clone(),
+            observed_at,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::ApplicationContractViolation,
+            );
+        }
+    };
+    if result.is_ok() {
+        let finished_at = current_micros();
+        let publication_authority = match authorization
+            .recheck_publication(&context, &operation, &admission, finished_at)
+            .await
+        {
+            Ok(authority) => authority,
+            Err(problem) => return application_problem(wire_request_id, problem),
+        };
+        if !tracedecay_usecases::primitives::runtime::reauthorize_primitive_evidence(
+            &mut result,
+            publication_authority,
+        ) {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    }
+    match feedback_invocation_result(result) {
+        Ok(result) => DaemonInvocationResponse::with_outcome(
+            wire_request_id,
+            DaemonInvocationOutcome::Primitive {
+                scope: result.scope,
+                result: DaemonFeedbackResult::from_application(result.evidence),
+            },
+        ),
+        Err(problem) => application_problem(wire_request_id, problem),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.callable_code.execute", future = true)]
+pub(super) async fn execute_callable_code(
+    service: &DaemonInvocationService,
+    project_root: Option<&Path>,
+    wire_request_id: String,
+    surface_operation: ApplicationSurfaceOperation,
+    request: CallableCodeSurfaceRequest,
+    page: PageRequest,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(project_root) = project_root else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let registered = service
+        .project_runtimes
+        .get::<RegisteredCallableCodeRuntime>(project_root)
+        .await;
+    let Some(registered) = registered else {
+        // Same admitted-route contract as `execute_primitive`: the runtime is
+        // still mounting, which is retryable rather than concealment-worthy.
+        return runtime_mounting_problem(wire_request_id);
+    };
+    let access = match registered.authorization.current(observed_at).await {
+        Ok(access) => access,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let kind = match (&request, surface_operation) {
+        (
+            CallableCodeSurfaceRequest::ExactOccurrence(_),
+            ApplicationSurfaceOperation::CodeExactOccurrence,
+        ) => CallableCodeOperationKind::ExactOccurrence,
+        (
+            CallableCodeSurfaceRequest::PhraseSearch(_),
+            ApplicationSurfaceOperation::CodePhraseSearch,
+        ) => CallableCodeOperationKind::PhraseSearch,
+        (CallableCodeSurfaceRequest::Callees(_), ApplicationSurfaceOperation::CodeCallees) => {
+            CallableCodeOperationKind::Callees
+        }
+        (CallableCodeSurfaceRequest::Facets(_), ApplicationSurfaceOperation::CodeFacets) => {
+            CallableCodeOperationKind::Facets
+        }
+        (CallableCodeSurfaceRequest::Timeline(_), ApplicationSurfaceOperation::CodeTimeline) => {
+            CallableCodeOperationKind::Timeline
+        }
+        (
+            CallableCodeSurfaceRequest::Declaration(_),
+            ApplicationSurfaceOperation::CodeDeclaration,
+        ) => CallableCodeOperationKind::Declaration,
+        (
+            CallableCodeSurfaceRequest::Definition(_),
+            ApplicationSurfaceOperation::CodeDefinition,
+        ) => CallableCodeOperationKind::Definition,
+        (
+            CallableCodeSurfaceRequest::TypeDefinition(_),
+            ApplicationSurfaceOperation::CodeTypeDefinition,
+        ) => CallableCodeOperationKind::TypeDefinition,
+        (
+            CallableCodeSurfaceRequest::References(_),
+            ApplicationSurfaceOperation::CodeReferences,
+        ) => CallableCodeOperationKind::References,
+        _ => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
+    };
+    let Ok(operations) = callable_code_operations() else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "callable_code.operation_unavailable".to_owned(),
+                message: "The callable code operation is unavailable".to_owned(),
+            }),
+        );
+    };
+    let context = match callable_code_request_context(
+        &registered.scope,
+        &access,
+        &wire_request_id,
+        operations.get(kind),
+        observed_at,
+        deadline,
+        cancellation,
+    ) {
+        Ok(context) => context,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let query = CallableCodeQueryService::new(
+        service.code_index_schedulers.clone(),
+        registered.authorization.authorize(access),
+        operations,
+    );
+    match request {
+        CallableCodeSurfaceRequest::ExactOccurrence(request) => {
+            let Ok(request) = request.into_application_request(page) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.exact_occurrence(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::PhraseSearch(request) => {
+            let Ok(request) = request.into_application_request(
+                tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(),
+                tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_normalization_revision(
+                ),
+                page,
+            ) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.phrase_search(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::Callees(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.callees(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::Facets(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.facets(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::Timeline(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.timeline(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::Declaration(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.declaration(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::Definition(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.definition(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::TypeDefinition(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.type_definition(&context, request, observed_at).await,
+            )
+        }
+        CallableCodeSurfaceRequest::References(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.references(&context, request, observed_at).await,
+            )
+        }
+    }
+}
+
+fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationResponse {
+    application_problem(
+        wire_request_id,
+        ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "callable_code.invalid_query".to_owned(),
+                message: "The callable code query is invalid".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
+    )
+}
+
+pub fn callable_code_request_context(
+    scope: &ResolvedScope,
+    access: &ProjectSourceAccessSnapshot,
+    wire_request_id: &str,
+    operation: &ApplicationOperation,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<RequestContext, ApplicationProblem> {
+    if scope != &access.scope {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(ApplicationProblem::cancelled_before_admission());
+    }
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+        return Err(ApplicationProblem::timed_out_before_admission());
+    }
+    let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
+    if expires_at.0 <= observed_at.0 {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    let request_id =
+        RequestId::new(wire_request_id).map_err(|_| ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "callable_code.invalid_request_id".to_owned(),
+                message: "The callable code request identifier is invalid".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        })?;
+    // Correlation IDs stay on the RequestContext. The route authority is a
+    // function of the access and the operation, so the same authorized call
+    // resolves the same grant from any surface and across durable retries.
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.daemon.callable-code-grant.v1",
+        scope,
+        &access.requester,
+        &access.configuration_digest,
+        operation.capability_id(),
+        operation.use_case_id(),
+    ))
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.grant_unavailable".to_owned(),
+            message: "The callable code route grant is unavailable".to_owned(),
+        })
+    })?;
+    let grant_id = CapabilityGrantId::new(format!(
+        "grant.daemon.callable-code.{}",
+        grant_digest.as_str().trim_start_matches("sha256:")
+    ))
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.grant_unavailable".to_owned(),
+            message: "The callable code route grant is unavailable".to_owned(),
+        })
+    })?;
+    let grant = CapabilityGrantSnapshot::new(
+        grant_id,
+        1,
+        grant_digest.clone(),
+        access.requester.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        std::collections::BTreeSet::from([operation.capability_id().clone()]),
+        std::collections::BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Evidence,
+    )
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.grant_unavailable".to_owned(),
+            message: "The callable code route grant is unavailable".to_owned(),
+        })
+    })?;
+    RequestContext::new(
+        access.requester.clone(),
+        scope.clone(),
+        grant,
+        request_id,
+        Deadline::new(expires_at).map_err(|_| {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "callable_code.deadline_unavailable".to_owned(),
+                message: "The callable code request deadline is unavailable".to_owned(),
+            })
+        })?,
+        cancellation,
+    )
+    .map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "callable_code.context_unavailable".to_owned(),
+            message: "The callable code request context is unavailable".to_owned(),
+        })
+    })
+}
+
+fn callable_code_response<T: Serialize>(
+    wire_request_id: String,
+    registered_scope: &ResolvedScope,
+    result: Result<ApplicationResult<T>, ApplicationContractError>,
+) -> DaemonInvocationResponse {
+    let Ok(result) = result else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::ApplicationContractViolation,
+        );
+    };
+    match feedback_invocation_result(result) {
+        Ok(result) if &result.scope == registered_scope => DaemonInvocationResponse::with_outcome(
+            wire_request_id,
+            DaemonInvocationOutcome::CallableCode {
+                scope: result.scope,
+                result: DaemonFeedbackResult::from_application(result.evidence),
+            },
+        ),
+        Ok(_) => concealed_application_problem(wire_request_id),
+        Err(problem) => application_problem(wire_request_id, problem),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(label = "daemon.service.context_scout.execute", future = true)]
+pub(super) async fn execute_context_scout(
+    service: &DaemonInvocationService,
+    wire_request_id: String,
+    registered: Option<RegisteredConfigurationRuntime>,
+    surface_operation: ApplicationSurfaceOperation,
+    request: ContextScoutSurfaceRequest,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(registered) = registered else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    let current = match registered.runtime.client().current().await {
+        Ok(current) => tracedecay_configuration::ConfigurationCurrentStateV1 {
+            revision_id: current.revision_id,
+            snapshot: current.snapshot,
+        },
+        Err(error) => {
+            return application_problem(wire_request_id, configuration_problem(error));
+        }
+    };
+    let Some(configuration) =
+        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    let registry = service
+        .context_scout_registries
+        .lock()
+        .await
+        .get(&registered.project_identity)
+        .cloned();
+    let Some(registry) = registry else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    let address = request.address();
+    let is_state_control = matches!(
+        &request,
+        ContextScoutSurfaceRequest::Pause(_) | ContextScoutSurfaceRequest::Resume(_)
+    );
+    let address_authorized = if is_state_control {
+        registry
+            .authorize_control_exact_address(address, &registered.scope)
+            .await
+    } else {
+        registry
+            .authorize_current_exact_address(address, &configuration, &registered.scope)
+            .await
+    };
+    if !address_authorized {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    }
+    let mut owner = None;
+    for candidate in
+        tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+            address.project_id,
+        )
+    {
+        if is_state_control
+            || candidate.configured_status().await.is_ok_and(|status| {
+                status.configuration_revision == configuration.control().configuration_revision
+            })
+        {
+            if owner.is_some() {
+                return DaemonInvocationResponse::problem(
+                    wire_request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            }
+            owner = Some(candidate);
+        }
+    }
+    let Some(owner) = owner else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    if let ContextScoutSurfaceRequest::Pause(control)
+    | ContextScoutSurfaceRequest::Resume(control) = &request
+    {
+        let target = match &request {
+            ContextScoutSurfaceRequest::Pause(_) => {
+                tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused
+            }
+            ContextScoutSurfaceRequest::Resume(_) => {
+                tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active
+            }
+            _ => unreachable!("pause/resume matched above"),
+        };
+        return execute_context_scout_state_transition(
+            wire_request_id,
+            registered,
+            owner,
+            registry,
+            control,
+            target,
+            current,
+            observed_at,
+            deadline,
+            cancellation,
+        )
+        .await;
+    }
+    let authority = match context_scout_request_authority(
+        &registered,
+        &wire_request_id,
+        surface_operation,
+        observed_at,
+        deadline.clone(),
+        cancellation,
+    ) {
+        Ok(authority) => authority,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let payload = match request {
+        ContextScoutSurfaceRequest::Status(_) => owner
+            .configured_status()
+            .await
+            .ok()
+            .and_then(|status| serde_json::to_value(status).ok()),
+        ContextScoutSurfaceRequest::Recent(request) => owner
+            .recent_exact(request.address, request.limit)
+            .await
+            .ok()
+            .and_then(|recent| serde_json::to_value(recent).ok()),
+        ContextScoutSurfaceRequest::Explain(request) => owner
+            .explain_exact(request.address, request.limit)
+            .await
+            .ok()
+            .and_then(|explanation| serde_json::to_value(explanation).ok()),
+        ContextScoutSurfaceRequest::Capability(_) => owner
+            .capability()
+            .await
+            .ok()
+            .and_then(|capability| serde_json::to_value(capability).ok()),
+        ContextScoutSurfaceRequest::Budget(_) => owner
+            .budget()
+            .await
+            .ok()
+            .and_then(|budget| serde_json::to_value(budget).ok()),
+        ContextScoutSurfaceRequest::Cancel(request) if request.work.address == request.address => {
+            owner
+                .cancel(request.work)
+                .await
+                .ok()
+                .filter(|outcome| {
+                    *outcome
+                        != ContextScoutDurableStoreOutcomeV1::Unavailable
+                })
+                .map(|outcome| {
+                    serde_json::json!({ "outcome": context_scout_store_outcome(outcome) })
+                })
+        }
+        ContextScoutSurfaceRequest::Claim(request) => {
+            let window = match request.window {
+                ContextScoutClaimWindowSurfaceV1::IdleWindow => {
+                    ContextScoutDeliveryWindowV1::IdleWindow
+                }
+                ContextScoutClaimWindowSurfaceV1::OnRequest => {
+                    ContextScoutDeliveryWindowV1::OnRequest
+                }
+            };
+            let digest = canonical_sha256(&(
+                "tracedecay.context-scout.delivery-lease.v1",
+                &wire_request_id,
+                request.address,
+                request.window,
+                observed_at,
+            ))
+            .ok();
+            let lease = digest.and_then(|digest| {
+                let bytes = digest.as_str().as_bytes();
+                (bytes.len() >= 16).then(|| {
+                    let mut lease_id = [0; 16];
+                    lease_id.copy_from_slice(&bytes[..16]);
+                    ContextScoutLeaseV1 {
+                        lease_id,
+                        expires_at: UtcMicros(
+                            deadline
+                                .expires_at
+                                .0
+                                .min(observed_at.0.saturating_add(30_000_000)),
+                        ),
+                    }
+                })
+            });
+            match lease {
+                Some(lease) => match owner
+                    .claim_delivery_exact(request.address, window, observed_at, lease)
+                    .await
+                {
+                    ContextScoutDurableClaimOutcomeV1::Claimed(
+                        claim,
+                    ) => serde_json::to_value(claim).ok(),
+                    ContextScoutDurableClaimOutcomeV1::Empty => {
+                        Some(serde_json::json!({ "outcome": "empty" }))
+                    }
+                    ContextScoutDurableClaimOutcomeV1::Unavailable => {
+                        None
+                    }
+                },
+                None => None,
+            }
+        }
+        ContextScoutSurfaceRequest::Delivery(request)
+            if request.claim.entry.work.address == request.address =>
+        {
+            let outcome = owner
+                .record_delivery(&request.claim, &request.receipt)
+                .await;
+            (outcome
+                != ContextScoutDurableStoreOutcomeV1::Unavailable)
+                .then(|| {
+                    serde_json::json!({
+                        "outcome": context_scout_store_outcome(outcome)
+                    })
+                })
+        }
+        ContextScoutSurfaceRequest::Feedback(request) => {
+            let outcome = owner
+                .record_feedback_exact(request.address, &request.receipt, request.feedback)
+                .await;
+            (outcome
+                != ContextScoutDurableStoreOutcomeV1::Unavailable)
+                .then(|| {
+                    serde_json::json!({
+                        "outcome": context_scout_store_outcome(outcome)
+                    })
+                })
+        }
+        ContextScoutSurfaceRequest::Pause(_)
+        | ContextScoutSurfaceRequest::Resume(_)
+        | ContextScoutSurfaceRequest::Cancel(_)
+        | ContextScoutSurfaceRequest::Delivery(_) => None,
+    };
+    let Some(payload) = payload else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "context_scout.unavailable".to_owned(),
+                message: "The exact-address Context Scout operation is unavailable".to_owned(),
+            }),
+        );
+    };
+    match configuration_evidence(payload, authority, observed_at, deadline) {
+        Ok(outcome) => DaemonInvocationResponse::with_outcome(
+            wire_request_id,
+            DaemonInvocationOutcome::ContextScout {
+                scope: registered.scope,
+                outcome,
+            },
+        ),
+        Err(error) => application_problem(wire_request_id, configuration_problem(error)),
+    }
+}
+
+#[hotpath::measure(label = "daemon.service.context_scout.transition", future = true)]
+async fn execute_context_scout_state_transition(
+    wire_request_id: String,
+    registered: RegisteredConfigurationRuntime,
+    owner: Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    registry: Arc<ProjectContextScoutAddressRegistryV1>,
+    control: &ContextScoutControlSurfaceRequest,
+    target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
+    current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(key) = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+    )
+    .ok() else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::Unavailable,
+        );
+    };
+    let Some(tracedecay_domain::configuration::ConfigurationValueV1::ContextScoutSettings(
+        mut settings,
+    )) = current.snapshot.effective_values.get(&key).cloned()
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    settings.state = target;
+    let response = execute_configuration(
+        wire_request_id,
+        Some(registered.clone()),
+        ApplicationSurfaceOperation::ConfigurationSet,
+        ConfigurationWireRequestV1::Set(tracedecay_application::ConfigurationSetRequestV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: registered.scope.project_id.clone(),
+            },
+            key,
+            value: tracedecay_domain::configuration::ConfigurationValueV1::ContextScoutSettings(
+                settings,
+            ),
+            expected_revision: control.expected_revision.clone(),
+            idempotency_key: control.idempotency_key.clone(),
+        }),
+        observed_at,
+        deadline,
+        cancellation,
+    )
+    .await;
+    let DaemonInvocationResponse {
+        protocol,
+        revision,
+        request_id,
+        outcome,
+    } = response;
+    let DaemonInvocationOutcome::Configuration { scope, outcome } = outcome else {
+        return DaemonInvocationResponse {
+            protocol,
+            revision,
+            request_id,
+            outcome,
+        };
+    };
+    if let Err(error) = reconcile_context_scout_configuration(
+        &registered.runtime,
+        &owner,
+        &registry,
+        control.address,
+        &registered.scope,
+        current_micros(),
+    )
+    .await
+    {
+        let runtime = Arc::clone(&registered.runtime);
+        let reconciliation_owner = Arc::clone(&owner);
+        let reconciliation_registry = Arc::clone(&registry);
+        let reconciliation_scope = registered.scope.clone();
+        let reconciliation_address = control.address;
+        let error_code = error.code().to_owned();
+        if let Err(observation_error) = runtime
+            .record_runtime_activation(None, Some(error_code), current_micros())
+            .await
+        {
+            tracing::warn!(
+                %observation_error,
+                "Context Scout activation degradation could not be recorded"
+            );
+        }
+        tokio::spawn(async move {
+            if let Err(reconciliation_error) = reconcile_context_scout_configuration(
+                &runtime,
+                &reconciliation_owner,
+                &reconciliation_registry,
+                reconciliation_address,
+                &reconciliation_scope,
+                current_micros(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    %reconciliation_error,
+                    "Context Scout configuration activation remains pending reconciliation"
+                );
+            }
+        });
+    }
+    DaemonInvocationResponse::with_outcome(
+        request_id,
+        DaemonInvocationOutcome::ContextScout { scope, outcome },
+    )
+}
+
+#[derive(Clone, Copy, Debug, Error)]
+enum ContextScoutActivationReconciliationError {
+    #[error("the committed Context Scout configuration could not be read")]
+    ConfigurationUnavailable,
+    #[error("the committed Context Scout configuration is invalid")]
+    InvalidConfiguration,
+    #[error("the Context Scout owner rejected committed configuration activation")]
+    ActivationRejected,
+    #[error("the Context Scout exact-address pin could not be advanced")]
+    AddressActivationRejected,
+    #[error("the Context Scout activation observation could not be recorded")]
+    ObservationUnavailable,
+}
+
+impl ContextScoutActivationReconciliationError {
+    #[hotpath::skip]
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ConfigurationUnavailable => "context_scout.activation.configuration_unavailable",
+            Self::InvalidConfiguration => "context_scout.activation.configuration_invalid",
+            Self::ActivationRejected => "context_scout.activation.reconciliation_pending",
+            Self::AddressActivationRejected => {
+                "context_scout.activation.address_reconciliation_pending"
+            }
+            Self::ObservationUnavailable => "context_scout.activation.observation_unavailable",
+        }
+    }
+}
+
+#[hotpath::measure(label = "daemon.service.context_scout.reconcile", future = true)]
+async fn reconcile_context_scout_configuration(
+    runtime: &Arc<ProjectConfigurationRuntime>,
+    owner: &Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    registry: &Arc<ProjectContextScoutAddressRegistryV1>,
+    address: ContextScoutAddressV1,
+    scope: &ResolvedScope,
+    observed_at: UtcMicros,
+) -> Result<(), ContextScoutActivationReconciliationError> {
+    let current = runtime
+        .client()
+        .current()
+        .await
+        .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
+    let current = tracedecay_configuration::ConfigurationCurrentStateV1 {
+        revision_id: current.revision_id,
+        snapshot: current.snapshot,
+    };
+    let refreshed =
+        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+            .ok_or(ContextScoutActivationReconciliationError::InvalidConfiguration)?;
+    if !registry
+        .advance_control_exact_address(address, scope, &refreshed)
+        .await
+    {
+        return Err(ContextScoutActivationReconciliationError::AddressActivationRejected);
+    }
+    let installed = owner.configured_status().await.is_ok_and(|status| {
+        status.configuration_revision == refreshed.control().configuration_revision
+    });
+    if !installed {
+        owner
+            .install_state_transition(refreshed)
+            .await
+            .map_err(|_| ContextScoutActivationReconciliationError::ActivationRejected)?;
+    }
+    runtime
+        .record_runtime_activation(Some(current.revision_id), None, observed_at)
+        .await
+        .map_err(|_| ContextScoutActivationReconciliationError::ObservationUnavailable)
+}
+
+const fn context_scout_store_outcome(outcome: ContextScoutDurableStoreOutcomeV1) -> &'static str {
+    match outcome {
+        ContextScoutDurableStoreOutcomeV1::Stored => "stored",
+        ContextScoutDurableStoreOutcomeV1::Duplicate => "duplicate",
+        ContextScoutDurableStoreOutcomeV1::Superseded => "superseded",
+        ContextScoutDurableStoreOutcomeV1::Unavailable => "unavailable",
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DaemonPrimitiveRuntimeRegistrationError {
+    #[error("a application primitive runtime is already mounted for this project")]
+    AlreadyRegistered,
+    #[error("the daemon project runtime registry is closed")]
+    RegistryClosed,
+    #[error("a concurrent primitive runtime build failed: {detail}")]
+    ConcurrentBuildFailed { detail: String },
+}
+
+/// Central project-open registration for the owned primitive facade.
+#[derive(Clone)]
+pub struct DaemonPrimitiveRuntimeRegistrar {
+    service: DaemonInvocationService,
+}
+
+impl DaemonPrimitiveRuntimeRegistrar {
+    pub fn new(service: &DaemonInvocationService) -> Self {
+        Self {
+            service: service.clone(),
+        }
+    }
+
+    /// Retains the already-opened project runtime as its teardown owner.
+    /// Scope/access were bound by the concrete project-open factory.
+    #[hotpath::skip]
+    pub async fn register(
+        &self,
+        project_root: PathBuf,
+        project_runtime: PrimitiveProjectRuntime,
+    ) -> Result<Arc<dyn PrimitiveDispatch>, DaemonPrimitiveRuntimeRegistrationError> {
+        let dispatch = project_runtime.dispatch();
+        self.service
+            .project_runtimes
+            .register(project_root, project_runtime)
+            .await
+            .map_err(|error| match error {
+                ProjectRuntimeRegistryError::AlreadyRegistered => {
+                    DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered
+                }
+                ProjectRuntimeRegistryError::Closed => {
+                    DaemonPrimitiveRuntimeRegistrationError::RegistryClosed
+                }
+                ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+                    DaemonPrimitiveRuntimeRegistrationError::ConcurrentBuildFailed { detail }
+                }
+            })?;
+        Ok(dispatch)
+    }
+}

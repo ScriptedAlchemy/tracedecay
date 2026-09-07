@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "id": "memory-multiturn-continuity",
+  "title": "Facts stored in one session are recalled in the next",
+  "description": "A continuity note stored in session one must be recallable in session two via memory state, not chat context. The deterministic layer verifies persistence plus a real exact-search hit.",
+  "adapted_from": "mnemon `memory-multiturn-continuity` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
+  "contract": "stable",
+  "setup": {
+    "facts": [],
+    "files": {}
+  },
+  "deterministic": {
+    "well_behaved": [
+      {
+        "kind": "tool",
+        "tool": "tracedecay_fact_store_add",
+        "args": {
+          "content": "Continuity note: eval-first memory regression stays in the long memory suite.",
+          "category": "decision",
+          "source_label": "eval-agent"
+        }
+      },
+      {
+        "kind": "tool",
+        "tool": "tracedecay_fact_store_search",
+        "args": {
+          "query": "continuity note memory regression"
+        }
+      }
+    ],
+    "violation": null
+  },
+  "real_model": {
+    "prompts": [
+      "Store this durable continuity note in project memory: eval-first memory regression stays in the long memory suite. Then reply done.",
+      "Consult project memory, not just this chat: what continuity note was saved about memory regression? Cite the recalled memory."
+    ],
+    "max_turns": 8
+  },
+  "assertions": [
+    {
+      "kind": "content-count",
+      "name": "continuity_note_persisted",
+      "contains": "Continuity note",
+      "op": "gte",
+      "value": 1,
+      "phase": "both"
+    },
+    {
+      "kind": "search-source",
+      "name": "continuity_note_recalled",
+      "query": "continuity note memory regression",
+      "source": "eval-agent",
+      "phase": "both"
+    }
+  ]
+}

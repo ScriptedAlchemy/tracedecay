@@ -1,0 +1,30 @@
+{
+  "capture": {
+    "captured_at": "2026-07-21T22:04:13Z",
+    "method": "GET",
+    "url": "https://api.github.com/repos/ScriptedAlchemy/tracedecay/check-runs/88773147767/annotations?per_page=100",
+    "api_version": "2022-11-28",
+    "documentation": "https://docs.github.com/en/rest/checks/runs#list-check-run-annotations"
+  },
+  "response": [
+    {
+      "path": ".github",
+      "start_line": 801,
+      "end_line": 801,
+      "start_column": null,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": ""
+    }
+  ],
+  "redacted": [
+    {
+      "message": {
+        "sha256": "sha256:527143cc87679147f28a858bb7dc32dbecfb35a8f562730840c8466011016918"
+      },
+      "raw_details": {
+        "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ]
+}

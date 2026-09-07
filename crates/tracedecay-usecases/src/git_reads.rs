@@ -1,0 +1,711 @@
+//! Scope-bound application authority for query read-only Git intelligence.
+//!
+//! The transport supplies an already admitted project/repository/worktree
+//! scope. This owner refuses scope drift before opening the existing typed
+//! [`crate::git_query::GitQueryEngine`]. Missing authority and read failures
+//! remain explicit typed unavailable outcomes.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tracedecay_application::{AuthorizedScopeSet, ResolvedScope};
+use tracedecay_code_index::git_projection::{
+    GitTopologyProjectionStore, git_topology_namespace, git_topology_projection_identity,
+};
+use tracedecay_domain::{
+    ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1, ScopeSetId,
+    ScopeSetRevision, ScopeUnavailableReasonV1,
+};
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1};
+use tracedecay_graph_db::{GraphCancellation, GraphDbError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_store::FactReadControl;
+
+use crate::git_intelligence::NativeGitIntelligence;
+use crate::git_query::{
+    GenerationBoundGitQueryV1, GenerationGitJoinV1, GitQueryBounds, GitQueryEngine,
+    GitQueryEnvelopeV1, GitQueryError,
+};
+use tracedecay_application::git::{
+    GitBlameRequest, GitHistoryRequest, GitHunkPreviewEntryV1, GitHunkPreviewInputV1,
+    GitIntelligenceError, GitReadRequestV1,
+};
+pub use tracedecay_application::historical_query::{
+    HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
+};
+
+// The typed read payload enum is a canonical public wire contract owned by
+// the application crate (`git::public_wire`), shared with SDK schema
+// generation.
+pub use tracedecay_application::git::GitReadResultV1;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitReadUnavailableReasonV1 {
+    AuthorityAbsent,
+    ScopeMismatch,
+    Cancelled,
+    TimedOut,
+    OutputLimitExceeded,
+    ReadFailed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+// Boxing Complete would ripple through admission/match sites; size gap is accepted.
+#[allow(clippy::large_enum_variant)]
+pub enum GitReadOutcomeV1 {
+    Complete {
+        scope: ResolvedScope,
+        result: GitReadResultV1,
+    },
+    Unavailable {
+        reason: GitReadUnavailableReasonV1,
+    },
+}
+
+/// Exact-root Git read adapter used by the federated authority.
+pub trait GitRootReadPort {
+    fn scope(&self) -> &ResolvedScope;
+
+    fn read(&self, request: &GitReadRequestV1, bounds: &GitQueryBounds) -> GitReadOutcomeV1;
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum MultiRootGitMountError {
+    #[error("multi-root Git mount contains an unknown or duplicate root")]
+    RootSetMismatch,
+    #[error("multi-root Git scope set is invalid: {0}")]
+    InvalidScopeSet(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiRootGitReadOutcomeV1 {
+    pub scope_set_id: ScopeSetId,
+    pub scope_set_revision: ScopeSetRevision,
+    pub scope_set_digest: ManifestDigest,
+    pub roots: Vec<RootScopeOutcomeV1<GitReadResultV1>>,
+    pub aggregate: ScopeOutcome<Vec<GitReadResultV1>>,
+}
+
+/// Production-capable Git federation over an immutable authorized scope set.
+/// Missing root adapters remain typed unavailable instead of disappearing.
+pub struct MultiRootGitReadAuthorityV1<P> {
+    scope_set: AuthorizedScopeSet,
+    roots: BTreeMap<ManifestDigest, P>,
+}
+
+impl<P> MultiRootGitReadAuthorityV1<P>
+where
+    P: GitRootReadPort,
+{
+    pub fn new(
+        scope_set: AuthorizedScopeSet,
+        roots: Vec<P>,
+    ) -> Result<Self, MultiRootGitMountError> {
+        scope_set
+            .validate()
+            .map_err(|error| MultiRootGitMountError::InvalidScopeSet(error.to_string()))?;
+        let mut mounted = BTreeMap::new();
+        for root in roots {
+            let scope = root.scope();
+            if !scope_set
+                .roots()
+                .iter()
+                .any(|candidate| candidate.scope() == scope)
+                || mounted.insert(scope.scope_digest.clone(), root).is_some()
+            {
+                return Err(MultiRootGitMountError::RootSetMismatch);
+            }
+        }
+        Ok(Self {
+            scope_set,
+            roots: mounted,
+        })
+    }
+
+    pub fn read(
+        &self,
+        request: &GitReadRequestV1,
+        bounds: &GitQueryBounds,
+    ) -> MultiRootGitReadOutcomeV1 {
+        let mut roots = Vec::with_capacity(self.scope_set.roots().len());
+        let mut values = Vec::new();
+        let mut unavailable = false;
+        for authorized_root in self.scope_set.roots() {
+            let scope = authorized_root.scope();
+            let outcome = self.roots.get(&scope.scope_digest).map_or(
+                ScopeOutcome::Unavailable {
+                    reason: ScopeUnavailableReasonV1::AuthorityUnavailable,
+                },
+                |root| match root.read(request, bounds) {
+                    GitReadOutcomeV1::Complete {
+                        scope: returned_scope,
+                        result,
+                    } if returned_scope == *scope => {
+                        values.push(result.clone());
+                        ScopeOutcome::Exact(result)
+                    }
+                    GitReadOutcomeV1::Complete { .. } => {
+                        unavailable = true;
+                        ScopeOutcome::Unavailable {
+                            reason: ScopeUnavailableReasonV1::AuthorityUnavailable,
+                        }
+                    }
+                    GitReadOutcomeV1::Unavailable { reason } => {
+                        unavailable = true;
+                        ScopeOutcome::Unavailable {
+                            reason: git_unavailable_reason(reason),
+                        }
+                    }
+                },
+            );
+            if matches!(outcome, ScopeOutcome::Unavailable { .. }) {
+                unavailable = true;
+            }
+            roots.push(RootScopeOutcomeV1 {
+                scope_digest: scope.scope_digest.clone(),
+                outcome,
+            });
+        }
+        let aggregate = if unavailable && !values.is_empty() {
+            ScopeOutcome::Partial {
+                value: values,
+                reason: ScopePartialReasonV1::RootUnavailable,
+            }
+        } else if unavailable {
+            ScopeOutcome::Unavailable {
+                reason: ScopeUnavailableReasonV1::AuthorityUnavailable,
+            }
+        } else {
+            ScopeOutcome::Exact(values)
+        };
+        MultiRootGitReadOutcomeV1 {
+            scope_set_id: self.scope_set.scope_set_id().clone(),
+            scope_set_revision: self.scope_set.revision(),
+            scope_set_digest: self.scope_set.digest().clone(),
+            roots,
+            aggregate,
+        }
+    }
+}
+
+fn git_unavailable_reason(reason: GitReadUnavailableReasonV1) -> ScopeUnavailableReasonV1 {
+    match reason {
+        GitReadUnavailableReasonV1::AuthorityAbsent | GitReadUnavailableReasonV1::ScopeMismatch => {
+            ScopeUnavailableReasonV1::AuthorityUnavailable
+        }
+        GitReadUnavailableReasonV1::Cancelled
+        | GitReadUnavailableReasonV1::TimedOut
+        | GitReadUnavailableReasonV1::OutputLimitExceeded
+        | GitReadUnavailableReasonV1::ReadFailed => ScopeUnavailableReasonV1::StoreUnavailable,
+    }
+}
+
+/// One production-mounted read authority for an exact admitted checkout.
+pub struct GitReadAuthorityV1 {
+    project_root: PathBuf,
+    scope: ResolvedScope,
+    project_sessions: Option<RegisteredGlobalDbLeaseV1>,
+}
+
+impl GitReadAuthorityV1 {
+    pub fn new(project_root: impl Into<PathBuf>, scope: ResolvedScope) -> Self {
+        Self {
+            project_root: project_root.into(),
+            scope,
+            project_sessions: None,
+        }
+    }
+
+    pub fn new_with_project_sessions(
+        project_root: impl Into<PathBuf>,
+        scope: ResolvedScope,
+        project_sessions: RegisteredGlobalDbLeaseV1,
+    ) -> Self {
+        Self {
+            project_root: project_root.into(),
+            scope,
+            project_sessions: Some(project_sessions),
+        }
+    }
+
+    pub fn read(
+        &self,
+        selected_scope: &ResolvedScope,
+        request: &GitReadRequestV1,
+        bounds: &GitQueryBounds,
+    ) -> GitReadOutcomeV1 {
+        if selected_scope != &self.scope {
+            return GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::ScopeMismatch,
+            };
+        }
+
+        let adapter = NativeGitIntelligence::new(
+            self.project_root.clone(),
+            self.scope.repository_id.clone(),
+            self.scope.worktree_id.clone(),
+        )
+        .with_execution_bounds(
+            bounds.deadline,
+            bounds.cancel.clone(),
+            usize::try_from(bounds.max_bytes).unwrap_or(usize::MAX),
+        );
+        let engine = GitQueryEngine::new(&adapter);
+        let result = match request {
+            GitReadRequestV1::Status => engine.status_summary(bounds).map(GitReadResultV1::Status),
+            GitReadRequestV1::Diff { scope } => {
+                engine.scoped_diff(bounds, scope).map(GitReadResultV1::Diff)
+            }
+            GitReadRequestV1::History {
+                max_count,
+                path,
+                follow,
+                first_parent,
+            } => engine
+                .bounded_history(
+                    bounds,
+                    &GitHistoryRequest {
+                        max_count: *max_count,
+                        path: path.clone(),
+                        follow: *follow,
+                        first_parent: *first_parent,
+                    },
+                )
+                .map(GitReadResultV1::History),
+            GitReadRequestV1::Blame {
+                path,
+                follow_renames,
+            } => engine
+                .path_blame(
+                    bounds,
+                    &GitBlameRequest {
+                        path: path.clone(),
+                        follow_renames: *follow_renames,
+                    },
+                )
+                .map(GitReadResultV1::Blame),
+            GitReadRequestV1::Hunks {
+                scope,
+                daemon_binding,
+            } => daemon_binding.as_ref().map_or_else(
+                || Err(GitQueryError::DaemonPreviewBindingAbsent),
+                |binding| {
+                    engine
+                        .hunk_refs(
+                            bounds,
+                            scope,
+                            binding.preview_id.as_str(),
+                            &binding.snapshot_digest,
+                        )
+                        .and_then(|envelope| {
+                            let hunks = envelope
+                                .value
+                                .into_iter()
+                                .map(|hunk| {
+                                    let digest = hunk.compute_digest().map_err(|error| {
+                                        GitQueryError::Serialization(error.to_string())
+                                    })?;
+                                    Ok(GitHunkPreviewEntryV1 { digest, hunk })
+                                })
+                                .collect::<Result<Vec<_>, GitQueryError>>()?;
+                            Ok(GitReadResultV1::Hunks(GitQueryEnvelopeV1 {
+                                value: GitHunkPreviewInputV1 {
+                                    preview_input_id: binding.preview_id.clone(),
+                                    repository_snapshot_digest: binding.snapshot_digest.clone(),
+                                    expires_at: binding.expires_at,
+                                    hunks,
+                                },
+                                coverage: envelope.coverage,
+                                truncated_by_bound: envelope.truncated_by_bound,
+                            }))
+                        })
+                },
+            ),
+        };
+
+        match result {
+            Ok(result) => GitReadOutcomeV1::Complete {
+                scope: self.scope.clone(),
+                result,
+            },
+            Err(GitQueryError::Cancelled) => GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::Cancelled,
+            },
+            Err(GitQueryError::DeadlineExceeded) => GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::TimedOut,
+            },
+            Err(GitQueryError::Adapter(GitIntelligenceError::Cancelled)) => {
+                GitReadOutcomeV1::Unavailable {
+                    reason: GitReadUnavailableReasonV1::Cancelled,
+                }
+            }
+            Err(GitQueryError::Adapter(GitIntelligenceError::DeadlineExceeded)) => {
+                GitReadOutcomeV1::Unavailable {
+                    reason: GitReadUnavailableReasonV1::TimedOut,
+                }
+            }
+            Err(GitQueryError::Adapter(GitIntelligenceError::OutputLimitExceeded { .. }))
+            | Err(GitQueryError::ByteBoundExceeded { .. }) => GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::OutputLimitExceeded,
+            },
+            Err(_) => GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::ReadFailed,
+            },
+        }
+    }
+
+    pub fn join_generation(
+        &self,
+        selected_scope: &ResolvedScope,
+        bounds: &GitQueryBounds,
+        query: &GenerationBoundGitQueryV1,
+    ) -> Result<GenerationGitJoinV1, GitQueryError> {
+        if selected_scope != &self.scope {
+            return Err(GitQueryError::TopologyUnavailable(
+                "selected scope does not match the mounted Git topology".to_owned(),
+            ));
+        }
+        bounds.check()?;
+        let database = self.project_sessions.as_ref().ok_or_else(|| {
+            GitQueryError::TopologyUnavailable(
+                "project sessions graph runtime was not mounted".to_owned(),
+            )
+        })?;
+        let runtime = database.project_graph_runtime().ok_or_else(|| {
+            GitQueryError::TopologyUnavailable(
+                "project sessions graph runtime is unavailable".to_owned(),
+            )
+        })?;
+        let identity = git_topology_projection_identity(
+            git_topology_namespace(&self.scope.repository_id)
+                .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?,
+        )
+        .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?;
+        let read_cancelled = bounds.cancel.clone();
+        let snapshot = runtime
+            .verified_snapshot(
+                &identity,
+                FactReadControl::new(Arc::new(move || {
+                    read_cancelled
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                })),
+            )
+            .map_err(map_graph_runtime_error)?
+            .ok_or_else(|| {
+                // The Git topology join needs a projected history; a topology
+                // that has never published is unavailable, not empty.
+                GitQueryError::TopologyUnavailable(
+                    "git topology projection has not published a verified head".to_owned(),
+                )
+            })?;
+        bounds.check()?;
+        let topology = GitTopologyProjectionStore::from_verified_snapshot_verified(
+            snapshot,
+            Arc::new(ReadGraphCancellation {
+                cancelled: bounds.cancel.clone(),
+            }),
+        )
+        .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?;
+        let adapter = NativeGitIntelligence::new(
+            self.project_root.clone(),
+            self.scope.repository_id.clone(),
+            self.scope.worktree_id.clone(),
+        );
+        GitQueryEngine::with_topology(&adapter, &topology).join_generation(bounds, query)
+    }
+}
+
+struct ReadGraphCancellation {
+    cancelled: Option<CancellationToken>,
+}
+
+impl GraphCancellation for ReadGraphCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+    }
+}
+
+fn map_graph_runtime_error(error: GraphDbError) -> GitQueryError {
+    match error {
+        GraphDbError::Cancelled => GitQueryError::Cancelled,
+        GraphDbError::DeadlineExceeded => GitQueryError::DeadlineExceeded,
+        error => GitQueryError::TopologyUnavailable(error.to_string()),
+    }
+}
+
+impl GitRootReadPort for GitReadAuthorityV1 {
+    fn scope(&self) -> &ResolvedScope {
+        &self.scope
+    }
+
+    fn read(&self, request: &GitReadRequestV1, bounds: &GitQueryBounds) -> GitReadOutcomeV1 {
+        GitReadAuthorityV1::read(self, &self.scope, request, bounds)
+    }
+}
+
+#[hotpath::measure(label = "usecases.git.execute_read")]
+pub fn execute_git_read(
+    authority: Option<&GitReadAuthorityV1>,
+    selected_scope: &ResolvedScope,
+    request: &GitReadRequestV1,
+    bounds: &GitQueryBounds,
+) -> GitReadOutcomeV1 {
+    match authority {
+        Some(authority) => authority.read(selected_scope, request, bounds),
+        None => GitReadOutcomeV1::Unavailable {
+            reason: GitReadUnavailableReasonV1::AuthorityAbsent,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
+
+    use tempfile::TempDir;
+    use tracedecay_application::git::DaemonGitHunkPreviewBindingV1;
+    use tracedecay_application::{
+        AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantId,
+        CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
+    };
+    use tracedecay_domain::{
+        ActorId, GitCoverageV1, GitIndexPreviewId, ProjectId, RepositoryId, ScopeOutcome,
+        ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId,
+    };
+    use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    use super::*;
+
+    fn scope(suffix: &str) -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new(format!("project.{suffix}")).expect("project"),
+            RepositoryId::new(format!("repository.{suffix}")).expect("repository"),
+            WorktreeId::new(format!("worktree.{suffix}")).expect("worktree"),
+            None,
+        )
+        .expect("scope")
+    }
+
+    fn request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {
+        let capability = CapabilityId::new("capability.application.git.status").unwrap();
+        let use_case = UseCaseId::new("use-case.application.git.status").unwrap();
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!("grant.git.{suffix}")).unwrap(),
+            1,
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            ActorId::new("actor.issuer").unwrap(),
+            UtcMicros(1),
+            UtcMicros(1_000),
+            scope.clone(),
+            BTreeSet::from([capability]),
+            BTreeSet::from([use_case]),
+            DisclosureClass::Evidence,
+        )
+        .unwrap();
+        RequestContext::new(
+            ActorId::new("actor.requester").unwrap(),
+            scope,
+            grant,
+            RequestId::new(format!("request.git.{suffix}")).unwrap(),
+            Deadline::new(UtcMicros(900)).unwrap(),
+            CancellationContext::active(format!("cancel.git.{suffix}")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    struct FakeGitRoot {
+        scope: ResolvedScope,
+    }
+
+    impl GitRootReadPort for FakeGitRoot {
+        fn scope(&self) -> &ResolvedScope {
+            &self.scope
+        }
+
+        fn read(&self, _request: &GitReadRequestV1, _bounds: &GitQueryBounds) -> GitReadOutcomeV1 {
+            GitReadOutcomeV1::Complete {
+                scope: self.scope.clone(),
+                result: GitReadResultV1::Hunks(GitQueryEnvelopeV1 {
+                    value: GitHunkPreviewInputV1 {
+                        preview_input_id: GitIndexPreviewId::new("preview.test").unwrap(),
+                        repository_snapshot_digest: ManifestDigest::new(format!(
+                            "sha256:{}",
+                            "a".repeat(64)
+                        ))
+                        .unwrap(),
+                        expires_at: UtcMicros(10),
+                        hunks: Vec::new(),
+                    },
+                    coverage: GitCoverageV1::complete(),
+                    truncated_by_bound: false,
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn absent_authority_is_typed_unavailable() {
+        assert_eq!(
+            execute_git_read(
+                None,
+                &scope("selected"),
+                &GitReadRequestV1::Status,
+                &GitQueryBounds::default(),
+            ),
+            GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::AuthorityAbsent,
+            }
+        );
+    }
+
+    #[test]
+    fn hunk_request_wire_never_accepts_or_exposes_daemon_preview_binding() {
+        let request = GitReadRequestV1::Hunks {
+            scope: tracedecay_domain::GitDiffScopeV1::Staged,
+            daemon_binding: Some(DaemonGitHunkPreviewBindingV1 {
+                preview_id: GitIndexPreviewId::new("preview.private").unwrap(),
+                snapshot_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+                expires_at: UtcMicros(30),
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"query": "hunks", "scope": {"scope": "staged"}})
+        );
+        let decoded: GitReadRequestV1 = serde_json::from_value(
+            serde_json::json!({"query": "hunks", "scope": {"scope": "staged"}}),
+        )
+        .unwrap();
+        assert!(matches!(
+            decoded,
+            GitReadRequestV1::Hunks {
+                daemon_binding: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn authority_refuses_a_different_project_worktree_scope_before_reading() {
+        let root = TempDir::new().expect("tempdir");
+        let authority = GitReadAuthorityV1::new(root.path(), scope("mounted"));
+
+        assert_eq!(
+            execute_git_read(
+                Some(&authority),
+                &scope("other"),
+                &GitReadRequestV1::Status,
+                &GitQueryBounds::default(),
+            ),
+            GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::ScopeMismatch,
+            }
+        );
+    }
+
+    #[test]
+    fn cancellation_and_deadline_are_distinct_typed_unavailable_outcomes() {
+        let root = TempDir::new().expect("tempdir");
+        let scope = scope("mounted");
+        let authority = GitReadAuthorityV1::new(root.path(), scope.clone());
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancelled = GitQueryBounds {
+            cancel: Some(cancellation),
+            ..GitQueryBounds::default()
+        };
+        let timed_out = GitQueryBounds {
+            deadline: Some(
+                Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap(),
+            ),
+            ..GitQueryBounds::default()
+        };
+
+        assert_eq!(
+            authority.read(&scope, &GitReadRequestV1::Status, &cancelled),
+            GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::Cancelled,
+            }
+        );
+        assert_eq!(
+            authority.read(&scope, &GitReadRequestV1::Status, &timed_out),
+            GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::TimedOut,
+            }
+        );
+    }
+
+    #[test]
+    fn subprocess_output_bound_is_a_distinct_typed_unavailable_outcome() {
+        let root = TempDir::new().expect("tempdir");
+        let initialized = std::process::Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .args(["init", "--quiet"])
+        .current_dir(root.path())
+        .status()
+        .expect("initialize git fixture");
+        assert!(initialized.success());
+        let scope = scope("output-bound");
+        let authority = GitReadAuthorityV1::new(root.path(), scope.clone());
+        let bounds = GitQueryBounds {
+            max_bytes: 1,
+            ..GitQueryBounds::default()
+        };
+
+        assert_eq!(
+            authority.read(&scope, &GitReadRequestV1::Status, &bounds),
+            GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::OutputLimitExceeded,
+            }
+        );
+    }
+
+    #[test]
+    fn multi_root_git_read_preserves_an_unmounted_root_as_partial() {
+        let main = scope("main");
+        let linked = scope("linked");
+        let contexts = vec![
+            request_context(main.clone(), "main"),
+            request_context(linked.clone(), "linked"),
+        ];
+        let scope_set = AuthorizedScopeSetAuthority::authorize(
+            ScopeSetId::new("scope-set.git").unwrap(),
+            ScopeSetRevision::new(1).unwrap(),
+            contexts,
+            &CapabilityId::new("capability.application.git.status").unwrap(),
+            &UseCaseId::new("use-case.application.git.status").unwrap(),
+            UtcMicros(10),
+        )
+        .unwrap();
+        let authority =
+            MultiRootGitReadAuthorityV1::new(scope_set, vec![FakeGitRoot { scope: main }]).unwrap();
+
+        let result = authority.read(&GitReadRequestV1::Status, &GitQueryBounds::default());
+
+        assert!(matches!(result.aggregate, ScopeOutcome::Partial { .. }));
+        assert_eq!(result.roots.len(), 2);
+        assert_eq!(
+            result
+                .roots
+                .iter()
+                .filter(|root| matches!(&root.outcome, ScopeOutcome::Unavailable { .. }))
+                .count(),
+            1
+        );
+    }
+}

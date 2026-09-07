@@ -1,21 +1,20 @@
-//! Code graph dashboard API, backed by tracedecay's indexed graph tables.
+//! Code graph dashboard API over the daemon/application graph read authority.
 //!
-//! The explorer reads the resolved project graph `nodes`, `edges`, and
-//! `files` tables directly and returns compact payloads suitable for search,
-//! inspection, progressive subgraph expansion, and shortest-path queries.
-//! Every endpoint is bounded: subgraphs cap node/edge counts, search is
-//! paginated, and the path BFS caps depth and visited-set size, so responses
-//! stay interactive even on graphs with tens of thousands of nodes.
+//! Every result is bound to one exact recovered-state-verified generation.
+//! The adapter receives no graph store path, connection, or query handle.
 
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{Extension, State};
 use axum::response::Json;
 use serde::Deserialize;
-use serde_json::Value;
 
-use super::DashboardState;
 use super::graph_service;
-use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
+use super::read_model::{
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
+    DashboardVersionV1, scope_from_state,
+};
+use super::util::{JsonPath, JsonQuery, coerce_limit};
+use super::{DashboardHttpRequestControlV1, DashboardState};
+use crate::graph::CodeGraphReadError;
 
 #[derive(Deserialize)]
 pub struct SearchParams {
@@ -49,51 +48,113 @@ pub struct PathParams {
 }
 
 /// `GET /api/plugins/graph/overview`
-pub async fn overview(State(state): State<DashboardState>) -> Json<Value> {
-    Json(graph_service::overview_payload(&state).await)
+pub async fn overview(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphOverviewPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+            };
+            graph_response(
+                &state,
+                graph_service::overview_payload(&state, &control).await,
+            )
+        },
+        label = "dashboard_api.graph.overview"
+    )
+    .await
 }
 
 /// `GET /api/plugins/graph/search?q=...&limit=50&offset=0`
 pub async fn search(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SearchParams>,
-) -> Json<Value> {
-    let limit = coerce_limit(params.limit, 50, 200);
-    let offset = params.offset.unwrap_or(0).max(0);
-    Json(graph_service::search_payload(&state, params.q.trim(), limit, offset).await)
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let limit = coerce_limit(params.limit, 50, 200);
+            let offset = params.offset.unwrap_or(0).max(0);
+            let Some(Extension(control)) = control else {
+                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+            };
+            graph_response(
+                &state,
+                graph_service::search_payload(&state, &control, params.q.trim(), limit, offset)
+                    .await,
+            )
+        },
+        label = "dashboard_api.graph.search"
+    )
+    .await
 }
 
 /// `GET /api/plugins/graph/node/{node_id}`
 pub async fn node(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
-) -> (StatusCode, Json<Value>) {
-    let Some(payload) = graph_service::node_payload(&state, &node_id).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("node not found: {node_id}"))),
-        );
-    };
-    (StatusCode::OK, Json(payload))
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNodePayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let Some(Extension(control)) = control else {
+                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+            };
+            match graph_service::node_payload(&state, &control, &node_id).await {
+                Ok(read) if read.payload.is_some() => {
+                    graph_ready(&state, read.payload, read.generation, read.freshness)
+                }
+                Ok(read) => {
+                    let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
+                        scope_from_state(&state),
+                        DashboardCoverageV1::complete(1, "nodes"),
+                        None,
+                    );
+                    envelope.freshness = graph_service::graph_envelope_freshness(read.freshness);
+                    Json(envelope.with_version(graph_version(read.generation)))
+                }
+                Err(error) => graph_read_failed(&state, error),
+            }
+        },
+        label = "dashboard_api.graph.node"
+    )
+    .await
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/neighbors`
 pub async fn neighbors(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<NeighborParams>,
-) -> (StatusCode, Json<Value>) {
-    if !graph_service::node_exists(&state, &node_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("node not found: {node_id}"))),
-        );
-    }
-    let limit = coerce_limit(params.limit, 50, 200);
-    (
-        StatusCode::OK,
-        Json(graph_service::neighbors_payload(&state, &node_id, limit).await),
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNeighborsPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let limit = coerce_limit(params.limit, 50, 200);
+            let Some(Extension(control)) = control else {
+                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+            };
+            match graph_service::neighbors_payload(&state, &control, &node_id, limit).await {
+                Ok(read) if read.payload.is_some() => {
+                    graph_ready(&state, read.payload, read.generation, read.freshness)
+                }
+                Ok(read) => {
+                    let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
+                        scope_from_state(&state),
+                        DashboardCoverageV1::complete(1, "nodes"),
+                        None,
+                    );
+                    envelope.freshness = graph_service::graph_envelope_freshness(read.freshness);
+                    Json(envelope.with_version(graph_version(read.generation)))
+                }
+                Err(error) => graph_read_failed(&state, error),
+            }
+        },
+        label = "dashboard_api.graph.neighbors"
     )
+    .await
 }
 
 /// `GET /api/plugins/graph/subgraph?node_id=...&limit_nodes=80&limit_edges=120`
@@ -104,27 +165,136 @@ pub async fn neighbors(
 /// instead: top-degree hubs plus the edges among them.
 pub async fn subgraph(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SubgraphParams>,
-) -> Json<Value> {
-    let node_limit = coerce_limit(params.limit_nodes, 80, 250);
-    let edge_limit = coerce_limit(params.limit_edges, 120, 500);
-    Json(
-        graph_service::subgraph_payload(
-            &state,
-            params.node_id,
-            params.q.trim(),
-            node_limit,
-            edge_limit,
-        )
-        .await,
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSubgraphPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let node_limit = coerce_limit(params.limit_nodes, 80, 250);
+            let edge_limit = coerce_limit(params.limit_edges, 120, 500);
+            let Some(Extension(control)) = control else {
+                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+            };
+            graph_response(
+                &state,
+                graph_service::subgraph_payload(
+                    &state,
+                    &control,
+                    params.node_id,
+                    params.q.trim(),
+                    node_limit,
+                    edge_limit,
+                )
+                .await,
+            )
+        },
+        label = "dashboard_api.graph.subgraph"
     )
+    .await
 }
 
 /// `GET /api/plugins/graph/path?from=<id>&to=<id>&max_depth=6`
 pub async fn path(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<PathParams>,
-) -> Json<Value> {
-    let max_depth = coerce_limit(params.max_depth, 6, 10);
-    Json(graph_service::path_payload(&state, params.from.trim(), params.to.trim(), max_depth).await)
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphPathPayloadV1>>> {
+    hotpath::future!(
+        async move {
+            let max_depth = coerce_limit(params.max_depth, 6, 10);
+            let Some(Extension(control)) = control else {
+                return graph_read_failed(&state, CodeGraphReadError::MissingRegistry);
+            };
+            graph_response(
+                &state,
+                graph_service::path_payload(
+                    &state,
+                    &control,
+                    params.from.trim(),
+                    params.to.trim(),
+                    max_depth,
+                )
+                .await,
+            )
+        },
+        label = "dashboard_api.graph.path"
+    )
+    .await
+}
+
+fn graph_response<T>(
+    state: &DashboardState,
+    result: Result<graph_service::GraphServiceReadV1<T>, CodeGraphReadError>,
+) -> Json<DashboardEnvelopeV1<Option<T>>> {
+    match result {
+        Ok(read) => graph_ready(state, Some(read.payload), read.generation, read.freshness),
+        Err(error) => graph_read_failed(state, error),
+    }
+}
+
+fn graph_ready<T>(
+    state: &DashboardState,
+    payload: Option<T>,
+    generation: String,
+    freshness: crate::graph::CodeGraphReadFreshnessV1,
+) -> Json<DashboardEnvelopeV1<Option<T>>> {
+    // A last-complete stale serve keeps the payload complete for the served
+    // generation but must not present itself as fresh (see
+    // `graph_service::graph_envelope_freshness`).
+    let mut envelope = DashboardEnvelopeV1::ready(
+        scope_from_state(state),
+        DashboardCoverageV1::unknown(),
+        payload,
+    );
+    envelope.freshness = graph_service::graph_envelope_freshness(freshness);
+    Json(envelope.with_version(graph_version(generation)))
+}
+
+fn graph_read_failed<T>(
+    state: &DashboardState,
+    error: CodeGraphReadError,
+) -> Json<DashboardEnvelopeV1<Option<T>>> {
+    let scope = scope_from_state(state);
+    let envelope = match error {
+        CodeGraphReadError::MissingRegistry => {
+            DashboardEnvelopeV1::unavailable(scope, None, "missing_registry")
+        }
+        CodeGraphReadError::Unavailable { detail } => {
+            DashboardEnvelopeV1::unavailable(scope, None, detail)
+        }
+        CodeGraphReadError::Stale { detail } => {
+            let mut coverage = DashboardCoverageV1::unknown();
+            coverage.omission_reasons.push(detail);
+            DashboardEnvelopeV1::stale(scope, coverage, None)
+        }
+        CodeGraphReadError::Cancelled => DashboardEnvelopeV1::new(
+            scope,
+            DashboardDomainStateV1::Cancelled,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
+            None,
+        ),
+        CodeGraphReadError::TimedOut => DashboardEnvelopeV1::new(
+            scope,
+            DashboardDomainStateV1::TimedOut,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
+            None,
+        ),
+        CodeGraphReadError::Denied => DashboardEnvelopeV1::denied(scope, None),
+        CodeGraphReadError::InvalidRequest { detail }
+        | CodeGraphReadError::Corrupt { detail }
+        | CodeGraphReadError::ResetRequired { detail }
+        | CodeGraphReadError::BudgetExhausted { detail } => {
+            DashboardEnvelopeV1::error(scope, None, detail)
+        }
+    };
+    Json(envelope)
+}
+
+fn graph_version(generation: String) -> DashboardVersionV1 {
+    DashboardVersionV1 {
+        entity_version: None,
+        graph_version: Some(generation),
+    }
 }

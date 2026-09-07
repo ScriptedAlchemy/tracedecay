@@ -1,0 +1,1121 @@
+//! Session-temporal Doctor health lane.
+//!
+//! Diagnosis is production-mounted and strictly read-only. Recovery belongs to
+//! separately admitted storage operations, never to Doctor.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::db::engine::Error as EngineError;
+
+use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
+
+mod relation_health;
+
+const MAX_FINDING_COUNT: u64 = 1_000_000;
+const SQLITE_CORRUPT_VTAB: i32 = 267;
+const SESSION_TEMPORAL_HEALTH_CACHE_TTL: Duration = Duration::from_secs(2);
+const MAX_CACHED_SESSION_TEMPORAL_STORES: usize = 64;
+const MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionTemporalStoreFileFingerprint {
+    bytes: u64,
+    modified_nanos: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionTemporalStoreFingerprint {
+    database: SessionTemporalStoreFileFingerprint,
+    wal: Option<SessionTemporalStoreFileFingerprint>,
+}
+
+#[derive(Clone)]
+struct CachedSessionTemporalHealth {
+    fingerprint: SessionTemporalStoreFingerprint,
+    observed_at: Instant,
+    report: SessionTemporalHealthReport,
+}
+
+#[cfg(feature = "hotpath")]
+type SessionDoctorCacheLock<T> = hotpath::mutexes::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type SessionDoctorCacheLock<T> = Mutex<T>;
+
+#[cfg(feature = "hotpath")]
+type SessionDoctorLaneLock<T> = hotpath::wrap::tokio::sync::Mutex<T>;
+#[cfg(not(feature = "hotpath"))]
+type SessionDoctorLaneLock<T> = tokio::sync::Mutex<T>;
+
+type SessionTemporalHealthCacheCell =
+    Arc<SessionDoctorLaneLock<Option<CachedSessionTemporalHealth>>>;
+
+static SESSION_TEMPORAL_HEALTH_CACHE: OnceLock<
+    SessionDoctorCacheLock<HashMap<PathBuf, SessionTemporalHealthCacheCell>>,
+> = OnceLock::new();
+
+fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCacheCell {
+    let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| {
+        hotpath::mutex!(
+            Mutex::new(HashMap::new()),
+            label = "session_temporal.doctor.cache"
+        )
+    });
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !cache.contains_key(path)
+        && cache.len() >= MAX_CACHED_SESSION_TEMPORAL_STORES
+        && let Some(evict) = cache
+            .iter()
+            .find(|(_, cell)| Arc::strong_count(cell) == 1)
+            .map(|(path, _)| path.clone())
+    {
+        cache.remove(&evict);
+    }
+    Arc::clone(cache.entry(path.to_path_buf()).or_insert_with(|| {
+        Arc::new(hotpath::mutex!(
+            tokio::sync::Mutex::new(None),
+            label = "session_temporal.doctor.lane"
+        ))
+    }))
+}
+
+fn store_file_fingerprint(
+    path: &Path,
+) -> std::io::Result<Option<SessionTemporalStoreFileFingerprint>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(SessionTemporalStoreFileFingerprint {
+            bytes: metadata.len(),
+            modified_nanos: metadata
+                .modified()?
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn session_temporal_store_fingerprint(
+    database_path: &Path,
+) -> std::io::Result<SessionTemporalStoreFingerprint> {
+    hotpath::measure_block!("session_temporal.doctor.fingerprint", {
+        let Some(database) = store_file_fingerprint(database_path)? else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "session temporal database is absent",
+            ));
+        };
+        let mut wal_path = database_path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        Ok(SessionTemporalStoreFingerprint {
+            database,
+            wal: store_file_fingerprint(&PathBuf::from(wal_path))?,
+        })
+    })
+}
+
+fn session_temporal_store_family_bytes(database_path: &Path) -> std::io::Result<u64> {
+    hotpath::measure_block!("session_temporal.doctor.stat", {
+        let database = std::fs::metadata(database_path)?.len();
+        let mut wal_path = database_path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        match std::fs::metadata(PathBuf::from(wal_path)) {
+            Ok(wal) => database.checked_add(wal.len()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session temporal store size overflowed",
+                )
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(database),
+            Err(error) => Err(error),
+        }
+    })
+}
+
+fn permits_synchronous_session_temporal_health(database_path: &Path) -> bool {
+    session_temporal_store_family_bytes(database_path)
+        .is_ok_and(|bytes| bytes <= MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
+}
+
+// Occurrence and summary FTS integrity share the same content/docsize
+// EXCEPT + probe-token shape; only the table names differ.
+macro_rules! fts_integrity_check_sql {
+    ($content:literal, $fts:literal, $docsize:literal) => {
+        concat!(
+            "SELECT
+    (SELECT COUNT(*) FROM (
+        SELECT rowid AS id FROM ",
+            $content,
+            "
+        EXCEPT SELECT id FROM ",
+            $docsize,
+            "
+        LIMIT 1000001
+    ))
+    + (SELECT COUNT(*) FROM (
+        SELECT id FROM ",
+            $docsize,
+            "
+        EXCEPT SELECT rowid AS id FROM ",
+            $content,
+            "
+        LIMIT 1000001
+    ))
+    + COALESCE((
+        SELECT 0 FROM ",
+            $fts,
+            "
+        WHERE ",
+            $fts,
+            " MATCH 'tracedecay_health_probe_token'
+        LIMIT 1
+    ), 0)"
+        )
+    };
+}
+
+const OCCURRENCE_FTS_CHECK_SQL: &str = fts_integrity_check_sql!(
+    "session_occurrences",
+    "session_occurrences_fts",
+    "session_occurrences_fts_docsize"
+);
+const SUMMARY_FTS_CHECK_SQL: &str = fts_integrity_check_sql!(
+    "session_summary_nodes",
+    "session_summary_nodes_fts",
+    "session_summary_nodes_fts_docsize"
+);
+
+const REQUIRED_BASE_TABLES: &[&str] = &[
+    "lcm_summary_nodes",
+    "lcm_summary_sources",
+    "observations",
+    "retrieval_anchors",
+    "sanitization_receipts",
+];
+
+const REQUIRED_FTS_SHADOW_TABLES: &[&str] = &[
+    "session_occurrences_fts_docsize",
+    "session_summary_nodes_fts_docsize",
+];
+
+fn required_table_names() -> impl Iterator<Item = &'static str> {
+    REQUIRED_BASE_TABLES
+        .iter()
+        .copied()
+        .chain(TEMPORAL_TABLE_COLUMNS.iter().map(|(table, _)| *table))
+        .chain(REQUIRED_FTS_SHADOW_TABLES.iter().copied())
+}
+
+const REQUIRED_INDEXES: &[&str] = &[
+    "idx_session_assertion_supersession_successor",
+    "idx_session_assertions_generation_order",
+    "idx_session_assertions_kind_order",
+    "idx_session_assertions_object_order",
+    "idx_session_assertions_subject",
+    "idx_session_current_entities_assertion",
+    "idx_session_current_entities_occurrence",
+    "idx_session_external_payload_manifests_session",
+    "idx_session_occurrences_agent",
+    "idx_session_occurrences_anchor_order",
+    "idx_session_occurrences_generation_order",
+    "idx_session_occurrences_message",
+    "idx_session_occurrences_root_generation_order",
+    "idx_session_occurrences_session_time",
+    "idx_session_occurrences_thread",
+    "idx_session_occurrences_turn",
+    "idx_session_query_cursor_keys_active",
+    "idx_session_refresh_operations_join",
+    "idx_session_refresh_operations_one_running",
+    "idx_session_refresh_operations_state",
+    "idx_session_refresh_receipts_session",
+    "idx_session_summary_availability_generation",
+    "idx_session_summary_nodes_root_created_order",
+    "idx_session_summary_nodes_session_created",
+    "idx_session_temporal_generations_one_active",
+    "idx_session_temporal_generations_session_state",
+    "idx_session_temporal_observation_effects_session",
+    "idx_session_turn_members_occurrence",
+];
+
+const REQUIRED_TRIGGERS: &[(&str, &str)] = &[
+    (
+        "session_occurrences_fts_insert_v1",
+        "CREATE TRIGGER session_occurrences_fts_insert_v1
+         AFTER INSERT ON session_occurrences BEGIN
+             INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
+             VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+         END",
+    ),
+    (
+        "session_occurrences_fts_delete_v1",
+        "CREATE TRIGGER session_occurrences_fts_delete_v1
+         AFTER DELETE ON session_occurrences BEGIN
+             INSERT INTO session_occurrences_fts(
+                 session_occurrences_fts, rowid, index_text, snippet_text
+             )
+             VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
+         END",
+    ),
+    (
+        "session_occurrences_fts_update_v1",
+        "CREATE TRIGGER session_occurrences_fts_update_v1
+         AFTER UPDATE OF index_text, snippet_text ON session_occurrences BEGIN
+             INSERT INTO session_occurrences_fts(
+                 session_occurrences_fts, rowid, index_text, snippet_text
+             )
+             VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
+             INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
+             VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+         END",
+    ),
+    (
+        "session_summary_nodes_fts_insert_v1",
+        "CREATE TRIGGER session_summary_nodes_fts_insert_v1
+         AFTER INSERT ON session_summary_nodes BEGIN
+             INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
+             VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+         END",
+    ),
+    (
+        "session_summary_nodes_fts_delete_v1",
+        "CREATE TRIGGER session_summary_nodes_fts_delete_v1
+         AFTER DELETE ON session_summary_nodes BEGIN
+             INSERT INTO session_summary_nodes_fts(
+                 session_summary_nodes_fts, rowid, summary_text, index_text
+             )
+             VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
+         END",
+    ),
+    (
+        "session_summary_nodes_fts_update_v1",
+        "CREATE TRIGGER session_summary_nodes_fts_update_v1
+         AFTER UPDATE OF summary_text, index_text ON session_summary_nodes BEGIN
+             INSERT INTO session_summary_nodes_fts(
+                 session_summary_nodes_fts, rowid, summary_text, index_text
+             )
+             VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
+             INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
+             VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+         END",
+    ),
+];
+
+const CHECKS: &[HealthCheck] = &[
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::OccurrenceFtsCorruption,
+        tables: &[
+            "session_occurrences",
+            "session_occurrences_fts",
+            "session_occurrences_fts_docsize",
+        ],
+        sql: OCCURRENCE_FTS_CHECK_SQL,
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::SummaryFtsCorruption,
+        tables: &[
+            "session_summary_nodes",
+            "session_summary_nodes_fts",
+            "session_summary_nodes_fts_docsize",
+        ],
+        sql: SUMMARY_FTS_CHECK_SQL,
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::MissingAnchor,
+        tables: &[
+            "retrieval_anchors",
+            "session_assertions",
+            "session_occurrences",
+            "session_summary_nodes",
+        ],
+        sql: "SELECT
+            (SELECT COUNT(*) FROM session_summary_nodes AS node
+             LEFT JOIN retrieval_anchors AS anchor
+               ON anchor.anchor_id = node.summary_anchor_id
+             WHERE anchor.anchor_id IS NULL)
+            + (SELECT COUNT(*) FROM session_occurrences AS occurrence
+               LEFT JOIN retrieval_anchors AS anchor
+                 ON anchor.anchor_id = occurrence.retrieval_anchor_id
+               WHERE anchor.anchor_id IS NULL)
+            + (SELECT COUNT(*) FROM session_assertions AS assertion
+               LEFT JOIN retrieval_anchors AS subject
+                 ON subject.anchor_id = assertion.subject_anchor_id
+               LEFT JOIN retrieval_anchors AS object
+                 ON object.anchor_id = assertion.object_anchor_id
+               WHERE subject.anchor_id IS NULL OR object.anchor_id IS NULL)",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::MissingReceipt,
+        tables: &[
+            "sanitization_receipts",
+            "session_external_payload_manifests",
+            "session_refresh_batch_bindings",
+            "session_summary_nodes",
+            "session_temporal_observation_effects",
+            "session_temporal_projection_receipts",
+        ],
+        sql: "SELECT
+            (SELECT COUNT(*) FROM session_external_payload_manifests AS manifest
+             LEFT JOIN sanitization_receipts AS receipt
+               ON receipt.receipt_id = manifest.receipt_id
+             WHERE receipt.receipt_id IS NULL)
+            + (SELECT COUNT(*) FROM session_temporal_observation_effects AS effect
+               LEFT JOIN sanitization_receipts AS receipt
+                 ON receipt.receipt_id = effect.receipt_id
+               WHERE receipt.receipt_id IS NULL)
+            + (SELECT COUNT(*) FROM session_summary_nodes AS summary
+               LEFT JOIN sanitization_receipts AS receipt
+                 ON receipt.receipt_id = json_extract(summary.publication_json, '$.receipt_id')
+               WHERE summary.publication_json IS NULL OR receipt.receipt_id IS NULL)
+            + (SELECT COUNT(*) FROM session_refresh_batch_bindings AS binding
+               LEFT JOIN session_temporal_projection_receipts AS receipt
+                 ON receipt.session_id = binding.session_id
+                AND receipt.generation = binding.generation
+                AND receipt.batch_ordinal = binding.batch_ordinal
+               WHERE receipt.session_id IS NULL)",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::InvalidGeneration,
+        tables: &["session_temporal_generations"],
+        sql: "SELECT COUNT(*) FROM session_temporal_generations
+            WHERE generation <= 0
+               OR json_valid(frozen_watermarks_json) = 0
+               OR CASE WHEN json_valid(frozen_watermarks_json) = 1 THEN (
+                    json_type(frozen_watermarks_json, '$.active_generation') IS NOT 'integer'
+                    OR CAST(json_extract(
+                        frozen_watermarks_json, '$.active_generation'
+                    ) AS INTEGER) <= 0
+                    OR CAST(json_extract(
+                        frozen_watermarks_json, '$.active_generation'
+                    ) AS INTEGER) > generation
+                    OR json_type(
+                        frozen_watermarks_json, '$.source_frontier'
+                    ) IS NOT 'integer'
+                    OR CAST(json_extract(
+                        frozen_watermarks_json, '$.source_frontier'
+                    ) AS INTEGER) < 0
+                    OR json_type(
+                        frozen_watermarks_json, '$.projection_frontier'
+                    ) IS NOT 'integer'
+                    OR CAST(json_extract(
+                        frozen_watermarks_json, '$.projection_frontier'
+                    ) AS INTEGER) < 0
+                    OR json_type(
+                        frozen_watermarks_json, '$.summary_frontier'
+                    ) IS NOT 'integer'
+                    OR CAST(json_extract(
+                        frozen_watermarks_json, '$.summary_frontier'
+                    ) AS INTEGER) < 0
+                    OR NOT (
+                         (state = 'building' AND ready_at IS NULL
+                              AND activated_at IS NULL AND completed_at IS NULL)
+                      OR (state = 'ready' AND ready_at IS NOT NULL
+                              AND activated_at IS NULL AND completed_at IS NULL)
+                      OR (state = 'active' AND ready_at IS NOT NULL
+                              AND activated_at IS NOT NULL AND completed_at IS NULL)
+                      OR (state = 'superseded' AND ready_at IS NOT NULL
+                              AND activated_at IS NOT NULL AND completed_at IS NOT NULL)
+                      OR (state IN ('failed', 'cancelled') AND completed_at IS NOT NULL)
+                    )
+               ) ELSE 0 END",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::MultiActiveGeneration,
+        tables: &["session_temporal_generations"],
+        sql: "SELECT COUNT(*) FROM (
+                SELECT session_id
+                FROM session_temporal_generations
+                WHERE state = 'active'
+                GROUP BY session_id
+                HAVING COUNT(*) > 1
+            )",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::CursorChainAbsent,
+        tables: &["session_query_cursor_keys", "session_temporal_generations"],
+        sql: "SELECT
+            (SELECT COUNT(*) FROM session_query_cursor_keys AS key
+             WHERE key.key_version > 1
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_query_cursor_keys AS predecessor
+                   WHERE predecessor.key_version = key.key_version - 1
+               ))
+            + (SELECT CASE
+                 WHEN EXISTS(
+                     SELECT 1 FROM session_temporal_generations
+                     WHERE state = 'active'
+                 ) AND (
+                     SELECT COUNT(*) FROM session_query_cursor_keys
+                     WHERE retired_at IS NULL
+                 ) <> 1
+                 THEN 1 ELSE 0 END)",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::CursorKeyAbsent,
+        tables: &["session_query_cursor_keys", "session_temporal_generations"],
+        sql: "SELECT COUNT(*)
+            FROM session_temporal_generations AS generation
+            LEFT JOIN session_query_cursor_keys AS key
+              ON key.key_id = json_extract(
+                    generation.frozen_watermarks_json, '$.cursor_key.key_id'
+                 )
+             AND key.key_version = CAST(json_extract(
+                    generation.frozen_watermarks_json, '$.cursor_key.version'
+                 ) AS INTEGER)
+             AND key.retired_at IS NULL
+            WHERE generation.state = 'active'
+              AND (
+                  json_type(generation.frozen_watermarks_json, '$.cursor_key') IS NOT 'object'
+                  OR key.key_id IS NULL
+              )",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::OwnershipDrift,
+        tables: &[
+            "session_refresh_batch_bindings",
+            "session_refresh_bindings",
+            "session_summary_availability",
+            "session_summary_nodes",
+        ],
+        sql: "SELECT
+            (SELECT COUNT(*)
+               FROM session_summary_availability AS availability
+               LEFT JOIN session_summary_nodes AS summary
+                 ON summary.summary_id = availability.summary_id
+               WHERE summary.summary_id IS NULL
+                  OR availability.session_id IS NOT summary.session_id)
+            + (SELECT COUNT(*)
+               FROM session_refresh_batch_bindings AS batch
+               LEFT JOIN session_refresh_bindings AS binding
+                 ON binding.session_id = batch.session_id
+                AND binding.operation_id = batch.operation_id
+               WHERE binding.operation_id IS NULL
+                  OR batch.generation IS NOT binding.generation)",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::StuckRefresh,
+        tables: &["session_refresh_operations"],
+        sql: "SELECT COUNT(*) FROM session_refresh_operations
+            WHERE state = 'running'
+              AND updated_at < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::StuckBinding,
+        tables: &[
+            "session_refresh_bindings",
+            "session_refresh_operations",
+            "session_temporal_generations",
+        ],
+        sql: "SELECT COUNT(*)
+            FROM session_refresh_operations AS operation
+            LEFT JOIN session_refresh_bindings AS binding
+              ON binding.session_id = operation.session_id
+             AND binding.operation_id = operation.operation_id
+            LEFT JOIN session_temporal_generations AS generation
+              ON generation.session_id = binding.session_id
+             AND generation.generation = binding.generation
+            WHERE operation.state = 'running'
+              AND (
+                  binding.operation_id IS NULL
+                  OR generation.session_id IS NULL
+                  OR generation.state <> 'building'
+              )",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::StuckProgress,
+        tables: &[
+            "session_refresh_bindings",
+            "session_refresh_operations",
+            "session_refresh_progress",
+        ],
+        sql: "SELECT COUNT(*) FROM (
+                SELECT operation.session_id, operation.operation_id
+                FROM session_refresh_operations AS operation
+                JOIN session_refresh_bindings AS binding
+                  ON binding.session_id = operation.session_id
+                 AND binding.operation_id = operation.operation_id
+                LEFT JOIN session_refresh_progress AS progress
+                  ON progress.session_id = operation.session_id
+                 AND progress.operation_id = operation.operation_id
+                WHERE operation.state = 'running'
+                GROUP BY operation.session_id, operation.operation_id
+                HAVING (MAX(progress.recorded_at) IS NULL
+                        AND MAX(operation.updated_at)
+                            < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000)
+                    OR MAX(progress.recorded_at)
+                         < CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000
+            )",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::StuckReceipt,
+        tables: &["session_refresh_operations", "session_refresh_receipts"],
+        sql: "SELECT COUNT(*)
+            FROM session_refresh_operations AS operation
+            LEFT JOIN session_refresh_receipts AS receipt
+              ON receipt.session_id = operation.session_id
+             AND receipt.operation_id = operation.operation_id
+            WHERE (operation.state = 'running' AND receipt.operation_id IS NOT NULL)
+               OR (operation.state <> 'running' AND receipt.operation_id IS NULL)
+               OR (receipt.operation_id IS NOT NULL
+                   AND (
+                       receipt.terminal_state <> operation.state
+                       OR receipt.terminal_at IS NOT operation.terminal_at
+                       OR receipt.failure_code IS NOT operation.failure_code
+                   ))",
+    },
+    HealthCheck {
+        kind: SessionTemporalHealthFindingKind::CompatibilityDrift,
+        tables: &["lcm_summary_nodes", "session_summary_nodes"],
+        sql: "SELECT COUNT(*)
+            FROM session_summary_nodes AS canonical
+            LEFT JOIN lcm_summary_nodes AS compatibility
+              ON compatibility.node_id = canonical.summary_id
+            WHERE compatibility.node_id IS NULL
+               OR canonical.publication_json IS NULL
+               OR json_extract(canonical.publication_json, '$.summary_hash') IS NULL
+               OR compatibility.session_id <> canonical.session_id
+               OR compatibility.summary_text <> canonical.summary_text
+               OR compatibility.summary_hash
+                    <> json_extract(canonical.publication_json, '$.summary_hash')",
+    },
+];
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTemporalHealthStatus {
+    Complete,
+    Partial,
+    Unavailable,
+    Locked,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTemporalHealthFindingKind {
+    TriggerAuditDrift,
+    OccurrenceFtsCorruption,
+    SummaryFtsCorruption,
+    MissingAnchor,
+    MissingReceipt,
+    InvalidGeneration,
+    MultiActiveGeneration,
+    CursorChainAbsent,
+    CursorKeyAbsent,
+    OwnershipDrift,
+    StuckRefresh,
+    StuckBinding,
+    StuckProgress,
+    StuckReceipt,
+    MigrationGap,
+    CompatibilityDrift,
+    RelationGraphUnavailable,
+    RelationGraphCorruption,
+    RelationGraphCycle,
+    StaleSummaryClosure,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionTemporalHealthFinding {
+    kind: SessionTemporalHealthFindingKind,
+    count: u64,
+}
+
+impl SessionTemporalHealthFinding {
+    #[hotpath::skip]
+    pub const fn kind(&self) -> SessionTemporalHealthFindingKind {
+        self.kind
+    }
+
+    #[hotpath::skip]
+    pub const fn count(&self) -> u64 {
+        self.count
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionTemporalHealthReport {
+    status: SessionTemporalHealthStatus,
+    findings: Vec<SessionTemporalHealthFinding>,
+    /// Fixed machine reason for path-API unavailability (for example
+    /// `uncheckpointed_wal`). Omitted when diagnosis ran against a
+    /// checkpointed immutable snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl SessionTemporalHealthReport {
+    #[hotpath::skip]
+    pub const fn status(&self) -> SessionTemporalHealthStatus {
+        self.status
+    }
+
+    pub fn findings(&self) -> &[SessionTemporalHealthFinding] {
+        &self.findings
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+}
+
+struct HealthCheck {
+    kind: SessionTemporalHealthFindingKind,
+    tables: &'static [&'static str],
+    sql: &'static str,
+}
+
+impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
+    /// Produces a redacted, non-mutating temporal health snapshot through the
+    /// retained registered reader pool. Identical requests coalesce behind one
+    /// per-store lane and reuse a very short-lived result only while the exact
+    /// database/WAL fingerprint remains unchanged.
+    #[hotpath::measure(future = true, label = "session_temporal.doctor.query")]
+    pub async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
+        let database_path = self.db_path();
+        if !permits_synchronous_session_temporal_health(database_path) {
+            return unavailable_report_with_reason(
+                SessionTemporalHealthStatus::Unavailable,
+                Some("synchronous_diagnosis_size_budget_exceeded"),
+            );
+        }
+        let cache = session_temporal_health_cache_cell(database_path);
+        let mut cached = cache.lock().await;
+        let before = session_temporal_store_fingerprint(database_path).ok();
+        if let (Some(fingerprint), Some(observed)) = (before, cached.as_ref())
+            && observed.fingerprint == fingerprint
+            && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
+        {
+            record_session_doctor_cache_hit();
+            return self
+                .with_relation_graph_health(observed.report.clone())
+                .await;
+        }
+        record_session_doctor_cache_miss();
+        let snapshot = match self.read_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return unavailable_report(classify_database_error(&error)),
+        };
+        let report = diagnose_snapshot(&snapshot).await;
+        let after = session_temporal_store_fingerprint(database_path).ok();
+        if let Some(fingerprint) = after.filter(|fingerprint| before == Some(*fingerprint)) {
+            *cached = Some(CachedSessionTemporalHealth {
+                fingerprint,
+                observed_at: Instant::now(),
+                report: report.clone(),
+            });
+        } else {
+            *cached = None;
+        }
+        self.with_relation_graph_health(report).await
+    }
+}
+
+#[hotpath::measure(future = true, label = "session_temporal.doctor.diagnose")]
+async fn diagnose_snapshot(
+    conn: &impl crate::handle::SessionTemporalQuery,
+) -> SessionTemporalHealthReport {
+    let inventory = match snapshot_schema_inventory(conn).await {
+        Ok(inventory) => inventory,
+        Err(error) => return unavailable_report(classify_engine_error(&error)),
+    };
+    let temporal_tables = inventory
+        .tables
+        .iter()
+        .filter(|name| name.starts_with("session_"))
+        .count();
+    if temporal_tables == 0 {
+        return SessionTemporalHealthReport {
+            status: SessionTemporalHealthStatus::Unavailable,
+            findings: vec![finding(
+                SessionTemporalHealthFindingKind::MigrationGap,
+                required_table_names().count() as u64,
+            )],
+            reason: None,
+        };
+    }
+
+    let mut status = SessionTemporalHealthStatus::Complete;
+    let mut findings = Vec::new();
+    let missing_tables = required_table_names()
+        .filter(|table| !inventory.tables.contains(*table))
+        .count() as u64;
+    if missing_tables > 0 {
+        status = SessionTemporalHealthStatus::Partial;
+        findings.push(finding(
+            SessionTemporalHealthFindingKind::MigrationGap,
+            missing_tables,
+        ));
+    } else {
+        match snapshot_schema_version(conn).await {
+            Ok(Some(version)) if version == SESSION_TEMPORAL_SCHEMA_VERSION => {}
+            Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::MigrationGap, 1)),
+            Err(error) => {
+                if is_engine_locked(&error) {
+                    return unavailable_report(SessionTemporalHealthStatus::Locked);
+                }
+                status = SessionTemporalHealthStatus::Partial;
+            }
+        }
+    }
+
+    let missing_triggers = REQUIRED_TRIGGERS
+        .iter()
+        .filter(|(name, expected)| match inventory.triggers.get(*name) {
+            Some(actual) => normalize_sql(actual) != normalize_sql(expected),
+            None => true,
+        })
+        .count() as u64;
+    if missing_triggers > 0 {
+        findings.push(finding(
+            SessionTemporalHealthFindingKind::TriggerAuditDrift,
+            missing_triggers,
+        ));
+    }
+
+    let missing_indexes = REQUIRED_INDEXES
+        .iter()
+        .filter(|name| !inventory.indexes.contains(**name))
+        .count() as u64;
+    if missing_indexes > 0 {
+        status = SessionTemporalHealthStatus::Partial;
+        merge_finding(
+            &mut findings,
+            SessionTemporalHealthFindingKind::MigrationGap,
+            missing_indexes,
+        );
+    }
+
+    match snapshot_column_shape_drift(conn, &inventory).await {
+        Ok(0) => {}
+        Ok(drift) => {
+            status = SessionTemporalHealthStatus::Partial;
+            merge_finding(
+                &mut findings,
+                SessionTemporalHealthFindingKind::MigrationGap,
+                drift,
+            );
+        }
+        Err(error) if is_engine_locked(&error) => {
+            return unavailable_report(SessionTemporalHealthStatus::Locked);
+        }
+        Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
+    }
+
+    for check in CHECKS {
+        if check
+            .tables
+            .iter()
+            .any(|table| !inventory.tables.contains(*table))
+        {
+            status = SessionTemporalHealthStatus::Partial;
+            continue;
+        }
+        record_session_doctor_check();
+        match snapshot_count(conn, check.sql).await {
+            Ok(0) => {}
+            Ok(value) => merge_finding(&mut findings, check.kind, value),
+            Err(error) if is_fts_finding(check.kind) && is_fts_virtual_table_corruption(&error) => {
+                merge_finding(&mut findings, check.kind, 1);
+            }
+            Err(error) if is_engine_locked(&error) => {
+                return SessionTemporalHealthReport {
+                    status: SessionTemporalHealthStatus::Locked,
+                    findings,
+                    reason: None,
+                };
+            }
+            Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
+        }
+    }
+    findings.sort_by_key(SessionTemporalHealthFinding::kind);
+    SessionTemporalHealthReport {
+        status,
+        findings,
+        reason: None,
+    }
+}
+
+struct SchemaInventory {
+    tables: BTreeSet<String>,
+    indexes: BTreeSet<String>,
+    triggers: BTreeMap<String, String>,
+}
+
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.inventory")]
+async fn snapshot_schema_inventory(
+    conn: &impl crate::handle::SessionTemporalQuery,
+) -> tracedecay_runtime_core::db::engine::Result<SchemaInventory> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger')",
+            (),
+        )
+        .await?;
+    let mut tables = BTreeSet::new();
+    let mut indexes = BTreeSet::new();
+    let mut triggers = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let kind: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let sql: String = row.get(2)?;
+        match kind.as_str() {
+            "table" => {
+                tables.insert(name);
+            }
+            "index" => {
+                indexes.insert(name);
+            }
+            "trigger" => {
+                triggers.insert(name, sql);
+            }
+            _ => {}
+        }
+    }
+    Ok(SchemaInventory {
+        tables,
+        indexes,
+        triggers,
+    })
+}
+
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.column_shape")]
+async fn snapshot_column_shape_drift(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    inventory: &SchemaInventory,
+) -> tracedecay_runtime_core::db::engine::Result<u64> {
+    let mut drift = 0_u64;
+    for &(table, expected) in TEMPORAL_TABLE_COLUMNS {
+        if !inventory.tables.contains(table) {
+            continue;
+        }
+        let mut rows = conn
+            .query(
+                "SELECT name FROM pragma_table_info(?1) ORDER BY cid",
+                [table],
+            )
+            .await?;
+        let mut actual = Vec::new();
+        while let Some(row) = rows.next().await? {
+            actual.push(row.get::<String>(0)?);
+        }
+        if actual.as_slice() != expected {
+            drift = drift.saturating_add(1).min(MAX_FINDING_COUNT);
+        }
+    }
+    Ok(drift)
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.chars()
+        .filter(|character| !character.is_whitespace() && *character != ';')
+        .collect()
+}
+
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.schema_version")]
+async fn snapshot_schema_version(
+    conn: &impl crate::handle::SessionTemporalQuery,
+) -> tracedecay_runtime_core::db::engine::Result<Option<i64>> {
+    let mut rows = conn
+        .query(
+            "SELECT version FROM session_temporal_schema_migrations
+             WHERE name = 'session-temporal'",
+            (),
+        )
+        .await?;
+    rows.next().await?.map(|row| row.get(0)).transpose()
+}
+
+#[hotpath::measure(future = true, label = "session_temporal.doctor.query.count")]
+async fn snapshot_count(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    sql: &str,
+) -> tracedecay_runtime_core::db::engine::Result<u64> {
+    let mut rows = conn.query(sql, ()).await?;
+    let value = rows
+        .next()
+        .await?
+        .map(|row| row.get::<Option<i64>>(0))
+        .transpose()?
+        .flatten();
+    Ok(value
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(0)
+        .min(MAX_FINDING_COUNT))
+}
+
+fn finding(kind: SessionTemporalHealthFindingKind, count: u64) -> SessionTemporalHealthFinding {
+    SessionTemporalHealthFinding {
+        kind,
+        count: count.min(MAX_FINDING_COUNT),
+    }
+}
+
+fn merge_finding(
+    findings: &mut Vec<SessionTemporalHealthFinding>,
+    kind: SessionTemporalHealthFindingKind,
+    count: u64,
+) {
+    if let Some(existing) = findings.iter_mut().find(|finding| finding.kind == kind) {
+        existing.count = existing.count.saturating_add(count).min(MAX_FINDING_COUNT);
+    } else {
+        findings.push(finding(kind, count));
+    }
+}
+
+fn is_fts_finding(kind: SessionTemporalHealthFindingKind) -> bool {
+    matches!(
+        kind,
+        SessionTemporalHealthFindingKind::OccurrenceFtsCorruption
+            | SessionTemporalHealthFindingKind::SummaryFtsCorruption
+    )
+}
+
+fn is_fts_virtual_table_corruption(error: &EngineError) -> bool {
+    error.sqlite_extended_code() == Some(SQLITE_CORRUPT_VTAB)
+        || error.sqlite_code() == Some(SQLITE_CORRUPT_VTAB)
+}
+
+fn classify_engine_error(error: &EngineError) -> SessionTemporalHealthStatus {
+    if is_engine_locked(error) {
+        SessionTemporalHealthStatus::Locked
+    } else {
+        SessionTemporalHealthStatus::Unavailable
+    }
+}
+
+fn classify_database_error(error: &TraceDecayError) -> SessionTemporalHealthStatus {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("locked") || message.contains("busy") {
+        SessionTemporalHealthStatus::Locked
+    } else {
+        SessionTemporalHealthStatus::Unavailable
+    }
+}
+
+fn is_engine_locked(error: &EngineError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("locked") || message.contains("busy")
+}
+
+fn unavailable_report(status: SessionTemporalHealthStatus) -> SessionTemporalHealthReport {
+    unavailable_report_with_reason(status, None)
+}
+
+fn unavailable_report_with_reason(
+    status: SessionTemporalHealthStatus,
+    reason: Option<&'static str>,
+) -> SessionTemporalHealthReport {
+    SessionTemporalHealthReport {
+        status,
+        findings: Vec::new(),
+        reason: reason.map(str::to_string),
+    }
+}
+
+#[inline(always)]
+fn record_session_doctor_cache_hit() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.doctor.cache_hits").inc(1_u64);
+}
+
+#[inline(always)]
+fn record_session_doctor_cache_miss() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.doctor.cache_misses").inc(1_u64);
+}
+
+#[inline(always)]
+fn record_session_doctor_check() {
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("session_temporal.doctor.checks").inc(1_u64);
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::handle::SessionTemporalAccess;
+    use tracedecay_global_db::tests::harness::{
+        RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
+    };
+
+    #[test]
+    fn session_temporal_fingerprint_tracks_database_and_wal_changes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let database = tmp.path().join("sessions.db");
+        std::fs::write(&database, b"database").expect("database");
+        let initial = session_temporal_store_fingerprint(&database).expect("initial fingerprint");
+
+        let wal = tmp.path().join("sessions.db-wal");
+        std::fs::write(&wal, b"wal").expect("wal");
+        let with_wal = session_temporal_store_fingerprint(&database).expect("wal fingerprint");
+        assert_ne!(initial, with_wal);
+
+        std::fs::write(&wal, b"wal-expanded").expect("expanded wal");
+        let expanded = session_temporal_store_fingerprint(&database).expect("expanded fingerprint");
+        assert_ne!(with_wal, expanded);
+    }
+
+    #[test]
+    fn session_temporal_size_budget_includes_wal_bytes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let database = tmp.path().join("sessions.db");
+        std::fs::write(&database, b"database").expect("database");
+        assert!(permits_synchronous_session_temporal_health(&database));
+
+        let wal = tmp.path().join("sessions.db-wal");
+        std::fs::File::create(wal)
+            .expect("wal")
+            .set_len(MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
+            .expect("wal size");
+        assert!(!permits_synchronous_session_temporal_health(&database));
+    }
+
+    #[tokio::test]
+    async fn registered_doctor_reports_an_unbound_relation_graph_as_partial() {
+        let harness =
+            RegisteredGlobalDbHarness::open_without_relation_graph("doctor-unbound-relation-graph")
+                .await;
+
+        let report = SessionTemporalAccess::new(&harness.registered)
+            .session_temporal_doctor_health()
+            .await;
+
+        assert_eq!(report.status(), SessionTemporalHealthStatus::Partial);
+        assert!(report.findings().contains(&SessionTemporalHealthFinding {
+            kind: SessionTemporalHealthFindingKind::RelationGraphUnavailable,
+            count: 1,
+        }));
+    }
+
+    #[tokio::test]
+    async fn registered_doctor_accepts_a_bound_clean_relation_graph() {
+        let profile = tempfile::tempdir().expect("profile root");
+        let runtime = RegisteredGlobalDbTestRuntime::profile(profile.path())
+            .await
+            .expect("registered profile runtime");
+
+        let report = SessionTemporalAccess::new(runtime.profile_database())
+            .session_temporal_doctor_health()
+            .await;
+
+        assert_eq!(report.status(), SessionTemporalHealthStatus::Complete);
+        assert!(!report.findings().iter().any(|finding| {
+            matches!(
+                finding.kind,
+                SessionTemporalHealthFindingKind::RelationGraphUnavailable
+                    | SessionTemporalHealthFindingKind::RelationGraphCorruption
+                    | SessionTemporalHealthFindingKind::RelationGraphCycle
+                    | SessionTemporalHealthFindingKind::StaleSummaryClosure
+            )
+        }));
+    }
+}

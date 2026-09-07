@@ -1,0 +1,261 @@
+use super::writer_test_support::init_indexed_repo;
+use super::{
+    BackgroundRefreshModeV1, BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer,
+    McpServerConstructionContext,
+};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[tokio::test]
+async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() {
+    let (cg, dir, _authority) = init_indexed_repo().await;
+    let forced = Arc::new(AtomicUsize::new(0));
+    let probed = Arc::new(AtomicUsize::new(0));
+    let reconcile_sink: super::CodeIndexReconcileSink = {
+        let forced = Arc::clone(&forced);
+        Arc::new(move |_root| {
+            let forced = Arc::clone(&forced);
+            Box::pin(async move {
+                forced.fetch_add(1, Ordering::AcqRel);
+                true
+            })
+        })
+    };
+    let freshness_probe_sink: super::CodeIndexFreshnessProbeSink = {
+        let probed = Arc::clone(&probed);
+        Arc::new(move |_root| {
+            let probed = Arc::clone(&probed);
+            Box::pin(async move {
+                probed.fetch_add(1, Ordering::AcqRel);
+                true
+            })
+        })
+    };
+
+    super::hook_writes::execute_background_refresh_direct(BackgroundRefreshRequest {
+        graph: Arc::new(cg),
+        project_root: dir.path().to_path_buf(),
+        mode: BackgroundRefreshModeV1::FreshnessProbe,
+        reconcile_sink: Some(reconcile_sink),
+        freshness_probe_sink: Some(freshness_probe_sink),
+    })
+    .await
+    .expect("read freshness probe");
+
+    assert_eq!(probed.load(Ordering::Acquire), 1);
+    assert_eq!(
+        forced.load(Ordering::Acquire),
+        0,
+        "an ordinary read must never enter the force-overflow authority"
+    );
+}
+
+#[tokio::test]
+async fn read_refresh_uses_injected_writer_without_direct_fallback() {
+    let (cg, dir, _authority) = init_indexed_repo().await;
+    let root = dir.path().to_path_buf();
+    let source_path = root.join("src/a.rs");
+    std::fs::write(&source_path, "pub fn a() { println!(\"changed\"); }\n").expect("modify source");
+    std::fs::File::options()
+        .write(true)
+        .open(&source_path)
+        .expect("open modified source")
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
+        .expect("advance source mtime");
+    let observed = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let observed = Arc::clone(&observed);
+        Arc::new(move |request: BackgroundRefreshRequest| {
+            let observed = Arc::clone(&observed);
+            Box::pin(async move {
+                observed
+                    .lock()
+                    .expect("recording lock")
+                    .push(request.project_root);
+                Ok(Some(HashMap::from([("injected.rs".to_string(), 41)])))
+            })
+        })
+    };
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(cg, None)
+            .with_background_refresh_writer(refresh_writer),
+    )
+    .await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(Duration::from_secs(5))
+            .await,
+        "startup catch-up settles before the explicit read refresh"
+    );
+    observed.lock().expect("recording lock").clear();
+    let snapshot = server.cg_snapshot().await;
+    server
+        .background_refresh_running
+        .store(true, Ordering::Release);
+
+    server.spawn_read_refresh_task(&snapshot);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.background_refresh_running.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("injected refresh settles");
+
+    assert_eq!(observed.lock().expect("recording lock").as_slice(), &[root]);
+    assert_eq!(
+        server.file_token_map_snapshot(),
+        HashMap::from([("injected.rs".to_string(), 41)])
+    );
+    assert_ne!(
+        server
+            .last_background_refresh_done_at
+            .load(Ordering::Acquire),
+        0,
+        "completion timestamp must be preserved"
+    );
+    server.shutdown().await;
+}
+
+/// Edit-shaped tools claim the lazy-sync window but never wait on it: the tool
+/// answers while the sync is still running, and the sync completes behind it.
+#[tokio::test]
+async fn lazy_stale_sync_is_detached_from_the_request() {
+    let (cg, _dir, _authority) = init_indexed_repo().await;
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let completed = Arc::new(AtomicUsize::new(0));
+    // Armed only after startup catch-up has settled, so the startup sync (which
+    // drives the same injected writer) is not the call this test parks.
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        let completed = Arc::clone(&completed);
+        let armed = Arc::clone(&armed);
+        Arc::new(move |_request: BackgroundRefreshRequest| {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let completed = Arc::clone(&completed);
+            let armed = Arc::clone(&armed);
+            Box::pin(async move {
+                if !armed.load(Ordering::Acquire) {
+                    return Ok(Some(HashMap::new()));
+                }
+                entered.notify_one();
+                release.notified().await;
+                completed.fetch_add(1, Ordering::AcqRel);
+                Ok(Some(HashMap::from([("detached.rs".to_string(), 7)])))
+            })
+        })
+    };
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(cg, None)
+            .with_background_refresh_writer(refresh_writer),
+    )
+    .await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(Duration::from_secs(5))
+            .await,
+        "startup catch-up settles before the lazy sync claim"
+    );
+    armed.store(true, Ordering::Release);
+    // Re-arm the cooldown so this call is the one that claims the window.
+    server.last_staleness_check_at.store(0, Ordering::Release);
+    server
+        .background_refresh_running
+        .store(false, Ordering::Release);
+
+    // The request path. It must return while the injected sync is parked.
+    tokio::time::timeout(Duration::from_secs(5), server.maybe_sync_if_stale())
+        .await
+        .expect("maybe_sync_if_stale must not block on the sync");
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the detached sync must have started");
+    assert_eq!(
+        completed.load(Ordering::Acquire),
+        0,
+        "the tool answered before the sync finished"
+    );
+
+    // ...and the sync still completes, refreshing the token map.
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.background_refresh_running.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the detached sync settles");
+    assert_eq!(completed.load(Ordering::Acquire), 1);
+    assert_eq!(
+        server.file_token_map_snapshot(),
+        HashMap::from([("detached.rs".to_string(), 7)])
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_startup_catchups_use_injected_writer_authority() {
+    let (first_cg, dir, authority) = init_indexed_repo().await;
+    let root = dir.path().to_path_buf();
+    let second_cg = authority.reopen_project_graph(&root).await;
+
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let gate = Arc::clone(&gate);
+        let calls = Arc::clone(&calls);
+        let active = Arc::clone(&active);
+        let max_active = Arc::clone(&max_active);
+        Arc::new(move |_request: BackgroundRefreshRequest| {
+            let gate = Arc::clone(&gate);
+            let calls = Arc::clone(&calls);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            Box::pin(async move {
+                let _authority = gate.lock().await;
+                calls.fetch_add(1, Ordering::AcqRel);
+                let concurrent = active.fetch_add(1, Ordering::AcqRel) + 1;
+                max_active.fetch_max(concurrent, Ordering::AcqRel);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                active.fetch_sub(1, Ordering::AcqRel);
+                Ok(Some(HashMap::new()))
+            })
+        })
+    };
+
+    let (first, second) = tokio::join!(
+        McpServer::new_with_context(
+            McpServerConstructionContext::direct(first_cg, Some("first".to_string()))
+                .with_background_refresh_writer(Arc::clone(&refresh_writer)),
+        ),
+        McpServer::new_with_context(
+            McpServerConstructionContext::direct(second_cg, Some("second".to_string()))
+                .with_background_refresh_writer(refresh_writer),
+        )
+    );
+    let (first_done, second_done) = tokio::join!(
+        first.wait_for_startup_catch_up(Duration::from_secs(5)),
+        second.wait_for_startup_catch_up(Duration::from_secs(5))
+    );
+
+    assert!(first_done && second_done, "startup catch-ups must settle");
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    assert_eq!(
+        max_active.load(Ordering::Acquire),
+        1,
+        "the injected writer authority must serialize concurrent startup catch-ups"
+    );
+    first.shutdown().await;
+    second.shutdown().await;
+}

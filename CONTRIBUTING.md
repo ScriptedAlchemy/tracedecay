@@ -8,39 +8,65 @@ Thanks for your interest in contributing! This guide covers everything you need 
 git clone https://github.com/ScriptedAlchemy/tracedecay.git
 cd tracedecay
 cargo build
-cargo nextest run --workspace --no-fail-fast
+cargo nextest run --workspace --all-features --no-fail-fast
 ```
 
-Requires **Rust 1.70+** (edition 2021).
+Requires **Rust 1.85+** (edition 2024) and **Node.js 22+ with npm**.
 
-## Project Structure
+The dashboard bundle at `dashboard/app-dist/` is generated output and is
+git-ignored, so a fresh clone has none. The CLI build script
+(`crates/tracedecay-cli/build.rs`) — the only crate that embeds the bundle —
+runs `npm ci` (when `dashboard/node_modules` is absent) and `npm run build`
+before embedding the UI, and fails the Rust build if npm is missing. Setting
+`TRACEDECAY_SKIP_DASHBOARD_BUILD` skips that npm rebuild only when
+`TRACEDECAY_DASHBOARD_BUNDLE_SHA256` holds the existing bundle's digest
+(print it with `python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+--print-digest`); a missing or mismatched digest fails the build. CI builds
+the bundle once in the `dashboard-assets` job and every Rust job downloads it
+as an artifact. GitHub Releases ship prebuilt binaries; workspace Cargo
+packages are private.
+
+Do not assume a green baseline for the full suite: run it and read the
+failures; treat new failures in code you touched as yours.
+
+## Final V2 storage
+
+Read [the V2 operating-model summary](docs/V2-OPERATING-MODEL.md) before
+changing storage, retrieval, or host ingestion, then follow the linked
+authoritative roadmap plans. `tracedecay-graph-db` is the sole final Grafeo
+boundary; SQLite is relational only. V2 persisted data is reset or recreated
+when incompatible—do not add a prior-store reader, conversion, backfill,
+shadow path, or dual write.
+
+Tests and local validation must use isolated temporary home, profile, project,
+and socket paths. Never start, install, or test a V2 daemon against an
+installed `master` profile.
+
+## Source tree reference
+
+This tree map is for source orientation only. The
+[V2 roadmap](docs/plans/tracedecay-v2/00-plan-set-index.md) owns product
+precedence and acceptance.
 
 ```
-src/
-  extraction/    Language-specific extractors (tree-sitter based)
-  db/            Database layer (libSQL)
-  graph/         Knowledge graph queries and traversal
-  mcp/           MCP server (tools + handlers)
-  context/       Context builder for AI-ready output
-  resolution/    Cross-file reference resolution
-  sync.rs        Incremental sync engine
-  main.rs        CLI entry point
-tests/           Integration tests (one per module/language)
-crates/tracedecay-code-extraction/tests/fixtures/
-                Sample source files for extraction tests
-vendor/          Vendored tree-sitter grammars
-docs/            Design docs and guides
+src/             Main tracedecay crate (daemon, MCP tools, sessions, application)
+crates/          Workspace members (code-extraction, graph-db, domain, hosts, …)
+dashboard/       Embedded React dashboard
+plugin/          Host bundles (Claude, Codex, Cursor, Kimi, OpenCode)
+tests/           Integration suites
+docs/            Design docs and the V2 roadmap
 ```
 
 ## Feature Flags
 
-tracedecay supports 31 languages via feature flags:
+tracedecay supports more than 50 languages. `Cargo.toml` is the source of truth
+for the exact feature membership:
 
-| Feature | Languages |
-|---------|-----------|
-| `lite` (default subset) | Rust, Go, Java, Scala, TypeScript/JS, Python, C, C++, Kotlin, C#, Swift |
-| `medium` | +Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET |
-| `full` (default) | +Lua, Zig, Obj-C, Perl, Batch, Fortran, COBOL, MSBasic2, GW-BASIC, QBasic |
+| Feature | Coverage |
+|---------|----------|
+| `lite` | Core extractors such as Rust, Go, Java, TypeScript/JS, Python, C/C++, Kotlin, C#, and Swift |
+| `medium` | `lite` plus Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, and VB.NET |
+| `full` (default) | `medium` plus all remaining `lang-*` features listed in `Cargo.toml` |
 
 Build with fewer languages for faster compile times during development:
 
@@ -52,15 +78,15 @@ cargo nextest run --no-default-features --features lite
 ## Making Changes
 
 1. **Fork and branch** from `master` for stable changes, `beta` for experimental features.
-2. **Write tests.** Every extraction change should have a corresponding test in `crates/tracedecay-code-extraction/tests/`. Follow the existing pattern: create a fixture in `crates/tracedecay-code-extraction/tests/fixtures/` and assert on extracted nodes/edges.
+2. **Write tests.** Every extraction change should have a corresponding test in `tests/`. Follow the existing pattern: create a fixture in `tests/fixtures/` and assert on extracted nodes/edges.
 3. **Run the full test suite** before submitting:
    ```bash
-   cargo nextest run --workspace --no-fail-fast
+   cargo nextest run --workspace --all-features --no-fail-fast
    ```
    Cargo-launched test processes are isolated from your real `~/.tracedecay`
    profile: `.cargo/config.toml` pins `TRACEDECAY_DATA_DIR` to
    `target/test-profile/.tracedecay` (enforced by
-   `tests/test_profile_isolation_test.rs`). Tests that need a private profile
+   `tests/core_cli_suite/test_profile_isolation_test.rs`). Tests that need a private profile
    should still override it per-test, e.g. via
    `common::TraceDecayStorageEnvGuard` or `common::apply_tracedecay_home_env`.
 4. **Format your code** with the standard Rust toolchain:
@@ -69,12 +95,12 @@ cargo nextest run --no-default-features --features lite
    cargo clippy --workspace --all-targets
    ```
 
-### Rebrand compatibility changes
+### Public wire compatibility changes
 
-For changes touching naming, legacy env vars, storage paths, generated agent
-config, plugin paths, or cleanup behavior, follow
-[`docs/REBRAND-COMPATIBILITY-POLICY.md`](docs/REBRAND-COMPATIBILITY-POLICY.md).
-Update compatibility warnings, migration cleanup, and docs together.
+For a public name or wire protocol, retain compatibility only with evidence
+that the external contract shipped. Persisted V2 storage has no compatibility
+conversion. Keep compatibility work out of storage; document the retained
+external boundary alongside its behavior.
 
 ### Clippy policy
 
@@ -105,14 +131,14 @@ section so the contributor command and blocking/advisory split still match CI.
 ## Adding a New Language Extractor
 
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
-2. Create `src/extraction/{lang}_extractor.rs` implementing the `Extractor` trait.
-3. Register it in the `LanguageRegistry` with a feature flag (e.g., `lang-{name}`).
-4. Add a fixture file `crates/tracedecay-code-extraction/tests/fixtures/sample.{ext}` and a test module `crates/tracedecay-code-extraction/tests/{lang}.rs`, then register it with a `mod {lang};` declaration in `crates/tracedecay-code-extraction/tests/main.rs`.
-5. Update the feature flag tables in `Cargo.toml` and this document.
+2. Create `crates/tracedecay-code-extraction/src/{lang}_extractor.rs` implementing the `LanguageExtractor` trait.
+3. Register it in `LanguageRegistry` with a feature flag (e.g., `lang-{name}`) in that crate's `lib.rs` and `Cargo.toml`.
+4. Add a test module `crates/tracedecay-code-extraction/tests/{lang}.rs` (inline source or a fixture under `crates/tracedecay-code-extraction/fixtures/`).
+5. Update the feature flag tables in that crate's `Cargo.toml` and this document.
 
 ## Validating Plugins and Skills
 
-Changes under `plugin/` or `src/agents/` are covered
+Changes under `plugin/` or `crates/tracedecay-agent-hosts/` are covered
 by a layered validation system: vendored JSON-schema checks, per-host skill
 frontmatter contracts, cross-bundle sync/parity tests, and a CI
 schema-validation workflow. `plugin/skills/` is the shared source of truth for
@@ -126,12 +152,37 @@ See [`docs/PLUGIN-VALIDATION.md`](docs/PLUGIN-VALIDATION.md) for the full
 layer breakdown, schema refresh procedure, and how to add a skill or a new
 ecosystem bundle correctly.
 
+## Changing the Rust-to-Dashboard Wire Contract
+
+`dashboard/src/contracts/generated.ts`, `dashboard/src/contracts/index.ts`, and
+`dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated, not
+hand-written. The Rust `schemars` output is authoritative: the codegen CLI
+shells out to `cargo test --test dashboard_contract_schema_export -- --ignored
+writes_dashboard_contract_schema`, regenerates all three files, and compares
+them byte-for-byte with what is committed.
+
+After changing any Rust type that crosses the dashboard API boundary:
+
+```bash
+cd dashboard
+npm run contracts:generate   # rewrite the generated files
+npm run contracts:check      # what CI runs; exits 1 on any drift
+```
+
+`contracts:check` is a blocking CI step in the `dashboard` job of `ci.yml`, not
+an advisory one. Do not hand-edit the generated files — the check will fail and
+the fix is to regenerate and commit.
+
+The generated contract files (and the embedded Cursor extension bundle) are
+marked `linguist-generated` in `.gitattributes`, so GitHub collapses them in
+PR diffs and excludes them from language stats; review the Rust source of the
+contract change instead.
+
 ## Running Specific Tests
 
 ```bash
-# All extractor tests for a specific language (module inside the
-# consolidated extraction_suite binary)
-cargo nextest run -E 'binary(=extraction_suite) and test(/^rust::/)'
+# All extractor tests for a specific language
+cargo nextest run -p tracedecay-code-extraction --test rust
 
 # A single test by name
 cargo nextest run test_find_stale_files
@@ -158,15 +209,15 @@ Install the local `commit-msg` hook once per checkout:
 scripts/install-git-hooks.sh
 ```
 
-CI validates commit subjects with:
+CI validates commit messages with commitlint (`commitlint.config.cjs`):
 
 ```bash
-npm ci
-npm run lint:commit -- --from origin/master --to HEAD
+git show --no-patch --format=%B HEAD | npm run --silent lint:commit --
 ```
 
-Run the same command locally before pushing to lint every non-merge commit in a
-branch range. Commitlint exempts merge commits to match CI behavior.
+Run the same command locally (per commit) before pushing to lint every
+non-merge commit in a branch range. Merge commits are skipped to match CI
+behavior.
 
 ## Pull Requests
 
@@ -174,7 +225,8 @@ branch range. Commitlint exempts merge commits to match CI behavior.
 - Target `beta` for experimental or breaking changes.
 - Keep PRs focused — one logical change per PR.
 - Include test coverage for new behavior.
-- Update `CHANGELOG.md` under an `[Unreleased]` section.
+- Do not hand-edit `CHANGELOG.md`; release automation generates it from
+  conventional commit messages.
 
 ## Reporting Issues
 

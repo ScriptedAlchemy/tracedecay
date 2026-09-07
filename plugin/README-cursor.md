@@ -31,30 +31,68 @@ only a unique registered project; otherwise `serve` exits with an actionable
 "multiple projects" error. The template keeps `--path ${workspaceFolder}`
 because normal Cursor windows expand it and home-dir discovery cannot scope
 multi-project setups. If tools still do not connect, run
-`tracedecay doctor --agent cursor`.
+`tracedecay doctor`.
 
 Hook commands derive the active project from Cursor's event payload /
-`CURSOR_PROJECT_DIR`, not from the plugin directory.
+`CURSOR_PROJECT_DIR`, not from the plugin directory. They only submit bounded
+native envelopes; daemon-side work handles capture, indexing, preflight,
+compaction, and advisory delivery after admission.
 
 Every MCP tool is also available from the shell as `tracedecay tool <name>`
 (`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
 parameters). The bundled `using-the-cli` skill and always-applied rule use
 that CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
+The CLI uses the same daemon authority and is not an availability guarantee;
+neither client starts a missing or stopped service. If the daemon is
+unavailable or intentionally held, report that state and use scoped native
+tools without retrying or changing daemon lifecycle.
+
+## Desktop native diagnostics
+
+Cursor desktop installs the unpacked `tracedecay.cursor-native` VS Code
+extension through TraceDecay's receipt-backed host-component lifecycle. Reload
+Cursor after installation so the extension starts
+`tracedecay lsp bridge --stdio` with `vscode-languageclient`.
+
+The extension forwards bounded native diagnostics only for the single admitted
+workspace folder. It sends URI, document version, range, source, message, and
+safe diagnostic metadata—never document text or arbitrary diagnostic payloads.
+The gateway merges that native upstream lane internally but, in Cursor-native
+mode, publishes only TraceDecay findings back to avoid duplicating Cursor's own
+diagnostics. Multi-root workspaces are not supported.
+
+The component is deployed at
+`~/.cursor/extensions/tracedecay.cursor-native-0.0.0/`; its receipt and
+installed manifest/bundle are checked by `tracedecay doctor`.
+TraceDecay does not install or claim ownership of `rust-analyzer`,
+`typescript-language-server`, Pyright, or another language analyzer.
+
+For compiler output Cursor already captured, call `tracedecay_diagnose` first:
+it maps the supplied `cargo`/`clippy` stderr to symbols and callers without
+starting a toolchain. Use `tracedecay_diagnostics` only when fresh structured
+diagnostics are needed; it runs the relevant type checker, so respect Cursor's
+approval/run mode even though the tool does not edit the workspace.
+
+`tracedecay lsp servers [--json]` is the separate CLI discovery command
+for supported local language servers and install hints. It is informational:
+it does not install or start a server. It is **not** an MCP tool, so do not add
+it (or a wildcard) to `mcpAllowlist`.
 
 For literal strings, regexes, and config keys inside indexed code, use
 `tracedecay_grep`; reserve `tracedecay_search` for symbol names and
 `tracedecay_context` for concept-level discovery.
 
-For sessions resumed from compacted context, the `sessionStart` hook adds a
-short recovery hint through Cursor's `additional_context` channel so the agent
-knows to query TraceDecay LCM/session recall before assuming the compacted
-summary is complete.
+For sessions resumed from compacted context, any recovery guidance is produced
+from the daemon's canonical session state after the hook admission succeeds;
+the `sessionStart` adapter does not read a session store itself.
 
 Slash workflows ship as Cursor-native commands
 (`/tracedecay-map-architecture`, `/tracedecay-check-health`,
 `/tracedecay-curate-memory`, `/tracedecay-review-diff`, ...). Their slugs keep
-the `tracedecay-` prefix so typing `/tracedecay` lists every command.
+the `tracedecay-` prefix so typing `/tracedecay` lists every command. The
+files in `overlays/cursor/commands/` are independently authored for Cursor
+(skill handoff + approval notes), not generated from `plugin/commands/`.
 
 ## Auto-review and `permissions.json`
 
@@ -72,9 +110,12 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
   "mcpAllowlist": [
     "tracedecay:tracedecay_active_project",
     "tracedecay:tracedecay_affected",
+    "tracedecay:tracedecay_affected_tests",
     "tracedecay:tracedecay_analytics",
     "tracedecay:tracedecay_ast_grep_search",
     "tracedecay:tracedecay_automation_run_artifact_view",
+    "tracedecay:tracedecay_automation_run_list",
+    "tracedecay:tracedecay_automation_run_view",
     "tracedecay:tracedecay_body",
     "tracedecay:tracedecay_branch_diff",
     "tracedecay:tracedecay_branch_list",
@@ -86,30 +127,79 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_callers_for",
     "tracedecay:tracedecay_changelog",
     "tracedecay:tracedecay_circular",
+    "tracedecay:tracedecay_code_callees",
+    "tracedecay:tracedecay_code_callers",
+    "tracedecay:tracedecay_code_declaration",
+    "tracedecay:tracedecay_code_definition",
+    "tracedecay:tracedecay_code_exact_occurrence",
+    "tracedecay:tracedecay_code_facets",
+    "tracedecay:tracedecay_code_implementations",
+    "tracedecay:tracedecay_code_phrase_search",
+    "tracedecay:tracedecay_code_references",
+    "tracedecay:tracedecay_code_signature_search",
+    "tracedecay:tracedecay_code_symbol_search",
+    "tracedecay:tracedecay_code_timeline",
+    "tracedecay:tracedecay_code_type_definition",
+    "tracedecay:tracedecay_code_type_hierarchy",
     "tracedecay:tracedecay_commit_context",
     "tracedecay:tracedecay_complexity",
     "tracedecay:tracedecay_config",
+    "tracedecay:tracedecay_configuration_audit",
+    "tracedecay:tracedecay_configuration_explain",
+    "tracedecay:tracedecay_configuration_get",
+    "tracedecay:tracedecay_configuration_list",
+    "tracedecay:tracedecay_configuration_observed_state",
+    "tracedecay:tracedecay_configuration_protected_preview",
+    "tracedecay:tracedecay_configuration_rollback_preview",
     "tracedecay:tracedecay_constructors",
     "tracedecay:tracedecay_context",
+    "tracedecay:tracedecay_context_scout_budget",
+    "tracedecay:tracedecay_context_scout_capability",
+    "tracedecay:tracedecay_context_scout_explain",
+    "tracedecay:tracedecay_context_scout_recent",
+    "tracedecay:tracedecay_context_scout_status",
     "tracedecay:tracedecay_coupling",
-    "tracedecay:tracedecay_dashboard",
     "tracedecay:tracedecay_dead_code",
     "tracedecay:tracedecay_dependency_depth",
     "tracedecay:tracedecay_derives",
     "tracedecay:tracedecay_diagnose",
     "tracedecay:tracedecay_diagnostics",
+    "tracedecay:tracedecay_diagnostics_read",
     "tracedecay:tracedecay_diff_context",
     "tracedecay:tracedecay_distribution",
     "tracedecay:tracedecay_doc_coverage",
     "tracedecay:tracedecay_dsm",
+    "tracedecay:tracedecay_fact_store_contradict",
+    "tracedecay:tracedecay_fact_store_get",
+    "tracedecay:tracedecay_fact_store_list",
+    "tracedecay:tracedecay_fact_store_probe",
+    "tracedecay:tracedecay_fact_store_reason",
+    "tracedecay:tracedecay_fact_store_related",
+    "tracedecay:tracedecay_fact_store_search",
+    "tracedecay:tracedecay_feedback_advisory_cycle",
+    "tracedecay:tracedecay_feedback_diagnostics",
+    "tracedecay:tracedecay_feedback_expand",
+    "tracedecay:tracedecay_feedback_get",
+    "tracedecay:tracedecay_feedback_impact",
+    "tracedecay:tracedecay_feedback_list",
     "tracedecay:tracedecay_field_sites",
     "tracedecay:tracedecay_file_dependents",
+    "tracedecay:tracedecay_file_metadata",
     "tracedecay:tracedecay_files",
     "tracedecay:tracedecay_find_exact_symbol",
     "tracedecay:tracedecay_gini",
+    "tracedecay:tracedecay_git_blame",
+    "tracedecay:tracedecay_git_diff",
+    "tracedecay:tracedecay_git_history",
+    "tracedecay:tracedecay_git_hunks",
+    "tracedecay:tracedecay_git_preview",
+    "tracedecay:tracedecay_git_status",
+    "tracedecay:tracedecay_github_stack_signal_expand",
     "tracedecay:tracedecay_god_class",
     "tracedecay:tracedecay_grep",
     "tracedecay:tracedecay_health",
+    "tracedecay:tracedecay_health_delta",
+    "tracedecay:tracedecay_health_read",
     "tracedecay:tracedecay_hermes_skill_bridge",
     "tracedecay:tracedecay_hotspots",
     "tracedecay:tracedecay_impact",
@@ -118,29 +208,40 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_inheritance_depth",
     "tracedecay:tracedecay_largest",
     "tracedecay:tracedecay_lcm_describe",
+    "tracedecay:tracedecay_lcm_doctor",
     "tracedecay:tracedecay_lcm_expand",
     "tracedecay:tracedecay_lcm_expand_query",
     "tracedecay:tracedecay_lcm_grep",
     "tracedecay:tracedecay_lcm_load_session",
     "tracedecay:tracedecay_lcm_status",
+    "tracedecay:tracedecay_memory_status",
     "tracedecay:tracedecay_message_search",
     "tracedecay:tracedecay_module_api",
+    "tracedecay:tracedecay_multi_root_execute",
+    "tracedecay:tracedecay_multi_root_scope_set_read",
+    "tracedecay:tracedecay_native_integration_status",
     "tracedecay:tracedecay_node",
+    "tracedecay:tracedecay_observatory_read",
     "tracedecay:tracedecay_outline",
     "tracedecay:tracedecay_port_order",
     "tracedecay:tracedecay_port_status",
     "tracedecay:tracedecay_pr_context",
+    "tracedecay:tracedecay_preflight_native_integration",
     "tracedecay:tracedecay_project_context",
     "tracedecay:tracedecay_project_list",
     "tracedecay:tracedecay_project_search",
+    "tracedecay:tracedecay_qualified_name",
     "tracedecay:tracedecay_rank",
     "tracedecay:tracedecay_read",
     "tracedecay:tracedecay_recursion",
     "tracedecay:tracedecay_redundancy",
+    "tracedecay:tracedecay_remote_status",
     "tracedecay:tracedecay_rename_preview",
     "tracedecay:tracedecay_retrieve",
     "tracedecay:tracedecay_runtime",
     "tracedecay:tracedecay_search",
+    "tracedecay:tracedecay_session_lookup",
+    "tracedecay:tracedecay_session_refresh_status",
     "tracedecay:tracedecay_sessions_for",
     "tracedecay:tracedecay_signature",
     "tracedecay:tracedecay_signature_search",
@@ -148,15 +249,47 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_simplify_scan",
     "tracedecay:tracedecay_skill_list",
     "tracedecay:tracedecay_skill_view",
+    "tracedecay:tracedecay_source_body",
+    "tracedecay:tracedecay_source_lines",
+    "tracedecay:tracedecay_source_outline",
+    "tracedecay:tracedecay_stack_snapshot",
     "tracedecay:tracedecay_status",
     "tracedecay:tracedecay_storage_status",
     "tracedecay:tracedecay_test_map",
+    "tracedecay:tracedecay_test_results",
     "tracedecay:tracedecay_test_risk",
     "tracedecay:tracedecay_todos",
     "tracedecay:tracedecay_type_hierarchy",
+    "tracedecay:tracedecay_unmounted_files",
     "tracedecay:tracedecay_unsafe_patterns",
     "tracedecay:tracedecay_unused_imports",
-    "tracedecay:tracedecay_workflows"
+    "tracedecay:tracedecay_work_attempt_status",
+    "tracedecay:tracedecay_work_compare_proposal",
+    "tracedecay:tracedecay_work_execution_history",
+    "tracedecay:tracedecay_work_experience",
+    "tracedecay:tracedecay_work_generate_proposal",
+    "tracedecay:tracedecay_work_hydrate_artifacts",
+    "tracedecay:tracedecay_work_list_attempts",
+    "tracedecay:tracedecay_work_placement_preflight",
+    "tracedecay:tracedecay_work_placement_status",
+    "tracedecay:tracedecay_work_prepare_duplicate_adjudication",
+    "tracedecay:tracedecay_work_prepare_graph_mutation",
+    "tracedecay:tracedecay_work_retrieve_evidence",
+    "tracedecay:tracedecay_work_run_control",
+    "tracedecay:tracedecay_work_topology",
+    "tracedecay:tracedecay_work_topology_metrics",
+    "tracedecay:tracedecay_work_views",
+    "tracedecay:tracedecay_workflow_definition_history",
+    "tracedecay:tracedecay_workflow_diff_definition",
+    "tracedecay:tracedecay_workflow_get_definition",
+    "tracedecay:tracedecay_workflow_get_run",
+    "tracedecay:tracedecay_workflow_list_definitions",
+    "tracedecay:tracedecay_workflow_validate_definition",
+    "tracedecay:tracedecay_workflows",
+    "tracedecay:tracedecay_worktree_cleanup_confirm",
+    "tracedecay:tracedecay_worktree_cleanup_inspect",
+    "tracedecay:tracedecay_worktree_cleanup_reconcile",
+    "tracedecay:tracedecay_worktree_inventory"
   ]
 }
 ```
@@ -165,8 +298,10 @@ Notes:
 
 - The list is exactly the tools that declare `readOnlyHint: true` - the edit
   primitives (`str_replace`, `replace_symbol`, ...), test runner, session
-  baseline, memory writes, and LCM lifecycle tools are deliberately excluded
-  so they keep going through review.
+  baseline, memory writes, LCM lifecycle tools, and mutating Work transitions
+  are deliberately excluded so they keep going through review. The listed Work
+  reads include execution `topology`; use them to inspect Work before choosing
+  a mutation.
 - Two borderline entries: `tracedecay_diagnostics` runs your toolchain
   (cargo/tsc/pyright) and `tracedecay_dashboard` starts a localhost server.
   Both are non-destructive, but remove those lines if you want a prompt first.
@@ -193,7 +328,7 @@ Two layers of defense ship with this plugin:
   error naming the failure and the fix; it rechecks the project on every tool
   call and recovers automatically once `tracedecay init` (or a corrected
   `--path`) makes resolution succeed.
-- `tracedecay doctor --agent cursor` scans Cursor's recent MCP logs
+- `tracedecay doctor` scans supported host integration evidence
   (`~/.config/Cursor/logs` on Linux, `~/Library/Application Support/Cursor/logs`
   on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures —
   literal `${workspaceFolder}` errors, `Connection failed: MCP error -32000`,
@@ -207,17 +342,16 @@ window.
 
 ## Known limitations
 
-- **Cloud agents:** plugin `sessionStart`, `sessionEnd`, `beforeSubmitPrompt`,
-  `workspaceOpen`, and `stop` hooks never run in Cursor cloud agents, so the
-  TraceDecay steering context and transcript ingest are desktop-only.
-  Cloud agents do run repo-level `.cursor/hooks.json` hooks for the supported
-  subset (`afterFileEdit`, `afterShellExecution`, tool hooks, subagent hooks).
-- The plugin's session-recall tools only see transcripts ingested on this
-  machine.
+- **Cloud agents:** lifecycle availability is host-dependent. The desktop
+  projection's daemon-owned native lifecycle journey uses `sessionStart`,
+  `preCompact`, `afterFileEdit`, and `stop`; each is fail-open. Only
+  `sessionStart` has a host-supported immediate context response.
+- Session recall is sourced from the daemon's canonical project store, not a
+  host hook's local transcript read.
 
 ## Local development
 
-For checkout dogfooding, install the generated Cursor projection after edits:
+For local development, install the generated Cursor projection after edits:
 
 ```bash
 tracedecay install --agent cursor

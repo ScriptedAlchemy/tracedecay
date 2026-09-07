@@ -1,0 +1,56 @@
+[package]
+name = "tracedecay-rusqlite-runtime"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+description = "Bundled SQLite runtime for TraceDecay storage adapters"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
+# the feature off, so instrumented call sites compile identically both ways.
+hotpath = [
+    "tracedecay-domain/hotpath",
+    "hotpath/hotpath",
+    "tracedecay-application/hotpath",
+    "tracedecay-store/hotpath",
+]
+hotpath-alloc = [
+    "tracedecay-domain/hotpath-alloc",
+    "hotpath",
+    "hotpath/hotpath-alloc",
+    "tracedecay-application/hotpath-alloc",
+    "tracedecay-store/hotpath-alloc",
+]
+hotpath-cpu = [
+    "tracedecay-domain/hotpath-cpu",
+    "hotpath",
+    "hotpath/hotpath-cpu",
+    "tracedecay-application/hotpath-cpu",
+    "tracedecay-store/hotpath-cpu",
+]
+test-transport = []
+
+[dependencies]
+async-channel = "2.5.0"
+hotpath.workspace = true
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "cache", "hooks", "limits", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ring = "0.17.14"
+sha2 = "0.11.0"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+tracing = "0.1"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+tempfile = "3"
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

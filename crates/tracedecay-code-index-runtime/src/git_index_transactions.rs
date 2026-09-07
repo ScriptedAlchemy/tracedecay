@@ -1,0 +1,775 @@
+//! Fixed native Git mechanics for Git index transactions.
+//!
+//! The native surface only stages and unstages preview-bound index changes. It
+//! never accepts a generic Git subcommand, flags, ref, or
+//! working-tree path from a caller. Daemon code supplies already validated,
+//! preview-bound patch material and performs the journaled recovery protocol.
+
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, Write};
+
+#[cfg(feature = "hotpath")]
+type ProfiledFile = hotpath::io::InstrumentedIo<File>;
+#[cfg(not(feature = "hotpath"))]
+type ProfiledFile = File;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use thiserror::Error;
+use tracedecay_domain::{
+    DomainError, GitBlobExpectationV1, GitFileModeV1, GitHeadStateV1, GitIndexEntryExpectationV1,
+    GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitOidV1, HunkDirectionV1, HunkRefV1,
+    ManifestDigest, canonical_sha256,
+};
+use tracedecay_runtime_core::git_discovery::{
+    GitRepositoryIdentity, GitRepositoryIdentityOutcome, discover_repository_identity_bounded,
+};
+use tracedecay_runtime_core::path_safety::plain_host_path;
+
+pub const GIT_INDEX_ADAPTER_REVISION: &str = "tracedecay.git-index-adapter.v1";
+
+mod patch;
+mod process;
+mod safety;
+#[cfg(test)]
+mod tests;
+
+pub use patch::ValidatedIndexPatch;
+use process::{
+    current_operation_state, git_command, joined_patch_bytes, parse_git_oid,
+    run_command_with_stdin, sync_parent_directory, worktree_mode,
+};
+
+#[derive(Debug, Error)]
+pub enum NativeGitIndexError {
+    #[error("repository root is unavailable: {0}")]
+    RepositoryUnavailable(String),
+    #[error("Git index is locked")]
+    IndexLocked,
+    #[error("native Git output was malformed for {operation}")]
+    MalformedOutput { operation: &'static str },
+    #[error("native Git {operation} failed with status {status}")]
+    GitFailed {
+        operation: &'static str,
+        status: String,
+    },
+    #[error("a patch does not exactly match its preview-bound HunkRef")]
+    PatchDoesNotMatchHunk,
+    #[error("partial hunk selection has no proven round-trip adapter")]
+    PartialHunkSelectionUnsupported,
+    #[error("native write-tree differs from the preview candidate tree")]
+    CandidateTreeMismatch,
+    #[error("native repository state no longer matches the preview")]
+    StaleRepositoryState,
+    #[error("native Git I/O failed: {0}")]
+    Io(String),
+    #[error("native Git {operation} crossed a commit boundary with an unknown result: {detail}")]
+    CommitBoundaryUnknown {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error(transparent)]
+    Domain(#[from] DomainError),
+}
+
+impl NativeGitIndexError {
+    /// Preserve ambiguity once a native publication/commit boundary may have
+    /// happened. Callers must reconcile rather than retry the operation.
+    #[must_use]
+    pub fn into_commit_boundary_unknown(self, operation: &'static str) -> Self {
+        match self {
+            Self::CommitBoundaryUnknown { .. } => self,
+            error => Self::CommitBoundaryUnknown {
+                operation,
+                detail: error.to_string(),
+            },
+        }
+    }
+
+    #[hotpath::skip]
+    pub const fn is_commit_boundary_unknown(&self) -> bool {
+        matches!(self, Self::CommitBoundaryUnknown { .. })
+    }
+}
+
+/// The fixed native executor rooted at a daemon-resolved repository. Callers
+/// cannot change its working directory or process environment.
+#[derive(Clone, Debug)]
+pub struct FixedGitIndexRunner {
+    repository_root: PathBuf,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    index_path: PathBuf,
+    objects_path: PathBuf,
+}
+
+/// Exclusive ownership of Git's real `index.lock` path. The lock is acquired
+/// with `create_new` and removed on every non-commit exit. Index-changing
+/// operations build a private candidate index and publish it by renaming this
+/// exact lock file over the real index.
+pub struct NativeIndexLock {
+    path: PathBuf,
+    file: ProfiledFile,
+    published: bool,
+}
+
+impl Drop for NativeIndexLock {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Resolves the identity of a bare repository rooted exactly at `directory`.
+/// Returns `None` unless git confirms the directory is itself bare, so
+/// non-repositories and worktree misresolutions keep their typed outcome.
+fn bare_repository_identity(directory: &Path) -> Option<GitRepositoryIdentity> {
+    let root = directory.canonicalize().ok()?;
+    let output = git_command(&root)
+        .args(["rev-parse", "--is-bare-repository", "--absolute-git-dir"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "true" {
+        return None;
+    }
+    let git_dir = PathBuf::from(lines.next()?.trim()).canonicalize().ok()?;
+    Some(GitRepositoryIdentity {
+        worktree_root: root,
+        git_dir: git_dir.clone(),
+        common_dir: git_dir,
+    })
+}
+
+impl FixedGitIndexRunner {
+    pub fn new(repository_root: impl AsRef<Path>) -> Result<Self, NativeGitIndexError> {
+        let identity = match discover_repository_identity_bounded(repository_root.as_ref()) {
+            GitRepositoryIdentityOutcome::Resolved(identity) => identity,
+            // Bounded discovery is worktree-shaped and cannot resolve a bare
+            // repository, but preflight must still construct a runner there to
+            // classify bare as a mutation blocker rather than an outage.
+            outcome => match bare_repository_identity(repository_root.as_ref()) {
+                Some(identity) => identity,
+                None => {
+                    return Err(NativeGitIndexError::RepositoryUnavailable(format!(
+                        "bounded Git repository identity discovery did not resolve: {outcome:?}"
+                    )));
+                }
+            },
+        };
+        let GitRepositoryIdentity {
+            worktree_root: repository_root,
+            git_dir,
+            common_dir,
+        } = identity;
+        let index_path = git_dir.join("index");
+        let objects_path = common_dir.join("objects");
+        Ok(Self {
+            repository_root,
+            git_dir,
+            common_dir,
+            index_path,
+            objects_path,
+        })
+    }
+
+    pub fn ensure_index_unlocked(&self) -> Result<(), NativeGitIndexError> {
+        if self.index_lock_path().exists() {
+            return Err(NativeGitIndexError::IndexLocked);
+        }
+        Ok(())
+    }
+
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    pub fn is_bare_repository(&self) -> Result<bool, NativeGitIndexError> {
+        let output = self.run_git("rev-parse", &["rev-parse", "--is-bare-repository"])?;
+        match String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .as_deref()
+        {
+            Some("true") => Ok(true),
+            Some("false") => Ok(false),
+            _ => Err(NativeGitIndexError::MalformedOutput {
+                operation: "rev-parse",
+            }),
+        }
+    }
+
+    pub fn object_format(&self) -> Result<String, NativeGitIndexError> {
+        let output = self.run_git("rev-parse", &["rev-parse", "--show-object-format"])?;
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or(NativeGitIndexError::MalformedOutput {
+                operation: "rev-parse",
+            })
+    }
+
+    #[hotpath::measure(label = "daemon.git.index_tx.lock.acquire")]
+    pub fn acquire_index_lock(&self) -> Result<NativeIndexLock, NativeGitIndexError> {
+        let path = self.index_lock_path();
+        let file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    NativeGitIndexError::IndexLocked
+                } else {
+                    NativeGitIndexError::Io(error.to_string())
+                }
+            })?;
+        let file = hotpath::io!(file, label = "usecases.git_index_tx.lock.file");
+        Ok(NativeIndexLock {
+            path,
+            file,
+            published: false,
+        })
+    }
+
+    pub fn git_version(&self) -> Result<String, NativeGitIndexError> {
+        let output = self.run_git("version", &["--version"])?;
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or(NativeGitIndexError::MalformedOutput {
+                operation: "version",
+            })
+    }
+
+    pub fn refs_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+        let output = self.run_git(
+            "for-each-ref",
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)%00%(symref)",
+            ],
+        )?;
+        canonical_sha256(&output.stdout).map_err(Into::into)
+    }
+
+    pub fn head_state(&self) -> Result<GitHeadStateV1, NativeGitIndexError> {
+        let symbolic = self.run_git_output(&["symbolic-ref", "-q", "HEAD"])?;
+        let branch = symbolic
+            .status
+            .success()
+            .then(|| String::from_utf8(symbolic.stdout).ok())
+            .flatten()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let head = self.run_git_output(&["rev-parse", "--verify", "HEAD"])?;
+        if head.status.success() {
+            let commit = parse_git_oid("rev-parse", &head.stdout)?;
+            Ok(match branch {
+                Some(branch) => GitHeadStateV1::Attached { branch, commit },
+                None => GitHeadStateV1::Detached { commit },
+            })
+        } else if let Some(branch) = branch {
+            Ok(GitHeadStateV1::Unborn { branch })
+        } else {
+            Err(NativeGitIndexError::MalformedOutput {
+                operation: "rev-parse",
+            })
+        }
+    }
+
+    pub fn has_intent_to_add(&self) -> Result<bool, NativeGitIndexError> {
+        const CE_INTENT_TO_ADD: u32 = 0x2000_0000;
+        let output = self.run_git("ls-files", &["ls-files", "--debug"])?;
+        let text =
+            String::from_utf8(output.stdout).map_err(|_| NativeGitIndexError::MalformedOutput {
+                operation: "ls-files",
+            })?;
+        Ok(text.lines().any(|line| {
+            line.split_once("flags: ")
+                .map(|(_, flags)| flags)
+                .and_then(|flags| u32::from_str_radix(flags, 16).ok())
+                .is_some_and(|flags| flags & CE_INTENT_TO_ADD != 0)
+        }))
+    }
+
+    pub fn index_tree_under_lock(
+        &self,
+        lock: &NativeIndexLock,
+    ) -> Result<GitOidV1, NativeGitIndexError> {
+        self.require_lock(lock)?;
+        self.preview_candidate_tree_inner(&[], false)
+    }
+
+    #[hotpath::measure(label = "daemon.git.index_tx.stage")]
+    pub fn stage_hunks(
+        &self,
+        lock: &mut NativeIndexLock,
+        preview: &GitIndexPreviewV1,
+        patches: &[ValidatedIndexPatch],
+    ) -> Result<(), NativeGitIndexError> {
+        self.apply_hunks(
+            lock,
+            preview,
+            patches,
+            HunkDirectionV1::WorkingTreeToIndex,
+            false,
+        )
+    }
+
+    #[hotpath::measure(label = "daemon.git.index_tx.unstage")]
+    pub fn unstage_hunks(
+        &self,
+        lock: &mut NativeIndexLock,
+        preview: &GitIndexPreviewV1,
+        patches: &[ValidatedIndexPatch],
+    ) -> Result<(), NativeGitIndexError> {
+        self.apply_hunks(lock, preview, patches, HunkDirectionV1::IndexToHead, true)
+    }
+
+    #[cfg(test)]
+    pub fn write_tree(&self) -> Result<GitOidV1, NativeGitIndexError> {
+        self.ensure_index_unlocked()?;
+        let output = self.run_git("write-tree", &["write-tree"])?;
+        parse_git_oid("write-tree", &output.stdout)
+    }
+
+    /// Compute the candidate tree against an isolated index and object
+    /// quarantine. Preview never writes the repository index or object store.
+    #[cfg(test)]
+    pub fn preview_candidate_tree(
+        &self,
+        patches: &[ValidatedIndexPatch],
+        reverse: bool,
+    ) -> Result<GitOidV1, NativeGitIndexError> {
+        let lock = self.acquire_index_lock()?;
+        let result = self.preview_candidate_tree_under_lock(&lock, patches, reverse);
+        drop(lock);
+        result
+    }
+
+    pub fn preview_candidate_tree_under_lock(
+        &self,
+        lock: &NativeIndexLock,
+        patches: &[ValidatedIndexPatch],
+        reverse: bool,
+    ) -> Result<GitOidV1, NativeGitIndexError> {
+        self.require_lock(lock)?;
+        self.preview_candidate_tree_inner(patches, reverse)
+    }
+
+    #[hotpath::measure(label = "usecases.git_index_tx.preview")]
+    fn preview_candidate_tree_inner(
+        &self,
+        patches: &[ValidatedIndexPatch],
+        reverse: bool,
+    ) -> Result<GitOidV1, NativeGitIndexError> {
+        let quarantine =
+            tempfile::tempdir().map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        let index_path = quarantine.path().join("index");
+        if self.index_path.exists() {
+            std::fs::copy(&self.index_path, &index_path)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        } else {
+            std::fs::File::create(&index_path)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        }
+        let object_path = quarantine.path().join("objects");
+        std::fs::create_dir_all(&object_path)
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+
+        let patch_bytes = joined_patch_bytes(patches);
+        if !patch_bytes.is_empty() {
+            let mut apply = self.quarantine_command(&index_path, &object_path);
+            apply
+                .arg("apply")
+                .arg("--cached")
+                .arg("--recount")
+                .arg("--whitespace=nowarn")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if reverse {
+                apply.arg("--reverse");
+            }
+            run_command_with_stdin(apply, "preview apply", &patch_bytes)?;
+        }
+
+        let output = self
+            .quarantine_command(&index_path, &object_path)
+            .arg("write-tree")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        if !output.status.success() {
+            return Err(NativeGitIndexError::GitFailed {
+                operation: "preview write-tree",
+                status: output.status.to_string(),
+            });
+        }
+        parse_git_oid("preview write-tree", &output.stdout)
+    }
+
+    pub fn index_bytes(&self) -> Result<Vec<u8>, NativeGitIndexError> {
+        match File::open(&self.index_path) {
+            Ok(file) => {
+                let mut file = hotpath::io!(file, label = "usecases.git_index_tx.index.file");
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+                Ok(bytes)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
+        }
+    }
+
+    fn apply_hunks(
+        &self,
+        lock: &mut NativeIndexLock,
+        preview: &GitIndexPreviewV1,
+        patches: &[ValidatedIndexPatch],
+        direction: HunkDirectionV1,
+        reverse: bool,
+    ) -> Result<(), NativeGitIndexError> {
+        preview.validate()?;
+        if !matches!(
+            preview.disposition,
+            GitIndexPreviewDispositionV1::Applicable
+        ) || preview.operation.hunk_direction() != Some(direction)
+        {
+            return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
+        }
+        self.require_lock(lock)?;
+        self.verify_native_preconditions(lock, preview)?;
+        let expected = preview.selected_hunk_digests()?;
+        let actual: Result<Vec<ManifestDigest>, DomainError> = patches
+            .iter()
+            .map(|patch| patch.hunk().compute_digest())
+            .collect();
+        if expected != actual? {
+            return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
+        }
+        for patch in patches {
+            self.verify_hunk_preconditions(patch.hunk())?;
+        }
+        let transaction =
+            tempfile::tempdir().map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        let candidate_index = transaction.path().join("index");
+        if self.index_path.exists() {
+            std::fs::copy(&self.index_path, &candidate_index)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        } else {
+            File::create(&candidate_index)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        }
+
+        let patch_bytes = joined_patch_bytes(patches);
+        let mut command = self.command();
+        command
+            .env("GIT_INDEX_FILE", &candidate_index)
+            .arg("apply")
+            .arg("--cached")
+            .arg("--recount")
+            .arg("--whitespace=nowarn")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if reverse {
+            command.arg("--reverse");
+        }
+        hotpath::measure_block!("usecases.git_index_tx.apply.patch", {
+            run_command_with_stdin(command, "apply", &patch_bytes)
+        })?;
+
+        let candidate_tree = hotpath::measure_block!("usecases.git_index_tx.apply.write_tree", {
+            self.command()
+                .env("GIT_INDEX_FILE", &candidate_index)
+                .arg("write-tree")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+        })?;
+        if !candidate_tree.status.success() {
+            return Err(NativeGitIndexError::GitFailed {
+                operation: "apply write-tree",
+                status: candidate_tree.status.to_string(),
+            });
+        }
+        let candidate_tree = parse_git_oid("apply write-tree", &candidate_tree.stdout)?;
+        if preview.candidate_index_tree.as_ref() != Some(&candidate_tree) {
+            return Err(NativeGitIndexError::CandidateTreeMismatch);
+        }
+
+        // Candidate construction can take long enough for non-cooperating
+        // worktree/ref writers to race us. Recheck every native and per-hunk
+        // CAS fact again at the index publication boundary.
+        self.verify_native_preconditions(lock, preview)?;
+        for patch in patches {
+            self.verify_hunk_preconditions(patch.hunk())?;
+        }
+
+        let candidate_permissions = std::fs::metadata(&candidate_index)
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?
+            .permissions();
+        let candidate_bytes = {
+            let mut file = hotpath::io!(
+                File::open(&candidate_index)
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
+                label = "usecases.git_index_tx.candidate.file"
+            );
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+            bytes
+        };
+        hotpath::measure_block!("usecases.git_index_tx.index.write", {
+            lock.file
+                .set_permissions(candidate_permissions)
+                .and_then(|()| lock.file.rewind())
+                .and_then(|()| lock.file.set_len(0))
+                .and_then(|()| lock.file.write_all(&candidate_bytes))
+                .and_then(|()| lock.file.sync_all())
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+        })?;
+        // rename either publishes atomically or reports failure without
+        // changing the destination. Durability becomes ambiguous only after a
+        // successful rename when syncing the parent directory fails.
+        hotpath::measure_block!("usecases.git_index_tx.index.rename", {
+            std::fs::rename(&lock.path, &self.index_path)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+        })?;
+        lock.published = true;
+        sync_parent_directory(&self.index_path)
+            .map_err(|error| error.into_commit_boundary_unknown("index publish"))?;
+        Ok(())
+    }
+
+    fn require_lock(&self, lock: &NativeIndexLock) -> Result<(), NativeGitIndexError> {
+        if lock.path != self.index_lock_path() || !lock.path.is_file() || lock.published {
+            return Err(NativeGitIndexError::IndexLocked);
+        }
+        Ok(())
+    }
+
+    #[hotpath::measure(label = "usecases.git_index_tx.verify_preconditions")]
+    fn verify_native_preconditions(
+        &self,
+        lock: &NativeIndexLock,
+        preview: &GitIndexPreviewV1,
+    ) -> Result<(), NativeGitIndexError> {
+        let snapshot = &preview.repository_snapshot;
+        let checksum = canonical_sha256(&self.index_bytes()?)?;
+        if !self.repository_identity_unchanged()
+            || checksum != snapshot.index.checksum
+            || self.index_tree_under_lock(lock).ok().as_ref() != snapshot.index.tree_id.as_ref()
+            || self.tracked_worktree_digest().ok().as_ref()
+                != Some(&snapshot.working_tree.tracked_digest)
+            || self.untracked_name_digest().ok().as_ref()
+                != Some(&snapshot.working_tree.untracked_name_digest)
+            || self.ignored_name_digest().ok().as_ref()
+                != Some(&snapshot.working_tree.ignored_collision_digest)
+            || self.refs_digest().ok().as_ref() != snapshot.refs_digest.as_ref()
+            || self.git_version().ok().as_deref() != snapshot.git_version.as_deref()
+            || snapshot.adapter_revision.as_deref() != Some(GIT_INDEX_ADAPTER_REVISION)
+            || self.head_state().ok().as_ref() != Some(&snapshot.head)
+            || current_operation_state(&self.git_dir) != snapshot.operation_state
+            || self.configuration_digest().ok().as_ref() != snapshot.configuration_digest.as_ref()
+            || self.attributes_digest().ok().as_ref() != snapshot.attributes_digest.as_ref()
+            || self.sparse_digest().ok().as_ref() != snapshot.sparse_digest.as_ref()
+            || self.submodule_digest().ok().as_ref() != snapshot.submodule_digest.as_ref()
+            || self.filesystem_capabilities_digest().ok().as_ref()
+                != snapshot.filesystem_capabilities_digest.as_ref()
+        {
+            return Err(NativeGitIndexError::StaleRepositoryState);
+        }
+        Ok(())
+    }
+
+    fn verify_hunk_preconditions(&self, hunk: &HunkRefV1) -> Result<(), NativeGitIndexError> {
+        let index_entry = self.index_entry(&hunk.path)?;
+        if index_entry != hunk.expected_index_entry {
+            return Err(NativeGitIndexError::StaleRepositoryState);
+        }
+
+        let base = match hunk.direction {
+            HunkDirectionV1::WorkingTreeToIndex => index_entry.blob,
+            HunkDirectionV1::IndexToHead => {
+                self.head_blob(hunk.original_path.as_deref().unwrap_or(&hunk.path))?
+            }
+        };
+        if base != hunk.expected_base_blob {
+            return Err(NativeGitIndexError::StaleRepositoryState);
+        }
+
+        if let Some(expected_blob) = &hunk.expected_worktree_blob {
+            let path = self.repository_root.join(&hunk.path);
+            let actual_blob = if std::fs::symlink_metadata(&path).is_err() {
+                GitBlobExpectationV1::AbsentFile
+            } else {
+                let output = self.run_git("hash-object", &["hash-object", "--", &hunk.path])?;
+                GitBlobExpectationV1::Present(parse_git_oid("hash-object", &output.stdout)?)
+            };
+            if &actual_blob != expected_blob
+                || worktree_mode(&path).as_ref() != hunk.expected_worktree_mode.as_ref()
+            {
+                return Err(NativeGitIndexError::StaleRepositoryState);
+            }
+        }
+
+        let attributes =
+            self.run_git("check-attr", &["check-attr", "-z", "-a", "--", &hunk.path])?;
+        let attributes_digest =
+            canonical_sha256(&String::from_utf8_lossy(&attributes.stdout).into_owned())?;
+        if hunk.attributes_digest.as_ref() != Some(&attributes_digest) {
+            return Err(NativeGitIndexError::StaleRepositoryState);
+        }
+        Ok(())
+    }
+
+    fn index_entry(&self, path: &str) -> Result<GitIndexEntryExpectationV1, NativeGitIndexError> {
+        let output = self.run_git("ls-files", &["ls-files", "-s", "-z", "--", path])?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut entries = Vec::new();
+        for record in text.split('\0').filter(|record| !record.is_empty()) {
+            let (metadata, _) =
+                record
+                    .split_once('\t')
+                    .ok_or(NativeGitIndexError::MalformedOutput {
+                        operation: "ls-files",
+                    })?;
+            let mut fields = metadata.split_whitespace();
+            let mode =
+                GitFileModeV1::new(fields.next().ok_or(NativeGitIndexError::MalformedOutput {
+                    operation: "ls-files",
+                })?)?;
+            let blob =
+                GitOidV1::new(fields.next().ok_or(NativeGitIndexError::MalformedOutput {
+                    operation: "ls-files",
+                })?)?;
+            let stage = fields
+                .next()
+                .and_then(|value| value.parse::<u8>().ok())
+                .ok_or(NativeGitIndexError::MalformedOutput {
+                    operation: "ls-files",
+                })?;
+            entries.push((mode, blob, stage));
+        }
+        let Some((mode, blob, _)) = entries.first().cloned() else {
+            return Ok(GitIndexEntryExpectationV1 {
+                blob: GitBlobExpectationV1::AbsentFile,
+                mode: None,
+                unmerged_stage: None,
+            });
+        };
+        Ok(GitIndexEntryExpectationV1 {
+            blob: GitBlobExpectationV1::Present(blob),
+            mode: Some(mode),
+            unmerged_stage: entries
+                .iter()
+                .map(|(_, _, stage)| *stage)
+                .find(|stage| *stage > 0),
+        })
+    }
+
+    fn head_blob(&self, path: &str) -> Result<GitBlobExpectationV1, NativeGitIndexError> {
+        let output = self.run_git("ls-tree", &["ls-tree", "-z", "HEAD", "--", path])?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(record) = text.split('\0').find(|record| !record.is_empty()) else {
+            return Ok(GitBlobExpectationV1::AbsentFile);
+        };
+        let (metadata, _) =
+            record
+                .split_once('\t')
+                .ok_or(NativeGitIndexError::MalformedOutput {
+                    operation: "ls-tree",
+                })?;
+        let oid =
+            metadata
+                .split_whitespace()
+                .nth(2)
+                .ok_or(NativeGitIndexError::MalformedOutput {
+                    operation: "ls-tree",
+                })?;
+        Ok(GitBlobExpectationV1::Present(GitOidV1::new(oid)?))
+    }
+
+    pub fn index_lock_path(&self) -> PathBuf {
+        let mut name = self
+            .index_path
+            .file_name()
+            .unwrap_or_else(|| OsStr::new("index"))
+            .to_os_string();
+        name.push(".lock");
+        self.index_path.with_file_name(name)
+    }
+
+    fn command(&self) -> Command {
+        let mut command = git_command(&self.repository_root);
+        // Exporting GIT_DIR without GIT_WORK_TREE makes git adopt the current
+        // directory as a work tree, and exporting either onto a bare root
+        // silently un-bares it, defeating bare-blocker preflight. A bare
+        // runner therefore relies on cwd resolution alone.
+        if self.repository_root != self.git_dir {
+            command
+                .env("GIT_DIR", plain_host_path(&self.git_dir))
+                .env("GIT_COMMON_DIR", plain_host_path(&self.common_dir))
+                .env("GIT_WORK_TREE", plain_host_path(&self.repository_root));
+        }
+        command
+    }
+
+    fn quarantine_command(&self, index_path: &Path, object_path: &Path) -> Command {
+        let mut command = self.command();
+        // `GIT_ALTERNATE_OBJECT_DIRECTORIES` is the strictest of the three:
+        // git normalizes every entry before linking it, so a verbatim
+        // `\\?\` path there fails every object-writing command in the
+        // quarantine (`write-tree`, `apply --cached`).
+        command
+            .env("GIT_INDEX_FILE", plain_host_path(index_path))
+            .env("GIT_OBJECT_DIRECTORY", plain_host_path(object_path))
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                plain_host_path(&self.objects_path),
+            );
+        command
+    }
+
+    fn run_git(
+        &self,
+        operation: &'static str,
+        args: &[&str],
+    ) -> Result<Output, NativeGitIndexError> {
+        let output = self.run_git_output(args)?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err(NativeGitIndexError::GitFailed {
+                operation,
+                status: output.status.to_string(),
+            })
+        }
+    }
+
+    fn run_git_output(&self, args: &[&str]) -> Result<Output, NativeGitIndexError> {
+        self.command()
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+    }
+}

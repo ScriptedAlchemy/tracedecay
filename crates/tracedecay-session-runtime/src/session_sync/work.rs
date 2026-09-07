@@ -1,0 +1,1125 @@
+use super::*;
+
+const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+pub enum SessionSyncInterruption {
+    Cancelled,
+    TimedOut,
+    Shutdown,
+}
+
+impl SessionSyncInterruption {
+    #[hotpath::skip]
+    pub const fn termination(self) -> Option<OperationTermination> {
+        match self {
+            Self::Cancelled => Some(OperationTermination::Cancelled),
+            Self::TimedOut => Some(OperationTermination::TimedOut),
+            Self::Shutdown => None,
+        }
+    }
+
+    #[hotpath::skip]
+    const fn git_after_commit_reason(self) -> &'static str {
+        match self {
+            Self::Cancelled => "git_sync_cancelled_after_commit",
+            Self::TimedOut => "git_sync_timed_out_after_commit",
+            Self::Shutdown => "git_sync_shutdown_after_commit",
+        }
+    }
+}
+
+impl DaemonSessionSyncService {
+    #[hotpath::skip]
+    pub(super) async fn mirror_primary_terminal(
+        &self,
+        context: &SessionSyncProjectContext,
+        alias_key: &str,
+        primary_key: &str,
+    ) -> tracedecay_domain::errors::Result<Option<SessionSyncJournalV1>> {
+        let Some(encoded) = context
+            .registry
+            .read_session_sync_journal(primary_key)
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        let primary: SessionSyncJournalV1 =
+            serde_json::from_str(&encoded).map_err(journal_decode_error)?;
+        let Some(completion) = primary.completion else {
+            return Ok(None);
+        };
+        self.persist_terminal(
+            context,
+            alias_key,
+            SessionSyncTerminalMaterial {
+                termination: completion.termination,
+                stats: completion.stats,
+                coverage: completion.coverage,
+                source_frontiers: completion.source_frontiers,
+                failure_codes: completion.failure_codes,
+            },
+        )
+        .await
+        .map(Some)
+    }
+
+    pub(super) fn coalesce_import(
+        &self,
+        context: Arc<SessionSyncProjectContext>,
+        project_sessions: RegisteredGlobalDbLeaseV1,
+        key: String,
+        journal: SessionSyncJournalV1,
+        primary_key: String,
+        cancellation: CancellationSignal,
+    ) {
+        {
+            let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+            if active.contains_key(&key) {
+                return;
+            }
+            active.insert(key.clone(), cancellation.clone());
+        }
+        let service = self.clone();
+        let task_scope = journal.scope.clone();
+        let task_key = key.clone();
+        let task_cancellation = cancellation.clone();
+        let key_for_cleanup = key.clone();
+        let task = tokio::spawn(async move {
+            let worker = async {
+                loop {
+                    let journal_changed = service.journal_changed.notified();
+                    tokio::pin!(journal_changed);
+                    let _ = journal_changed.as_mut().enable();
+                    match context
+                        .registry
+                        .read_session_sync_journal(&primary_key)
+                        .await
+                    {
+                        Ok(Some(encoded)) => {
+                            let primary: SessionSyncJournalV1 = match serde_json::from_str(&encoded)
+                            {
+                                Ok(primary) => primary,
+                                Err(error) => {
+                                    tracing::warn!(%error, "coalesced session sync journal invalid");
+                                    let _ = service
+                                        .persist_terminal(
+                                            &context,
+                                            &key,
+                                            SessionSyncTerminalMaterial {
+                                                termination: OperationTermination::Unavailable,
+                                                stats: journal.stats.clone(),
+                                                coverage: journal.coverage.clone(),
+                                                source_frontiers: journal.source_frontiers.clone(),
+                                                failure_codes: vec![
+                                                    "session_sync_coalesced_journal_invalid"
+                                                        .to_owned(),
+                                                ],
+                                            },
+                                        )
+                                        .await;
+                                    return;
+                                }
+                            };
+                            if let Some(completion) = primary.completion.clone() {
+                                let _ = service
+                                    .persist_terminal(
+                                        &context,
+                                        &key,
+                                        SessionSyncTerminalMaterial {
+                                            termination: completion.termination,
+                                            stats: completion.stats,
+                                            coverage: completion.coverage,
+                                            source_frontiers: completion.source_frontiers,
+                                            failure_codes: completion.failure_codes,
+                                        },
+                                    )
+                                    .await;
+                                return;
+                            }
+                            if let Some(termination) = coalesced_alias_local_interruption(
+                                &primary,
+                                &journal,
+                                cancellation.is_cancelled(),
+                                now_micros(),
+                            ) {
+                                let _ = service
+                                    .persist_interruption_with_project_sessions(
+                                        &context,
+                                        &project_sessions,
+                                        &key,
+                                        termination,
+                                    )
+                                    .await;
+                                return;
+                            }
+                        }
+                        Ok(None) => {
+                            let _ = service
+                                .persist_terminal(
+                                    &context,
+                                    &key,
+                                    SessionSyncTerminalMaterial {
+                                        termination: OperationTermination::Unavailable,
+                                        stats: journal.stats.clone(),
+                                        coverage: journal.coverage.clone(),
+                                        source_frontiers: journal.source_frontiers.clone(),
+                                        failure_codes: vec![
+                                            "session_sync_coalesced_journal_missing".to_owned(),
+                                        ],
+                                    },
+                                )
+                                .await;
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "coalesced session sync journal read failed");
+                            let _ = service
+                                .persist_terminal(
+                                    &context,
+                                    &key,
+                                    SessionSyncTerminalMaterial {
+                                        termination: OperationTermination::Unavailable,
+                                        stats: journal.stats.clone(),
+                                        coverage: journal.coverage.clone(),
+                                        source_frontiers: journal.source_frontiers.clone(),
+                                        failure_codes: vec![
+                                            "session_sync_coalesced_journal_read_failed".to_owned(),
+                                        ],
+                                    },
+                                )
+                                .await;
+                            return;
+                        }
+                    }
+                    tokio::select! {
+                        interruption = service.wait_for_interruption_parts(
+                            &cancellation,
+                            &journal.deadline,
+                        ) => {
+                            if let Some(termination) = interruption.termination() {
+                                let _ = service
+                                    .persist_interruption_with_project_sessions(
+                                        &context,
+                                        &project_sessions,
+                                        &key,
+                                        termination,
+                                    )
+                                    .await;
+                            }
+                            return;
+                        }
+                        () = &mut journal_changed => {}
+                        () = tokio::time::sleep(COALESCED_JOURNAL_RECHECK_INTERVAL) => {}
+                    }
+                }
+            };
+            worker.await;
+            service
+                .active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&key_for_cleanup);
+        });
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        tasks.retain(|task| !task.task.is_finished());
+        tasks.push(super::project_lifecycle::SessionSyncTaskV1 {
+            scope: task_scope,
+            key: task_key,
+            cancellation: task_cancellation,
+            task,
+        });
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn cancel_request(
+        &self,
+        control: SessionSyncControlV1,
+    ) -> SessionSyncOutcomeV1 {
+        let project_gate = self.project_gate(control.scope());
+        let _project = project_gate.lock().await;
+        let Some(context) = self.context_for(control.scope()) else {
+            return SessionSyncOutcomeV1::WrongScope;
+        };
+        let key = journal_key(control.scope(), control.idempotency_key());
+        let encoded = match context.registry.read_session_sync_journal(&key).await {
+            Ok(Some(encoded)) => encoded,
+            Ok(None) => {
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_operation_not_found",
+                };
+            }
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation journal read failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
+        };
+        let mut initial = match serde_json::from_str::<SessionSyncJournalV1>(&encoded) {
+            Ok(initial) => initial,
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation journal decode failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
+        };
+        if initial.scope != *control.scope()
+            || initial.admission.idempotency_key != *control.idempotency_key()
+        {
+            return SessionSyncOutcomeV1::WrongScope;
+        }
+        if initial.status == SessionSyncJournalStatusV1::Complete {
+            return initial.outcome();
+        }
+        let Ok(project_sessions) = context.project_sessions() else {
+            return SessionSyncOutcomeV1::Unavailable {
+                reason_code: "session_sync_project_retired",
+            };
+        };
+        match self
+            .refresh_source_frontiers_with_project_sessions(&context, &project_sessions, &key)
+            .await
+        {
+            Ok(refreshed) => initial = refreshed,
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation frontier refresh failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
+        }
+        let primary_key = initial
+            .coalesced_primary
+            .as_ref()
+            .map(|primary| journal_key(control.scope(), primary));
+        if let Some(primary_key) = primary_key.as_deref() {
+            match self
+                .mirror_primary_terminal(&context, &key, primary_key)
+                .await
+            {
+                Ok(Some(journal)) => return journal.outcome(),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "session sync cancellation reconciliation failed");
+                    return SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_cancel_failed",
+                    };
+                }
+            }
+        }
+        let mut cancellation_owned = false;
+        let updated = self
+            .update_journal(&context, &key, |journal| {
+                cancellation_owned = false;
+                if journal.scope == *control.scope()
+                    && journal.admission.idempotency_key == *control.idempotency_key()
+                    && journal.status != SessionSyncJournalStatusV1::Complete
+                    && journal.cancel_requested_at.is_none()
+                {
+                    journal.cancel_requested_at = Some(now_micros());
+                    journal.updated_at = now_micros();
+                    cancellation_owned = true;
+                }
+            })
+            .await;
+        let journal = match updated {
+            Ok(journal) => journal,
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation journal write failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
+        };
+        if journal.scope != *control.scope()
+            || journal.admission.idempotency_key != *control.idempotency_key()
+        {
+            return SessionSyncOutcomeV1::WrongScope;
+        }
+        if journal.status == SessionSyncJournalStatusV1::Complete {
+            return journal.outcome();
+        }
+        if !cancellation_owned {
+            return journal.outcome();
+        }
+        if let Some(signal) = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            signal.cancel(now_micros());
+            return journal.outcome();
+        }
+        if let Some(primary_key) = primary_key.as_deref() {
+            match self
+                .mirror_primary_terminal(&context, &key, primary_key)
+                .await
+            {
+                Ok(Some(journal)) => return journal.outcome(),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "session sync cancellation reconciliation failed");
+                    return SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_cancel_failed",
+                    };
+                }
+            }
+        }
+        match self
+            .persist_interruption_with_project_sessions(
+                &context,
+                &project_sessions,
+                &key,
+                OperationTermination::Cancelled,
+            )
+            .await
+        {
+            Ok(journal) => journal.outcome(),
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation completion failed");
+                SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                }
+            }
+        }
+    }
+}
+
+fn import_transcript_stats(
+    imported: tracedecay_sessions::TranscriptIngestStats,
+    git: Option<&tracedecay_global_db::GitEvidenceConvergenceStats>,
+) -> SessionSyncStatsV1 {
+    let mut stats = SessionSyncStatsV1 {
+        sessions_imported: imported.sessions_upserted,
+        messages_imported: imported.messages_upserted,
+        ..SessionSyncStatsV1::default()
+    };
+    if let Some(git) = git {
+        stats.sessions_scanned = saturating_usize_to_u64(git.backfill.sessions_scanned);
+        stats.spans_written = saturating_usize_to_u64(git.backfill.spans_written);
+        stats.commits_attributed = saturating_usize_to_u64(git.backfill.commits_attributed);
+        stats.skipped = saturating_usize_to_u64(git.backfill.skipped_total());
+    }
+    stats
+}
+
+fn git_convergence_deferred_units(
+    convergence: &tracedecay_global_db::GitEvidenceConvergenceOutcome,
+) -> u64 {
+    let stats = convergence.stats();
+    stats
+        .pending_publications
+        .unwrap_or(1)
+        .saturating_add(u64::from(stats.backfill_page_saturated))
+        .saturating_add(saturating_usize_to_u64(stats.backfill.skipped_git_error))
+        .saturating_add(u64::from(convergence.later_failure().is_some()))
+}
+
+impl SessionSyncProjectContext {
+    #[hotpath::skip]
+    pub(super) async fn source_frontiers_for(
+        &self,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
+        source: &SessionSyncCommandV1,
+    ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+        match source {
+            SessionSyncCommandV1::ImportTranscripts(_) => {
+                self.source_frontiers(project_sessions).await
+            }
+            SessionSyncCommandV1::SynchronizeGit(_) => {
+                self.git_history_source_frontiers(project_sessions.clone())
+                    .await
+            }
+        }
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn source_frontiers(
+        &self,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
+    ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+        let mut frontiers = Vec::new();
+        for (store_scope, database) in [
+            ("project", project_sessions.as_ref()),
+            ("profile", self.user_sessions.as_ref()),
+        ] {
+            for (source_json, scope_json, committed_cursor_json) in database
+                .list_session_sync_source_frontiers()
+                .await
+                .map_err(store_error)?
+            {
+                frontiers.push(SessionSyncSourceFrontierV1 {
+                    store_scope: store_scope.to_owned(),
+                    source_json,
+                    scope_json,
+                    committed_cursor_json,
+                });
+            }
+        }
+        frontiers.sort_by(|left, right| {
+            (
+                &left.store_scope,
+                &left.source_json,
+                &left.scope_json,
+                &left.committed_cursor_json,
+            )
+                .cmp(&(
+                    &right.store_scope,
+                    &right.source_json,
+                    &right.scope_json,
+                    &right.committed_cursor_json,
+                ))
+        });
+        Ok(frontiers)
+    }
+
+    #[hotpath::skip]
+    async fn git_history_source_frontiers(
+        &self,
+        project_sessions: RegisteredGlobalDbLeaseV1,
+    ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+        let store = GlobalDbGitCorrelationStore::new(project_sessions);
+        let snapshot = store.read_snapshot().await.map_err(store_error)?;
+        let activity_timestamp = tracedecay_sessions::runtime::git_correlation::read_meta_value(
+            &snapshot,
+            tracedecay_sessions::runtime::git_correlation::AUTO_BACKFILL_WATERMARK_KEY,
+        )
+        .await
+        .map_err(store_error)?;
+        let source_rowid = tracedecay_sessions::runtime::git_correlation::read_meta_value(
+            &snapshot,
+            tracedecay_sessions::runtime::git_correlation::GIT_HISTORY_ROWID_FRONTIER_KEY,
+        )
+        .await
+        .map_err(store_error)?;
+        Ok(
+            git_history_frontier_from_meta(activity_timestamp, source_rowid)
+                .map(|frontier| vec![git_history_source_frontier(&self.project_id, frontier)])
+                .unwrap_or_default(),
+        )
+    }
+
+    #[hotpath::measure(label = "daemon.session_sync.ingest.project", future = true)]
+    async fn ingest_project_transcripts(
+        &self,
+        authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
+        cancellation: &tracedecay_usecases::observation::ObservationCancellation,
+    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
+        let pass =
+            tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
+                &self.brain_id,
+                &self.profile_id,
+                authority,
+                &self.project_root,
+                Some(self.project_id.clone()),
+                None,
+                true,
+                cancellation,
+            );
+        Box::pin(pass).await
+    }
+
+    #[hotpath::measure(label = "daemon.session_sync.ingest.profile", future = true)]
+    async fn ingest_profile_transcripts(
+        &self,
+        user_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
+        registry_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
+        cancellation: &tracedecay_usecases::observation::ObservationCancellation,
+    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
+        let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
+            &self.brain_id,
+            &self.profile_id,
+            user_authority,
+            registry_authority,
+            &self.profile_root,
+            None,
+            cancellation,
+        );
+        Box::pin(pass).await
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn import_transcripts(
+        &self,
+        service: &DaemonSessionSyncService,
+        journal_key: &str,
+        admitted_at: UtcMicros,
+        request: &SessionSyncRequestV1,
+        project_sessions: RegisteredGlobalDbLeaseV1,
+    ) -> SessionSyncWorkResult {
+        let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
+        let pass_cancellation = cancellation.clone();
+        let pass = async {
+            let project_authority = GlobalDbSessionIngestAuthority::new(project_sessions.clone());
+            let project = self
+                .ingest_project_transcripts(&project_authority, &pass_cancellation)
+                .await;
+            let git_convergence = if pass_cancellation.is_cancelled() {
+                None
+            } else {
+                Some(
+                    GlobalDbGitCorrelationStore::new(project_sessions.clone())
+                        .converge_session_git_evidence(
+                            &tracedecay_sessions::runtime::git_correlation::SystemGit,
+                            tracedecay_sessions::runtime::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+                            tracedecay_sessions::runtime::git_correlation::DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
+                        )
+                        .await,
+                )
+            };
+            let project_stats = import_transcript_stats(
+                project.stats,
+                git_convergence
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(tracedecay_global_db::GitEvidenceConvergenceOutcome::stats),
+            );
+            let git_deferred_units = match git_convergence.as_ref() {
+                Some(Ok(convergence)) => {
+                    if let Some(error) = convergence.later_failure() {
+                        tracing::warn!(%error, "startup session Git convergence made partial progress");
+                    }
+                    git_convergence_deferred_units(convergence)
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "startup session Git convergence failed");
+                    1
+                }
+                None => 1,
+            };
+            let project_coverage = vec![
+                source_coverage("project", project.coverage),
+                SessionSyncSourceCoverageV1 {
+                    store_scope: "git".to_owned(),
+                    coverage: if git_deferred_units == 0 {
+                        SessionSyncCoverageV1::Complete
+                    } else {
+                        SessionSyncCoverageV1::Partial {
+                            deferred_units: git_deferred_units,
+                        }
+                    },
+                },
+            ];
+            let project_progress = hotpath::future!(
+                service.persist_progress(
+                    self,
+                    &project_sessions,
+                    journal_key,
+                    project_stats.clone(),
+                    project_coverage.clone(),
+                ),
+                label = "daemon.session_sync.project_frontier_persist"
+            )
+            .await;
+            let project_progress_failed = project_progress.is_err();
+            let project_frontiers = project_progress.unwrap_or_default();
+            let git_convergence_committed = git_convergence.as_ref().is_some_and(|result| {
+                result.as_ref().is_ok_and(
+                    tracedecay_global_db::GitEvidenceConvergenceOutcome::committed_progress,
+                )
+            });
+
+            let profile_sweep_satisfied = {
+                let completed_profile_sweeps = service
+                    .completed_profile_sweeps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                completed_profile_sweep_covers(
+                    completed_profile_sweeps.get(self.profile_id.as_str()),
+                    admitted_at,
+                )
+            };
+            let (user, profile_sweep_started_at) = if profile_sweep_satisfied
+                || pass_cancellation.is_cancelled()
+            {
+                (None, None)
+            } else {
+                let profile_sweep_started_at = now_micros();
+                let user_authority =
+                    GlobalDbSessionIngestAuthority::new(self.user_sessions.clone());
+                let registry_authority = GlobalDbSessionIngestAuthority::new(self.registry.clone());
+                let user = self
+                    .ingest_profile_transcripts(
+                        &user_authority,
+                        &registry_authority,
+                        &pass_cancellation,
+                    )
+                    .await;
+                (Some(user), Some(profile_sweep_started_at))
+            };
+            if let Some(user) = user.as_ref()
+                && user.coverage.is_complete()
+                && user.failures.is_empty()
+                && let Some(profile_sweep_started_at) = profile_sweep_started_at
+            {
+                service
+                    .completed_profile_sweeps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(
+                        self.profile_id.as_str().to_owned(),
+                        profile_sweep_started_at,
+                    );
+            }
+            let combined = user
+                .as_ref()
+                .map_or(project.stats, |user| project.stats.merge(user.stats));
+            let stats = import_transcript_stats(
+                combined,
+                git_convergence
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(tracedecay_global_db::GitEvidenceConvergenceOutcome::stats),
+            );
+            let mut coverage = project_coverage;
+            coverage.push(user.as_ref().map_or_else(
+                || {
+                    source_coverage(
+                        "profile",
+                        if profile_sweep_satisfied {
+                            tracedecay_sessions::runtime::IngestPassCoverage::Complete
+                        } else {
+                            tracedecay_sessions::runtime::IngestPassCoverage::Partial {
+                                deferred_units: 1,
+                            }
+                        },
+                    )
+                },
+                |user| source_coverage("profile", user.coverage),
+            ));
+            let source_frontiers = hotpath::future!(
+                service.persist_progress(
+                    self,
+                    &project_sessions,
+                    journal_key,
+                    stats.clone(),
+                    coverage.clone(),
+                ),
+                label = "daemon.session_sync.combined_frontier_persist"
+            )
+            .await;
+            (
+                project,
+                user,
+                stats,
+                coverage,
+                source_frontiers,
+                project_frontiers,
+                project_progress_failed,
+                git_convergence.is_some_and(|result| result.is_err()),
+                git_deferred_units > 0,
+                git_convergence_committed,
+            )
+        };
+        let pass = async {
+            match &self.transcript_source_home {
+                Some(home) => {
+                    tracedecay_sessions::runtime::with_transcript_source_home(home.clone(), pass)
+                        .await
+                }
+                None => pass.await,
+            }
+        };
+        tokio::pin!(pass);
+        let (outcomes, interrupted) = tokio::select! {
+            biased;
+            outcomes = &mut pass => (outcomes, None),
+            interruption = service.wait_for_interruption(request) => {
+                cancellation.cancel();
+                (pass.await, Some(interruption))
+            }
+        };
+        let (
+            project,
+            user,
+            stats,
+            coverage,
+            source_frontiers,
+            project_frontiers,
+            project_progress_failed,
+            git_convergence_failed,
+            git_convergence_incomplete,
+            git_convergence_committed,
+        ) = outcomes;
+        let committed = project.scheduling_state_written
+            || user
+                .as_ref()
+                .is_some_and(|outcome| outcome.scheduling_state_written)
+            || git_convergence_committed
+            || stats != SessionSyncStatsV1::default();
+        let mut failure_codes = project
+            .failures
+            .into_iter()
+            .chain(user.into_iter().flat_map(|outcome| outcome.failures))
+            .map(|failure| failure.reason_code.to_owned())
+            .collect::<Vec<_>>();
+        if project_progress_failed || source_frontiers.is_err() {
+            failure_codes.push("session_sync_frontier_persist_failed".to_owned());
+        }
+        if git_convergence_failed {
+            failure_codes.push("git_convergence_failed".to_owned());
+        } else if git_convergence_incomplete {
+            failure_codes.push("git_convergence_incomplete".to_owned());
+        }
+        let source_frontiers = source_frontiers.unwrap_or(project_frontiers);
+        if committed {
+            return SessionSyncWorkResult::Finished {
+                interruption: interrupted,
+                committed: true,
+                stats,
+                coverage,
+                source_frontiers,
+                failure_codes,
+            };
+        }
+        match interrupted {
+            Some(interrupted) => SessionSyncWorkResult::Interrupted(interrupted),
+            None => SessionSyncWorkResult::Finished {
+                interruption: None,
+                committed: false,
+                stats,
+                coverage,
+                source_frontiers,
+                failure_codes,
+            },
+        }
+    }
+
+    #[hotpath::skip]
+    pub(super) async fn synchronize_git(
+        &self,
+        service: &DaemonSessionSyncService,
+        request: &SessionSyncRequestV1,
+        options: SessionGitSyncV1,
+        project_sessions: RegisteredGlobalDbLeaseV1,
+    ) -> SessionSyncWorkResult {
+        if let Some(interruption) =
+            service.observed_interruption(request.cancellation(), request.deadline())
+        {
+            return SessionSyncWorkResult::Interrupted(interruption);
+        }
+        let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
+        let control = tracedecay_sessions::runtime::git_correlation::BoundedGitControl::new(
+            cancellation.clone(),
+            GIT_SYNC_COMMAND_DEADLINE,
+        );
+        let store = GlobalDbGitCorrelationStore::new(project_sessions.clone());
+        let backfill_options = tracedecay_sessions::runtime::git_correlation::BackfillOptions {
+            since: options.since_unix(),
+            limit_sessions: options.max_sessions(),
+            merge_gap_secs:
+                tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+            max_commits_per_repo: usize::MAX,
+            dry_run: options.dry_run(),
+        };
+        let backfill = store.run_bounded_history_index_page(&backfill_options, &control);
+        tokio::pin!(backfill);
+        let (result, mut requested_interruption) = tokio::select! {
+            biased;
+            result = &mut backfill => (result, None),
+            interruption = service.wait_for_interruption(request) => {
+                cancellation.cancel();
+                (backfill.await, Some(interruption))
+            }
+        };
+        let topology_result =
+            if result.is_ok() && requested_interruption.is_none() && !options.dry_run() {
+                match self
+                    .publish_git_topology(service, request, project_sessions)
+                    .await
+                {
+                    super::git_topology::GitTopologySyncOutcome::Finished(result) => result,
+                    super::git_topology::GitTopologySyncOutcome::Interrupted(interruption) => {
+                        requested_interruption = Some(interruption);
+                        Ok(())
+                    }
+                }
+            } else {
+                Ok(())
+            };
+        let work = match result {
+            Ok(outcome) => git_sync_work_result(&self.project_id, outcome, requested_interruption),
+            Err(error) => {
+                tracing::warn!(%error, "session git sync failed");
+                SessionSyncWorkResult::Finished {
+                    interruption: None,
+                    committed: false,
+                    stats: SessionSyncStatsV1::default(),
+                    coverage: vec![SessionSyncSourceCoverageV1 {
+                        store_scope: "git".to_owned(),
+                        coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+                    }],
+                    source_frontiers: Vec::new(),
+                    failure_codes: vec!["git_sync_failed".to_owned()],
+                }
+            }
+        };
+        if requested_interruption.is_some() {
+            work
+        } else {
+            git_sync_with_topology_result(work, topology_result)
+        }
+    }
+}
+
+pub fn git_sync_with_topology_result(
+    work: SessionSyncWorkResult,
+    topology_result: Result<(), super::git_topology::GitTopologySyncFailure>,
+) -> SessionSyncWorkResult {
+    let Err(error) = topology_result else {
+        return work;
+    };
+    tracing::warn!(?error, "session Git topology publication failed");
+    match work {
+        SessionSyncWorkResult::Finished {
+            interruption,
+            committed,
+            stats,
+            mut coverage,
+            source_frontiers,
+            mut failure_codes,
+        } => {
+            coverage.push(SessionSyncSourceCoverageV1 {
+                store_scope: "git_topology".to_owned(),
+                coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+            });
+            failure_codes.push(error.failure_code().to_owned());
+            SessionSyncWorkResult::Finished {
+                interruption,
+                committed,
+                stats,
+                coverage,
+                source_frontiers,
+                failure_codes,
+            }
+        }
+        SessionSyncWorkResult::Interrupted(interruption) => {
+            SessionSyncWorkResult::Interrupted(interruption)
+        }
+    }
+}
+
+pub fn git_sync_work_result(
+    project_id: &ProjectId,
+    outcome: tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome,
+    requested_interruption: Option<SessionSyncInterruption>,
+) -> SessionSyncWorkResult {
+    let stats = SessionSyncStatsV1 {
+        sessions_scanned: saturating_usize_to_u64(outcome.stats.sessions_scanned),
+        spans_written: saturating_usize_to_u64(outcome.stats.spans_written),
+        commits_attributed: saturating_usize_to_u64(outcome.stats.commits_attributed),
+        skipped: saturating_usize_to_u64(outcome.stats.skipped_total()),
+        ..SessionSyncStatsV1::default()
+    };
+    let interrupted = outcome.interruption.is_some() || requested_interruption.is_some();
+    if !outcome.committed
+        && let Some(interruption) = requested_interruption
+    {
+        return SessionSyncWorkResult::Interrupted(interruption);
+    }
+    let git_errors = saturating_usize_to_u64(outcome.stats.skipped_git_error);
+    let terminal_without_progress = interrupted && !outcome.committed;
+    let remaining_work = if terminal_without_progress {
+        1
+    } else {
+        outcome
+            .remaining_sessions
+            .max(git_errors)
+            .max(outcome.unresolved_failures)
+            .max(u64::from(interrupted))
+    };
+    let coverage = if remaining_work > 0 {
+        SessionSyncCoverageV1::Partial {
+            deferred_units: remaining_work,
+        }
+    } else {
+        SessionSyncCoverageV1::Complete
+    };
+    let mut failure_codes = Vec::new();
+    if interrupted {
+        failure_codes.push(
+            requested_interruption
+                .map(SessionSyncInterruption::git_after_commit_reason)
+                .or_else(|| outcome.interruption.map(git_history_interruption_reason))
+                .unwrap_or("git_sync_interrupted")
+                .to_owned(),
+        );
+    }
+    if git_errors > 0 || outcome.unresolved_failures > 0 {
+        failure_codes.push("git_source_failed".to_owned());
+    }
+    SessionSyncWorkResult::Finished {
+        interruption: requested_interruption,
+        committed: outcome.committed,
+        stats,
+        coverage: vec![SessionSyncSourceCoverageV1 {
+            store_scope: "git".to_owned(),
+            coverage,
+        }],
+        source_frontiers: (!terminal_without_progress)
+            .then(|| git_history_source_frontier(project_id, outcome.frontier))
+            .into_iter()
+            .collect(),
+        failure_codes,
+    }
+}
+
+const fn git_history_interruption_reason(
+    interruption: tracedecay_sessions::runtime::git_correlation::BoundedBackfillInterruption,
+) -> &'static str {
+    use tracedecay_sessions::runtime::git_correlation::BoundedBackfillInterruption;
+
+    match interruption {
+        BoundedBackfillInterruption::Cancelled => "git_sync_cancelled",
+        BoundedBackfillInterruption::CommandTimedOut => "git_command_timed_out",
+        BoundedBackfillInterruption::HistoryLimitReached => "git_history_limit_reached",
+        BoundedBackfillInterruption::DryRunFrontierLimitReached => {
+            "git_dry_run_frontier_limit_reached"
+        }
+        BoundedBackfillInterruption::HistoryTraversalBudgetReached => {
+            "git_history_traversal_budget_reached"
+        }
+        BoundedBackfillInterruption::UnsupportedSourceFraming => "git_unsupported_source_framing",
+        BoundedBackfillInterruption::UnsupportedCanonicalWorktreeEncoding => {
+            "git_unsupported_canonical_worktree_encoding"
+        }
+        BoundedBackfillInterruption::SourceChanged => "git_source_changed",
+        BoundedBackfillInterruption::SourceUnavailable => "git_source_unavailable",
+    }
+}
+
+pub fn git_history_frontier_from_meta(
+    activity_timestamp: Option<i64>,
+    source_rowid: Option<i64>,
+) -> Option<tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier> {
+    activity_timestamp.map(|activity_timestamp| {
+        tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
+            activity_timestamp,
+            source_rowid: source_rowid.unwrap_or(0),
+        }
+    })
+}
+
+pub fn git_history_source_frontier(
+    project_id: &ProjectId,
+    frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier,
+) -> SessionSyncSourceFrontierV1 {
+    SessionSyncSourceFrontierV1 {
+        store_scope: "git".to_owned(),
+        source_json: serde_json::json!({
+            "authority": "git_history_index",
+        })
+        .to_string(),
+        scope_json: serde_json::json!({
+            "project_id": project_id.as_str(),
+        })
+        .to_string(),
+        committed_cursor_json: serde_json::json!({
+            "activity_timestamp": frontier.activity_timestamp,
+            "source_rowid": frontier.source_rowid,
+        })
+        .to_string(),
+    }
+}
+
+pub fn coalesced_alias_local_interruption(
+    primary: &SessionSyncJournalV1,
+    alias: &SessionSyncJournalV1,
+    cancellation_is_requested: bool,
+    observed_at: UtcMicros,
+) -> Option<OperationTermination> {
+    if primary.completion.is_some() {
+        None
+    } else if alias.deadline.is_elapsed_at(observed_at) {
+        Some(OperationTermination::TimedOut)
+    } else if cancellation_is_requested {
+        Some(OperationTermination::Cancelled)
+    } else {
+        None
+    }
+}
+
+pub(super) fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && !error.is_cancelled()
+    {
+        tracing::warn!(%error, "session sync worker join failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saturated_git_only_import_preserves_committed_partial_receipt_evidence() {
+        let convergence = tracedecay_global_db::GitEvidenceConvergenceOutcome::Complete(
+            tracedecay_global_db::GitEvidenceConvergenceStats {
+                replayed_publications: 0,
+                pending_publications: Some(0),
+                backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
+                    sessions_scanned: 50,
+                    spans_written: 2,
+                    commits_attributed: 3,
+                    skipped_not_worktree: 4,
+                    frontier_advanced: true,
+                    ..tracedecay_sessions::runtime::git_correlation::BackfillStats::default()
+                },
+                backfill_page_saturated: true,
+            },
+        );
+
+        let stats = import_transcript_stats(
+            tracedecay_sessions::TranscriptIngestStats::default(),
+            Some(convergence.stats()),
+        );
+
+        assert_eq!(stats.sessions_imported, 0);
+        assert_eq!(stats.messages_imported, 0);
+        assert_eq!(stats.sessions_scanned, 50);
+        assert_eq!(stats.spans_written, 2);
+        assert_eq!(stats.commits_attributed, 3);
+        assert_eq!(stats.skipped, 4);
+        assert_eq!(git_convergence_deferred_units(&convergence), 1);
+        assert!(convergence.committed_progress());
+        assert_eq!(
+            completion_termination(None, true, &stats, false, true),
+            OperationTermination::Partial
+        );
+    }
+
+    #[test]
+    fn later_git_failure_preserves_committed_startup_progress() {
+        let convergence = tracedecay_global_db::GitEvidenceConvergenceOutcome::Partial {
+            progress: tracedecay_global_db::GitEvidenceConvergenceStats {
+                replayed_publications: 1,
+                pending_publications: Some(0),
+                backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
+                    sessions_scanned: 1,
+                    spans_written: 1,
+                    frontier_advanced: true,
+                    skipped_git_error: 1,
+                    ..Default::default()
+                },
+                backfill_page_saturated: false,
+            },
+            later_failure:
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Unavailable(
+                    "retained worktree temporarily unreadable".to_owned(),
+                ),
+        };
+
+        let stats = import_transcript_stats(
+            tracedecay_sessions::TranscriptIngestStats::default(),
+            Some(convergence.stats()),
+        );
+        assert_eq!(stats.sessions_scanned, 1);
+        assert_eq!(stats.spans_written, 1);
+        assert!(git_convergence_deferred_units(&convergence) > 0);
+        assert!(convergence.committed_progress());
+    }
+}

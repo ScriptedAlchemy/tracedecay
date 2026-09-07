@@ -3,11 +3,7 @@ use tracedecay_code_extraction::MsBasic2Extractor;
 use tracedecay_domain::*;
 
 fn extract_fixture() -> ExtractionResult {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.bas"
-    ))
-    .unwrap();
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.bas").unwrap();
     let extractor = MsBasic2Extractor;
     let result = extractor.extract("sample.bas", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -53,7 +49,6 @@ fn test_msbasic2_subroutine_functions() {
         .iter()
         .filter(|n| n.kind == NodeKind::Function)
         .collect();
-    // We expect 3 subroutines: LOG_A_MESSAGE, CONNECT_TO_SERVER, DISCONNECT
     assert_eq!(
         fns.len(),
         3,
@@ -85,7 +80,6 @@ fn test_msbasic2_gosub_calls() {
         .collect();
     assert!(!calls.is_empty(), "expected call site refs");
 
-    // Top-level: GOSUB 200, GOSUB 300, GOSUB 400
     assert!(
         calls.iter().any(|r| r.reference_name == "200"),
         "expected GOSUB 200 call, got: {:?}",
@@ -158,7 +152,6 @@ fn test_msbasic2_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // File contains: 2 consts + 3 functions = 5 Contains edges
     assert!(
         contains.len() >= 5,
         "should have >= 5 Contains edges, got {}",
@@ -170,7 +163,6 @@ fn test_msbasic2_contains_edges() {
 fn test_msbasic2_subroutine_complexity() {
     let result = extract_fixture();
 
-    // CONNECT_TO_SERVER has a FOR loop
     let connect_fn = result
         .nodes
         .iter()
@@ -222,7 +214,6 @@ fn test_msbasic2_subroutine_internal_calls() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
 
-    // CONNECT_TO_SERVER and DISCONNECT both GOSUB 200 (LOG_A_MESSAGE)
     let gosub_200_count = calls.iter().filter(|r| r.reference_name == "200").count();
     assert!(
         gosub_200_count >= 3,

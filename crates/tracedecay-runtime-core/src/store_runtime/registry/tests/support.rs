@@ -1,0 +1,277 @@
+use std::fmt::Debug;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tracedecay_domain::{
+    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
+};
+use tracedecay_store::{
+    CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, StoreClientIdV1,
+    StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1,
+    VerifiedStoreLocatorV1,
+};
+
+use super::super::*;
+
+pub(super) fn id<T>(value: &str) -> T
+where
+    T: TryFrom<String>,
+    <T as TryFrom<String>>::Error: Debug,
+{
+    T::try_from(value.to_owned()).unwrap()
+}
+
+/// Host-absolute fixture path: store locators require `Path::is_absolute`,
+/// which a bare `/...` literal fails on Windows, where the same fixture is
+/// spelled `C:\...`.
+pub(super) fn absolute_fixture_path(posix: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+    } else {
+        PathBuf::from(posix)
+    }
+}
+
+pub(super) fn incarnation() -> StoreIncarnationV1 {
+    StoreIncarnationV1::new(1).unwrap()
+}
+
+pub(super) fn profile_shard() -> StoreShardIdV1 {
+    StoreShardIdV1::profile(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+    )
+}
+
+pub(super) fn profile_sessions_shard() -> StoreShardIdV1 {
+    StoreShardIdV1::profile_sessions(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+    )
+}
+
+fn profile_memory_shard() -> StoreShardIdV1 {
+    StoreShardIdV1::profile_memory(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+    )
+}
+
+pub(super) fn project_shard(project: &str) -> StoreShardIdV1 {
+    StoreShardIdV1::project(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<ProjectId>(project),
+    )
+}
+
+fn project_sessions_shard(project: &str) -> StoreShardIdV1 {
+    StoreShardIdV1::project_sessions(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<ProjectId>(project),
+    )
+}
+
+fn code_shard(worktree: &str) -> StoreShardIdV1 {
+    StoreShardIdV1::code(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<ProjectId>("project.registry"),
+        id::<RepositoryId>("repository.registry"),
+        CodeShardScopeV1::Worktree {
+            worktree_id: id::<WorktreeId>(worktree),
+        },
+    )
+}
+
+#[derive(Default)]
+pub(super) struct TestResolver {
+    pub(super) calls: AtomicUsize,
+    pub(super) graph_calls: AtomicUsize,
+}
+
+impl StoreRuntimeResolver for TestResolver {
+    fn resolve<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+        _mode: StoreRuntimeOpenMode,
+        _database_authority: Option<&'a crate::db::DatabaseAuthority>,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let locator = VerifiedStoreLocatorV1::new(
+            key.shard_id.clone(),
+            key.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        );
+        Box::pin(async move {
+            Ok(ResolvedStoreLocator::new(
+                locator,
+                absolute_fixture_path(&format!("/verified/{call}")),
+            ))
+        })
+    }
+
+    fn resolve_graph<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        self.graph_calls.fetch_add(1, Ordering::SeqCst);
+        let locator = VerifiedStoreLocatorV1::new(
+            key.shard_id.clone(),
+            key.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        );
+        let path = absolute_fixture_path(&format!(
+            "/verified/graph/{:?}/{}",
+            key.shard_id.scope,
+            key.incarnation.get()
+        ));
+        Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
+    }
+}
+
+#[derive(Default)]
+pub(super) struct TestPublisher {
+    pub(super) calls: AtomicUsize,
+    pub(super) block: AtomicBool,
+    pub(super) mode: AtomicU8,
+    pub(super) release: tokio::sync::Notify,
+    pub(super) bindings: Mutex<Vec<StoreRuntimeBindingV1>>,
+}
+
+impl ShardRuntimePublisher for TestPublisher {
+    fn publish(
+        &self,
+        request: ShardRuntimeBuildRequest,
+    ) -> StoreRuntimeRegistryFuture<'_, Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.bindings.lock().unwrap().push(request.binding.clone());
+        Box::pin(async move {
+            if self.block.load(Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+            if self.mode.load(Ordering::SeqCst) == 1 {
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "publish",
+                    message: "publisher failed".to_owned(),
+                });
+            }
+            let runtime = ShardRuntime::new(
+                request.binding.clone(),
+                matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile),
+            );
+            runtime
+                .transition(RuntimeMaintenanceStateV1::Opening)
+                .unwrap();
+            runtime
+                .transition(RuntimeMaintenanceStateV1::Ready)
+                .unwrap();
+            Ok(PublishedShardRuntime::new(
+                runtime,
+                Box::new(EmptyPhysicalRuntimeAttachment),
+            ))
+        })
+    }
+}
+
+pub(super) fn force_ready_runtime_state(
+    registry: &StoreRuntimeRegistry,
+    binding: &StoreRuntimeBindingV1,
+    state: RuntimeMaintenanceStateV1,
+) {
+    let key = StoreRuntimeKey::from_binding(binding);
+    let owner = {
+        let registry_state = registry.lock_state();
+        let Some(RegistryEntry::Ready(ready)) = registry_state.entries.get(&key) else {
+            panic!("expected ready runtime for forced lifecycle state");
+        };
+        Arc::clone(&ready.owner)
+    };
+    owner.runtime().transition(state).unwrap();
+}
+
+pub(super) fn registry(
+    config: StoreRuntimeRegistryConfig,
+) -> (StoreRuntimeRegistry, Arc<TestResolver>, Arc<TestPublisher>) {
+    let resolver = Arc::new(TestResolver::default());
+    let publisher = Arc::new(TestPublisher::default());
+    let registry =
+        StoreRuntimeRegistry::with_config(resolver.clone(), publisher.clone(), config).unwrap();
+    (registry, resolver, publisher)
+}
+
+pub(super) async fn open_published(
+    registry: &StoreRuntimeRegistry,
+    request: StoreRuntimeOpenRequest,
+) -> StoreRuntimeClientLease {
+    match registry.open(request).await {
+        StoreRuntimeOpenResult::Published(handle) => handle,
+        other @ StoreRuntimeOpenResult::Failed(_) => panic!("open failed: {other:?}"),
+    }
+}
+
+pub(super) async fn profile_pin(registry: &StoreRuntimeRegistry) -> ProfileAuthorityPin {
+    open_published(
+        registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    }
+}
+
+pub(super) fn project_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(project_shard(project), incarnation(), Some(pin.clone()))
+}
+
+pub(super) fn profile_memory_request(pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(profile_memory_shard(), incarnation(), Some(pin.clone()))
+}
+
+pub(super) fn project_sessions_request(
+    project: &str,
+    pin: &ProfileAuthorityPin,
+) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(
+        project_sessions_shard(project),
+        incarnation(),
+        Some(pin.clone()),
+    )
+}
+
+pub(super) fn code_request(worktree: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(code_shard(worktree), incarnation(), Some(pin.clone()))
+}
+
+pub(super) fn profile_sessions_request(pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(profile_sessions_shard(), incarnation(), Some(pin.clone()))
+}
+
+pub(super) async fn wait_for_calls(calls: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while calls.load(Ordering::SeqCst) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publisher made progress");
+}
+
+pub(super) fn active_lease(binding: &StoreRuntimeBindingV1, lease_id: &str) -> RuntimeLeaseV1 {
+    let now = utc_now();
+    RuntimeLeaseV1 {
+        lease_id: RuntimeLeaseIdV1::new(lease_id).unwrap(),
+        binding: binding.clone(),
+        holder: StoreClientIdV1::new("client.registry").unwrap(),
+        acquired_at: UtcMicros(now.0.saturating_sub(1_000_000)),
+        expires_at: UtcMicros(now.0.saturating_add(60_000_000)),
+    }
+}

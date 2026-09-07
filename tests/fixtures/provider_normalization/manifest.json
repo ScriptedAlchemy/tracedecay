@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "supported_providers": [
+    "claude",
+    "codex",
+    "cursor",
+    "cursor_composer",
+    "hermes",
+    "kiro",
+    "vibe"
+  ],
+  "fixtures": [
+    {
+      "provider": "claude",
+      "path": "claude/assistant_thinking_text_tool_use.input.json",
+      "origin": "redacted_native_capture",
+      "origin_evidence": "claude/README.md:7-10",
+      "provider_version": "unversioned",
+      "sha256": "4d5eb191b8d463a761162a38c7b97efce3614d4f8f36e192d85f3d225ea3fb0d"
+    },
+    {
+      "provider": "claude",
+      "path": "claude/assistant_tool_use.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "claude/README.md:3-5",
+      "provider_version": "unversioned",
+      "sha256": "2856a52773ce61d349b6e1916266d59c2cf175e5de1048d43594413f977b56a5"
+    },
+    {
+      "provider": "claude",
+      "path": "claude/compact_summary_pair.boundary.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "claude/README.md:12-17",
+      "provider_version": "unversioned",
+      "sha256": "3233018dfd1a95477f6bf9aaea9919acdc813aebcf2e59f2909e68c1b5909e51"
+    },
+    {
+      "provider": "claude",
+      "path": "claude/compact_summary_pair.summary.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "claude/README.md:12-17",
+      "provider_version": "unversioned",
+      "sha256": "b1ed51e5c7a8d35c8c09fe31b11f026e892892ee3664e7431bb71abb8757bd59"
+    },
+    {
+      "provider": "claude",
+      "path": "claude/workflow_lookalike.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "claude/README.md:27-35",
+      "provider_version": "unversioned",
+      "sha256": "03b42e8f10dbfc40591a102e04bde245e2d384d1620febadea04ac01a0fa568d"
+    },
+    {
+      "provider": "codex",
+      "path": "codex/agent_message.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "codex/README.md:3-7",
+      "provider_version": "unversioned",
+      "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
+    },
+    {
+      "provider": "codex",
+      "path": "codex/function_call.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "codex/README.md:3-7",
+      "provider_version": "unversioned",
+      "sha256": "562ca2e6f6c5d2ebb4704c42b0e460e5f8cec8bccf55a86365a4ac0e22e35749"
+    },
+    {
+      "provider": "codex",
+      "path": "codex/session_meta.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "codex/README.md:3-7",
+      "provider_version": "unversioned",
+      "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
+    },
+    {
+      "provider": "codex",
+      "path": "codex/thread_goal_updated.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "codex/README.md:20-23",
+      "provider_version": "unversioned",
+      "sha256": "af9b0a4952f700b8e72cda6dcf5107a87ef53843b9f1b29d30471bce6ebf3a1c"
+    },
+    {
+      "provider": "codex",
+      "path": "codex/thread_goal_updates.input.json",
+      "origin": "redacted_native_capture",
+      "origin_evidence": "codex/README.md:9-13",
+      "provider_version": "unversioned",
+      "sha256": "dc956bb0a087f01a6c3f0b398c96131646e55c67921cddada461b9b4b113239c"
+    },
+    {
+      "provider": "cursor",
+      "path": "cursor/tool_use.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "../README.md:3-6",
+      "provider_version": "unversioned",
+      "sha256": "1326e1852898a0ade540f94b82bc697b04cb9d57d9659633fff805e7ac5b2167"
+    },
+    {
+      "provider": "cursor",
+      "path": "cursor/workflow_lookalike.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "../README.md:3-6",
+      "provider_version": "unversioned",
+      "sha256": "39a8426c9ef3118a1997d5a8709f50bfec0301e24b212557fd61068001000544"
+    },
+    {
+      "provider": "cursor_composer",
+      "path": "cursor_composer/assistant_bubble.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "cursor_composer/README.md:3-4",
+      "provider_version": "unversioned",
+      "sha256": "af37fc6bc1e466e0cd7d77988ee8a7ed7a5575b073ca7ffbc919881c7095d112"
+    },
+    {
+      "provider": "cursor_composer",
+      "path": "cursor_composer/assistant_bubble_with_todos.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "cursor_composer/README.md:3-4",
+      "provider_version": "unversioned",
+      "sha256": "ecf9d69f7070674800785a7132152d75b749e5a3d4531461e90ef2c6a650efd3"
+    },
+    {
+      "provider": "cursor_composer",
+      "path": "cursor_composer/envelope_todos.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "cursor_composer/README.md:6-9",
+      "provider_version": "unversioned",
+      "sha256": "297728ccbcfbbf1e51e79a5fd2330650f82f17cb4ec71f57e5231ba2220b63a1"
+    },
+    {
+      "provider": "hermes",
+      "path": "hermes/assistant_reasoning.input.json",
+      "origin": "redacted_native_capture",
+      "origin_evidence": "hermes/README.md:3-10",
+      "provider_version": "unversioned",
+      "sha256": "0e9e91b0eab871be2a22432d637a92306075dc0000a3314b61168d0be2a6c990"
+    },
+    {
+      "provider": "hermes",
+      "path": "hermes/assistant_tool_call.input.json",
+      "origin": "redacted_native_capture",
+      "origin_evidence": "hermes/README.md:3-10",
+      "provider_version": "unversioned",
+      "sha256": "059987758c040eb2bd9bd7942dd2c81eae598f3bec6a3a1c7b1ab890ed7af266"
+    },
+    {
+      "provider": "hermes",
+      "path": "hermes/workflow_lookalike.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "hermes/README.md:12-14",
+      "provider_version": "unversioned",
+      "sha256": "f3fa09c760bd67d340403e00c2ae9e0f516f94d16f9bf75506e2b9efee6af992"
+    },
+    {
+      "provider": "kiro",
+      "path": "kiro/workspace_session.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "../README.md:3-6",
+      "provider_version": "unversioned",
+      "sha256": "b4517043c04daf0e88e3c3f814813958a65128583c6cf7e6930c63a0f3cf33ae"
+    },
+    {
+      "provider": "vibe",
+      "path": "vibe/workflow_lookalike.input.json",
+      "origin": "synthetic_value_contract",
+      "origin_evidence": "../README.md:3-6",
+      "provider_version": "unversioned",
+      "sha256": "487e01475210d4a723339bbf81f2b28c84d50ea7c1485a6b9e7d91773178a6cf"
+    }
+  ]
+}

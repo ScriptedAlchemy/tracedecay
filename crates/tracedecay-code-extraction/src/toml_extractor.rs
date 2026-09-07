@@ -6,25 +6,25 @@
 /// parented to their enclosing table (or to the file if at top level).
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tree_sitter::{Node as TsNode, Parser, Tree};
+use tree_sitter::{Node as TsNode, Tree};
 
-use tracedecay_domain::code_intelligence::{
+use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
 };
 
 pub struct TomlExtractor;
 
-struct ExtractionState {
+struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     file_path: String,
-    source: Vec<u8>,
+    source: &'s [u8],
     file_node_id: String,
     timestamp: u64,
 }
 
-impl ExtractionState {
-    fn new(file_path: &str, source: &str) -> Self {
+impl<'s> ExtractionState<'s> {
+    fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -34,24 +34,59 @@ impl ExtractionState {
             nodes: Vec::new(),
             edges: Vec::new(),
             file_path: file_path.to_string(),
-            source: source.as_bytes().to_vec(),
+            source: source.as_bytes(),
             file_node_id,
             timestamp,
         }
     }
 
-    fn node_text(&self, node: TsNode<'_>) -> String {
-        node.utf8_text(&self.source)
-            .unwrap_or("<invalid utf8>")
-            .to_string()
+    fn node_text(&self, node: TsNode<'_>) -> &'s str {
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
 impl TomlExtractor {
     pub fn extract_toml(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+        let tree = match Self::parse(source) {
+            Ok(tree) => tree,
+            Err(_msg) => {
+                return Self::build_result(
+                    Self::initialize_state(file_path, source),
+                    Instant::now(),
+                );
+            }
+        };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = Self::initialize_state(file_path, source);
+
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
+
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
+    }
+
+    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
+        let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
             kind: NodeKind::File,
@@ -78,11 +113,10 @@ impl TomlExtractor {
             parent_id: None,
         };
         state.nodes.push(file_node);
+        state
+    }
 
-        if let Ok(tree) = Self::parse(source) {
-            Self::visit_document(&mut state, tree.root_node());
-        }
-
+    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
         ExtractionResult {
             nodes: state.nodes,
             edges: state.edges,
@@ -93,33 +127,16 @@ impl TomlExtractor {
     }
 
     fn parse(source: &str) -> Result<Tree, String> {
-        let mut parser = Parser::new();
-        let language = crate::ts_provider::try_language("toml")?;
-        parser
-            .set_language(&language)
-            .map_err(|e| format!("failed to load TOML grammar: {e}"))?;
-        parser
-            .parse(source, None)
-            .ok_or_else(|| "tree-sitter parse returned None".to_string())
+        crate::ts_provider::parse_extractor_source("toml", "TOML", source)
     }
 
-    fn visit_document(state: &mut ExtractionState, root: TsNode<'_>) {
-        let mut cursor = root.walk();
-        if !cursor.goto_first_child() {
-            return;
-        }
+    fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         let file_id = state.file_node_id.clone();
         let file_qn = state.file_path.clone();
-        loop {
-            let child = cursor.node();
-            match child.kind() {
-                "pair" => Self::emit_pair(state, child, &file_id, &file_qn),
-                "table" | "table_array_element" => Self::emit_table(state, child),
-                _ => {}
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+        match node.kind() {
+            "pair" => Self::emit_pair(state, node, &file_id, &file_qn),
+            "table" | "table_array_element" => Self::emit_table(state, node),
+            _ => {}
         }
     }
 
@@ -189,7 +206,7 @@ impl TomlExtractor {
             loop {
                 let child = cursor.node();
                 if matches!(child.kind(), "bare_key" | "dotted_key" | "quoted_key") {
-                    return Some(state.node_text(child));
+                    return Some(state.node_text(child).to_string());
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -212,12 +229,12 @@ impl TomlExtractor {
         let start_line = pair_node.start_position().row as u32;
         let end_line = pair_node.end_position().row as u32;
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
 
         let pair = Node {
             id: id.clone(),
             kind: NodeKind::Const,
-            name,
+            name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
             start_line,
@@ -283,5 +300,15 @@ impl crate::LanguageExtractor for TomlExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_toml(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

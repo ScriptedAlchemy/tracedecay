@@ -3,11 +3,8 @@ use tracedecay_code_extraction::ProtoExtractor;
 use tracedecay_domain::*;
 
 fn extract_sample() -> ExtractionResult {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/sample.proto"
-    ))
-    .expect("failed to read sample.proto");
+    let source = std::fs::read_to_string("../../tests/fixtures/sample.proto")
+        .expect("failed to read sample.proto");
     let extractor = ProtoExtractor;
     extractor.extract("sample.proto", &source)
 }
@@ -70,7 +67,6 @@ fn test_proto_messages() {
         .iter()
         .filter(|n| n.kind == NodeKind::ProtoMessage)
         .collect();
-    // Endpoint, ConnectionConfig, AuthConfig (nested), ConnectionStatus, DisconnectRequest, HealthCheckRequest, HealthCheckResponse
     assert!(
         msgs.len() >= 7,
         "expected >= 7 messages, got {} : {:?}",
@@ -94,7 +90,6 @@ fn test_proto_nested_message() {
         .find(|n| n.kind == NodeKind::ProtoMessage && n.name == "AuthConfig");
     assert!(auth.is_some(), "nested AuthConfig message not found");
 
-    // AuthConfig should be contained within ConnectionConfig via an edge.
     let conn_config = result
         .nodes
         .iter()
@@ -187,7 +182,6 @@ fn test_proto_rpcs() {
     assert!(rpcs.iter().any(|r| r.name == "Disconnect"));
     assert!(rpcs.iter().any(|r| r.name == "HealthCheck"));
 
-    // Check docstrings on rpcs
     let connect = rpcs.iter().find(|r| r.name == "Connect").unwrap();
     assert!(
         connect.docstring.is_some(),
@@ -203,7 +197,6 @@ fn test_proto_fields() {
         .iter()
         .filter(|n| n.kind == NodeKind::Field)
         .collect();
-    // Endpoint (3) + ConnectionConfig (4 + auth + 2 oneof) + AuthConfig (2) + ConnectionStatus (2) + DisconnectRequest (1) + HealthCheckRequest (1) + HealthCheckResponse (2) = 17
     assert!(
         fields.len() >= 15,
         "expected >= 15 fields, got {}",
@@ -214,7 +207,6 @@ fn test_proto_fields() {
     assert!(fields.iter().any(|f| f.name == "tls"));
     assert!(fields.iter().any(|f| f.name == "connection_id"));
 
-    // Check field signatures contain type and number
     let host = fields.iter().find(|f| f.name == "host").unwrap();
     assert!(
         host.signature.as_ref().unwrap().contains("string"),
@@ -234,7 +226,6 @@ fn test_proto_oneof_fields() {
         .iter()
         .filter(|n| n.kind == NodeKind::Field)
         .collect();
-    // oneof fields: round_robin, least_connections
     assert!(fields.iter().any(|f| f.name == "round_robin"));
     assert!(fields.iter().any(|f| f.name == "least_connections"));
 }
@@ -243,7 +234,6 @@ fn test_proto_oneof_fields() {
 fn test_proto_docstrings() {
     let result = extract_sample();
 
-    // Endpoint message should have a docstring
     let endpoint = result
         .nodes
         .iter()
@@ -272,7 +262,6 @@ fn test_proto_contains_edges() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    // Should have many Contains edges: file->package, file->imports, file->messages, etc.
     assert!(
         contains.len() >= 10,
         "expected >= 10 Contains edges, got {}",
