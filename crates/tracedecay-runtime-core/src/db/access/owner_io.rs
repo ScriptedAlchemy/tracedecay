@@ -478,16 +478,6 @@ pub(super) fn writer_owner(token: &str, intent: &str) -> WriterOwner {
     }
 }
 
-#[cfg(windows)]
-pub fn is_lock_contended(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(33)
-}
-
-#[cfg(not(windows))]
-pub fn is_lock_contended(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock
-}
-
 pub(super) fn authority_token() -> String {
     let nonce = TOKEN_NONCE.fetch_add(1, Ordering::Relaxed);
     format!(

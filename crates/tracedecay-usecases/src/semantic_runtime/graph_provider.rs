@@ -355,10 +355,13 @@ pub trait VerifiedSemanticVectorGraphRuntimeV1: Send + Sync {
     ) -> Result<bool, GraphDbError>;
 }
 
+pub type SemanticVectorOperationTaskOwnerV1 = tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
+
 /// A code-graph authority retained for semantic-vector reads and writes.
 pub struct RetainedSemanticVectorGraphV1 {
     runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
     cancellation: Arc<dyn GraphCancellation>,
+    operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
 }
 
 impl RetainedSemanticVectorGraphV1 {
@@ -366,9 +369,22 @@ impl RetainedSemanticVectorGraphV1 {
         runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Self {
+        Self::new_with_operation_task_owner(
+            runtime,
+            cancellation,
+            Arc::new(SemanticVectorOperationTaskOwnerV1::new()),
+        )
+    }
+
+    pub fn new_with_operation_task_owner(
+        runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+        operation_task_owner: Arc<SemanticVectorOperationTaskOwnerV1>,
+    ) -> Self {
         Self {
             runtime,
             cancellation,
+            operation_task_owner,
         }
     }
 
@@ -378,6 +394,10 @@ impl RetainedSemanticVectorGraphV1 {
 
     pub fn cancellation(&self) -> &Arc<dyn GraphCancellation> {
         &self.cancellation
+    }
+
+    pub(crate) fn operation_task_owner(&self) -> &Arc<SemanticVectorOperationTaskOwnerV1> {
+        &self.operation_task_owner
     }
 }
 
@@ -392,4 +412,68 @@ pub trait SemanticVectorGraphProviderV1: Send + Sync {
     fn graph_for_current(
         &self,
     ) -> SemanticRuntimeFuture<'_, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn operation_owner_shutdown_fences_admission_and_joins_retained_work() {
+        let owner = Arc::new(SemanticVectorOperationTaskOwnerV1::new());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        assert!(owner.retain({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+            }
+        }));
+        started.notified().await;
+
+        owner.begin_shutdown();
+        assert!(
+            !owner.retain(async {}),
+            "shutdown must fence later settlement admission"
+        );
+        let first_shutdown = tokio::spawn({
+            let owner = Arc::clone(&owner);
+            async move { owner.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !first_shutdown.is_finished(),
+            "first shutdown waiter must join retained settlement work"
+        );
+
+        first_shutdown.abort();
+        let first_join_error = match first_shutdown.await {
+            Err(error) => error,
+            Ok(_) => panic!("first shutdown waiter unexpectedly completed"),
+        };
+        assert!(
+            first_join_error.is_cancelled(),
+            "aborted first shutdown waiter must join as cancelled"
+        );
+
+        let retry_shutdown = tokio::spawn({
+            let owner = Arc::clone(&owner);
+            async move { owner.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !retry_shutdown.is_finished(),
+            "retried shutdown must retain and join settlement work after waiter cancellation"
+        );
+
+        release.notify_one();
+        retry_shutdown
+            .await
+            .expect("retried operation-owner shutdown remains joinable")
+            .expect("retried operation-owner shutdown joins cleanly");
+    }
 }

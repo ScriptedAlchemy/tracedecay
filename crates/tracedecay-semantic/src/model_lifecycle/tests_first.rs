@@ -5,7 +5,7 @@
     };
     use std::collections::BTreeMap;
     #[cfg(feature = "semantic-fastembed")]
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc::{self, Receiver, SyncSender};
     use std::sync::Barrier;
@@ -121,10 +121,22 @@
         }
     }
 
+    /// A local stand-in for the model hub serving one fixture model.
+    ///
+    /// The listener is bound and listening before the endpoint is handed out,
+    /// and it stays in blocking mode: a nonblocking listener hands out
+    /// nonblocking accepted sockets on Windows, so the request reader would
+    /// fail with `WouldBlock` (WSAEWOULDBLOCK 10035) instead of waiting for
+    /// bytes. The worker accepts until it has served every expected request;
+    /// `finish` stops it early through a wake-up connection if the client
+    /// never issued them, so a short acquisition fails an assertion instead
+    /// of hanging the join.
     #[cfg(feature = "semantic-fastembed")]
     struct FixtureHub {
         endpoint: String,
+        address: SocketAddr,
         requests: Arc<AtomicUsize>,
+        stop_requested: Arc<AtomicBool>,
         worker: Option<JoinHandle<()>>,
     }
 
@@ -143,39 +155,40 @@
                 .collect::<BTreeMap<_, _>>();
             let revision = model.source.revision.clone();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let address = listener.local_addr().unwrap();
+            let endpoint = format!("http://{address}");
             let requests = Arc::new(AtomicUsize::new(0));
             let request_counter = Arc::clone(&requests);
+            let stop_requested = Arc::new(AtomicBool::new(false));
+            let stop_observed = Arc::clone(&stop_requested);
             let worker = thread::spawn(move || {
                 let expected_requests = members.len() * 2;
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while request_counter.load(Ordering::SeqCst) < expected_requests
-                    && Instant::now() < deadline
-                {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => serve_fixture_hub_request(
-                            &mut stream,
-                            &members,
-                            &revision,
-                            &request_counter,
-                        ),
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("fixture hub accept failed: {error}"),
+                while request_counter.load(Ordering::SeqCst) < expected_requests {
+                    let (mut stream, _) = listener
+                        .accept()
+                        .unwrap_or_else(|error| panic!("fixture hub accept failed: {error}"));
+                    if stop_observed.load(Ordering::SeqCst) {
+                        return;
                     }
+                    serve_fixture_hub_request(&mut stream, &members, &revision, &request_counter);
                 }
             });
             Self {
                 endpoint,
+                address,
                 requests,
+                stop_requested,
                 worker: Some(worker),
             }
         }
 
         fn finish(mut self) -> usize {
-            self.worker.take().unwrap().join().unwrap();
+            let worker = self.worker.take().unwrap();
+            self.stop_requested.store(true, Ordering::SeqCst);
+            if !worker.is_finished() {
+                let _ = TcpStream::connect(self.address);
+            }
+            worker.join().unwrap();
             self.requests.load(Ordering::SeqCst)
         }
     }
