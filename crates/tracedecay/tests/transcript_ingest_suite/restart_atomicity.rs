@@ -4,10 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
-    ProviderId, SessionId,
-};
+use tracedecay_domain::{ObservationScopeV1, ObservationSourceCursorV1, ProjectId};
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
@@ -145,6 +142,33 @@ impl ProjectSessionTestRuntime {
             other => panic!("{provider} provider usage read is not Known: {other:?}"),
         }
     }
+
+    pub(super) async fn observation_fact_count(&self, kind: &str) -> usize {
+        self.runtime
+            .replay_observations(
+                HostAdmissionScope::Project,
+                ObservationReplayRequest::new(0, 100).unwrap(),
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|stored| {
+                let payload = serde_json::from_slice::<serde_json::Value>(
+                    &stored
+                        .observation()
+                        .canonical_payload_bytes()
+                        .expect("canonical observation payload"),
+                )
+                .expect("canonical observation JSON");
+                payload["facts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|fact| fact["kind"] == kind)
+                    .count()
+            })
+            .sum()
+    }
 }
 
 pub(super) async fn open_project_session_db(project: &Path) -> Option<ProjectSessionTestRuntime> {
@@ -238,22 +262,13 @@ async fn parse_offset_for_task_history(
     _project: &Path,
     path: &Path,
 ) -> Option<tracedecay_global_db::ParseOffset> {
-    let path_text = path.to_string_lossy();
-    if let Some(offset) = runtime.get_parse_offset(path_text.as_ref()).await {
-        return Some(offset);
-    }
-    #[cfg(windows)]
+    // `get_parse_offset` normalises to the canonical stored form itself, so
+    // the display path is the lookup.
+    if let Some(offset) = runtime
+        .get_parse_offset(path.to_string_lossy().as_ref())
+        .await
     {
-        let alternate = if path_text.contains('/') {
-            path_text.replace('/', "\\")
-        } else {
-            path_text.replace('\\', "/")
-        };
-        if alternate != path_text
-            && let Some(offset) = runtime.get_parse_offset(&alternate).await
-        {
-            return Some(offset);
-        }
+        return Some(offset);
     }
     let task_dir = path.parent()?.file_name()?.to_string_lossy();
     let file_name = path.file_name()?.to_string_lossy();
@@ -285,18 +300,11 @@ pub(super) async fn observation_source_cursor(
     session_id: &str,
     project: &Path,
 ) -> Option<ObservationSourceCursorV1> {
-    // Since `fc13a72ac` Codex commits its observations under a v2 canonical
-    // source identity; `for_provider` names only the pre-v2 legacy source that
-    // prompt-recovery replay reconciles against.
-    let source = if provider == "codex" {
-        tracedecay_sessions::runtime::codex::codex_observation_source_v2(session_id).unwrap()
-    } else {
-        ObservationSourceIdentityV1::for_provider(
-            ProviderId::new(provider).unwrap(),
-            SessionId::new(session_id).unwrap(),
-        )
-        .unwrap()
-    };
+    // Look up with the same source identity admission wrote. Codex v2 and
+    // Cline UI streams must not be reconstructed as a session-only source.
+    let source =
+        tracedecay_sessions::runtime::native_ingest_source_identity(provider, session_id, None)
+            .unwrap();
     let project_id = test_project_id(project);
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
@@ -323,10 +331,10 @@ pub(super) async fn observation_source_cursor_for_key(
     session_id: &str,
     source_key: &str,
 ) -> Option<ObservationSourceCursorV1> {
-    let source = ObservationSourceIdentityV1::for_provider_source(
-        ProviderId::new(provider).unwrap(),
-        SessionId::new(session_id).unwrap(),
-        SessionId::new(source_key).unwrap(),
+    let source = tracedecay_sessions::runtime::native_ingest_source_identity(
+        provider,
+        session_id,
+        Some(source_key),
     )
     .unwrap();
     runtime
@@ -387,7 +395,15 @@ pub(super) async fn assert_secret_absent_from_observation_sinks(
 }
 
 fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> PathBuf {
-    let dir = home.join(".codex/sessions/2026/01/01");
+    // Joined per component so the fixture path is spelled exactly as the
+    // rollout walker reports it (a `/`-joined tail is not the native spelling
+    // on Windows), which is what `transcript_path` is asserted against.
+    let dir = home
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("01")
+        .join("01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("rollout-2026-01-01T00-00-00-{session}.jsonl"));
     let contents = format!(

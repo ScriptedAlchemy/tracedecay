@@ -66,7 +66,7 @@ pub use fair_scheduler::{
 };
 pub use graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphErrorV1,
-    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1,
+    SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1, SemanticVectorOperationTaskOwnerV1,
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 pub use owner::SemanticRuntimeOwnerV1;
@@ -87,12 +87,12 @@ pub use ports::{
 pub use production::{
     ApplicationSemanticSearchParametersV1, AuthorizedProjectSemanticSearchParametersV1,
     ProductionProjectSemanticSearchBridgeV1, SemanticSourceCoherenceOutcomeV1,
-    SemanticSourceCoherenceV1, SemanticSourceMismatchV1,
+    SemanticSourceCoherenceV1, SemanticSourceMismatchV1, SemanticSourceUnavailableV1,
     compose_project_application_semantic_search, semantic_source_coherence,
     semantic_source_content_coherent,
 };
 pub use production::{
-    PreparedProductionSemanticCacheCommitV1, PreparedSemanticEvaluationGenerationV1,
+    PreparedProductionSemanticRuntimeCommitV1, PreparedSemanticEvaluationGenerationV1,
     ProductionSemanticRuntimeV1, SavedCodeGenerationScheduleHookV1,
     SavedGenerationScheduleHookParametersV1, SemanticCompatibleCurrentGenerationSnapshotV1,
     SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationLifecycleVerificationV1,

@@ -257,7 +257,14 @@ impl DaemonLifecycle {
             if finished {
                 return;
             }
-            notified.await;
+            // The completion guard notifies from inside the coordinator task,
+            // one scheduler step before Tokio marks its JoinHandle finished.
+            // Recheck periodically so consuming that notification in the
+            // intervening window cannot wait forever for a second one.
+            tokio::select! {
+                () = notified => {}
+                () = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
         }
     }
 
@@ -341,5 +348,52 @@ impl Drop for DaemonActivity {
         if self.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.inner.idle.notify_waiters();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coordinator_completion_notification_cannot_strand_its_waiter() {
+        let lifecycle = DaemonLifecycle::default();
+        let allow_completion = Arc::new(tokio::sync::Notify::new());
+        let (coordinator_task, completed) = {
+            let shutdown = lifecycle
+                .inner
+                .shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                Arc::clone(&shutdown.coordinator_task),
+                Arc::clone(&shutdown.coordinator_completed),
+            )
+        };
+        let task = tokio::spawn({
+            let allow_completion = Arc::clone(&allow_completion);
+            async move {
+                allow_completion.notified().await;
+                completed.notify_waiters();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let mut retained_task = coordinator_task.lock().await;
+        *retained_task = Some(task);
+        let waiter = tokio::spawn({
+            let lifecycle = lifecycle.clone();
+            async move {
+                lifecycle.wait_for_finished_shutdown_coordinator().await;
+            }
+        });
+
+        allow_completion.notify_one();
+        drop(retained_task);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("coordinator completion notification must not be lost")
+            .expect("coordinator waiter remains joinable");
+        lifecycle.join_finished_shutdown_coordinator().await;
+        assert!(coordinator_task.lock().await.is_none());
     }
 }

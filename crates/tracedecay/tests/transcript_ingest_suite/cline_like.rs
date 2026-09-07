@@ -25,8 +25,11 @@ pub(super) fn vscode_storage_root(
     home: &std::path::Path,
     extension_id: &str,
 ) -> std::path::PathBuf {
+    // Joined per component to match the source's native spelling; the task
+    // paths derived from this root are compared against stored cursor keys.
     tracedecay::agents::vscode_data_dir(home)
-        .join("User/globalStorage")
+        .join("User")
+        .join("globalStorage")
         .join(extension_id)
         .join("tasks")
 }
@@ -35,24 +38,9 @@ async fn parse_offset_for_path(
     db: &ProjectSessionTestRuntime,
     path: &std::path::Path,
 ) -> Option<ParseOffset> {
-    let path = path.to_string_lossy();
-    if let Some(offset) = db.get_parse_offset(path.as_ref()).await {
-        return Some(offset);
-    }
-
-    #[cfg(windows)]
-    {
-        let alternate = if path.contains('/') {
-            path.replace('/', "\\")
-        } else {
-            path.replace('\\', "/")
-        };
-        if alternate != path {
-            return db.get_parse_offset(&alternate).await;
-        }
-    }
-
-    None
+    // `get_parse_offset` normalises to the canonical stored form itself, so
+    // the display path is the lookup.
+    db.get_parse_offset(path.to_string_lossy().as_ref()).await
 }
 
 pub(super) async fn parse_offset_for_task_history(
@@ -822,6 +810,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             2,
             "{provider}: initial durable message cardinality"
         );
+        let usage_fact_count = db.observation_fact_count("uncorrelated_usage").await;
+        assert_eq!(
+            usage_fact_count, 1,
+            "{provider}: initial usage fact cardinality"
+        );
         let prefix_cursor = observation_source_cursor(&db, provider, &session_id, &project)
             .await
             .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
@@ -850,6 +843,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             observation_source_cursor(&replay, provider, &session_id, &project).await,
             Some(prefix_cursor.clone()),
             "{provider}: frontier unchanged on restart"
+        );
+        assert_eq!(
+            replay.observation_fact_count("uncorrelated_usage").await,
+            usage_fact_count,
+            "{provider}: exact restart must not duplicate usage"
         );
 
         // Replacement with an extra durable turn, interrupted by projection failure.
@@ -901,6 +899,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             "{provider}: API replacement leaves the UI stream frontier untouched"
         );
         assert_eq!(
+            replay.observation_fact_count("uncorrelated_usage").await,
+            usage_fact_count,
+            "{provider}: covered API replacement must not duplicate UI usage"
+        );
+        assert_eq!(
             replay.session_message_count().await.unwrap(),
             2,
             "{provider}: failed projection preserves prior durable cardinality"
@@ -941,6 +944,11 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
                 .messages_upserted,
             0,
             "{provider}: post-recovery replay"
+        );
+        assert_eq!(
+            recovered.observation_fact_count("uncorrelated_usage").await,
+            usage_fact_count,
+            "{provider}: recovery replay must not duplicate usage"
         );
     }
 }
