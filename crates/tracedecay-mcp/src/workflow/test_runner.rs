@@ -19,6 +19,7 @@ use std::os::unix::process::CommandExt;
 use super::TestProfile;
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(unix)]
 const TERMINATION_GRACE: Duration = Duration::from_millis(500);
 const MAX_TEST_RUN_OUTPUT_BYTES: u64 = 128 * 1024;
 
@@ -630,6 +631,7 @@ fn join_reader(reader: Option<thread::JoinHandle<StreamCapture>>) -> StreamCaptu
 #[derive(Clone, Copy)]
 enum TerminationSignal {
     Terminate,
+    #[cfg(unix)]
     Kill,
 }
 
@@ -680,6 +682,8 @@ pub fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use std::ffi::c_void;
     use std::fmt::{self, Display};
     use std::fs;
     use std::io::Write;
@@ -688,9 +692,11 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    #[cfg(unix)]
+    use super::{MAX_TEST_RUN_OUTPUT_BYTES, TestRunStream};
     use super::{
-        MAX_TEST_RUN_OUTPUT_BYTES, TestProfile, TestRunControl, TestRunFailure, TestRunOutput,
-        TestRunStream, cargo_test_build_args, run_bounded_test_command, run_cargo_tests,
+        TestProfile, TestRunControl, TestRunFailure, TestRunOutput, cargo_test_build_args,
+        run_bounded_test_command, run_cargo_tests,
     };
 
     const FIXTURE_MODE: &str = "TRACEDECAY_TEST_RUNNER_FIXTURE_MODE";
@@ -996,6 +1002,7 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp");
         let marker = temp.path().join("build-script.pid");
         let staging = temp.path().join("build-script.pid.partial");
+        let lock = temp.path().join("build-script.lock");
         write_fixture_package(
             temp.path(),
             "stalled-compile-fixture",
@@ -1008,11 +1015,25 @@ mod tests {
             format!(
                 concat!(
                     "fn main() {{\n",
+                    "    #[cfg(windows)]\n",
+                    "    let _lock = {{\n",
+                    "        use std::os::windows::fs::OpenOptionsExt;\n",
+                    "        std::fs::OpenOptions::new()\n",
+                    "            .write(true)\n",
+                    "            .create(true)\n",
+                    "            .truncate(true)\n",
+                    "            .share_mode(0)\n",
+                    "            .open({lock:?})\n",
+                    "            .expect(\"exclusive lock\");\n",
+                    "    }};\n",
+                    "    #[cfg(not(windows))]\n",
+                    "    let _lock = std::fs::File::create({lock:?}).expect(\"lock file\");\n",
                     "    std::fs::write({staging:?}, std::process::id().to_string()).expect(\"staging marker\");\n",
                     "    std::fs::rename({staging:?}, {marker:?}).expect(\"publish marker\");\n",
                     "    std::thread::sleep(std::time::Duration::from_secs(60));\n",
                     "}}\n",
                 ),
+                lock = lock.to_str().expect("utf-8 lock path"),
                 staging = staging.to_str().expect("utf-8 staging path"),
                 marker = marker.to_str().expect("utf-8 marker path"),
             ),
@@ -1029,8 +1050,9 @@ mod tests {
                     thread::sleep(Duration::from_millis(10));
                 }
                 let stalled = marker.exists();
+                let cargo_pid = control.active_process_group();
                 control.cancel();
-                stalled
+                (stalled, cargo_pid)
             })
         };
 
@@ -1044,7 +1066,7 @@ mod tests {
         )
         .await;
         let elapsed = started.elapsed();
-        let stalled = canceller.join().expect("canceller");
+        let (stalled, _cargo_pid) = canceller.join().expect("canceller");
 
         assert!(
             stalled,
@@ -1054,8 +1076,17 @@ mod tests {
             matches!(result, Err(TestRunFailure::Cancelled { .. })),
             "cancelling a stalled compile must report Cancelled after {elapsed:?}, not a timeout or NoMatch: {result:?}"
         );
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         assert_reaped(&marker);
+        #[cfg(windows)]
+        {
+            let cargo_pid = _cargo_pid.expect("cargo pid while build script is stalled");
+            assert_process_reaped(cargo_pid, "cargo");
+            fs::remove_file(&lock).expect("stalled build-script file lock must be released");
+            fs::write(temp.path().join("build.rs"), "fn main() {}\n")
+                .expect("replacement build script");
+            compile_fixture_tests(temp.path());
+        }
     }
 
     #[tokio::test]
@@ -1165,7 +1196,7 @@ mod tests {
         command
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn assert_reaped(marker: &std::path::Path) {
         let deadline = Instant::now() + Duration::from_secs(1);
         while !marker.exists() && Instant::now() < deadline {
@@ -1174,25 +1205,58 @@ mod tests {
         let pid = fs::read_to_string(marker)
             .expect("fixture child marker")
             .trim()
-            .parse::<i32>()
+            .parse::<u32>()
             .expect("fixture child pid");
+        assert_process_reaped(pid, "fixture descendant");
+    }
+
+    #[cfg(any(unix, windows))]
+    fn assert_process_reaped(pid: u32, description: &str) {
+        let deadline = Instant::now() + Duration::from_secs(1);
         while process_is_live(pid) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(
             !process_is_live(pid),
-            "fixture descendant {pid} survived test-process cleanup"
+            "{description} process {pid} survived test-process cleanup"
         );
     }
 
     #[cfg(unix)]
-    fn process_is_live(pid: i32) -> bool {
+    fn process_is_live(pid: u32) -> bool {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
         if let Ok(stat) = stat
             && stat.split_whitespace().nth(2) == Some("Z")
         {
             return false;
         }
+        let pid = i32::try_from(pid).expect("fixture pid fits pid_t");
         unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(windows)]
+    fn process_is_live(pid: u32) -> bool {
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            #[link_name = "OpenProcess"]
+            fn open_process(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+            #[link_name = "GetExitCodeProcess"]
+            fn get_exit_code_process(process: *mut c_void, exit_code: *mut u32) -> i32;
+            #[link_name = "CloseHandle"]
+            fn close_handle(handle: *mut c_void) -> i32;
+        }
+
+        let process = unsafe { open_process(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return std::io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER);
+        }
+        let mut exit_code = 0_u32;
+        let read = unsafe { get_exit_code_process(process, &mut exit_code) };
+        let _ = unsafe { close_handle(process) };
+        read == 0 || exit_code == STILL_ACTIVE
     }
 }
