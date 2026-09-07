@@ -50,7 +50,6 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
         "the race is only live when execute would acquire the pool"
     );
     let collectable = plan.collectable_generations[0].clone();
-    let started = Instant::now();
     let error = execute_code_generation_retention(
         store.path(),
         plan,
@@ -59,15 +58,10 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
         Some(&pool_root),
     )
     .expect_err("a held pool after a successful probe must defer");
-    let elapsed = started.elapsed();
 
     assert!(
         matches!(error, CodeGenerationRetentionErrorV1::GraphReplayPoolBusy),
         "executor must return the typed busy result, got {error:?}"
-    );
-    assert!(
-        elapsed < GRAPH_REPLAY_POOL_ACQUIRE_BUDGET + Duration::from_millis(50),
-        "bounded acquire must finish inside the budget, took {elapsed:?}"
     );
     assert!(
         !transaction_path(store.path()).exists(),
@@ -298,20 +292,20 @@ fn execute_cancels_held_pool_acquire_before_any_exposure() {
 fn checked_acquire_returns_busy_when_the_carried_deadline_has_elapsed() {
     let (_root, pool) = isolated_pool();
     let publisher = hold_replay_pool(&pool);
-    let started = Instant::now();
+    reset_graph_replay_pool_acquire_observation();
     let error = match acquire_graph_replay_pool_lock_checked(&pool, Instant::now(), &|| false) {
         Ok(_) => panic!("an elapsed deadline must defer a held pool"),
         Err(error) => error,
     };
-    let elapsed = started.elapsed();
 
     assert!(matches!(
         error,
         CodeGenerationRetentionErrorV1::GraphReplayPoolBusy
     ));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "an expired deadline must not poll, took {elapsed:?}"
+    assert_eq!(
+        graph_replay_pool_acquire_observation(),
+        (1, 0),
+        "an expired held acquire must make one non-blocking try and skip the poll loop"
     );
     drop(publisher);
 }

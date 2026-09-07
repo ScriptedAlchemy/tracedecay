@@ -470,9 +470,15 @@ impl CodeGraphPublicationFlightV1 {
 #[derive(Default)]
 pub(crate) struct CodeGraphShardPublicationLocksV1 {
     gate: Mutex<()>,
-    build: Mutex<()>,
+    /// Owned so the permit can outlive the publishing call: the staging-row
+    /// release that follows a seal keeps holding it from its own thread
+    /// while the seated snapshot is already serving.
+    build: Arc<tokio::sync::Mutex<()>>,
     flight: CodeGraphPublicationFlightV1,
 }
+
+/// The shard-wide corpus build permit; dropping it admits the next scope.
+type CodeGraphBuildPermitV1 = tokio::sync::OwnedMutexGuard<()>;
 
 /// How long one build-permit wait sleeps between interruption polls, matching
 /// the flight-table cadence: the permit turns over at corpus-publish
@@ -483,18 +489,17 @@ const PUBLICATION_BUILD_INTERRUPTION_POLL: Duration = Duration::from_millis(250)
 impl CodeGraphShardPublicationLocksV1 {
     /// Claims the shard-wide corpus build permit, observing `interruption`
     /// while parked behind a peer's corpus-sized publish.
-    fn claim_build<'a>(
-        &'a self,
+    fn claim_build(
+        &self,
         interruption: &dyn Fn() -> std::result::Result<(), GraphDbError>,
-    ) -> std::result::Result<std::sync::MutexGuard<'a, ()>, GraphDbError> {
+    ) -> std::result::Result<CodeGraphBuildPermitV1, GraphDbError> {
         loop {
             interruption()?;
-            match self.build.try_lock() {
+            match Arc::clone(&self.build).try_lock_owned() {
                 Ok(permit) => return Ok(permit),
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                    return Ok(poisoned.into_inner());
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {
+                // The only failure is "held by a peer"; tokio's mutex has no
+                // poisoned state to unwrap.
+                Err(_held) => {
                     hotpath::measure_block!(
                         "daemon.session_registry.publish_snapshot.build_wait",
                         std::thread::sleep(PUBLICATION_BUILD_INTERRUPTION_POLL)
@@ -1291,7 +1296,7 @@ impl RetainedCodeGraphRuntimeV1 {
             }
             other => other,
         };
-        let _build = self
+        let build = self
             .publication_locks
             .claim_build(&interruption)
             .map_err(refuse_if_resident_memory)?;
@@ -1373,11 +1378,20 @@ impl RetainedCodeGraphRuntimeV1 {
         // the build permit goes to the next scope. Deferring any of that past
         // the permit is what made peak RSS grow with the number of published
         // worktree scopes even though the builds never overlapped (#830).
+        //
+        // The release itself runs off this thread: the sealed artifact is the
+        // serving authority the moment the head is seated, so the seated
+        // snapshot must not wait behind a corpus-sized row sweep. The permit
+        // travels with the sweep, which keeps the next scope's build ordered
+        // after it exactly as before.
         drop(prepared);
-        if let Some(projection) = staging_release {
-            self.release_sealed_staging_rows(projection);
+        match staging_release {
+            Some(projection) => self.release_sealed_staging_rows(build, projection),
+            None => {
+                release_publish_transient_memory();
+                drop(build);
+            }
         }
-        release_publish_transient_memory();
         published
     }
 
@@ -1605,23 +1619,31 @@ impl RetainedCodeGraphRuntimeV1 {
     }
 
     /// Releases the duplicate staging rows this publication's seal made
-    /// redundant, on the publishing thread, before the build permit is
-    /// handed to the next scope.
+    /// redundant, on its own thread, holding the build permit until the
+    /// sweep ends so the next scope's corpus build still starts on released
+    /// rows.
     ///
-    /// This used to be a `spawn_blocking` task. Two things were wrong with
-    /// that for the retention this fixes. It ran *after* the permit was
+    /// The sweep once ran as a `spawn_blocking` task *after* the permit was
     /// released, so the next corpus build started on top of rows that were
-    /// already redundant; and it silently did not run at all off a Tokio
-    /// thread, which is exactly how the publication measurement harness
-    /// calls this path — the release was warned about and left to
-    /// maintenance. Running it here makes "released when the permit is
-    /// released" a property of the code rather than of the caller's runtime.
-    fn release_sealed_staging_rows(&self, projection: GraphProjectionIdentityV1) {
+    /// already redundant, and it silently did not run at all off a Tokio
+    /// thread — which is how the publication measurement harness calls this
+    /// path. It then moved onto the publishing thread, which fixed both but
+    /// put a corpus-sized delete between the seated head and the caller's
+    /// serving seat: a first 4,925-file publication spent longer releasing
+    /// its 3.4M staging rows than it did building the generation, with the
+    /// code graph reported `pending` the whole time. A plain OS thread keeps
+    /// the permit ordering without a runtime and without that wait.
+    fn release_sealed_staging_rows(
+        &self,
+        build: CodeGraphBuildPermitV1,
+        projection: GraphProjectionIdentityV1,
+    ) {
         let graph_registry = self.graph_registry.clone();
         let project_database = Arc::clone(&self.project_database);
         let authority: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
         let lifecycle_cancelled = Arc::clone(&self.lifecycle_cancelled);
-        {
+        let sweep = move || {
+            let _build = build;
             let release: std::result::Result<
                 tracedecay_graph_db::SealedStagingRelease,
                 GraphDbError,
@@ -1687,6 +1709,21 @@ impl RetainedCodeGraphRuntimeV1 {
                     "sealed generation staging release will be retried by maintenance"
                 );
             }
+            release_publish_transient_memory();
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("code-graph-staging-release".to_owned())
+            .spawn(sweep)
+        {
+            // The permit and the sweep closure are gone with the failed
+            // spawn; the rows are still redundant and maintenance owns the
+            // retry, exactly as for a failed release.
+            tracing::warn!(
+                event = "graph_staging_release_failed",
+                error = %error,
+                "staging release thread could not start; maintenance will retry the release"
+            );
+            release_publish_transient_memory();
         }
     }
 
@@ -3270,6 +3307,7 @@ fn map_code_graph_error(
 
 impl Drop for DaemonSessionRuntimeRegistryV1 {
     fn drop(&mut self) {
+        self.semantic_vector_operation_task_owner.begin_shutdown();
         self.graph_lifecycle_cancelled
             .store(true, Ordering::Release);
         self.cancel_memory_graph_reconciliation_tasks();

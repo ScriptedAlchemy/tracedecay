@@ -37,7 +37,6 @@ pub use lease::enter_owned_maintenance_database_scope;
 use lease::fallback_scoped_runtime_role;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
 pub use lease::{enter_daemon_database_scope, probe_writer_owner};
-pub use owner_io::is_lock_contended;
 use owner_io::{
     authority_token, epoch_ms, publish_record_atomically, read_record_strict, writer_owner,
 };
@@ -45,6 +44,7 @@ use path_layout::{
     canonical_profile_root, database_profile_root, is_legacy_repository_database,
     platform_identity_key,
 };
+pub use tracedecay_private_fs::is_lock_contended;
 
 static PROCESS_LEASES: LazyLock<Mutex<HashMap<PathBuf, ProcessLease>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));

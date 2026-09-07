@@ -13,6 +13,7 @@ use tracedecay_lcm::retrieval_content::{
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
+use super::super::shared::path_identity_key;
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -36,6 +37,26 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
      WHERE requested.type = 'text'
        AND messages.provider = ?1
        AND messages.message_id = requested.value";
+
+/// Appends the project-scope predicate.
+///
+/// `project_key` is an opaque authority and stays byte-exact. `project_path`
+/// is written through `path_identity_key`, so the same selector can use its
+/// exact spelling for the key and its canonical path spelling for the path.
+fn push_project_identity_predicate(
+    sql: &mut String,
+    query_params: &mut Vec<Value>,
+    project_selector: &str,
+) {
+    query_params.push(Value::Text(project_selector.to_owned()));
+    let key_parameter = query_params.len();
+    query_params.push(Value::Text(path_identity_key(project_selector)));
+    let path_parameter = query_params.len();
+    let _ = write!(
+        sql,
+        " AND (s.project_key = ?{key_parameter} OR s.project_path = ?{path_parameter})"
+    );
+}
 
 fn session_db_operation_error(
     operation: &'static str,
@@ -372,15 +393,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         &self,
         project_key: &str,
     ) -> Result<i64, String> {
-        let mut rows = self
-            .read_connection()
-            .query(
-                "SELECT COUNT(*)
+        let mut sql = "SELECT COUNT(*)
                  FROM session_messages m
                  JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-                 WHERE s.project_key = ?1",
-                tracedecay_runtime_core::db::engine::params![project_key],
-            )
+                 WHERE 1 = 1"
+            .to_owned();
+        let mut query_params = Vec::with_capacity(2);
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
+        let mut rows = self
+            .read_connection()
+            .query(sql.as_str(), query_params)
             .await
             .map_err(|error| format!("failed to count project session messages: {error}"))?;
         let row = rows
@@ -572,12 +594,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_owned())];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         for term in &literal_terms {
             query_params.push(Value::Text(term.clone()));
@@ -679,12 +696,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .to_owned();
         let mut query_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -741,12 +753,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .to_owned();
         let mut legacy_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            legacy_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                legacy_sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                legacy_params.len()
-            );
+            push_project_identity_predicate(&mut legacy_sql, &mut legacy_params, project_key);
         }
         legacy_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -881,12 +888,7 @@ async fn search_workflow_facts(
     ];
     let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
     if let Some(project_key) = project_key {
-        query_params.push(Value::Text(project_key.to_owned()));
-        let _ = write!(
-            sql,
-            " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-            query_params.len()
-        );
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
     }
     let mut term_predicates = Vec::with_capacity(terms.len());
     for term in terms {
