@@ -37,8 +37,15 @@ pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String
         // resolved the program: a `NotFound` here is the checkout, not the host
         // CLI. Reporting it as an unavailable Git turns "this project root is
         // gone" into a host-installation problem, so it stays the same
-        // "no churn to read" answer a non-repository directory gets.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        // "no churn to read" answer a non-repository directory gets. Windows
+        // reports the missing working directory as `ERROR_DIRECTORY`
+        // (`NotADirectory`) rather than `NotFound`.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
             return Ok(HashMap::new());
         }
         Err(error) => return Err(TraceDecayError::Io(error)),

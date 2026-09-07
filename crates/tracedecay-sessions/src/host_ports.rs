@@ -137,7 +137,9 @@ fn platform_data_dir(home: &Path, product: &str) -> PathBuf {
                 return appdata_path.join(product);
             }
         }
-        home.join("AppData/Roaming").join(product)
+        // Joined per component: this root's text becomes durable transcript
+        // cursor keys, so it must carry the native spelling.
+        home.join("AppData").join("Roaming").join(product)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
