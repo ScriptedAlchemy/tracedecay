@@ -49,10 +49,13 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
 ///
 /// The source is opened `SQLITE_OPEN_READ_ONLY` without `immutable=1`. That
 /// URI skips locking and ignores WAL/SHM; it is illegal on a changing family.
-/// Each attempt writes an owned staging file beside `destination` and
-/// retires only that scratch. A pre-existing destination is left untouched
-/// until an authorized replace succeeds, so a failed public backup cannot
-/// delete a valid snapshot.
+/// Each attempt exclusively creates an owned staging file beside
+/// `destination` (`create_new`) and retires only that scratch. A colliding
+/// name is refused, not deleted. On Unix, `rename` atomically replaces an
+/// existing destination. Elsewhere the public helper rejects an existing
+/// destination because displace/restore is not atomic and cannot keep the
+/// documented promise that the old file stays at its path until replace
+/// succeeds. Scratch callers always publish to a new path.
 fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
     backup_live_sqlite_database_with(source, destination, || Ok(()))
 }
@@ -62,6 +65,35 @@ fn backup_staging_path(destination: &Path) -> PathBuf {
     let mut staging = destination.as_os_str().to_os_string();
     staging.push(format!(".{}.{id}.backup-partial", std::process::id()));
     PathBuf::from(staging)
+}
+
+fn reserve_exclusive_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn reserve_attempt_staging(destination: &Path) -> io::Result<PathBuf> {
+    for _ in 0..32 {
+        let staging = backup_staging_path(destination);
+        match reserve_exclusive_file(&staging) {
+            Ok(file) => {
+                drop(file);
+                return Ok(staging);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve an exclusive SQLite backup staging file",
+    ))
 }
 
 fn retire_attempt_scratch(staging: &Path) {
@@ -99,7 +131,10 @@ fn backup_live_sqlite_database_with(
     checkpoint: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
     reject_aliased_backup_paths(source, destination)?;
-    let staging = backup_staging_path(destination);
+    // Cancel/deadline before any exclusive create so an early failure cannot
+    // treat a colliding name as this attempt's deletable scratch.
+    checkpoint()?;
+    let staging = reserve_attempt_staging(destination)?;
     match run_online_backup(source, &staging, checkpoint) {
         Ok(()) => publish_complete_backup(&staging, destination),
         Err(error) => {
@@ -131,11 +166,9 @@ fn first_backup_step(source: &Path) -> io::Result<StepResult> {
     source_conn
         .busy_timeout(Duration::ZERO)
         .map_err(io::Error::other)?;
-    let mut destination = Connection::open_with_flags(
-        &probe,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-    )
-    .map_err(io::Error::other)?;
+    drop(reserve_exclusive_file(&probe)?);
+    let mut destination = Connection::open_with_flags(&probe, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
     let backup =
         rusqlite::backup::Backup::new(&source_conn, &mut destination).map_err(io::Error::other)?;
     let step = backup.step(1).map_err(io::Error::other)?;
@@ -162,11 +195,8 @@ fn run_online_backup(
     source
         .busy_timeout(Duration::ZERO)
         .map_err(io::Error::other)?;
-    let mut staging = Connection::open_with_flags(
-        staging_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-    )
-    .map_err(io::Error::other)?;
+    let mut staging = Connection::open_with_flags(staging_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
     let backup = rusqlite::backup::Backup::new(&source, &mut staging).map_err(io::Error::other)?;
     loop {
         checkpoint()?;
@@ -218,37 +248,26 @@ fn publish_complete_backup(staging: &Path, destination: &Path) -> io::Result<()>
         return Err(io::Error::other("forced backup publish failure"));
     }
     if destination.exists() {
-        replace_existing_destination(staging, destination)
-    } else {
-        fs::rename(staging, destination).inspect_err(|_| retire_attempt_scratch(staging))
+        return replace_existing_destination(staging, destination);
     }
+    fs::rename(staging, destination).inspect_err(|_| retire_attempt_scratch(staging))
 }
 
 fn replace_existing_destination(staging: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        // rename(2) replaces the name atomically. Failure leaves destination
-        // untouched; only this attempt's staging is retired.
+        // rename(2) replaces the directory entry atomically. Failure leaves
+        // destination untouched; only this attempt's staging is retired.
         fs::rename(staging, destination).inspect_err(|_| retire_attempt_scratch(staging))
     }
     #[cfg(not(unix))]
     {
-        let displaced = backup_staging_path(destination);
-        if let Err(error) = fs::rename(destination, &displaced) {
-            retire_attempt_scratch(staging);
-            return Err(error);
-        }
-        match fs::rename(staging, destination) {
-            Ok(()) => {
-                let _ = fs::remove_file(&displaced);
-                Ok(())
-            }
-            Err(error) => {
-                let _ = fs::rename(&displaced, destination);
-                retire_attempt_scratch(staging);
-                Err(error)
-            }
-        }
+        let _ = destination;
+        retire_attempt_scratch(staging);
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "SQLite backup cannot atomically replace an existing destination",
+        ))
     }
 }
 

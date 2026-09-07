@@ -307,6 +307,69 @@ fn live_backup_preserves_existing_destination_when_publish_fails() {
 }
 
 #[test]
+fn exclusive_staging_refuses_a_collision_without_deleting_it() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("owned.backup-partial");
+    fs::write(&path, b"foreign-scratch").unwrap();
+    let identity = sqlite_generation_identity(&path).unwrap();
+    let bytes = fs::read(&path).unwrap();
+
+    let error = super::reserve_exclusive_file(&path)
+        .expect_err("create_new must refuse a pre-existing scratch name");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(sqlite_generation_identity(&path).unwrap(), identity);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_backup_replaces_an_existing_destination_atomically() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
+        )
+        .unwrap();
+    seed_existing_destination(&destination, "stale");
+
+    backup_live_sqlite_database(&source, &destination)
+        .await
+        .unwrap();
+
+    assert_eq!(integrity_ok(&destination), "ok");
+    assert_eq!(snapshot_ids(&destination), [1]);
+    assert_eq!(snapshot_ids_text(&destination), ["fresh"]);
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn live_backup_refuses_to_replace_an_existing_destination() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("live.db");
+    let destination = temp.path().join("snapshot.db");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE durable(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO durable(id, value) VALUES (1, 'fresh');",
+        )
+        .unwrap();
+    let (identity, bytes) = seed_existing_destination(&destination, "keep-me");
+
+    let error = backup_live_sqlite_database(&source, &destination)
+        .await
+        .expect_err("Windows cannot atomically replace an existing destination");
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_destination_survived(&destination, identity, &bytes);
+}
+
+#[test]
 fn live_backup_rejects_source_destination_alias() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");
