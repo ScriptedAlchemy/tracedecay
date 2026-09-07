@@ -3,6 +3,10 @@ use std::process::Command;
 
 use super::*;
 use crate::daemon::ProjectServerRequirement;
+#[cfg(unix)]
+use tracedecay_application::doctor::{
+    DoctorReportV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
+};
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]
@@ -171,6 +175,283 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
 async fn fresh_committed_project_open_mounts_feedback_before_lsp() {
     assert_fresh_project_open_owners("committed-project-open-owners", ProjectGitState::Committed)
         .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn semantic_owner_registration_heals_after_configuration_runtime_race() {
+    async fn tool_json(
+        server: &crate::mcp::McpServer,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let response = server
+            .handle_request(&tracedecay_mcp::transport::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: Some(serde_json::json!(1)),
+                method: "tools/call".to_owned(),
+                params: Some(serde_json::json!({
+                    "name": name,
+                    "arguments": arguments,
+                })),
+            })
+            .await
+            .expect("tool call response");
+        let result = response
+            .result
+            .unwrap_or_else(|| panic!("{name} failed: {:?}", response.error));
+        assert_ne!(
+            result["isError"], true,
+            "{name} returned an error: {result}"
+        );
+        serde_json::from_str(
+            result["content"][0]["text"]
+                .as_str()
+                .expect("tool JSON text"),
+        )
+        .unwrap_or_else(|error| panic!("{name} returned invalid JSON: {error}; {result}"))
+    }
+
+    fn semantic_owner_doctor_finding(report: &DoctorReportV1, reference: &str) -> bool {
+        report.findings().any(|finding| {
+            finding
+                .evidence()
+                .iter()
+                .any(|evidence| evidence.reference().as_str() == reference)
+        })
+    }
+
+    let temp = TempDir::new().expect("semantic owner race fixture");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("semantic owner race project");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n")
+        .expect("semantic owner race source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let initialized = Command::new("git")
+        .args(["init", "--quiet", "--initial-branch=main"])
+        .current_dir(&project)
+        .status()
+        .expect("run git init");
+    assert!(initialized.success(), "git init must succeed");
+    let added = Command::new("git")
+        .args(["add", "--all"])
+        .current_dir(&project)
+        .status()
+        .expect("stage semantic owner race fixture");
+    assert!(added.success(), "fixture stage must succeed");
+    let committed = Command::new("git")
+        .args([
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test: initial",
+        ])
+        .current_dir(&project)
+        .status()
+        .expect("commit semantic owner race fixture");
+    assert!(committed.success(), "fixture commit must succeed");
+    let canonical_project = project.canonicalize().expect("canonical project root");
+    let handshake = DaemonHandshake {
+        project_path: Some(canonical_project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "semantic-owner-registration-race");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let registration = engine
+        .invocation
+        .service
+        .pause_configuration_runtime_registration(canonical_project.clone())
+        .await;
+    let opening_engine = engine.clone();
+    let opening_handshake = handshake.clone();
+    let opening =
+        tokio::spawn(async move { opening_engine.project_server(&opening_handshake).await });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        registration.before_registration,
+    )
+    .await
+    .expect("configuration registration must reach the race gate")
+    .expect("configuration registration gate sender");
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("published full server while configuration registration is paused");
+    let semantic_owner = engine
+        .invocation
+        .semantic_owner_runtime_registrar()
+        .registered(&canonical_project)
+        .await
+        .expect("project-owned semantic registration task");
+    let mut semantic_states = semantic_owner.subscribe_state();
+    let project_id = server
+        .cg()
+        .await
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("registered project identity");
+    let project_id = tracedecay_domain::ProjectId::new(project_id).expect("project id");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&canonical_project, &project_id)
+            .expect("semantic owner race scope");
+    let _initial_generation = engine
+        .invocation
+        .code_index_schedulers
+        .latest_complete_ready_for_scope(&scope)
+        .await;
+    let pending = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let state = semantic_states.borrow_and_update().clone();
+            if matches!(
+                state,
+                SemanticOwnerStateV1::PendingPrerequisites { ref missing }
+                    if missing == &[SemanticOwnerPrerequisiteV1::ConfigurationRuntime]
+            ) {
+                return state;
+            }
+            semantic_states
+                .changed()
+                .await
+                .expect("semantic owner state authority must remain live");
+        }
+    })
+    .await
+    .expect("code-index mount must publish semantic runtime readiness");
+    assert_eq!(
+        pending,
+        SemanticOwnerStateV1::PendingPrerequisites {
+            missing: vec![SemanticOwnerPrerequisiteV1::ConfigurationRuntime],
+        }
+    );
+    assert!(
+        engine
+            .invocation
+            .code_index_schedulers
+            .semantic_vector_graph_provider(&canonical_project)
+            .await
+            .is_some(),
+        "code-index mount must succeed while semantic ownership awaits configuration"
+    );
+    let pending_status = tool_json(
+        server.as_ref(),
+        "tracedecay_status",
+        serde_json::json!({
+            "format": "json",
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+        }),
+    )
+    .await;
+    assert_eq!(
+        pending_status["semantic_owner"],
+        serde_json::json!({
+            "status": "pending_prerequisites",
+            "missing": ["configuration_runtime"],
+        })
+    );
+    let pending_doctor = tool_json(
+        server.as_ref(),
+        "tracedecay_runtime",
+        serde_json::json!({"format": "json", "doctor_report": true}),
+    )
+    .await;
+    let pending_report: DoctorReportV1 =
+        serde_json::from_value(pending_doctor["doctor_report"]["report"].clone())
+            .expect("pending Doctor report");
+    assert!(semantic_owner_doctor_finding(
+        &pending_report,
+        "semantic-owner.pending-prerequisites",
+    ));
+
+    registration
+        .allow_registration
+        .send(())
+        .expect("release configuration registration");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        registration.after_registration,
+    )
+    .await
+    .expect("configuration registration must publish")
+    .expect("configuration registration publication sender");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if semantic_states.borrow_and_update().clone() == SemanticOwnerStateV1::Ready {
+                return;
+            }
+            semantic_states
+                .changed()
+                .await
+                .expect("semantic owner state authority must remain live");
+        }
+    })
+    .await
+    .expect("configuration registration must wake and heal the semantic owner");
+    assert!(
+        !opening.is_finished(),
+        "semantic ownership must heal before advisory project-open setup resumes"
+    );
+    let ready_status = tool_json(
+        server.as_ref(),
+        "tracedecay_status",
+        serde_json::json!({
+            "format": "json",
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+        }),
+    )
+    .await;
+    assert_eq!(
+        ready_status["semantic_owner"],
+        serde_json::json!({"status": "ready"})
+    );
+    let ready_doctor = tool_json(
+        server.as_ref(),
+        "tracedecay_runtime",
+        serde_json::json!({"format": "json", "doctor_report": true}),
+    )
+    .await;
+    let ready_report: DoctorReportV1 =
+        serde_json::from_value(ready_doctor["doctor_report"]["report"].clone())
+            .expect("ready Doctor report");
+    assert!(semantic_owner_doctor_finding(
+        &ready_report,
+        "semantic-owner.ready",
+    ));
+
+    registration
+        .allow_return
+        .send(())
+        .expect("release project-open owner setup");
+    opening
+        .await
+        .expect("project-open task")
+        .expect("project opens after semantic ownership heals");
+    drop(server);
+    let shutdown = engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "semantic owner task must join during project shutdown: {shutdown:?}"
+    );
+    assert!(
+        !semantic_owner.has_retained_task(),
+        "project shutdown must join and release the semantic registration task"
+    );
 }
 
 #[cfg(unix)]

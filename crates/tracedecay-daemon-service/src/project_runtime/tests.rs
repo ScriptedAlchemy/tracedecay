@@ -1299,3 +1299,33 @@ async fn targeted_retirement_joins_the_exact_project_semantic_worker() {
         }
     ));
 }
+
+#[tokio::test]
+async fn semantic_owner_registration_task_is_cancelled_and_joined() {
+    let owner = RegisteredSemanticOwnerTaskV1::new();
+    let cancellation = owner.cancellation();
+    let (started, worker_started) = tokio::sync::oneshot::channel();
+    let (finished, worker_finished) = tokio::sync::oneshot::channel();
+    assert!(owner.spawn(async move {
+        started
+            .send(())
+            .expect("semantic owner task start receiver");
+        cancellation.cancelled().await;
+        finished
+            .send(())
+            .expect("semantic owner task finish receiver");
+    }));
+    worker_started
+        .await
+        .expect("semantic owner registration task started");
+
+    owner.cancel_and_join().await;
+
+    worker_finished
+        .await
+        .expect("semantic owner registration task finished");
+    assert!(
+        !owner.has_retained_task(),
+        "joining must release the task handle"
+    );
+}

@@ -322,33 +322,19 @@ async fn wait_for_settled_semantic_generation(
 
 /// The generation this root serves, with the source content it sealed.
 ///
-/// This walks the same complete-seat-then-text-owner ladder as
-/// `CodeIndexSchedulerRegistryV1::latest_generation_id`, because that resolver
-/// answers an identity only and the journey needs the content that identity
-/// sealed; the registry's content-bearing resolver
-/// (`current_serving_generation_for_scope`) is scope-shaped while the journey
-/// holds a project root.
+/// Strict queries pin the text owner even while a complete graph seat lags, so
+/// this helper deliberately reads only that owner's authenticated metadata.
 async fn serving_source_identity(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project: &Path,
 ) -> Option<(
     tracedecay_domain::CodeGenerationId,
-    tracedecay_domain::ContentDigest,
+    tracedecay_domain::ManifestDigest,
 )> {
-    if let Some(seated) = schedulers
-        .serving_code_scope(project)
-        .await
-        .and_then(|serving| serving.serving_generation)
-    {
-        return Some((
-            seated.manifest().generation_id.clone(),
-            seated.snapshot().content_identity.clone(),
-        ));
-    }
     let text = schedulers.latest_text_serving_for_root(project).await?;
     Some((
         text.metadata().manifest().generation_id.clone(),
-        text.metadata().snapshot().content_identity.clone(),
+        text.source_commitments().ok()?.full_replay_digest.clone(),
     ))
 }
 
@@ -378,7 +364,13 @@ async fn wait_for_restored_source_content(
         .expect("live harness")
         .invocation
         .code_index_schedulers;
-    let expected_content = expected.snapshot().content_identity.clone();
+    let expected_content = expected
+        .manifest()
+        .source_commitments
+        .as_ref()
+        .expect("sealed source commitments")
+        .full_replay_digest
+        .clone();
     let restored = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Some((generation_id, content)) =
@@ -985,7 +977,6 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     )
     .await
     .expect("production composition");
-    let resources = harness.resources.as_ref().expect("live harness");
     let (first_code_id, first_code, first_vector) = timed_stage(
         "G1.index+embed+publish(settle)",
         wait_for_settled_semantic_generation(&harness, &project, None),
@@ -1048,6 +1039,44 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         json!(first_code.manifest().generation_id)
     );
 
+    drop(first_generation);
+    drop(first_graph);
+    drop(graph);
+    timed_stage("harness.shutdown(restart)", harness.shutdown()).await;
+    let harness = timed_stage(
+        "harness.reopen(daemon composition)",
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()]),
+    )
+    .await
+    .expect("restart production composition");
+    let restarted_runtime = timed_stage(
+        "restart.await_runtime_ready",
+        wait_for_semantic_runtime_ready(&harness, &project),
+    )
+    .await;
+    assert_eq!(
+        restarted_runtime["state"]["receipt"]["activated_generation"],
+        json!(first_vector.generation_id())
+    );
+    let restarted_query =
+        timed_stage("restart.strict_query", search(&harness, &project, true)).await;
+    assert_eq!(restarted_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &restarted_query,
+        "semantic_product_probe",
+        "semantic restart",
+    );
+    let first_code_id = harness
+        .resources
+        .as_ref()
+        .expect("restarted harness")
+        .invocation
+        .code_index_schedulers
+        .latest_generation_id(&project)
+        .await
+        .expect("restarted serving generation");
+    let first_graph = retain_graph(&harness, &project, &first_code).await;
+
     std::fs::write(
         project.join("src/lib.rs"),
         "pub fn semantic_product_probe() -> &'static str { \"generation-two\" }\n",
@@ -1055,7 +1084,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     .expect("G2 source");
     let second_commit = commit(&project, "test: publish semantic generation two");
     assert!(
-        resources
+        harness
+            .resources
+            .as_ref()
+            .expect("live harness")
             .invocation
             .code_index_schedulers
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
@@ -1138,7 +1170,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         &["checkout", "--quiet", "--detach", &first_commit],
     );
     assert!(
-        resources
+        harness
+            .resources
+            .as_ref()
+            .expect("live harness")
             .invocation
             .code_index_schedulers
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
@@ -1231,7 +1266,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         &["checkout", "--quiet", "--detach", &second_commit],
     );
     assert!(
-        resources
+        harness
+            .resources
+            .as_ref()
+            .expect("live harness")
             .invocation
             .code_index_schedulers
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
