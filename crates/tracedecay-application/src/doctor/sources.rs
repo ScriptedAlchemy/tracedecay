@@ -23,7 +23,8 @@
 //!   host-capability/conformance evidence)
 //! - mounted canonical feedback owner → [`DoctorFindingFamilyV1::Advisory`]
 //!   (finding/scope/generation/provider/evidence/coverage identity)
-//! - code/semantic index mount state → [`DoctorFindingFamilyV1::SemanticIndex`]
+//! - code-index mount state and semantic-owner lifecycle →
+//!   [`DoctorFindingFamilyV1::SemanticIndex`]
 //! - live language-server/analyzer state → [`DoctorFindingFamilyV1::LanguageServer`]
 //! - durable feedback observations → [`DoctorFindingFamilyV1::Observability`]
 //! - storage retention/size → [`DoctorFindingFamilyV1::Storage`] (producers in
@@ -1019,7 +1020,163 @@ pub trait AdvisoryFeedbackDoctorPort: Send + Sync {
     ) -> DoctorSourceFuture<'a, AdvisoryFeedbackReadV1>;
 }
 
-/// The observed mount state of the code/semantic index.
+/// One canonical authority the project-owned semantic registration task still
+/// needs before it can install the activation owner.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticOwnerPrerequisiteV1 {
+    ConfigurationRuntime,
+    ProductionSemanticRuntime,
+}
+
+impl SemanticOwnerPrerequisiteV1 {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConfigurationRuntime => "configuration_runtime",
+            Self::ProductionSemanticRuntime => "production_semantic_runtime",
+        }
+    }
+}
+
+/// Why a semantic registration task observed both prerequisites but could not
+/// publish one complete owner.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticOwnerDegradedReasonV1 {
+    ConfigurationStoreUnavailable,
+    ActivationOwnerRegistrationRefused,
+    ConfigurationRuntimeInstallationRefused,
+    PartialRegistrationCleanupFailed,
+    TaskRuntimeUnavailable,
+    TaskCancelled,
+}
+
+impl SemanticOwnerDegradedReasonV1 {
+    const fn evidence_reference(&self) -> &'static str {
+        match self {
+            Self::ConfigurationStoreUnavailable => "semantic-owner.configuration-store-unavailable",
+            Self::ActivationOwnerRegistrationRefused => {
+                "semantic-owner.activation-owner-registration-refused"
+            }
+            Self::ConfigurationRuntimeInstallationRefused => {
+                "semantic-owner.configuration-runtime-installation-refused"
+            }
+            Self::PartialRegistrationCleanupFailed => {
+                "semantic-owner.partial-registration-cleanup-failed"
+            }
+            Self::TaskRuntimeUnavailable => "semantic-owner.task-runtime-unavailable",
+            Self::TaskCancelled => "semantic-owner.task-cancelled",
+        }
+    }
+}
+
+/// Live state of the one project-owned semantic activation-owner registration
+/// task. Pending state names every missing prerequisite; degraded state keeps a
+/// typed reason plus the bounded diagnostic that caused it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum SemanticOwnerStateV1 {
+    PendingPrerequisites {
+        missing: Vec<SemanticOwnerPrerequisiteV1>,
+    },
+    Ready,
+    Degraded {
+        reason: SemanticOwnerDegradedReasonV1,
+        detail: String,
+    },
+}
+
+/// One Doctor read from the project runtime's semantic-owner state authority.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SemanticOwnerReadV1 {
+    Observed {
+        state: SemanticOwnerStateV1,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    Unsupported,
+    Absent,
+    Denied,
+    Unknown,
+}
+
+/// Map project-owned semantic registration state into the `SemanticIndex`
+/// finding family without conflating it with code-index mount readiness.
+#[hotpath::measure(label = "application.doctor_sources.semantic_owner")]
+pub fn semantic_owner_finding(
+    read: &SemanticOwnerReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::SemanticIndex;
+    match read {
+        SemanticOwnerReadV1::Observed { state, coverage } => match state {
+            SemanticOwnerStateV1::PendingPrerequisites { missing } => {
+                let missing = missing
+                    .iter()
+                    .map(|prerequisite| prerequisite.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                source_finding(
+                    family,
+                    DoctorEvidenceStateV1::Partial,
+                    "semantic-owner.pending-prerequisites",
+                    *coverage,
+                    &bounded_statement(&format!(
+                        "semantic activation owner is waiting for prerequisites: {missing}"
+                    )),
+                )
+            }
+            SemanticOwnerStateV1::Ready => clean_finding(
+                family,
+                "semantic-owner.ready",
+                *coverage,
+                "semantic activation owner is registered",
+            ),
+            SemanticOwnerStateV1::Degraded { reason, detail } => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                reason.evidence_reference(),
+                *coverage,
+                &bounded_statement(&format!(
+                    "semantic activation owner registration is degraded: {detail}"
+                )),
+            ),
+        },
+        SemanticOwnerReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "semantic-owner.unsupported",
+            "semantic activation owner inspection is unsupported",
+        ),
+        SemanticOwnerReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "semantic-owner.absent",
+            "semantic activation owner task is not registered",
+        ),
+        SemanticOwnerReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "semantic-owner.denied",
+            "semantic activation owner inspection was denied",
+        ),
+        SemanticOwnerReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "semantic-owner.unknown",
+            "semantic activation owner state is undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for the independently scheduled semantic owner.
+pub trait SemanticOwnerDoctorPort: Send + Sync {
+    fn semantic_owner<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, SemanticOwnerReadV1>;
+}
+
+/// The observed mount state of the code index.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeIndexMountStateV1 {
@@ -1035,7 +1192,7 @@ pub enum CodeIndexMountStateV1 {
     Incompatible,
 }
 
-/// One code/semantic index mount read.
+/// One code-index mount read.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CodeIndexMountReadV1 {
@@ -1141,7 +1298,7 @@ pub fn code_index_finding(
     }
 }
 
-/// Narrow source port for code/semantic index mount state.
+/// Narrow source port for code-index mount state.
 pub trait CodeIndexMountDoctorPort: Send + Sync {
     /// Read the current code/semantic index mount state.
     fn code_index_mount<'a>(
@@ -1688,6 +1845,48 @@ mod tests {
         })
         .expect("finding");
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+    }
+
+    #[test]
+    fn semantic_owner_pending_and_degraded_states_remain_typed() {
+        let pending = semantic_owner_finding(&SemanticOwnerReadV1::Observed {
+            state: SemanticOwnerStateV1::PendingPrerequisites {
+                missing: vec![SemanticOwnerPrerequisiteV1::ConfigurationRuntime],
+            },
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("pending semantic owner finding");
+        assert_eq!(pending.state(), DoctorEvidenceStateV1::Partial);
+        assert_eq!(
+            pending.evidence()[0].reference().as_str(),
+            "semantic-owner.pending-prerequisites"
+        );
+        assert!(
+            pending
+                .coverage()
+                .statement()
+                .contains("configuration_runtime")
+        );
+
+        let degraded = semantic_owner_finding(&SemanticOwnerReadV1::Observed {
+            state: SemanticOwnerStateV1::Degraded {
+                reason: SemanticOwnerDegradedReasonV1::ActivationOwnerRegistrationRefused,
+                detail: "registered scope refused the candidate".to_owned(),
+            },
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("degraded semantic owner finding");
+        assert_eq!(degraded.state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            degraded.evidence()[0].reference().as_str(),
+            "semantic-owner.activation-owner-registration-refused"
+        );
+        assert!(
+            degraded
+                .coverage()
+                .statement()
+                .contains("registered scope refused the candidate")
+        );
     }
 
     #[test]

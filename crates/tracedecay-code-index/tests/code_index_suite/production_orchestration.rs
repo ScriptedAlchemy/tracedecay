@@ -66,13 +66,13 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .active
             .lock()
             .expect("publication lock")
             .get(scope)
-            .map(|generation| generation.as_ref().clone()))
+            .map(Arc::clone))
     }
 
     fn publish_atomically(
@@ -107,13 +107,13 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .active
             .lock()
             .expect("publication lock")
             .as_ref()
-            .map(|generation| generation.as_ref().clone()))
+            .map(Arc::clone))
     }
 
     fn publish_atomically(
@@ -855,6 +855,19 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
         first.projection().receipt().source_generation,
         first.manifest().generation_id
     );
+    let first_commitments = first
+        .manifest()
+        .source_commitments
+        .as_ref()
+        .expect("published generation seals source commitments");
+    assert_eq!(
+        first_commitments.incremental_manifest_digest,
+        first.projection().request().changes.manifest_digest
+    );
+    assert_ne!(
+        first_commitments.incremental_manifest_digest,
+        first_commitments.full_replay_digest
+    );
 
     let mut restarted =
         CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
@@ -884,11 +897,59 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
     );
     assert!(second.projection().request().changes.deleted.is_empty());
     assert!(!second.projection().request().changes.reused.is_empty());
+    let second_commitments = second
+        .manifest()
+        .source_commitments
+        .as_ref()
+        .expect("successor seals source commitments");
+    assert_eq!(
+        second_commitments.incremental_manifest_digest,
+        second.projection().request().changes.manifest_digest
+    );
+    assert_ne!(
+        first_commitments.incremental_manifest_digest,
+        second_commitments.incremental_manifest_digest,
+        "incremental commitments retain the physical generation transition"
+    );
+    assert_eq!(
+        first_commitments.full_replay_digest, second_commitments.full_replay_digest,
+        "unchanged source has one generation-independent full replay commitment"
+    );
     assert!(
         !second
             .admitted_chunks()
             .expect("carry-forward retains parser-backed exact authority")
             .is_empty()
+    );
+}
+
+#[test]
+fn active_generation_loads_share_the_published_allocation() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let published = owner
+        .build_and_publish(
+            request("file.production.shared-active", 1_100_000),
+            &ActiveControl,
+        )
+        .expect("generation publishes");
+    let scope = published.sealed_scope();
+
+    let first = store
+        .load_active(&scope)
+        .expect("first active read")
+        .expect("active generation");
+    let second = store
+        .load_active(&scope)
+        .expect("second active read")
+        .expect("active generation");
+
+    assert_eq!(
+        first.chunks().chunks().as_ptr(),
+        second.chunks().chunks().as_ptr(),
+        "active reads must share the immutable generation instead of cloning its complete indices"
     );
 }
 
@@ -1340,10 +1401,10 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
     )
     .expect("content-addressed source opens");
     let retained_layout_bytes = initial.retained_layout_bytes();
-    assert_eq!(
-        retained_layout_bytes,
-        std::mem::size_of::<u64>() * 4,
-        "source mount authority must not retain one byte range per file"
+    assert!(
+        retained_layout_bytes > std::mem::size_of::<u64>() * 4
+            && retained_layout_bytes < sealed.len() / 8,
+        "source layout must count retained file positions while staying compact"
     );
     let first = match initial.next_page(&ActiveControl).expect("first page") {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
@@ -1425,10 +1486,10 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
         &ActiveControl,
     )
     .expect("one-file content-addressed source opens");
-    assert_eq!(
-        foreign_source.retained_layout_bytes(),
-        retained_layout_bytes,
-        "retained source layout must remain constant between one and two files"
+    assert!(
+        foreign_source.retained_layout_bytes() > std::mem::size_of::<u64>() * 4
+            && foreign_source.retained_layout_bytes() <= retained_layout_bytes,
+        "the one-file source must account for its positions within the two-file allocation bound"
     );
     let error = VerifiedSealedLexicalPageSourceV1::open_content_addressed_at(
         Cursor::new(foreign.clone()),
@@ -2033,6 +2094,57 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
         ),
         "amortized attribution must return the same evidence as the first read"
     );
+}
+
+#[test]
+fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request("file.source-commitments", 1_350_000),
+            &ActiveControl,
+        )
+        .expect("valid generation publishes");
+    let sealed = generation.encode_sealed().expect("valid generation seals");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+
+    let mut tampered = envelope.clone();
+    tampered["generation"]["manifest"]["source_commitments"]["full_replay_digest"] =
+        serde_json::json!(format!("sha256:{}", "f".repeat(64)));
+    let state_digest = sealed_generation_payload_digest(
+        SEALED_GENERATION_FORMAT_REVISION_V1,
+        &tampered["generation"],
+    )
+    .expect("tampered payload has an outer digest");
+    tampered["state_digest"] = serde_json::json!(state_digest.as_str());
+    let tampered = serde_json::to_vec(&tampered).expect("tampered sealed generation");
+    assert!(
+        CodeIndexPublishedGenerationV1::decode_sealed(&tampered)
+            .expect_err("the authenticated source commitment must reject tampering")
+            .to_string()
+            .contains("seal")
+    );
+
+    let mut historical = envelope;
+    historical["generation"]["manifest"]
+        .as_object_mut()
+        .expect("generation manifest")
+        .remove("source_commitments")
+        .expect("current manifest carries source commitments");
+    let state_digest = sealed_generation_payload_digest(
+        SEALED_GENERATION_FORMAT_REVISION_V1,
+        &historical["generation"],
+    )
+    .expect("historical payload has an outer digest");
+    historical["state_digest"] = serde_json::json!(state_digest.as_str());
+    let historical = serde_json::to_vec(&historical).expect("historical sealed generation");
+    assert!(matches!(
+        CodeIndexPublishedGenerationV1::decode_sealed(&historical),
+        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
+    ));
 }
 
 /// Corruption of chunk evidence must still be caught by the very first
@@ -2743,7 +2855,7 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:56f954431e92b5e2ef9b1355bc229acf516a8d3409b7e48e9cd9fb7856411f29";
+    "sha256:9efbb93d5ede0c96f7516c5c40f30d170716431140f09f4f098586bbf4d78cad";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
         "sha256:462ca12853ede4c82969ef6cc161dedc0952b5b7ef85dcf23b125adddb25ecf8",
@@ -2758,7 +2870,7 @@ const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
         5_123,
     ),
     (
-        "sha256:9feaf20448940c092084790fb29cef6c763466bb16d87b5afc482ef61f03a5bd",
+        "sha256:dfda6de857678869b0896614cbfb89a6160a179c9bf55e239ffa8db76c4cc2f6",
         22_960,
     ),
 ];
@@ -2886,6 +2998,35 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
 }
 
 #[test]
+fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
+    let (expected, manifest, _) = partitioned_codec_fixture();
+    let metadata = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+        .expect("authenticated text metadata")
+        .expect("revision seven partitioned manifest");
+    assert_eq!(
+        metadata
+            .source_commitments()
+            .expect("verified source commitments"),
+        expected
+            .manifest()
+            .source_commitments
+            .as_ref()
+            .expect("published generation commitments")
+    );
+
+    let error = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, |_, _| {
+        Err(CodeIndexProductionErrorV1::Contract(
+            "payload segment requested".to_owned(),
+        ))
+    })
+    .expect_err("full decode must request payload segments");
+    assert_eq!(
+        error.to_string(),
+        "code-index contract failed: payload segment requested"
+    );
+}
+
+#[test]
 fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
     let (expected, manifest, segments) = partitioned_codec_fixture();
     let mut envelope: serde_json::Value =
@@ -2965,11 +3106,9 @@ fn partitioned_codec_reads_pre_paging_evidence_descriptor() {
 }
 
 /// Bytes the unmodified pre-paging writer emitted (see the fixture README and
-/// `provenance.json`; the current writer always emits a page table, so it
-/// cannot produce this manifest). Both public readers accept them and agree on
-/// the segment identities, the full path authenticates and restores the exact
-/// generation the historical writer sealed, and only the full path refuses an
-/// unauthenticated envelope.
+/// `provenance.json`). Descriptor readers can still inventory its retained
+/// segments, but serving refuses the generation with typed rebuild-required
+/// unavailability because those bytes predate source commitments.
 #[test]
 fn historical_writer_bytes_read_through_both_partitioned_readers() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3051,18 +3190,14 @@ fn historical_writer_bytes_read_through_both_partitioned_readers() {
         CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
             .expect("historical segments verify")
     );
-    let restored = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read)
-        .expect("historical bytes decode")
-        .expect("revision seven partitioned manifest");
-    assert_eq!(
-        restored.encode_sealed().expect("restored generation seals"),
-        expected,
-        "the historical writer's generation restores byte exact"
-    );
-    assert_eq!(
-        restored.manifest().generation_id.as_str(),
-        provenance["generation_id"]
-    );
+    assert!(matches!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest),
+        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
+    ));
+    assert!(matches!(
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&manifest, read),
+        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
+    ));
 
     let corrupted = &identities[0].digest;
     let corrupt = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {

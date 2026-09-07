@@ -13,6 +13,7 @@ mod agent_registry_test;
 mod agent_targets_test;
 mod claude_plugin_bundle_test;
 mod claude_plugin_schema_test;
+mod host_io_bundle_test;
 mod managed_skill_archive_test;
 mod managed_skills_test;
 mod plugin_config_schema_test;
