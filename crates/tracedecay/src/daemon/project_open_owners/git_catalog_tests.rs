@@ -4,7 +4,7 @@ use tracedecay_application::git::GitIndexTransactionPortError;
 use tracedecay_application::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GitIndexOperationBindingV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,
-    IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
+    IdempotencyKey, OperationTermination, PolicyDecisionRef, RequestContext, RequestId,
 };
 use tracedecay_code_index_runtime::ApplicationCatalogProviderV1;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -189,10 +189,32 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     std::fs::write(project_root.join("file.txt"), "previewed\n").unwrap();
     let stale = transaction_preview(&owner, "stale", operation);
     std::fs::write(project_root.join("file.txt"), "changed\n").unwrap();
-    assert!(matches!(
-        owner.service.apply(&stale),
-        Err(GitIndexTransactionPortError::StalePreview)
-    ));
+    let head_before_stale = git(&project_root, &["rev-parse", "HEAD"]);
+    let index_before_stale = std::fs::read(project_root.join(".git/index")).unwrap();
+    // Repository revalidation happens after durable admission, so refusal
+    // must return a terminal no-change receipt.
+    let stale_result = owner.service.apply(&stale).unwrap();
+    stale_result.validate_for(&stale).unwrap();
+    assert_eq!(
+        stale_result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert_eq!(
+        stale_result.execution.termination,
+        OperationTermination::Failed
+    );
+    assert_eq!(
+        git(&project_root, &["rev-parse", "HEAD"]),
+        head_before_stale
+    );
+    assert_eq!(
+        std::fs::read(project_root.join(".git/index")).unwrap(),
+        index_before_stale
+    );
+    assert_eq!(
+        std::fs::read(project_root.join("file.txt")).unwrap(),
+        b"changed\n"
+    );
     let denied = transaction_preview(&owner, "revoked", operation);
     let before_denial = git(&project_root, &["rev-parse", "HEAD"]);
     let index_before_denial = std::fs::read(project_root.join(".git/index")).unwrap();
@@ -211,10 +233,16 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         owner.current_authority(operation),
         Err(GitIndexTransactionPortError::PolicyDenied)
     ));
-    assert!(matches!(
-        owner.service.apply(&denied),
-        Err(GitIndexTransactionPortError::PolicyDenied)
-    ));
+    let denied_result = owner.service.apply(&denied).unwrap();
+    denied_result.validate_for(&denied).unwrap();
+    assert_eq!(
+        denied_result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert_eq!(
+        denied_result.execution.termination,
+        OperationTermination::Failed
+    );
     assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), before_denial);
     assert_eq!(
         std::fs::read(project_root.join(".git/index")).unwrap(),

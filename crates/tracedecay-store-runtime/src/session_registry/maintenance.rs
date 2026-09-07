@@ -216,7 +216,11 @@ impl RegisteredSchemaConvergenceMaintenance {
                 gate.block().await;
             }
             let result = match convergence {
-                Some(convergence) => database.converge_schema(convergence).await,
+                Some(convergence) => {
+                    let convergence: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+                        Box::pin(database.converge_schema(convergence));
+                    convergence.await
+                }
                 None => Ok(()),
             };
             if let Err(error) = database.release_connection_memory().await {
