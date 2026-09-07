@@ -1,6 +1,6 @@
 ---
 name: editing-safely
-description: 'Perform a TraceDecay structural rename, symbol move, signature change, or atomic edit across related sites. Ordinary local text edits do not require this workflow.'
+description: 'Planning or performing a rename, signature or field change, symbol move, or a helper that may already exist. Covers finding every call, constructor, and write site first, graph blind spots (macros, generated code, string dispatch), and atomic apply with rollback. Local edits need no workflow.'
 ---
 
 # Editing safely

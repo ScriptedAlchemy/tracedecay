@@ -6,6 +6,9 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 
 mod project_lifecycle;
 mod workspace_admission;
+
+#[cfg(test)]
+mod federated_pairing_tests;
 mod workspace_diagnostics;
 
 use workspace_admission::CurrentLspWorkspaceAuthorityV1;

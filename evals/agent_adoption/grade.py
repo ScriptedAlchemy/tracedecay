@@ -613,6 +613,11 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     subs["efficiency"] = 1.0 if count <= budget else 0.0
     details["tool_call_count"] = count
     details["budget"] = budget
+    # Claude Code defers most MCP schemas behind ToolSearch; count those loads
+    # so a graph-tool miss can be told apart from "never discovered the tool".
+    details["tool_search_calls"] = sum(
+        1 for tc in tr.tools if (tc.raw_name or tc.canon) == "ToolSearch"
+    )
 
     # 4. outcome (fraction of ground-truth fragments present in final answer)
     if ground_truth:
@@ -905,10 +910,13 @@ def parse_transcript_base(base: str) -> Optional[tuple[str, str, str, str]]:
     """Split a basename into (scenario_id, host, condition, model).
 
     Accepts legacy `<id>__<host>[__<condition>]` and matrix
-    `<id>__<host>__<model>[__<condition>]` shapes. Scenario ids use single
-    underscores, so `__` separators are unambiguous.
+    `<id>__<host>__<model>[__<condition>][__r<N>]` shapes. Scenario ids use
+    single underscores, so `__` separators are unambiguous; a trailing `r<N>`
+    is the repetition index and carries no identity.
     """
     parts = base.split("__")
+    if len(parts) >= 3 and re.fullmatch(r"r[1-9][0-9]*", parts[-1]):
+        parts.pop()
     if len(parts) < 2:
         return None
     condition = "full"
