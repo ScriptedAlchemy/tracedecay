@@ -1496,6 +1496,7 @@ fn prepare_production_query(
         )?,
         score_domain: id(tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1)?,
         budget,
+        control: &ActiveControl,
     };
     let lexical_input_candidates = lexical_request
         .whole_terms

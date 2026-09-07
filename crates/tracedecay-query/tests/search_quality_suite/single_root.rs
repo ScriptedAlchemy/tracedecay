@@ -19,8 +19,7 @@ use tracedecay_query::retrieval::fusion::{
     RetrievalCursorKeyringV1,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
 };
 use tracedecay_query::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
@@ -37,7 +36,8 @@ use tracedecay_query::retrieval::{
 };
 
 use crate::candidate_producers::{
-    base_request, budget, chunk, complete, id, lexical_request, projection_metadata,
+    FixtureGraphExecutionControl, base_request, budget, chunk, complete, id, lexical_request,
+    projection_metadata,
 };
 
 #[derive(Clone, Copy)]
@@ -48,18 +48,6 @@ enum GraphDisposition {
 }
 
 const CURSOR_NOW: UtcMicros = UtcMicros(10);
-
-struct FixtureGraphExecutionControl;
-
-impl GraphExecutionControl for FixtureGraphExecutionControl {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn elapsed_micros(&self) -> u64 {
-        0
-    }
-}
 
 #[derive(Clone)]
 enum GraphPortReply {

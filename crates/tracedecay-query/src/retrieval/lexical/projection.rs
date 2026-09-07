@@ -17,7 +17,7 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
-    admit_candidate_sources,
+    admit_candidate_sources, lexical_checkpoint,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
@@ -1075,6 +1075,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut pairs = Vec::new();
         let mut excluded = self.rows.len() as u64 - documents.len();
         for document in documents {
+            lexical_checkpoint(request.control)?;
             let row = &self.rows[document as usize];
             let score = self.score_row(
                 document,

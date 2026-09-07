@@ -2188,6 +2188,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .split_whitespace()
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
+            let lexical_control = CallableGraphExecutionControl::for_request(context.request);
             let lane_request = LexicalLaneRequest {
                 query_view: &request.query,
                 generation: served_generation.clone(),
@@ -2224,6 +2225,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(|_| panic!("static lexical score domain")),
                 budget: base.budget,
                 base: base.clone(),
+                control: lexical_control.as_ref(),
             };
             let Ok(owners) = latest.production_query_owners_with_budget(&base.budget) else {
                 return unavailable(finished_at);

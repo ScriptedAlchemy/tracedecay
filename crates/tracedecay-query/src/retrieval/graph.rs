@@ -28,7 +28,9 @@ mod projection;
 
 pub use self::projection::production_code_index_freshness;
 
-/// Live request authority consulted throughout one graph traversal.
+/// Live request authority consulted throughout one graph traversal and, via
+/// [`super::lexical::LexicalLaneRequest::control`], between the bounded row
+/// visits of one lexical scan.
 pub trait GraphExecutionControl: Send + Sync {
     fn is_cancelled(&self) -> bool;
     /// Monotonic elapsed time in the request-relative domain used by
