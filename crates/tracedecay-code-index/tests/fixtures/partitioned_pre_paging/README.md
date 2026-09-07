@@ -13,6 +13,11 @@ hashes. Only segments referenced by this successor manifest are included here;
 the archival export retains the unreferenced parent segments. No current
 manifest was modified to impersonate the historical format.
 
+The export predates sealed semantic source commitments. Current descriptor
+readers may inventory its referenced segments, but text metadata and complete
+generation restore return typed rebuild-required unavailability rather than
+fabricating commitments from those historical bytes.
+
 Reproduce in a fresh owned worktree at the exact writer commit, using the
 current checkout's maintained worktree script. Save the absolute path to this
 fixture directory before changing directories:

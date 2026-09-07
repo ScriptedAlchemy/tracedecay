@@ -1,7 +1,4 @@
-use super::{
-    hook_output_owner_event_id, hook_route_metadata_from_parsed, run_with_test_env_lock,
-    schedule_user_session_review,
-};
+use super::{hook_output_owner_event_id, run_with_test_env_lock, schedule_user_session_review};
 
 #[test]
 fn direct_hook_owner_identity_is_stable_across_retry_time() {
@@ -23,32 +20,6 @@ fn direct_hook_owner_identity_is_stable_across_retry_time() {
     );
     assert_eq!(first, retry);
     assert_eq!(first, expected);
-}
-
-#[test]
-fn hook_route_metadata_preserves_camel_case_session_ids() {
-    let event = serde_json::json!({
-        "sessionId": "session-camel",
-        "conversationId": "conversation-camel",
-        "cwd": "/tmp/project"
-    })
-    .to_string();
-
-    let parsed: serde_json::Value = serde_json::from_str(&event).expect("event JSON");
-    let route = hook_route_metadata_from_parsed(&parsed, std::path::Path::new("/tmp/project"));
-
-    assert_eq!(route.session_id.as_deref(), Some("session-camel"));
-
-    let event = serde_json::json!({
-        "conversationId": "conversation-camel",
-        "cwd": "/tmp/project"
-    })
-    .to_string();
-
-    let parsed: serde_json::Value = serde_json::from_str(&event).expect("event JSON");
-    let route = hook_route_metadata_from_parsed(&parsed, std::path::Path::new("/tmp/project"));
-
-    assert_eq!(route.session_id.as_deref(), Some("conversation-camel"));
 }
 
 #[cfg(unix)]

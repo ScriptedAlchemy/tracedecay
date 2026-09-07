@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::safe_write_text_file;
+use super::host_io::{HostIo, PluginFile};
 use crate::errors::Result;
 
 const MANIFEST_FILE: &str = ".tracedecay-managed-agents.json";
@@ -28,10 +28,6 @@ struct ManagedAgentManifest {
     exported: Vec<ManagedAgentExportEntry>,
 }
 
-fn agents() -> Result<&'static [crate::agents::plugin_bundle::PluginFile]> {
-    crate::agents::plugin_bundle::codex_agent_files()
-}
-
 fn generated_agent_id(relative: &'static str) -> &'static str {
     relative
         .strip_prefix("tracedecay-")
@@ -40,17 +36,20 @@ fn generated_agent_id(relative: &'static str) -> &'static str {
 }
 
 #[hotpath::measure(label = "automation.host_io.install_agents")]
-pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSummary> {
+pub fn install_codex_managed_agents(
+    host_io: &HostIo,
+    home: &Path,
+) -> Result<ManagedAgentInstallSummary> {
     let agents_dir = agents_dir(home);
     fs::create_dir_all(&agents_dir)?;
-    remove_stale_managed_agents(&agents_dir)?;
+    remove_stale_managed_agents(host_io, &agents_dir)?;
 
-    let agents = agents()?;
+    let agents: &[PluginFile] = host_io.codex_agent_files();
     let mut exported = Vec::with_capacity(agents.len());
     for agent in agents {
         let id = generated_agent_id(agent.relative);
         let path = agents_dir.join(agent.relative);
-        safe_write_text_file(&path, agent.contents, None)?;
+        host_io.safe_write_text_file(&path, agent.contents, None)?;
         exported.push(ManagedAgentExportEntry {
             id: id.to_string(),
             path,
@@ -61,7 +60,7 @@ pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSu
         version: 1,
         exported: exported.clone(),
     };
-    safe_write_text_file(
+    host_io.safe_write_text_file(
         &agents_dir.join(MANIFEST_FILE),
         &format!("{}\n", serde_json::to_string_pretty(&manifest)?),
         None,
@@ -75,7 +74,7 @@ pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSu
 }
 
 #[hotpath::measure(label = "automation.host_io.remove_agents")]
-pub fn remove_managed_agents(agents_dir: &Path) -> Result<()> {
+pub fn remove_managed_agents(host_io: &HostIo, agents_dir: &Path) -> Result<()> {
     let manifest_path = agents_dir.join(MANIFEST_FILE);
     let exported = match fs::read_to_string(&manifest_path) {
         Ok(contents) => serde_json::from_str::<ManagedAgentManifest>(&contents)?.exported,
@@ -85,10 +84,10 @@ pub fn remove_managed_agents(agents_dir: &Path) -> Result<()> {
 
     for entry in exported {
         if path_is_direct_child(&entry.path, agents_dir) {
-            remove_managed_agent_file(&entry.path);
+            remove_managed_agent_file(host_io, &entry.path);
         }
     }
-    remove_managed_agent_file(&manifest_path);
+    remove_managed_agent_file(host_io, &manifest_path);
     fs::remove_dir(agents_dir).ok();
     Ok(())
 }
@@ -100,8 +99,8 @@ pub fn remove_managed_agents(agents_dir: &Path) -> Result<()> {
 /// only when a recorded intent attributes it. A raw `remove_file` leaves the
 /// deletion unattributable, which made rollback refuse with `StalePreview` and
 /// strand the journal.
-fn remove_managed_agent_file(path: &Path) {
-    crate::agents::safe_remove_host_file(path).ok();
+fn remove_managed_agent_file(host_io: &HostIo, path: &Path) {
+    host_io.safe_remove_host_file(path).ok();
 }
 
 /// Every generated-agent path that a Codex lifecycle operation may mutate.
@@ -109,9 +108,10 @@ fn remove_managed_agent_file(path: &Path) {
 /// This includes both the current bundle's exports and safe direct-child
 /// entries from the previous ownership manifest so aggregate transactions can
 /// restore stale exports removed during an update.
-pub fn managed_agent_transaction_paths(home: &Path) -> Result<Vec<PathBuf>> {
+pub fn managed_agent_transaction_paths(host_io: &HostIo, home: &Path) -> Result<Vec<PathBuf>> {
     let agents_dir = agents_dir(home);
-    let mut paths = agents()?
+    let mut paths = host_io
+        .codex_agent_files()
         .iter()
         .map(|agent| agents_dir.join(agent.relative))
         .chain([agents_dir.join(MANIFEST_FILE)])
@@ -122,20 +122,22 @@ pub fn managed_agent_transaction_paths(home: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths.into_iter().collect())
 }
 
-pub fn managed_agent_label(agent_id: &str) -> Result<Option<&'static str>> {
+pub fn managed_agent_label(host_io: &HostIo, agent_id: &str) -> Option<&'static str> {
     let normalized = agent_id.strip_prefix("tracedecay-").unwrap_or(agent_id);
-    Ok(agents()?
+    host_io
+        .codex_agent_files()
         .iter()
         .map(|agent| generated_agent_id(agent.relative))
-        .find(|id| *id == normalized))
+        .find(|id| *id == normalized)
 }
 
 fn agents_dir(home: &Path) -> PathBuf {
     home.join(".codex/agents")
 }
 
-fn remove_stale_managed_agents(agents_dir: &Path) -> Result<()> {
-    let keep: BTreeSet<PathBuf> = agents()?
+fn remove_stale_managed_agents(host_io: &HostIo, agents_dir: &Path) -> Result<()> {
+    let keep: BTreeSet<PathBuf> = host_io
+        .codex_agent_files()
         .iter()
         .map(|agent| agents_dir.join(agent.relative))
         .chain([agents_dir.join(MANIFEST_FILE)])
@@ -143,7 +145,7 @@ fn remove_stale_managed_agents(agents_dir: &Path) -> Result<()> {
 
     for path in manifest_paths(agents_dir)? {
         if !keep.contains(&path) {
-            remove_managed_agent_file(&path);
+            remove_managed_agent_file(host_io, &path);
         }
     }
     Ok(())
