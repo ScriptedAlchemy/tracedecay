@@ -91,6 +91,7 @@ use tracedecay_runtime_core::resident_memory::{
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 mod noop_reconcile_tests;
+mod search_permit_release;
 mod semantic_schedule_order_tests;
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
