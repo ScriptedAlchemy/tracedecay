@@ -89,6 +89,7 @@ pub(crate) fn install_managed_skill_prompt_index(
     retired_memory_digest::remove_state(&profile_root)?;
     retired_memory_digest::remove_prompt_block(prompt_path)?;
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+        &crate::host_io(),
         &profile_root,
         target,
         prompt_path,
@@ -108,6 +109,7 @@ pub(crate) fn remove_managed_skill_prompt_index(
         );
     retired_memory_digest::remove_state(&profile_root)?;
     tracedecay_automation_runtime::automation::skill_targets::remove_prompt_skill_index_for_target(
+        &crate::host_io(),
         prompt_path,
         target,
     )?;

@@ -23,16 +23,15 @@ use tracedecay_automation_runtime::automation::skill_materialization::{
 const INSTALL: &str = "install-test-a";
 const INSTALL_B: &str = "install-test-b";
 
+/// The production host I/O bundle materialization writes through — the same
+/// value the composition root hands automation.
+fn host_io() -> tracedecay_automation_runtime::automation::host_io::HostIo {
+    tracedecay_agent_hosts::host_io()
+}
+
 /// A canonicalized temp root: on macOS `/tmp` is a symlink to `/private/tmp`,
 /// so canonicalizing keeps materialized paths comparable to the profile paths.
-///
-/// Also installs the production agent-hosts adapters into the
-/// automation-runtime host-config write surface — the same wiring the
-/// composition root performs at process start — because materialization
-/// fails closed when the surface is unregistered. Idempotent, so every test
-/// entry point calls it.
 fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
-    tracedecay_agent_hosts::register_automation_host_io();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     (temp, root)
@@ -89,7 +88,7 @@ async fn materialize_on_activate_writes_global_scope_only_by_default() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
 
-    let (results, errors) = reconcile_detected_scopes(&profile_root, &home, &project);
+    let (results, errors) = reconcile_detected_scopes(&host_io(), &profile_root, &home, &project);
     assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     // 2 hosts x 2 scopes (project + global) are still detected...
     assert_eq!(results.len(), 4, "expected 4 detected scopes");
@@ -147,11 +146,12 @@ async fn isolated_profile_cannot_remove_user_profile_materializations() {
     install_fake_hosts(&home);
 
     activate_skill(&user_profile, "code-slop-cleanup").await;
-    reconcile_detected_scopes(&user_profile, &home, &project);
+    reconcile_detected_scopes(&host_io(), &user_profile, &home, &project);
     let materialized = home.join(".codex/skills/code-slop-cleanup/SKILL.md");
     assert!(materialized.is_file());
 
-    let (results, errors) = reconcile_detected_scopes(&isolated_profile, &home, &project);
+    let (results, errors) =
+        reconcile_detected_scopes(&host_io(), &isolated_profile, &home, &project);
     assert!(results.is_empty());
     assert!(errors.is_empty());
     assert!(materialized.is_file());
@@ -165,7 +165,7 @@ async fn materialized_file_carries_provenance_frontmatter() {
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
-    reconcile_detected_scopes(&profile_root, &home, &home);
+    reconcile_detected_scopes(&host_io(), &profile_root, &home, &home);
 
     let path = home.join(".claude/skills/code-slop-cleanup/SKILL.md");
     let contents = std::fs::read_to_string(&path).unwrap();
@@ -190,7 +190,7 @@ async fn remove_on_deactivate_deletes_materialized_file() {
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
-    reconcile_detected_scopes(&profile_root, &home, &home);
+    reconcile_detected_scopes(&host_io(), &profile_root, &home, &home);
     let path = home.join(".claude/skills/code-slop-cleanup/SKILL.md");
     assert!(path.is_file());
 
@@ -202,7 +202,7 @@ async fn remove_on_deactivate_deletes_materialized_file() {
     )
     .await
     .unwrap();
-    let (results, errors) = reconcile_detected_scopes(&profile_root, &home, &home);
+    let (results, errors) = reconcile_detected_scopes(&host_io(), &profile_root, &home, &home);
     assert!(errors.is_empty(), "errors: {errors:?}");
     assert!(
         !path.exists(),
@@ -222,11 +222,11 @@ async fn idempotent_reconcile_is_unchanged_on_rerun() {
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
-    reconcile_detected_scopes(&profile_root, &home, &home);
+    reconcile_detected_scopes(&host_io(), &profile_root, &home, &home);
     let path = home.join(".claude/skills/code-slop-cleanup/SKILL.md");
     let first = std::fs::read_to_string(&path).unwrap();
 
-    let (results, errors) = reconcile_detected_scopes(&profile_root, &home, &home);
+    let (results, errors) = reconcile_detected_scopes(&host_io(), &profile_root, &home, &home);
     assert!(errors.is_empty(), "errors: {errors:?}");
     for result in &results {
         assert_eq!(result.report.written_count(), 0, "rerun rewrote a file");
@@ -252,18 +252,18 @@ async fn body_update_re_materializes_the_file() {
     )
     .await
     .unwrap();
-    let first = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let first = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_eq!(first.action, MaterializeAction::Written);
 
     // Change the body: the content-hash changes, so the reconciler rewrites.
     skill.body_markdown = "# Cleanup v2\n\nNow with extra rigor.".to_string();
-    let second = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let second = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_eq!(second.action, MaterializeAction::Written);
     let contents = std::fs::read_to_string(skill_md(&scope, "code-slop-cleanup")).unwrap();
     assert!(contents.contains("Now with extra rigor."));
 
     // A third pass with the same content is a no-op.
-    let third = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let third = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_eq!(third.action, MaterializeAction::Unchanged);
 }
 
@@ -282,17 +282,19 @@ async fn metadata_update_re_materializes_the_file() {
     )
     .await
     .unwrap();
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
 
     skill.metadata.routing_description =
         "Use when performing a strict cleanup before review.".to_string();
-    let updated = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let updated = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
 
     assert_eq!(updated.action, MaterializeAction::Written);
     let contents = std::fs::read_to_string(skill_md(&scope, "code-slop-cleanup")).unwrap();
     assert!(contents.contains("performing a strict cleanup"));
     assert_eq!(
-        materialize_skill(&scope, &skill, INSTALL).unwrap().action,
+        materialize_skill(&host_io(), &scope, &skill, INSTALL)
+            .unwrap()
+            .action,
         MaterializeAction::Unchanged
     );
 }
@@ -312,7 +314,7 @@ async fn support_update_removes_only_stale_owned_files() {
     )
     .await
     .unwrap();
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     let dir = scope.skills_dir().join("code-slop-cleanup");
     let stale = dir.join("references/checklist.md");
     let foreign = dir.join("references/user-notes.md");
@@ -320,7 +322,7 @@ async fn support_update_removes_only_stale_owned_files() {
 
     skill.support_files =
         vec![ManagedSupportFile::new("references/guide.md", b"new guide\n".to_vec()).unwrap()];
-    let updated = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let updated = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
 
     assert_eq!(updated.action, MaterializeAction::Written);
     assert!(
@@ -349,14 +351,14 @@ async fn user_edited_support_file_is_fork_protected() {
     )
     .await
     .unwrap();
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     let support = scope
         .skills_dir()
         .join("code-slop-cleanup/references/checklist.md");
     std::fs::write(&support, "user edit\n").unwrap();
 
     skill.support_files[0].bytes = b"automation update\n".to_vec();
-    let updated = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let updated = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
 
     assert_eq!(updated.action, MaterializeAction::SkippedForked);
     assert_eq!(std::fs::read_to_string(support).unwrap(), "user edit\n");
@@ -377,12 +379,13 @@ async fn deactivation_removes_only_owned_artifacts() {
     )
     .await
     .unwrap();
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     let dir = scope.skills_dir().join("code-slop-cleanup");
     let foreign = dir.join("references/user-notes.md");
     std::fs::write(&foreign, "keep me\n").unwrap();
 
-    let removed = remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap();
+    let removed =
+        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL).unwrap();
 
     assert_eq!(removed, RemoveAction::Removed);
     assert!(!dir.join("SKILL.md").exists());
@@ -414,7 +417,7 @@ async fn package_symlink_is_rejected_before_materialization() {
     .await
     .unwrap();
 
-    let error = materialize_skill(&scope, &skill, INSTALL).unwrap_err();
+    let error = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap_err();
 
     assert!(error.to_string().contains("symlink"), "{error}");
     assert!(std::fs::read_dir(external).unwrap().next().is_none());
@@ -444,7 +447,7 @@ async fn nested_support_symlink_is_rejected_before_write() {
     .await
     .unwrap();
 
-    let error = materialize_skill(&scope, &skill, INSTALL).unwrap_err();
+    let error = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap_err();
 
     assert!(error.to_string().contains("symlink"), "{error}");
     assert!(!external.join("checklist.md").exists());
@@ -469,7 +472,7 @@ async fn nested_support_symlink_is_rejected_before_remove() {
     )
     .await
     .unwrap();
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     let dir = scope.skills_dir().join("code-slop-cleanup");
     let support = dir.join("references/checklist.md");
     let contents = std::fs::read(&support).unwrap();
@@ -479,7 +482,8 @@ async fn nested_support_symlink_is_rejected_before_remove() {
     std::fs::write(external.join("checklist.md"), &contents).unwrap();
     symlink(&external, dir.join("references")).unwrap();
 
-    let error = remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap_err();
+    let error =
+        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL).unwrap_err();
 
     assert!(error.to_string().contains("symlink"), "{error}");
     assert_eq!(
@@ -503,7 +507,7 @@ async fn fork_protection_leaves_user_edited_file_untouched() {
     )
     .await
     .unwrap();
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     let path = skill_md(&scope, "code-slop-cleanup");
 
     // User edits the materialized body (the content-hash no longer matches).
@@ -514,12 +518,13 @@ async fn fork_protection_leaves_user_edited_file_untouched() {
     std::fs::write(&path, &edited).unwrap();
 
     // Re-materialize: the reconciler must NOT clobber the fork.
-    let action = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let action = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_eq!(action.action, MaterializeAction::SkippedForked);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
 
     // A deactivate reconcile must also refuse to delete the fork.
-    let removed = remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap();
+    let removed =
+        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL).unwrap();
     assert_eq!(removed, RemoveAction::SkippedForked);
     assert!(path.is_file(), "forked file must survive removal");
 }
@@ -546,7 +551,7 @@ async fn foreign_file_is_never_touched() {
     .await
     .unwrap();
 
-    let action = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let action = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_eq!(action.action, MaterializeAction::SkippedForeign);
     assert_eq!(
         std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
@@ -555,7 +560,7 @@ async fn foreign_file_is_never_touched() {
 
     // Removal never touches a foreign file either.
     assert_eq!(
-        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap(),
+        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL).unwrap(),
         RemoveAction::SkippedForeign
     );
 }
@@ -608,7 +613,7 @@ async fn reconcile_scope_removes_only_managed_orphans() {
     )
     .unwrap();
 
-    let report = reconcile_scope(&scope, &[], INSTALL).unwrap();
+    let report = reconcile_scope(&host_io(), &scope, &[], INSTALL).unwrap();
     assert!(
         report.removed.is_empty(),
         "foreign skill must not be enumerated for removal"
@@ -642,7 +647,9 @@ async fn lost_manifest_pristine_file_is_rederived_not_forked() {
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
     let skill = load_skill(&profile_root, "code-slop-cleanup").await;
     assert_eq!(
-        materialize_skill(&scope, &skill, INSTALL).unwrap().action,
+        materialize_skill(&host_io(), &scope, &skill, INSTALL)
+            .unwrap()
+            .action,
         MaterializeAction::Written
     );
 
@@ -653,14 +660,14 @@ async fn lost_manifest_pristine_file_is_rederived_not_forked() {
 
     // Re-materialize: the reconciler must recognize the pristine package and
     // re-derive the manifest, never SkippedForked.
-    let again = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let again = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_ne!(again.action, MaterializeAction::SkippedForked);
     assert!(manifest.is_file(), "manifest should be re-derived");
 
     // It stays removable after re-derivation.
     std::fs::remove_file(&manifest).unwrap();
     assert_eq!(
-        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL).unwrap(),
+        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL).unwrap(),
         RemoveAction::Removed
     );
     assert!(!dir.join("SKILL.md").exists());
@@ -694,7 +701,7 @@ async fn project_scope_filters_out_global_skills() {
     install_fake_hosts(&project);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
-    reconcile_detected_scopes(&profile_root, &home, &project);
+    reconcile_detected_scopes(&host_io(), &profile_root, &home, &project);
 
     assert!(
         home.join(".claude/skills/code-slop-cleanup/SKILL.md")
@@ -722,7 +729,7 @@ async fn project_scope_protects_another_installations_committed_package() {
 
     // Installation A materializes into a project checkout and "commits" it.
     let project_scope = MaterializationScope::project(MaterializationHost::Claude, project);
-    materialize_skill(&project_scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &project_scope, &skill, INSTALL).unwrap();
     let committed = project_scope
         .skills_dir()
         .join("code-slop-cleanup/SKILL.md");
@@ -731,22 +738,25 @@ async fn project_scope_protects_another_installations_committed_package() {
     // Installation B (skill not in its profile) must NOT delete A's committed
     // file.
     assert_eq!(
-        remove_materialized_skill(&project_scope, "code-slop-cleanup", INSTALL_B).unwrap(),
+        remove_materialized_skill(&host_io(), &project_scope, "code-slop-cleanup", INSTALL_B)
+            .unwrap(),
         RemoveAction::SkippedForeign
     );
     assert!(committed.is_file(), "another user's file must survive");
 
     // Installation A can still remove its own file.
     assert_eq!(
-        remove_materialized_skill(&project_scope, "code-slop-cleanup", INSTALL).unwrap(),
+        remove_materialized_skill(&host_io(), &project_scope, "code-slop-cleanup", INSTALL)
+            .unwrap(),
         RemoveAction::Removed
     );
 
     // Global scope is the user's own home: cross-installation removal is fine.
     let global_scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    materialize_skill(&global_scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &global_scope, &skill, INSTALL).unwrap();
     assert_eq!(
-        remove_materialized_skill(&global_scope, "code-slop-cleanup", INSTALL_B).unwrap(),
+        remove_materialized_skill(&host_io(), &global_scope, "code-slop-cleanup", INSTALL_B)
+            .unwrap(),
         RemoveAction::Removed
     );
 }
@@ -764,7 +774,7 @@ async fn project_scope_legacy_manifestless_package_is_not_removed() {
     let skill = load_skill(&profile_root, "code-slop-cleanup").await;
 
     let scope = MaterializationScope::project(MaterializationHost::Claude, project);
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
+    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     let dir = scope.skills_dir().join("code-slop-cleanup");
     let manifest = dir.join(".tracedecay-materialization.json");
 
@@ -776,13 +786,13 @@ async fn project_scope_legacy_manifestless_package_is_not_removed() {
     std::fs::write(&manifest, serde_json::to_string_pretty(&json).unwrap()).unwrap();
 
     assert_eq!(
-        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL_B).unwrap(),
+        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL_B).unwrap(),
         RemoveAction::SkippedForeign
     );
 
     std::fs::remove_file(&manifest).unwrap();
     assert_eq!(
-        remove_materialized_skill(&scope, "code-slop-cleanup", INSTALL_B).unwrap(),
+        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL_B).unwrap(),
         RemoveAction::SkippedForeign
     );
 }
@@ -802,7 +812,13 @@ async fn concurrent_materialize_does_not_wedge_forked() {
 
     let actions: Vec<MaterializeAction> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..8)
-            .map(|_| s.spawn(|| materialize_skill(&scope, &skill, INSTALL).unwrap().action))
+            .map(|_| {
+                s.spawn(|| {
+                    materialize_skill(&host_io(), &scope, &skill, INSTALL)
+                        .unwrap()
+                        .action
+                })
+            })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
@@ -815,7 +831,7 @@ async fn concurrent_materialize_does_not_wedge_forked() {
         );
     }
     // Final state is a clean, unchanged, fork-free package.
-    let final_pass = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let final_pass = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_eq!(final_pass.action, MaterializeAction::Unchanged);
 }
 
@@ -839,7 +855,7 @@ async fn symlinked_scope_root_materializes_through_link() {
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
     let skill = load_skill(&profile_root, "code-slop-cleanup").await;
 
-    let action = materialize_skill(&scope, &skill, INSTALL).unwrap();
+    let action = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
     assert_eq!(action.action, MaterializeAction::Written);
     assert!(
         real_claude
@@ -873,7 +889,7 @@ async fn reconcile_continues_past_one_poisoned_package() {
     std::fs::create_dir_all(scope.skills_dir()).unwrap();
     symlink(&external, scope.skills_dir().join("broken-skill")).unwrap();
 
-    let report = reconcile_scope(&scope, &[good, broken], INSTALL).unwrap();
+    let report = reconcile_scope(&host_io(), &scope, &[good, broken], INSTALL).unwrap();
 
     assert_eq!(report.written_count(), 1, "good skill should still write");
     assert_eq!(
@@ -901,7 +917,7 @@ async fn colliding_host_slugs_are_disambiguated() {
     let b = load_skill(&profile_root, "team_sync").await;
 
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let report = reconcile_scope(&scope, &[a, b], INSTALL).unwrap();
+    let report = reconcile_scope(&host_io(), &scope, &[a, b], INSTALL).unwrap();
 
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
     assert_eq!(report.materialized.len(), 2);

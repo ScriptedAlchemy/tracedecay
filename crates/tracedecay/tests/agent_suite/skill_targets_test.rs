@@ -10,13 +10,13 @@ use tracedecay_automation_runtime::automation::skill_targets::{
     install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
 };
 
-/// Temp root for a test. Also installs the production agent-hosts adapters
-/// into the automation-runtime host-config write surface — the same wiring
-/// the composition root performs at process start — because skill exports and
-/// prompt-index writes fail closed when the surface is unregistered.
-/// Idempotent, so every test entry point calls it.
+/// The production host I/O bundle prompt-index writes go through — the same
+/// value the host installers hand `skill_targets`.
+fn host_io() -> tracedecay_automation_runtime::automation::host_io::HostIo {
+    tracedecay_agent_hosts::host_io()
+}
+
 fn tempdir() -> tempfile::TempDir {
-    tracedecay_agent_hosts::register_automation_host_io();
     tempfile::tempdir().unwrap()
 }
 
@@ -361,6 +361,7 @@ async fn exports_only_skills_targeted_to_requested_host() {
     assert_eq!(codex.exported[0].id, "codex-only");
 
     let opencode = export_prompt_skill_index(
+        &host_io(),
         &profile_root,
         SkillInstallTarget::OpenCode,
         &opencode_prompt,
@@ -399,8 +400,13 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     .unwrap();
 
     std::fs::write(&prompt_path, "# User rules\n\nKeep this line.\n").unwrap();
-    let summary =
-        export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    let summary = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
     assert_eq!(summary.exported_count, 1);
 
     let first = std::fs::read_to_string(&prompt_path).unwrap();
@@ -411,8 +417,13 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     assert!(first.contains("tracedecay_skill_view"));
     assert!(!first.contains("codex-flow"));
 
-    let second =
-        export_prompt_skill_index(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+    let second = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Claude,
+        &prompt_path,
+    )
+    .unwrap();
     assert_eq!(second.exported_count, 1);
     let second = std::fs::read_to_string(&prompt_path).unwrap();
     assert_eq!(second.matches("TRACEDECAY MANAGED SKILLS START").count(), 2);
@@ -438,14 +449,26 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
     .await
     .unwrap();
     std::fs::write(&prompt_path, "# User rules\n\nKeep before.\n").unwrap();
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
 
     let stale = std::fs::read_to_string(&prompt_path)
         .unwrap()
         .replace("<!-- TRACEDECAY MANAGED SKILLS START agents -->\n", "");
     std::fs::write(&prompt_path, format!("{stale}\nKeep after.\n")).unwrap();
 
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
     let repaired = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(repaired.contains("Keep before."));
     assert!(repaired.contains("Keep after."));
@@ -456,7 +479,13 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
         1
     );
 
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Agents,
+        &prompt_path,
+    )
+    .unwrap();
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), repaired);
 }
 
@@ -474,7 +503,8 @@ fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
     );
     std::fs::write(&prompt_path, contents).unwrap();
 
-    remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap();
+    remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
+        .unwrap();
 
     let repaired = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(repaired.contains("Keep before."));
@@ -482,7 +512,8 @@ fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
     assert!(!repaired.contains("TraceDecay managed skills"));
     assert!(!repaired.contains("`generated`"));
 
-    remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap();
+    remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
+        .unwrap();
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), repaired);
 }
 
@@ -499,7 +530,8 @@ fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
     std::fs::write(&prompt_path, contents).unwrap();
 
     let error =
-        remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap_err();
+        remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
+            .unwrap_err();
     assert!(error.to_string().contains("markers are unbalanced"));
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
 }
@@ -523,7 +555,7 @@ fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
     );
     std::fs::write(&prompt_path, contents).unwrap();
 
-    remove_prompt_skill_index(&prompt_path).unwrap();
+    remove_prompt_skill_index(&host_io(), &prompt_path).unwrap();
 
     let repaired = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(repaired.contains("Keep before."));
@@ -552,7 +584,7 @@ fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
     );
     std::fs::write(&prompt_path, contents).unwrap();
 
-    remove_prompt_skill_index(&prompt_path).unwrap();
+    remove_prompt_skill_index(&host_io(), &prompt_path).unwrap();
 
     let repaired = std::fs::read_to_string(&prompt_path).unwrap();
     assert!(repaired.contains("Keep before."));
@@ -573,9 +605,10 @@ fn prompt_index_duplicate_balanced_blocks_fail_closed() {
     let contents = format!("# User rules\n\n{block}\n{block}");
     std::fs::write(&prompt_path, &contents).unwrap();
 
-    let error = remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents)
-        .unwrap_err()
-        .to_string();
+    let error =
+        remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
+            .unwrap_err()
+            .to_string();
 
     assert!(error.contains("markers are ambiguous"));
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
@@ -604,8 +637,20 @@ async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
     .await
     .unwrap();
 
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::OpenCode, &agents_md).unwrap();
-    export_prompt_skill_index(&profile_root, SkillInstallTarget::Kimi, &agents_md).unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::OpenCode,
+        &agents_md,
+    )
+    .unwrap();
+    export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Kimi,
+        &agents_md,
+    )
+    .unwrap();
 
     let prompt = std::fs::read_to_string(&agents_md).unwrap();
     assert!(prompt.contains("TRACEDECAY MANAGED SKILLS START opencode"));
@@ -636,7 +681,8 @@ async fn uninstall_preserves_legacy_block_on_shared_file_mid_migration() {
     );
     std::fs::write(&agents_md, contents).unwrap();
 
-    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
+    remove_prompt_skill_index_for_target(&host_io(), &agents_md, SkillInstallTarget::Agents)
+        .unwrap();
 
     let after = std::fs::read_to_string(&agents_md).unwrap();
     assert!(
@@ -670,7 +716,8 @@ async fn uninstall_removes_own_slugged_block_on_shared_file() {
     );
     std::fs::write(&agents_md, contents).unwrap();
 
-    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Claude).unwrap();
+    remove_prompt_skill_index_for_target(&host_io(), &agents_md, SkillInstallTarget::Claude)
+        .unwrap();
 
     let after = std::fs::read_to_string(&agents_md).unwrap();
     assert!(
@@ -697,7 +744,8 @@ async fn uninstall_removes_legacy_block_when_no_slugged_blocks_remain() {
     );
     std::fs::write(&agents_md, contents).unwrap();
 
-    remove_prompt_skill_index_for_target(&agents_md, SkillInstallTarget::Agents).unwrap();
+    remove_prompt_skill_index_for_target(&host_io(), &agents_md, SkillInstallTarget::Agents)
+        .unwrap();
 
     let after = std::fs::read_to_string(&agents_md).unwrap();
     assert!(
@@ -1017,14 +1065,24 @@ async fn hermes_target_uses_native_plugin_overlay() {
         .await
         .unwrap();
 
-    let err = export_prompt_skill_index(&profile_root, SkillInstallTarget::Hermes, &prompt_path)
-        .unwrap_err()
-        .to_string();
+    let err = export_prompt_skill_index(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Hermes,
+        &prompt_path,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("Hermes owns profile skills"));
     assert!(!prompt_path.exists());
 
-    let summary =
-        install_managed_skills(&profile_root, SkillInstallTarget::Hermes, &plugin_root).unwrap();
+    let summary = install_managed_skills(
+        &host_io(),
+        &profile_root,
+        SkillInstallTarget::Hermes,
+        &plugin_root,
+    )
+    .unwrap();
     assert_eq!(summary.exported_count, 1);
     assert_eq!(summary.exported[0].id, "repo-hygiene");
     assert!(

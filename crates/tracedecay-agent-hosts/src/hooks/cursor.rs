@@ -5,21 +5,16 @@
 //! Cursor expects Cursor-shaped stdout, separate from Claude, Codex, and Kiro.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::Value;
-use tracedecay_hooks::DaemonHookEvent;
 
 use crate::ports::hook_runtime::HookRuntimeV1;
 
-use super::post_tool_use::{
-    EmptyPathPolicy, captured_tool_output, notify_edited_paths, trusted_tool_failure,
-};
+use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
-    deduped_project_hint_with_id, event_session_id, format_tool_hint,
-    hook_route_metadata_from_parsed, mint_hint_id, nearest_project_like_root, read_hook_event,
-    record_hint_analytics, record_hook_invoked, record_hook_invoked_parsed, rel_under_root,
+    deduped_project_hint_with_id, event_session_id, format_tool_hint, mint_hint_id,
+    nearest_project_like_root, read_hook_event, record_hint_analytics, record_hook_invoked_parsed,
     text_field,
 };
 
@@ -27,12 +22,6 @@ use super::{
 /// Oversized backlogs stay queued instead of blocking hook execution.
 pub const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 =
     tracedecay_sessions::runtime::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
-/// Budget for the end-of-turn `stop` catch-up ingest. `stop` and `sessionEnd`
-/// (see `hook_cursor_session_completion`) both share this budget and are
-/// registered with a 30s hook timeout in `plugin/hooks/hooks-cursor.json`,
-/// leaving 5s of headroom for the rest of the handler.
-const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
-
 fn paths_same(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -49,36 +38,6 @@ const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
     "relative_workspace_path",
     "relativeWorkspacePath",
 ];
-
-/// Cursor `subagentStart` hook handler.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.subagent_start")]
-pub async fn hook_cursor_subagent_start(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
-    let _hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Cursor,
-        "subagentStart",
-        &event,
-        &parsed,
-    );
-    if let Some(decision) = evaluate_cursor_subagent_start(&event)
-        && !super::write_hook_output(
-            runtime,
-            root.as_deref(),
-            tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
-            &decision,
-            Some(&_hook_telemetry),
-        )
-        .await
-    {
-        return 1;
-    }
-    0
-}
 
 /// Cursor `postToolUse` hook handler.
 ///
@@ -112,230 +71,6 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
             &event,
             &decision,
             Some(&_hook_telemetry),
-        )
-        .await
-    {
-        return 1;
-    }
-    0
-}
-
-/// Cursor `sessionEnd` hook handler (fire-and-forget).
-///
-/// Final transcript-ingest flush when a conversation ends (including
-/// `window_close` / `user_close`, which the end-of-turn `stop` hook can
-/// miss). `sessionEnd` receives the common-schema `transcript_path`, so the
-/// regular capped catch-up ingest applies. The response is logged but unused,
-/// so an empty object is emitted. Fail-open.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.session_end")]
-pub async fn hook_cursor_session_end(runtime: &HookRuntimeV1) -> i32 {
-    hook_cursor_session_completion(runtime, "sessionEnd").await
-}
-
-async fn hook_cursor_session_completion(runtime: &HookRuntimeV1, hook_name: &str) -> i32 {
-    let event = read_hook_event!();
-    // One parse feeds root resolution, the analytics row, the ingest scope,
-    // and the session-review id; payloads can approach the wire cap.
-    let Ok(parsed) = serde_json::from_str::<Value>(&event) else {
-        // A malformed event keeps the fail-open telemetry row and empty
-        // output the handler always produced, but is never ingested.
-        let hook_telemetry =
-            record_hook_invoked(runtime, None, HintAgent::Cursor, hook_name, &event);
-        if !super::write_hook_output(
-            runtime,
-            None,
-            tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
-            &serde_json::json!({}).to_string(),
-            Some(&hook_telemetry),
-        )
-        .await
-        {
-            return 1;
-        }
-        return 0;
-    };
-    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Cursor,
-        hook_name,
-        &event,
-        &parsed,
-    );
-    let guidance = if hook_name == "stop"
-        && let Some(root) = root.as_deref()
-    {
-        super::dispatch::dispatch(
-            runtime,
-            tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-        .flatten()
-    } else {
-        None
-    };
-    let outcome = super::ingest_transcript_for_event(
-        runtime,
-        "cursor",
-        &event,
-        root.as_deref(),
-        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
-        CURSOR_STOP_INGEST_BUDGET,
-        Some(&hook_telemetry),
-    )
-    .await;
-    if outcome.should_schedule_user_review() {
-        let session_id = event_session_id(&parsed);
-        super::schedule_user_session_review(runtime, "cursor", session_id.as_deref()).await;
-    }
-    let output = guidance.map_or_else(
-        || serde_json::json!({}).to_string(),
-        |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
-    );
-    if !super::write_hook_output(
-        runtime,
-        root.as_deref(),
-        tracedecay_hooks::HookHostV1::CursorDesktop,
-        &event,
-        &output,
-        Some(&hook_telemetry),
-    )
-    .await
-    {
-        return 1;
-    }
-    0
-}
-
-/// Cursor `stop` hook handler (fire-and-forget).
-///
-/// Fires at the end of an agent turn and performs the primary transcript
-/// ingest: a time-boxed incremental catch-up that picks up bounded transcript
-/// tails appended during the turn. The `stop` output is informational only, so
-/// we emit an empty object and never ask the agent to continue. Fail-open.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.stop")]
-pub async fn hook_cursor_stop(runtime: &HookRuntimeV1) -> i32 {
-    hook_cursor_session_completion(runtime, "stop").await
-}
-
-/// Cursor `preCompact` hook handler.
-///
-/// Cursor's compaction event exposes pressure metadata but not Cursor's own
-/// generated summary text. The hook delegates the pressure probe to the daemon
-/// without ingesting the transcript or publishing summary state. Native summary
-/// content remains typed unavailable because Cursor does not expose it.
-/// The hook is fail-open and emits Cursor's empty object shape.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.pre_compact")]
-pub async fn hook_cursor_pre_compact(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Cursor,
-        "preCompact",
-        &event,
-        &parsed,
-    );
-    let outcome = super::cursor_compact::cursor_pre_compact_via_daemon_with_telemetry(
-        runtime,
-        &event,
-        Some(&hook_telemetry),
-    )
-    .await;
-    if outcome.status == "error" {
-        eprintln!(
-            "tracedecay Cursor preCompact pressure probe failed: {}",
-            outcome.reason
-        );
-    }
-    if !super::write_hook_output(
-        runtime,
-        root.as_deref(),
-        tracedecay_hooks::HookHostV1::CursorDesktop,
-        &event,
-        &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
-    )
-    .await
-    {
-        return 1;
-    }
-    0
-}
-
-/// Cursor `afterFileEdit` hook handler.
-///
-/// Two jobs, both fail-open:
-/// 1. Keeps the graph fresh after Cursor Agent writes files by notifying the
-///    daemon about the edited path(s). The daemon owns targeted sync scheduling
-///    and the notification no-ops when no daemon is available.
-/// 2. Emits the edit-driven redundancy nudge ([`HintCategory::EditRedundancy`]),
-///    matching Claude's `PostToolUse` surface. `afterFileEdit` is the only
-///    Cursor hook whose recorded payload carries the *applied* edit body
-///    (`edits[].new_string`); Cursor's `postToolUse` edit payload carries only
-///    the target `file_path` (see the recorded fixtures in
-///    `tests/hooks_lsp_suite/hooks_test.rs`), so the redundancy classifier —
-///    which needs the added text — can only run here. The hint rides Cursor's
-///    documented `additional_context` output shape with the same per-session
-///    dedupe and initialized-store gating as `postToolUse`.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.after_file_edit")]
-pub async fn hook_cursor_after_file_edit(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Cursor,
-        "afterFileEdit",
-        &event,
-        &parsed,
-    );
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::dispatch::dispatch(
-            runtime,
-            tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance
-            && !super::write_hook_output(
-                runtime,
-                Some(root),
-                tracedecay_hooks::HookHostV1::CursorDesktop,
-                &event,
-                &serde_json::json!({ "additional_context": guidance }).to_string(),
-                Some(&hook_telemetry),
-            )
-            .await
-        {
-            return 1;
-        }
-        return 0;
-    }
-    if let Some(root) = root.as_deref() {
-        notify_cursor_after_file_edit(runtime, &parsed, root, &hook_telemetry).await;
-    }
-    if let Some(decision) = cursor_after_file_edit_decision(runtime, &event)
-        && !super::write_hook_output(
-            runtime,
-            root.as_deref(),
-            tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
-            &decision,
-            Some(&hook_telemetry),
         )
         .await
     {
@@ -391,59 +126,6 @@ async fn cursor_session_start_response(
     .flatten();
     let output = cursor_session_start_json(root.as_deref(), guidance.as_deref().unwrap_or(""));
     (root, output)
-}
-
-/// Cursor `afterShellExecution` hook handler.
-///
-/// Notifies the daemon that Cursor completed a shell action. Command text is
-/// not forwarded and cannot become Git or synchronization authority.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.after_shell")]
-pub async fn hook_cursor_after_shell(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Cursor,
-        "afterShellExecution",
-        &event,
-        &parsed,
-    );
-    notify_cursor_after_shell_event(runtime, &parsed, root.as_deref(), &hook_telemetry).await;
-    0
-}
-
-/// Cursor `workspaceOpen` hook handler.
-///
-/// Notifies the daemon to run one-shot workspace catch-up. Fail-open.
-#[hotpath::measure(future = true, label = "hosts.hooks.cursor.workspace_open")]
-pub async fn hook_cursor_workspace_open(runtime: &HookRuntimeV1) -> i32 {
-    let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_parsed_event_with_identity(runtime, &parsed).await;
-    let hook_telemetry = record_hook_invoked_parsed(
-        runtime,
-        root.as_deref(),
-        HintAgent::Cursor,
-        "workspaceOpen",
-        &event,
-        &parsed,
-    );
-    notify_cursor_workspace_open(runtime, &parsed, root.as_deref(), &hook_telemetry).await;
-    if !super::write_hook_output(
-        runtime,
-        root.as_deref(),
-        tracedecay_hooks::HookHostV1::CursorDesktop,
-        &event,
-        &serde_json::json!({}).to_string(),
-        Some(&hook_telemetry),
-    )
-    .await
-    {
-        return 1;
-    }
-    0
 }
 
 /// Pure decision logic for Cursor `subagentStart` hook events.
@@ -651,42 +333,6 @@ fn cursor_hook_cwd(event: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn cursor_after_file_edit_rel_paths_from_parsed(
-    parsed: &Value,
-    project_root: &Path,
-) -> Vec<String> {
-    let mut abs_paths: Vec<String> = Vec::new();
-    if let Some(p) = parsed
-        .get("file_path")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        abs_paths.push(p.to_string());
-    }
-    // Defensive: some edit payloads may carry per-edit file paths.
-    if let Some(edits) = parsed.get("edits").and_then(Value::as_array) {
-        for edit in edits {
-            if let Some(p) = edit
-                .get("file_path")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                abs_paths.push(p.to_string());
-            }
-        }
-    }
-
-    let mut rels: Vec<String> = Vec::new();
-    for abs in abs_paths {
-        if let Some(rel) = rel_under_root(project_root, Path::new(&abs))
-            && !rels.contains(&rel)
-        {
-            rels.push(rel);
-        }
-    }
-    rels
-}
-
 /// Exposes a known project root as `TRACEDECAY_PROJECT_ROOT` so later session
 /// hooks can reuse it.
 pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context: &str) -> String {
@@ -702,77 +348,6 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
         "env": Value::Object(env),
     })
     .to_string()
-}
-
-/// Best-effort daemon notification for Cursor `afterFileEdit`.
-///
-/// Resolves the edited repo-relative paths locally, then lets the daemon own
-/// scheduling and sync execution. No-ops when no in-project paths were edited.
-async fn notify_cursor_after_file_edit(
-    runtime: &HookRuntimeV1,
-    parsed: &Value,
-    root: &Path,
-    telemetry: &super::analytics::HookTimingSpan,
-) {
-    // Cursor's event carries nothing but the edited paths, so an edit that
-    // touched nothing inside the project is not sent.
-    notify_edited_paths(
-        runtime,
-        root,
-        parsed,
-        || cursor_after_file_edit_rel_paths_from_parsed(parsed, root),
-        DaemonHookEvent::cursor_after_file_edit,
-        EmptyPathPolicy::Skip,
-        Some(telemetry),
-    )
-    .await;
-}
-
-/// Best-effort daemon notification for Cursor `afterShellExecution`.
-async fn notify_cursor_after_shell_event(
-    runtime: &HookRuntimeV1,
-    parsed: &Value,
-    root: Option<&Path>,
-    telemetry: &super::analytics::HookTimingSpan,
-) {
-    let Some(root) = root else {
-        return;
-    };
-    if !runtime.is_project_initialized(root) {
-        return;
-    }
-    let cwd = cursor_hook_cwd(parsed).unwrap_or_else(|| root.to_path_buf());
-    super::notify_hook_event_with_telemetry(
-        runtime,
-        root,
-        DaemonHookEvent::cursor_after_shell_execution(cwd)
-            .with_route(Some(hook_route_metadata_from_parsed(parsed, root))),
-        telemetry,
-    )
-    .await;
-}
-
-/// Best-effort daemon notification for Cursor `workspaceOpen`.
-async fn notify_cursor_workspace_open(
-    runtime: &HookRuntimeV1,
-    parsed: &Value,
-    root: Option<&Path>,
-    telemetry: &super::analytics::HookTimingSpan,
-) {
-    let Some(root) = root else {
-        return;
-    };
-    if !runtime.is_project_initialized(root) {
-        return;
-    }
-    super::notify_hook_event_with_telemetry(
-        runtime,
-        root,
-        DaemonHookEvent::cursor_workspace_open(root.to_path_buf())
-            .with_route(Some(hook_route_metadata_from_parsed(parsed, root))),
-        telemetry,
-    )
-    .await;
 }
 
 fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
@@ -814,93 +389,10 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
     }
 }
 
-/// Builds the redundancy-hint input for a Cursor `afterFileEdit` event.
-///
-/// `afterFileEdit` reports `file_path` at the top level and the applied edit(s)
-/// as `edits: [{ old_string, new_string }]`. We join the `new_string`s into
-/// `edit_text` and label the synthetic tool `Edit` so the shared
-/// [`is_redundancy_candidate_edit`](super::tool_hints) classifier recognizes it.
-/// Prompt/command/subagent fields are left empty: this surface only ever drives
-/// the edit-shaped categories (redundancy and harness-memory edits), never a
-/// prompt- or shell-shaped hint.
-fn cursor_after_file_edit_hint_input(parsed: &Value) -> ToolHintInput {
-    ToolHintInput {
-        agent: HintAgent::Cursor,
-        session_id: event_session_id(parsed),
-        tool_name: Some("Edit".to_string()),
-        command: None,
-        prompt: None,
-        subagent_type: None,
-        file_path: text_field(parsed, CURSOR_FILE_PATH_FIELDS),
-        captured_output: None,
-        trusted_failure: false,
-        edit_text: cursor_after_file_edit_new_text(parsed),
-        hints_enabled: true,
-    }
-}
-
-/// Joins the `new_string`s an `afterFileEdit` event applied, or `None` when the
-/// event carries no non-empty added text. `O(len)`: concatenates existing JSON
-/// string fields without parsing code.
-fn cursor_after_file_edit_new_text(parsed: &Value) -> Option<String> {
-    let joined = parsed
-        .get("edits")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|edit| edit.get("new_string").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!joined.trim().is_empty()).then_some(joined)
-}
-
-/// Pure decision logic for Cursor `afterFileEdit` redundancy hints.
-///
-/// Returns a soft `additional_context` payload (the same shape `postToolUse`
-/// uses) when the applied edit adds a new function-sized body. Non-qualifying
-/// edits (too small, no function shape, non-source file) and events without an
-/// edit body fail open with no output. Session-level dedupe lives in the impure
-/// paths; this stays pure for tests.
-#[cfg(test)]
-fn evaluate_cursor_after_file_edit(event_json: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let hint = decide_hint(&cursor_after_file_edit_hint_input(&parsed))?;
-    Some(format_cursor_post_tool_use_decision(&hint))
-}
-
-fn prepare_cursor_after_file_edit_hint(event_json: &str) -> Option<(String, ToolHint)> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let hint = decide_hint(&cursor_after_file_edit_hint_input(&parsed))?;
-    let root = cursor_project_root_candidate_from_parsed_event(&parsed);
-    let hint_id = mint_hint_id();
-    record_hint_analytics(
-        root.as_deref(),
-        "hint_candidate",
-        HintAgent::Cursor,
-        event_session_id(&parsed).as_deref(),
-        &hint_id,
-        &hint,
-    );
-    Some((hint_id, hint))
-}
-
-/// Cursor `afterFileEdit` redundancy decision with per-session hint dedupe.
-/// Shares [`deduped_cursor_hint`] with `postToolUse`, so the redundancy category
-/// surfaces at most once per Cursor session regardless of which surface emits
-/// it first.
-pub fn cursor_after_file_edit_decision(
-    runtime: &HookRuntimeV1,
-    event_json: &str,
-) -> Option<String> {
-    let (hint_id, hint) = prepare_cursor_after_file_edit_hint(event_json)?;
-    let hint = deduped_cursor_hint(runtime, event_json, &hint_id, hint)?;
-    Some(format_cursor_post_tool_use_decision(&hint))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
-    use crate::config::USER_DATA_DIR_ENV;
+    use std::time::Duration;
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
@@ -961,159 +453,5 @@ mod tests {
         assert!(!outcome.timed_out);
         assert!(!outcome.should_schedule_user_review());
         assert_eq!(outcome.messages_upserted, 0);
-    }
-
-    #[test]
-    fn cursor_after_file_edit_nudges_redundancy_for_new_function_body() {
-        let body = [
-            "fn compute_widget_total(items: &[Item]) -> u64 {",
-            "    let mut total = 0;",
-            "    for item in items {",
-            "        if item.active {",
-            "            total += item.count;",
-            "        }",
-            "    }",
-            "    total",
-            "}",
-        ]
-        .join("\n");
-        let event = serde_json::json!({
-            "hook_event_name": "afterFileEdit",
-            "file_path": "src/widgets.rs",
-            "edits": [{ "old_string": "", "new_string": body }],
-            "session_id": "cursor-after-edit"
-        })
-        .to_string();
-
-        let output = evaluate_cursor_after_file_edit(&event)
-            .expect("a new function-sized edit should nudge redundancy");
-        let v: Value = serde_json::from_str(&output).unwrap();
-        let context = v["additional_context"].as_str().unwrap_or_default();
-        assert!(context.contains("tracedecay hint:"), "context: {context}");
-        assert!(
-            context.contains("tracedecay_redundancy"),
-            "context: {context}"
-        );
-        // Soft `additional_context` only — Cursor has no permission /
-        // hookSpecificOutput envelope on this surface.
-        assert!(v.get("permission").is_none());
-        assert!(v.get("hookSpecificOutput").is_none());
-    }
-
-    /// A qualifying edit split across multiple `edits[]` entries still reaches
-    /// the line/keyword heuristic: the handler joins every `new_string`.
-    #[test]
-    fn cursor_after_file_edit_joins_multiple_edits() {
-        let event = serde_json::json!({
-            "hook_event_name": "afterFileEdit",
-            "file_path": "src/widgets.rs",
-            "edits": [
-                { "old_string": "", "new_string": "fn compute_widget_total(items: &[Item]) -> u64 {\n    let mut total = 0;" },
-                { "old_string": "", "new_string": "    for item in items {\n        if item.active {\n            total += item.count;\n        }\n    }\n    total\n}" }
-            ],
-            "session_id": "cursor-after-edit-multi"
-        })
-        .to_string();
-
-        let output = evaluate_cursor_after_file_edit(&event)
-            .expect("a function body spread across edits should still nudge");
-        let v: Value = serde_json::from_str(&output).unwrap();
-        assert!(
-            v["additional_context"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("tracedecay_redundancy")
-        );
-    }
-
-    /// Small edits, non-source files, and edit-less events stay silent so the
-    /// nudge never spams ordinary Cursor edits.
-    #[test]
-    fn cursor_after_file_edit_stays_silent_for_non_redundancy_edits() {
-        let small = serde_json::json!({
-            "hook_event_name": "afterFileEdit",
-            "file_path": "src/widgets.rs",
-            "edits": [{ "old_string": "", "new_string": "fn tiny() -> u8 { 1 }" }],
-            "session_id": "s1"
-        })
-        .to_string();
-        assert!(evaluate_cursor_after_file_edit(&small).is_none());
-
-        let long_body = (0..12)
-            .map(|i| format!("line number {i} of prose"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let markdown = serde_json::json!({
-            "hook_event_name": "afterFileEdit",
-            "file_path": "notes.md",
-            "edits": [{ "old_string": "", "new_string": long_body }],
-            "session_id": "s2"
-        })
-        .to_string();
-        assert!(evaluate_cursor_after_file_edit(&markdown).is_none());
-
-        let no_edits = serde_json::json!({
-            "hook_event_name": "afterFileEdit",
-            "file_path": "src/widgets.rs",
-            "session_id": "s3"
-        })
-        .to_string();
-        assert!(evaluate_cursor_after_file_edit(&no_edits).is_none());
-    }
-
-    /// End-to-end dedupe: the impure `afterFileEdit` decision emits the nudge
-    /// once per session and reuses the shared per-session hint dedupe (so the
-    /// same category never double-fires across the `postToolUse` /
-    /// `afterFileEdit` surfaces).
-    #[test]
-    fn cursor_after_file_edit_decision_dedupes_per_session() {
-        // States the dependency explicitly: this path gates on
-        // `is_project_initialized`, which is a composition capability, not a
-        // value this crate can default.
-        let runtime = crate::ports::hook_runtime::crate_test_runtime();
-        let _lock = crate::hooks::lock_test_env();
-        let project = tempfile::tempdir().unwrap();
-        let profile = tempfile::tempdir().unwrap();
-        let project_root = project.path().canonicalize().unwrap();
-        let profile_root = profile.path().canonicalize().unwrap();
-        let _profile_env = crate::hooks::EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
-        crate::storage::pin_fixture_repository_identity(
-            &project_root,
-            "proj_hook_cursor_after_edit",
-        )
-        .unwrap();
-        let layout = crate::storage::resolve_layout_for_current_profile(&project_root).unwrap();
-        std::fs::create_dir_all(&layout.data_root).unwrap();
-        std::fs::write(&layout.graph_db_path, "").unwrap();
-        let body = [
-            "fn compute_widget_total(items: &[Item]) -> u64 {",
-            "    let mut total = 0;",
-            "    for item in items {",
-            "        if item.active {",
-            "            total += item.count;",
-            "        }",
-            "    }",
-            "    total",
-            "}",
-        ]
-        .join("\n");
-        let event = serde_json::json!({
-            "hook_event_name": "afterFileEdit",
-            "file_path": project_root.join("src/widgets.rs"),
-            "edits": [{ "old_string": "", "new_string": body }],
-            "session_id": "cursor-after-edit-dedupe",
-            "cwd": project_root,
-            "workspace_roots": [project_root],
-        })
-        .to_string();
-
-        assert!(
-            cursor_after_file_edit_decision(&runtime, &event).is_some(),
-            "first qualifying edit in a session must emit the nudge"
-        );
-        assert!(
-            cursor_after_file_edit_decision(&runtime, &event).is_none(),
-            "the redundancy nudge must be deduped within the session"
-        );
     }
 }
