@@ -32,6 +32,9 @@ fn sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
     sidecar.into()
 }
 
+/// Production writer policy: WAL, `synchronous=NORMAL`, and no automatic
+/// checkpoint. This is the durability contract; it does not consult any
+/// process environment variable.
 #[test]
 fn writer_mode_applies_wal_integrity_and_write_policy() {
     let file = database();

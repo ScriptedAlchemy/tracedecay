@@ -548,8 +548,6 @@ jobs:
           path: ${{ runner.temp }}
 
       - name: Run Windows tests
-        env:
-          TRACEDECAY_SQLITE_UNSAFE_FAST: "1"
         shell: pwsh
         # --extract-to must be the workspace so target/ lands at the same
         # absolute path as on the build job: integration tests bake
