@@ -668,6 +668,7 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "projectless-socket-test");
+    prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
@@ -749,6 +750,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     )
     .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let unregistered_project = home.join("unregistered-project");
     std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
 
@@ -826,6 +828,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
         &client_identity.profile_root,
         "closed-invocation-socket-test",
     );
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
 
@@ -1220,6 +1223,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         &client_identity.profile_root,
         "portable-closed-invocation-test",
     );
+    prewarm_test_profile_runtime(&store_administration).await;
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
