@@ -2,6 +2,7 @@ mod authority;
 mod composition;
 mod composition_order;
 mod cursor;
+mod diversity_caps;
 mod evidence_lanes;
 mod request;
 mod rerank;
