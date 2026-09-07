@@ -22,8 +22,9 @@ use tracedecay_daemon_service::{
     DaemonContextScoutRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar, DaemonInvocationOutcome,
     DaemonInvocationProblem, DaemonInvocationService, DaemonLspOwnerRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonRetainedRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrar, DaemonWorkRuntimeRegistrar, ProjectRuntimeRequestLeaseV1,
-    ProjectRuntimeRootQuiescenceV1, WorkApplicationInvocationV1,
+    DaemonSemanticOwnerRuntimeRegistrar, DaemonSemanticRuntimeRegistrar,
+    DaemonWorkRuntimeRegistrar, ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
+    WorkApplicationInvocationV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -329,6 +330,10 @@ impl DaemonInvocationState {
 
     pub(super) fn semantic_runtime_registrar(&self) -> DaemonSemanticRuntimeRegistrar {
         DaemonSemanticRuntimeRegistrar::new(&self.service)
+    }
+
+    pub(super) fn semantic_owner_runtime_registrar(&self) -> DaemonSemanticOwnerRuntimeRegistrar {
+        DaemonSemanticOwnerRuntimeRegistrar::new(&self.service)
     }
 
     pub(super) fn lsp_owner_registrar(&self) -> DaemonLspOwnerRegistrar {

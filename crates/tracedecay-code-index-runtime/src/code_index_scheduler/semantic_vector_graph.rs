@@ -26,7 +26,7 @@ use tracedecay_usecases::semantic_runtime::{
     SemanticVectorRetentionAuthorizationV1,
 };
 
-use super::{CodeIndexSchedulerRegistryV1, registry::CodeIndexServingScopeV1};
+use super::{CodeIndexSchedulerRegistryV1, registry::CodeIndexMountedScopeV1};
 
 mod retention_inventory;
 use retention_inventory::{
@@ -598,9 +598,9 @@ impl DaemonSemanticVectorGraphProviderV1 {
         }
     }
 
-    async fn serving_scope(&self) -> Result<CodeIndexServingScopeV1, SemanticVectorGraphErrorV1> {
+    async fn mounted_scope(&self) -> Result<CodeIndexMountedScopeV1, SemanticVectorGraphErrorV1> {
         self.schedulers
-            .serving_code_scope(&self.project_root)
+            .mounted_code_scope(&self.project_root)
             .await
             .ok_or_else(|| {
                 SemanticVectorGraphErrorV1::Unavailable(
@@ -623,7 +623,7 @@ impl DaemonSemanticVectorGraphProviderV1 {
     /// binds the same identity either way.
     async fn retain(
         &self,
-        scope: &CodeIndexServingScopeV1,
+        scope: &CodeIndexMountedScopeV1,
         generation_id: &CodeGenerationId,
         reference: Option<&tracedecay_domain::RefId>,
     ) -> Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1> {
@@ -692,7 +692,7 @@ impl SemanticVectorGraphProviderV1 for DaemonSemanticVectorGraphProviderV1 {
     ) -> SemanticRuntimeFuture<'a, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
     {
         Box::pin(async move {
-            let scope = self.serving_scope().await?;
+            let scope = self.mounted_scope().await?;
             self.retain(
                 &scope,
                 &generation.manifest().generation_id,
@@ -707,22 +707,10 @@ impl SemanticVectorGraphProviderV1 for DaemonSemanticVectorGraphProviderV1 {
     ) -> SemanticRuntimeFuture<'_, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
     {
         Box::pin(async move {
-            let scope = self.serving_scope().await?;
-            if let Some(generation) = scope.serving_generation.clone() {
-                return self
-                    .retain(
-                        &scope,
-                        &generation.manifest().generation_id,
-                        generation.snapshot().reference.as_ref(),
-                    )
-                    .await;
-            }
-            // A clean restart whose retained revision-7 head recovered leaves
-            // the sealed seat empty on purpose - replaying the partitions to
-            // seat a second copy of what already serves is exactly the cost
-            // recovery avoids. Reporting the project as serving nothing here
-            // fail-closed every vector retention pass for the life of a quiet
-            // checkout, so read the identity from the level that does serve.
+            // The text owner is the serving identity strict queries pin. A
+            // complete graph seat may lag it during rollback or remain empty
+            // after a revision-7 restart, so it is never source authority for
+            // current semantic-vector reads.
             let text = self
                 .schedulers
                 .latest_text_serving_for_root(&self.project_root)
@@ -732,7 +720,15 @@ impl SemanticVectorGraphProviderV1 for DaemonSemanticVectorGraphProviderV1 {
                         "no code generation is currently serving for this project".to_owned(),
                     )
                 })?;
+            let scope = self.mounted_scope().await?;
             let metadata = text.metadata();
+            if metadata.snapshot().repository != scope.repository_id
+                || metadata.snapshot().worktree.as_ref() != Some(&scope.worktree_id)
+            {
+                return Err(SemanticVectorGraphErrorV1::Unavailable(
+                    "text-serving generation no longer matches the mounted code scope".to_owned(),
+                ));
+            }
             self.retain(
                 &scope,
                 &metadata.manifest().generation_id,
