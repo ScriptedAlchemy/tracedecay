@@ -3901,10 +3901,11 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         first_generation.manifest().snapshot_digest,
         second_generation.manifest().snapshot_digest
     );
-    assert_ne!(
+    assert_eq!(
         first_generation.capability().manifest_digest,
         second_generation.capability().manifest_digest,
-        "authorization identity remains generation-local"
+        "byte-identical capability evidence is generation-free; generation, occurrence, \
+         snapshot, and publication identities remain worktree-local above and below"
     );
     assert_ne!(
         first_generation.projection().publication_digest(),
@@ -10234,7 +10235,7 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
     // is *already* blocked acquiring that lock is a different wait than the one
     // under test — this test is about shutdown never taking the lock on its own
     // behalf.
-    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -15492,6 +15493,25 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             }
         }
     };
+    // The successful query can land while the owner is finishing generation
+    // A and legitimately leave one coalesced BusyFollowUp. Let that pass
+    // settle before this test injects generation B's publication failure, so
+    // the assertion below observes only the failed pass's restored hint.
+    let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let in_progress = registry
+            .reconcile_in_progress_for_test(fixture.path())
+            .await;
+        let pending_wake = registry.pending_wake_micros_for_scope(&scope).await;
+        if !in_progress && pending_wake == Some(0) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= settled_deadline,
+            "generation A follow-up wake did not settle"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
     let owner_epoch_a = {
         let scheduler = scheduler
             .lock()

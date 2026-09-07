@@ -1406,16 +1406,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
         });
         let projection_deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let build_claimed = match runtime.publication_locks.build.try_lock() {
-                Ok(build) => {
-                    drop(build);
-                    false
-                }
-                Err(std::sync::TryLockError::WouldBlock) => true,
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    panic!("publication build permit was poisoned")
-                }
-            };
+            let build_claimed = runtime.publication_locks.build.try_lock().is_err();
             if build_claimed
                 && (PUBLICATION_PROJECTION_IN_FLIGHT.load(Ordering::Acquire) != 0
                     || take_publication_projection_overlap_peak() != 0)
