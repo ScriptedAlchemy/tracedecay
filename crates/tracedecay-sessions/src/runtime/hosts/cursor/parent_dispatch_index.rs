@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde_json::Value;
+#[cfg(windows)]
+use tracedecay_private_fs::windows_file::{
+    FileChangeToken as WindowsFileChangeToken, change_token as windows_file_change_token,
+};
 use tracedecay_store::cursor_dispatch::{
     cursor_dispatch_model, is_subagent_dispatch_tool, record_bytes_may_name_subagent_dispatch,
 };
@@ -81,11 +85,40 @@ impl DispatchScanReceipt {
     }
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ParentFileChangeToken {
+    jsonl: JsonlFileChangeToken,
+    windows: WindowsFileChangeToken,
+}
+
+#[cfg(not(windows))]
+type ParentFileChangeToken = JsonlFileChangeToken;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ParentFileRevision {
     identity: JsonlNativeFileIdentity,
     len: u64,
-    change: JsonlFileChangeToken,
+    change: ParentFileChangeToken,
+}
+
+fn parent_file_revision(file: &File) -> std::io::Result<Option<ParentFileRevision>> {
+    let metadata = file.metadata()?;
+    let Some(identity) = jsonl_native_file_identity(file, &metadata) else {
+        return Ok(None);
+    };
+    #[cfg(windows)]
+    let change = ParentFileChangeToken {
+        jsonl: jsonl_file_change_token(&metadata),
+        windows: windows_file_change_token(file)?,
+    };
+    #[cfg(not(windows))]
+    let change = jsonl_file_change_token(&metadata);
+    Ok(Some(ParentFileRevision {
+        identity,
+        len: metadata.len(),
+        change,
+    }))
 }
 
 struct ParentDispatchEntry {
@@ -140,21 +173,12 @@ impl ParentDispatchIndex {
                 return (None, DispatchScanReceipt::EMPTY);
             }
         };
-        let metadata = match file.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => {
+        let revision = match parent_file_revision(&file) {
+            Ok(Some(revision)) => revision,
+            Ok(None) | Err(_) => {
                 self.forget(parent_path);
                 return (None, DispatchScanReceipt::EMPTY);
             }
-        };
-        let Some(identity) = jsonl_native_file_identity(&file, &metadata) else {
-            self.forget(parent_path);
-            return (None, DispatchScanReceipt::EMPTY);
-        };
-        let revision = ParentFileRevision {
-            identity,
-            len: metadata.len(),
-            change: jsonl_file_change_token(&metadata),
         };
         let (plan, digest_bytes) =
             match self.plan_lookup(parent_path, &mut file, revision, agent_id) {
@@ -234,12 +258,10 @@ impl ParentDispatchIndex {
         let cached = entry.models.get(agent_id).cloned();
         // Zero-I/O hit, which is the reason this index exists: the native
         // revision — identity, length, and the change token, which on Unix
-        // carries ctime and so catches a same-length same-mtime rewrite — is
-        // byte-identical to the one this entry was verified under, and the
-        // entry covers the whole file. Nothing can have been appended or
-        // rewritten, so re-hashing the prefix would only re-prove that.
-        // (On Windows the token is last_write_time alone, so a rewrite that
-        // preserves it falls through to the digest below.)
+        // carries ctime and on Windows carries native ChangeTime — is identical
+        // to the one this entry was verified under, and the entry covers the
+        // whole file. Nothing can have been appended or rewritten, so
+        // re-hashing the prefix would only re-prove that.
         if entry.revision == revision && verified_cursor == revision.len {
             return Ok((LookupPlan::RefreshObserved { model: cached }, 0));
         }
@@ -276,38 +298,44 @@ impl ParentDispatchIndex {
         file: File,
         scan: ScanCommit<'_>,
     ) -> (Option<String>, DispatchScanReceipt) {
-        let delta = match scan_parent_delta(file, scan.start, scan.resume_digest, scan.agent_id) {
-            Ok(delta) => delta,
-            Err(_) => {
-                self.forget(scan.parent_path);
-                return (None, DispatchScanReceipt::EMPTY);
-            }
-        };
-        let final_metadata = match delta.file.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                self.forget(scan.parent_path);
-                return (None, DispatchScanReceipt::EMPTY);
-            }
-        };
-        let Some(final_identity) = jsonl_native_file_identity(&delta.file, &final_metadata) else {
-            self.forget(scan.parent_path);
-            return (None, DispatchScanReceipt::EMPTY);
-        };
-        let final_revision = ParentFileRevision {
-            identity: final_identity,
-            len: final_metadata.len(),
-            change: jsonl_file_change_token(&final_metadata),
-        };
-        if !scanned_prefix_survives(scan.revision, final_revision) {
-            self.forget(scan.parent_path);
-            return (None, DispatchScanReceipt::EMPTY);
-        }
-        let receipt = DispatchScanReceipt {
+        let delta =
+            match scan_parent_delta(file, scan.start, scan.resume_digest.clone(), scan.agent_id) {
+                Ok(delta) => delta,
+                Err(_) => {
+                    self.forget(scan.parent_path);
+                    return (None, DispatchScanReceipt::EMPTY);
+                }
+            };
+        self.commit_scanned_delta(delta, scan)
+    }
+
+    fn commit_scanned_delta(
+        &mut self,
+        mut delta: ScanDelta,
+        scan: ScanCommit<'_>,
+    ) -> (Option<String>, DispatchScanReceipt) {
+        let mut receipt = DispatchScanReceipt {
             bytes_parsed: delta.bytes_parsed,
             records_parsed: delta.records_parsed,
             rescanned_from_zero: scan.reset || scan.start == 0,
             ..DispatchScanReceipt::EMPTY
+        };
+        let (final_revision, digest_bytes) = match revalidate_scanned_prefix(
+            &mut delta.file,
+            scan.revision,
+            delta.verified_cursor,
+            &delta.resume_digest,
+        ) {
+            Ok(validated) => validated,
+            Err(_) => {
+                self.forget(scan.parent_path);
+                return (None, receipt);
+            }
+        };
+        receipt.prefix_digest_bytes = digest_bytes;
+        let Some(final_revision) = final_revision else {
+            self.forget(scan.parent_path);
+            return (None, receipt);
         };
         let Some(entry) = self.entries.get_mut(scan.parent_path) else {
             return (delta.transient_model, receipt);
@@ -367,18 +395,41 @@ impl ParentDispatchIndex {
     }
 }
 
-/// Whether the bytes just read through `delta.verified_cursor` are still what
-/// the file holds at those offsets.
+/// Revalidate the exact bytes parsed from one opened parent handle.
 ///
-/// A live Cursor parent is appended to *while* it is being read — that is the
-/// normal case for the sessions this index exists to serve, not a failure. The
-/// appended bytes lie beyond everything the scan verified, so the verified
-/// prefix is committed and the next pass reads the delta; discarding the whole
-/// scan instead would send the next call back to byte zero, where it can lose
-/// the same race again. Only a replaced file (new identity) or a truncation
-/// (bytes the scan read are gone) invalidates what was read.
-fn scanned_prefix_survives(scanned: ParentFileRevision, current: ParentFileRevision) -> bool {
-    scanned.identity == current.identity && current.len >= scanned.len
+/// A stable native revision needs no content read. When the revision moved,
+/// one digest of the consumed prefix distinguishes a safe append or metadata
+/// touch from an in-place rewrite. A second revision capture refuses mutation
+/// during that proof instead of polling. Work is therefore bounded to one
+/// consumed-prefix digest per changed scan revision.
+fn revalidate_scanned_prefix(
+    file: &mut File,
+    scanned: ParentFileRevision,
+    verified_cursor: u64,
+    parsed_digest: &ResumeDigest,
+) -> std::io::Result<(Option<ParentFileRevision>, u64)> {
+    let Some(current) = parent_file_revision(file)? else {
+        return Ok((None, 0));
+    };
+    if current.identity != scanned.identity
+        || current.len < scanned.len
+        || current.len < verified_cursor
+    {
+        return Ok((None, 0));
+    }
+    if current == scanned {
+        return Ok((Some(current), 0));
+    }
+
+    let expected = parsed_digest.witness(verified_cursor);
+    let (observed, digest_bytes) = jsonl_prefix_digest(file, verified_cursor)?;
+    if observed.witness(verified_cursor) != expected {
+        return Ok((None, digest_bytes));
+    }
+    if parent_file_revision(file)? != Some(current) {
+        return Ok((None, digest_bytes));
+    }
+    Ok((Some(current), digest_bytes))
 }
 
 struct ScanDelta {
@@ -717,14 +768,14 @@ mod tests {
         assert_eq!(first.records_parsed, 0);
         assert!(first.rescanned_from_zero);
 
-        for _ in 0..16 {
-            let (model, again) = lookup(&layout, "missing-agent");
+        for agent in 0..128 {
+            let (model, again) = lookup(&layout, &format!("missing-agent-{agent}"));
             assert!(model.is_none());
             assert_eq!(again.bytes_parsed, 0);
             assert_eq!(
                 again.prefix_digest_bytes, 0,
-                "an unchanged parent must be served from the cached revision \
-                 without re-hashing the verified prefix"
+                "every subagent lookup on one unchanged parent must be served \
+                 from the cached revision without re-hashing the verified prefix"
             );
             assert_eq!(again.records_parsed, 0);
             assert!(!again.rescanned_from_zero);
@@ -776,14 +827,25 @@ mod tests {
         let (model, appended) = lookup(&layout, "late-agent");
         assert_eq!(model.as_deref(), Some("late-model"));
         assert_eq!(appended.bytes_parsed, delta);
+        assert_eq!(
+            appended.prefix_digest_bytes, before_len,
+            "one changed revision performs exactly one cached-prefix proof"
+        );
         assert_eq!(appended.records_parsed, 1);
         assert!(!appended.rescanned_from_zero);
 
+        for agent in 0..128 {
+            let (model, unchanged) = lookup(&layout, &format!("post-append-agent-{agent}"));
+            assert!(model.is_none());
+            assert_eq!(unchanged.bytes_parsed, 0);
+            assert_eq!(unchanged.prefix_digest_bytes, 0);
+            assert_eq!(unchanged.records_parsed, 0);
+            assert!(!unchanged.rescanned_from_zero);
+        }
+
         let (model, unchanged) = lookup(&layout, "late-agent");
         assert_eq!(model.as_deref(), Some("late-model"));
-        assert_eq!(unchanged.bytes_parsed, 0);
-        assert_eq!(unchanged.records_parsed, 0);
-        assert!(!unchanged.rescanned_from_zero);
+        assert_eq!(unchanged, DispatchScanReceipt::EMPTY);
     }
 
     #[test]
@@ -836,10 +898,21 @@ mod tests {
         );
         restore_exact_mtime(&replacement, original_mtime);
         fs::rename(&replacement, &layout.candidate_two).unwrap();
+        let replaced_metadata = fs::metadata(&layout.candidate_two).unwrap();
+        assert_eq!(replaced_metadata.len(), original_len);
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&replaced_metadata),
+            original_mtime,
+            "replacement fixture must preserve the exact modification time"
+        );
 
         let (stale, receipt) = lookup(&layout, "old-agent");
         assert!(stale.is_none());
         assert!(receipt.rescanned_from_zero);
+        assert_eq!(
+            receipt.prefix_digest_bytes, 0,
+            "native file replacement must invalidate before prefix validation"
+        );
         assert_eq!(lookup(&layout, "new-agent").0.as_deref(), Some("new-model"));
     }
 
@@ -870,9 +943,9 @@ mod tests {
             lookup(&layout, "rewrite-agent").0.as_deref(),
             Some("old-model")
         );
-        let original_mtime = filetime::FileTime::from_last_modification_time(
-            &fs::metadata(&layout.candidate_two).unwrap(),
-        );
+        let original_metadata = fs::metadata(&layout.candidate_two).unwrap();
+        let original_len = original_metadata.len();
+        let original_mtime = filetime::FileTime::from_last_modification_time(&original_metadata);
 
         rewrite_in_place(&layout.candidate_two, &[new]);
         restore_exact_mtime(&layout.candidate_two, original_mtime);
@@ -887,6 +960,7 @@ mod tests {
             receipt.rescanned_from_zero,
             "same-length rewrite must invalidate the verified cursor"
         );
+        assert_eq!(receipt.prefix_digest_bytes, original_len);
     }
 
     #[test]
@@ -921,6 +995,7 @@ mod tests {
         let (model, receipt) = lookup(&layout, "rewrite-agent");
         assert_eq!(model.as_deref(), Some("new-model"));
         assert!(receipt.rescanned_from_zero);
+        assert_eq!(receipt.prefix_digest_bytes, original_len);
     }
 
     #[cfg(unix)]
@@ -1108,12 +1183,30 @@ mod tests {
 
     fn revision_of(path: &std::path::Path) -> super::ParentFileRevision {
         let file = fs::File::open(path).unwrap();
-        let metadata = file.metadata().unwrap();
-        super::ParentFileRevision {
-            identity: crate::runtime::source::jsonl_native_file_identity(&file, &metadata).unwrap(),
-            len: metadata.len(),
-            change: crate::runtime::source::jsonl_file_change_token(&metadata),
-        }
+        super::parent_file_revision(&file).unwrap().unwrap()
+    }
+
+    fn parsed_scan<'a>(
+        index: &mut super::ParentDispatchIndex,
+        parent_path: &'a std::path::Path,
+        agent_id: &'a str,
+    ) -> (super::ScanCommit<'a>, super::ScanDelta) {
+        let file = fs::File::open(parent_path).unwrap();
+        let revision = super::parent_file_revision(&file).unwrap().unwrap();
+        index.insert_reset(parent_path, revision);
+        let resume_digest = crate::runtime::source::ResumeDigest::new();
+        let delta = super::scan_parent_delta(file, 0, resume_digest.clone(), agent_id).unwrap();
+        (
+            super::ScanCommit {
+                parent_path,
+                revision,
+                start: 0,
+                reset: true,
+                resume_digest,
+                agent_id,
+            },
+            delta,
+        )
     }
 
     /// A live Cursor parent grows while the scan reads it. The verified prefix
@@ -1126,29 +1219,83 @@ mod tests {
             &layout.candidate_two,
             &[dispatch_record("agent_id", "live-agent", "live-model")],
         );
-        let scanned = revision_of(&layout.candidate_two);
+        let initial_len = fs::metadata(&layout.candidate_two).unwrap().len();
+        let mut index = super::ParentDispatchIndex::new();
+        let (commit, delta) = parsed_scan(&mut index, &layout.candidate_two, "live-agent");
 
+        let late = dispatch_record("agent_id", "late-agent", "late-model");
         let mut file = OpenOptions::new()
             .append(true)
             .open(&layout.candidate_two)
             .unwrap();
-        writeln!(file, "{}", ordinary_record("appended while the scan ran")).unwrap();
+        writeln!(file, "{late}").unwrap();
         file.flush().unwrap();
         drop(file);
+        let appended_len = fs::metadata(&layout.candidate_two).unwrap().len() - initial_len;
 
-        let appended = revision_of(&layout.candidate_two);
-        assert!(
-            scanned != appended,
-            "the append must change the observed revision"
+        let (model, committed) = index.commit_scanned_delta(delta, commit);
+        assert_eq!(model.as_deref(), Some("live-model"));
+        assert_eq!(committed.bytes_parsed, initial_len);
+        assert_eq!(
+            committed.prefix_digest_bytes, initial_len,
+            "one exact prefix proof must admit the append without rescanning"
         );
-        assert!(
-            super::scanned_prefix_survives(scanned, appended),
-            "an append past the verified prefix must not discard the scan"
-        );
+
+        let (late_model, caught_up) = index.lookup(&layout.candidate_two, "late-agent");
+        assert_eq!(late_model.as_deref(), Some("late-model"));
+        assert_eq!(caught_up.bytes_parsed, appended_len);
+        assert_eq!(caught_up.prefix_digest_bytes, initial_len);
+        assert!(!caught_up.rescanned_from_zero);
+
+        let (_, unchanged) = index.lookup(&layout.candidate_two, "late-agent");
+        assert_eq!(unchanged.bytes_parsed, 0);
+        assert_eq!(unchanged.prefix_digest_bytes, 0);
     }
 
     #[test]
-    fn replacing_or_truncating_during_a_scan_discards_it() {
+    fn same_length_rewrite_after_scan_discards_the_parsed_prefix() {
+        let layout = layout();
+        let old = dispatch_record("agent_id", "live-agent", "old-model");
+        let new = dispatch_record("agent_id", "live-agent", "new-model");
+        assert_eq!(old.len(), new.len(), "fixture must preserve file length");
+        write_lines(&layout.candidate_two, &[old]);
+        let original_metadata = fs::metadata(&layout.candidate_two).unwrap();
+        let original_len = original_metadata.len();
+        let original_mtime = filetime::FileTime::from_last_modification_time(&original_metadata);
+        let scanned = revision_of(&layout.candidate_two);
+        let mut index = super::ParentDispatchIndex::new();
+        let (commit, parsed) = parsed_scan(&mut index, &layout.candidate_two, "live-agent");
+        assert_eq!(
+            parsed.models.get("live-agent").map(String::as_str),
+            Some("old-model")
+        );
+
+        rewrite_in_place(&layout.candidate_two, &[new]);
+        restore_exact_mtime(&layout.candidate_two, original_mtime);
+        assert_eq!(
+            fs::metadata(&layout.candidate_two).unwrap().len(),
+            original_len
+        );
+        let rewritten = revision_of(&layout.candidate_two);
+        assert!(
+            scanned != rewritten,
+            "the opened native revision must witness the exact-mtime rewrite"
+        );
+
+        let (stale, rejected) = index.commit_scanned_delta(parsed, commit);
+        assert!(stale.is_none(), "the stale parsed model must be refused");
+        assert_eq!(rejected.bytes_parsed, original_len);
+        assert_eq!(rejected.prefix_digest_bytes, original_len);
+
+        let (model, rescanned) = index.lookup(&layout.candidate_two, "live-agent");
+        assert_eq!(model.as_deref(), Some("new-model"));
+        assert_eq!(rescanned.bytes_parsed, original_len);
+        assert_eq!(rescanned.prefix_digest_bytes, 0);
+        assert!(rescanned.rescanned_from_zero);
+    }
+
+    #[test]
+    fn truncating_after_scan_discards_it() {
         let layout = layout();
         write_lines(
             &layout.candidate_two,
@@ -1157,22 +1304,13 @@ mod tests {
                 ordinary_record("tail"),
             ],
         );
-        let scanned = revision_of(&layout.candidate_two);
+        let mut index = super::ParentDispatchIndex::new();
+        let (commit, parsed) = parsed_scan(&mut index, &layout.candidate_two, "live-agent");
 
         rewrite_in_place(&layout.candidate_two, &[ordinary_record("t")]);
-        let truncated = revision_of(&layout.candidate_two);
-        assert!(
-            !super::scanned_prefix_survives(scanned, truncated),
-            "bytes the scan read are gone, so the scan cannot be committed"
-        );
-
-        fs::remove_file(&layout.candidate_two).unwrap();
-        write_lines(&layout.candidate_two, &[ordinary_record("replacement")]);
-        let replaced = revision_of(&layout.candidate_two);
-        assert!(
-            !super::scanned_prefix_survives(scanned, replaced),
-            "a replaced file is a different transcript"
-        );
+        let (model, receipt) = index.commit_scanned_delta(parsed, commit);
+        assert!(model.is_none());
+        assert_eq!(receipt.prefix_digest_bytes, 0);
     }
 
     #[test]
