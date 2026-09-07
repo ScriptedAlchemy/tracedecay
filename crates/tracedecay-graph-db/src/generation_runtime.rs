@@ -3325,6 +3325,56 @@ mod tests {
         owner.close().unwrap();
     }
 
+    /// Retirement pages a generation out in `MAX_VERIFIED_GENERATION_BATCH_MUTATIONS`
+    /// slices. Each slice must read only the rows it retires: reading the
+    /// whole remaining projection to pick one page made a corpus release
+    /// O(rows² / page), which is what kept a first publication's serving
+    /// seat pending behind the sweep.
+    #[test]
+    fn staged_row_release_reads_each_row_once_across_its_pages() {
+        let temp = TempDir::new().unwrap();
+        let manifest = large_manifest("released-row-read-once");
+        let rows = manifest.entities.len();
+        assert!(
+            rows > crate::limits::MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+            "fixture must retire across more than one page"
+        );
+        let sealed = sealed_digest(&manifest);
+        let locator =
+            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
+        let (owner, database) = persistent_database(&temp);
+        database
+            .apply_generation_unverified_with_digest_observed(
+                arc_manifest(&manifest),
+                &sealed,
+                &|| Ok(()),
+            )
+            .unwrap();
+        crate::state::reset_retirement_page_record_reads();
+        assert!(matches!(
+            database.delete_staged_generation_rows(&locator, &|| Ok(())),
+            Ok(StagedGenerationRowsDeletion::Deleted { removed_rows: true })
+        ));
+        // Every entity is read on exactly one page. The owner label also
+        // covers the projection's own non-record node, which each page scan
+        // (including the empty terminal one) may read once more.
+        let pages = rows.div_ceil(crate::limits::MAX_VERIFIED_GENERATION_BATCH_MUTATIONS) + 1;
+        let reads = crate::state::retirement_page_record_reads();
+        assert!(
+            (rows..=rows + pages).contains(&reads),
+            "retirement read {reads} records for {rows} rows over {pages} page scans; each page \
+             must read only the rows it retires"
+        );
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0)
+        );
+        drop(database);
+        owner.close().unwrap();
+    }
+
     #[test]
     fn persistent_reopen_replays_released_rows_instead_of_false_reseat() {
         let temp = TempDir::new().unwrap();
