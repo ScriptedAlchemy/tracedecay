@@ -46,7 +46,9 @@ pub fn try_acquire_code_generation_store_lock(
             store_root,
             generation_store: true,
         })),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        // Windows LockFileEx reports ERROR_LOCK_VIOLATION (33) instead of
+        // WouldBlock. AccessDenied and sharing violations stay Storage.
+        Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
         Err(error) => Err(storage(error)),
     }
 }

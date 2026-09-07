@@ -74,7 +74,9 @@ use generation_transactions::{
 };
 #[cfg(test)]
 use generation_transactions::{
-    acquire_graph_replay_pool_lock, transaction_stage_root, verify_existing_graph_replay_pool_entry,
+    acquire_graph_replay_pool_lock, graph_replay_pool_acquire_observation,
+    reset_graph_replay_pool_acquire_observation, transaction_stage_root,
+    verify_existing_graph_replay_pool_entry,
 };
 use receipt_store::receipt_digest_file_component;
 use scope_roots::is_code_index_scope_hash;

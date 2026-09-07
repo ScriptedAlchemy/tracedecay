@@ -8,6 +8,8 @@ use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -262,6 +264,26 @@ pub(super) fn acquire_graph_replay_pool_lock_checked(
     GraphReplayPoolLockV1::acquire_exclusive(pool_root, deadline, is_cancelled)
 }
 
+#[cfg(test)]
+static GRAPH_REPLAY_POOL_ACQUIRE_TRIES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GRAPH_REPLAY_POOL_ACQUIRE_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_graph_replay_pool_acquire_observation() {
+    GRAPH_REPLAY_POOL_ACQUIRE_TRIES.store(0, Ordering::SeqCst);
+    GRAPH_REPLAY_POOL_ACQUIRE_WAITS.store(0, Ordering::SeqCst);
+}
+
+/// `(non_blocking_tries, wait_for_exclusive_calls)` since the last reset.
+#[cfg(test)]
+pub(super) fn graph_replay_pool_acquire_observation() -> (usize, usize) {
+    (
+        GRAPH_REPLAY_POOL_ACQUIRE_TRIES.load(Ordering::SeqCst),
+        GRAPH_REPLAY_POOL_ACQUIRE_WAITS.load(Ordering::SeqCst),
+    )
+}
+
 impl GraphReplayPoolLockV1 {
     fn acquire_exclusive(
         pool_root: &Path,
@@ -278,6 +300,14 @@ impl GraphReplayPoolLockV1 {
                 crate::hotpath_observe::retention_replay_pool_acquire_cancelled();
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
+            // One non-blocking try comes before the elapsed-deadline
+            // classification. A free pool must still be taken so later
+            // UnsafeState proofs (directory/symlink/corrupt pool entries)
+            // can run; a held pool returns typed busy without polling once
+            // the budget is gone. Windows lock-conflict is `Ok(None)` via
+            // `is_lock_contended`, not Storage.
+            #[cfg(test)]
+            GRAPH_REPLAY_POOL_ACQUIRE_TRIES.fetch_add(1, Ordering::SeqCst);
             match try_acquire_code_generation_store_lock(pool_root)? {
                 Some(guard) => {
                     crate::hotpath_observe::retention_replay_pool_acquired();
@@ -296,6 +326,8 @@ impl GraphReplayPoolLockV1 {
     }
 
     fn wait_for_exclusive(deadline: Instant) {
+        #[cfg(test)]
+        GRAPH_REPLAY_POOL_ACQUIRE_WAITS.fetch_add(1, Ordering::SeqCst);
         crate::hotpath_observe::retention_replay_pool_acquire_wait();
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

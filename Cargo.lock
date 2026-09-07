@@ -6383,6 +6383,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-private-fs",
  "tracedecay-runtime-core",
 ]
 
