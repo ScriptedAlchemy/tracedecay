@@ -970,6 +970,95 @@ fn remount_after_release_serves_from_the_sealed_store() {
     );
 }
 
+/// Every sealed artifact container under the graph's sealed root, by bytes.
+fn sealed_artifact_containers(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let Ok(entries) = std::fs::read_dir(sealed_store_root(root)) else {
+        return BTreeMap::new();
+    };
+    entries
+        .map(Result::unwrap)
+        .map(|entry| entry.path().join("generation.grafeo"))
+        .filter(|container| container.is_file())
+        .map(|container| {
+            let bytes = std::fs::read(&container).unwrap();
+            (container, bytes)
+        })
+        .collect()
+}
+
+/// A sealed artifact is immutable once built: reopening it to serve reads,
+/// hibernating it, closing the owning store, and adopting it again on a
+/// remount must all leave its container byte-identical. Grafeo's close-time
+/// checkpoint elision excludes the layered store a compacted artifact opens
+/// as, so a write-capable reopen re-serialized the whole container on every
+/// close — a 3.2 GB artifact doubled to 6.4 GB after one reopen in the
+/// dogfood journey. Fails if any reopen path opens the artifact write-capable.
+#[test]
+fn sealed_artifact_container_is_byte_identical_across_reopens() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("code:gen-immutable", "code");
+    let manifest = rich_manifest(identity.clone(), "immutable-g1", "immutable");
+    let record = stage_sealed_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        "publish:immutable-g1",
+        None,
+        '1',
+    );
+    let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+    let sealed = sealed_artifact_containers(temp.path());
+    assert_eq!(sealed.len(), 1, "one sealed artifact is built at publish");
+    assert_eq!(
+        release_sealed_head(
+            &registered,
+            temp.path(),
+            &mut authority,
+            &record.publication.key.projection,
+        ),
+        SealedStagingRelease::Released {
+            entities: 2,
+            relations: 1,
+        }
+    );
+    // Reads reopen the hibernated artifact; dropping the snapshot and closing
+    // the store release it again.
+    assert_snapshot_reads(&commit.snapshot, &identity, "immutable");
+    drop(commit);
+    assert!(registered.close().unwrap());
+    drop(registered);
+    assert_eq!(
+        sealed_artifact_containers(temp.path()),
+        sealed,
+        "serving and closing a sealed artifact must not rewrite its container"
+    );
+
+    let registered = RegisteredGraph::new_mounted_with_manifest_provider(
+        temp.path(),
+        Arc::new(RemountSealedProvider {
+            manifest: manifest.clone(),
+        }),
+    )
+    .unwrap();
+    let snapshot = recover_head(
+        &registered,
+        temp.path(),
+        &mut authority,
+        &record.publication.key.projection,
+    );
+    assert!(snapshot.serves_from_sealed_store());
+    assert_snapshot_reads(&snapshot, &identity, "immutable");
+    drop(snapshot);
+    assert!(registered.close().unwrap());
+    assert_eq!(
+        sealed_artifact_containers(temp.path()),
+        sealed,
+        "remount adoption must not rewrite the sealed container"
+    );
+}
+
 /// Retirement of a deleted code generation must not lazily open a hibernated
 /// staging engine; it returns `RetentionPending` and retries once a later
 /// lease has opened the engine.
