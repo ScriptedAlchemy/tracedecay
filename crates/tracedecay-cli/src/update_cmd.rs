@@ -733,6 +733,7 @@ fn reconcile_materialized_managed_skills_after_update() {
             &start,
         );
     tracedecay_automation_runtime::automation::skill_materialization::reconcile_after_activation(
+        &tracedecay_agent_hosts::host_io(),
         &profile_root,
         &project_root,
     );

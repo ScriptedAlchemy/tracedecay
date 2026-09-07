@@ -233,6 +233,7 @@ impl AgentIntegration for VibeIntegration {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
+            &crate::host_io(),
             profile_root,
             SkillInstallTarget::Agents,
             &prompt_path,
@@ -253,6 +254,7 @@ impl AgentIntegration for VibeIntegration {
             return Ok(Vec::new());
         }
         Ok(vec![install_managed_skills(
+            &crate::host_io(),
             profile_root,
             SkillInstallTarget::Agents,
             &prompt_path,

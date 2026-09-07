@@ -127,6 +127,7 @@ impl AgentIntegration for HermesIntegration {
         let mut exports = Vec::new();
         for plugin_dir in detected_plugin_dirs(home) {
             exports.push(tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Hermes,
                 &plugin_dir,
