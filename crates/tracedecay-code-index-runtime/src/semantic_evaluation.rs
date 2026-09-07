@@ -622,7 +622,8 @@ pub struct DaemonSemanticEvaluationWorkerOwnerV1 {
     /// chunker revision and privacy partition. Nothing request-scoped is
     /// retained here -- cancellation, leases, query factories and publication
     /// bindings are all rebuilt per request -- and the cache is byte-bounded
-    /// and released on shutdown.
+    /// for completed batches, accounts its in-flight and borrowed allocations
+    /// separately, and is irreversibly retired on shutdown.
     projection_batch_store: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchStoreV1>,
 }
 
@@ -831,10 +832,22 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
                 .workers
                 .extend(pending);
         }
-        // Shutdown returns the retained projection bytes even when a worker
-        // outlived the deadline: the cache holds no request state, so nothing
-        // still running depends on an entry surviving.
+        // Retirement clears completed batches and fences every late claim or
+        // installation. Outliving builders and warm-hit clones remain visible
+        // in the accounting until their guards and request handles settle.
         self.projection_batch_store.release();
+        let cache_memory = self.projection_batch_store.memory_usage();
+        tracing::info!(
+            retired = cache_memory.retired,
+            retained_batch_bytes = cache_memory.retained_batch_bytes,
+            in_flight_key_bytes = cache_memory.in_flight_key_bytes,
+            active_lookup_key_bytes = cache_memory.active_lookup_key_bytes,
+            active_hit_vector_bytes = cache_memory.active_hit_vector_bytes,
+            total_accounted_bytes = cache_memory.total_accounted_bytes,
+            peak_accounted_bytes = cache_memory.peak_accounted_bytes,
+            remaining_workers,
+            "semantic evaluation projection cache retired"
+        );
         SemanticEvaluationShutdownReceiptV1 {
             joined_workers,
             failed_workers,
@@ -1821,6 +1834,64 @@ mod lifecycle_tests {
             !work_started.load(Ordering::Acquire),
             "cancelled semantic evaluation must not bypass scheduler admission"
         );
+    }
+
+    #[tokio::test]
+    async fn shared_scheduler_admission_bounds_parallel_project_evaluations() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let first_owner = Arc::new(
+            DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(Arc::clone(&admission)),
+        );
+        let second_owner = Arc::new(
+            DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(Arc::clone(&admission)),
+        );
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+        let first = {
+            let owner = Arc::clone(&first_owner);
+            tokio::spawn(async move {
+                owner
+                    .execute(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        CancellationToken::new(),
+                        move |_control| async move {
+                            let _ = first_started_tx.send(());
+                            let _ = release_first_rx.await;
+                            Ok::<(), SemanticActivationCoordinationErrorV1>(())
+                        },
+                    )
+                    .await
+            })
+        };
+        first_started_rx.await.expect("first project admitted");
+
+        let (second_started_tx, mut second_started_rx) = tokio::sync::oneshot::channel();
+        let second = {
+            let owner = Arc::clone(&second_owner);
+            tokio::spawn(async move {
+                owner
+                    .execute(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        CancellationToken::new(),
+                        move |_control| async move {
+                            let _ = second_started_tx.send(());
+                            Ok::<(), SemanticActivationCoordinationErrorV1>(())
+                        },
+                    )
+                    .await
+            })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second_started_rx)
+                .await
+                .is_err(),
+            "a second project's evaluation must wait for the shared owner admission"
+        );
+
+        release_first_tx.send(()).expect("release first project");
+        assert_eq!(first.await.expect("first task"), Ok(()));
+        second_started_rx.await.expect("second project admitted");
+        assert_eq!(second.await.expect("second task"), Ok(()));
     }
 
     #[test]
