@@ -247,6 +247,58 @@ def command_realpath(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resident_memory_kib(pid: int) -> tuple[int | None, int | None]:
+    """Current and peak resident set size of `pid` in KiB, when measurable.
+
+    Linux exposes both through `/proc/<pid>/status` (`VmRSS`, `VmHWM`). Other
+    Unix kernels report the current size through `ps`; they have no portable
+    peak, so the caller keeps its own high-water mark across samples. A
+    process that has already exited yields no measurement rather than an
+    error: the sample is evidence, never a liveness check.
+    """
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        status = status_path.read_text(encoding="utf-8")
+    except OSError:
+        status = None
+    if status is not None:
+        current = peak = None
+        for line in status.splitlines():
+            key, _, rest = line.partition(":")
+            fields = rest.split()
+            if not fields or not fields[0].isdigit():
+                continue
+            if key == "VmRSS":
+                current = int(fields[0])
+            elif key == "VmHWM":
+                peak = int(fields[0])
+        return current, peak
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or not value.isdigit():
+        return None, None
+    return int(value), None
+
+
+def _render_kib(value: int | None) -> str:
+    return "unavailable" if value is None else str(value)
+
+
+def command_resident_memory(args: argparse.Namespace) -> int:
+    current, peak = _resident_memory_kib(args.pid)
+    print(f"rss_kib={_render_kib(current)} peak_rss_kib={_render_kib(peak)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -282,6 +334,10 @@ def build_parser() -> argparse.ArgumentParser:
     realpath = subparsers.add_parser("realpath")
     realpath.add_argument("path")
     realpath.set_defaults(func=command_realpath)
+
+    resident_memory = subparsers.add_parser("resident-memory")
+    resident_memory.add_argument("--pid", required=True, type=_positive_pid)
+    resident_memory.set_defaults(func=command_resident_memory)
     return parser
 
 

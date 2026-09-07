@@ -91,6 +91,8 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
     let (phrases, remainder) = split_quoted(query);
     let mut clauses = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut lexical_terms = Vec::new();
+    let mut seen_lexical_terms = BTreeSet::new();
 
     push_clause(
         &mut clauses,
@@ -132,11 +134,16 @@ pub fn plan_candidates(query: &str) -> CandidatePlan {
                 token.to_string(),
             );
         }
+        if seen_lexical_terms.insert(token) {
+            lexical_terms.push(token);
+        }
+    }
+    if !lexical_terms.is_empty() {
         push_clause(
             &mut clauses,
             &mut seen,
             CandidateChannel::Lexical,
-            token.to_string(),
+            lexical_terms.join(" "),
         );
     }
 
@@ -312,8 +319,10 @@ mod tests {
         assert!(plan.contains(CandidateChannel::Phrase, "fatal: path/to/file.rs:42"));
         assert!(plan.contains(CandidateChannel::Entity, "panic!(\"boom\")"));
         assert!(plan.contains(CandidateChannel::Entity, "E0425"));
-        assert!(plan.contains(CandidateChannel::Lexical, "日本語"));
-        assert!(plan.contains(CandidateChannel::Lexical, "🚨"));
+        assert!(plan.contains(
+            CandidateChannel::Lexical,
+            r#"panic!("boom") E0425 日本語 🚨 foo::bar"#
+        ));
         assert!(plan.contains(CandidateChannel::Entity, "foo::bar"));
         assert!(!plan.has_semantic_channel());
     }
@@ -332,6 +341,19 @@ mod tests {
     #[test]
     fn empty_queries_produce_no_candidates() {
         assert!(plan_candidates(" \t\n").clauses().is_empty());
+    }
+
+    #[test]
+    fn lexical_terms_share_one_deduplicated_candidate_lane() {
+        let plan = plan_candidates("workflow correction workflow repeated");
+        let lexical = plan
+            .clauses()
+            .iter()
+            .filter(|clause| clause.channel == CandidateChannel::Lexical)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lexical.len(), 1);
+        assert_eq!(lexical[0].value, "workflow correction repeated");
     }
 
     #[test]
@@ -361,10 +383,8 @@ mod tests {
         let plan = plan_candidates(query);
 
         assert!(plan.contains(CandidateChannel::ExactMessage, query));
-        assert!(plan.contains(CandidateChannel::Lexical, "don't"));
+        assert!(plan.contains(CandidateChannel::Lexical, query));
         assert!(plan.contains(CandidateChannel::Entity, "[path/to/file.rs],"));
-        assert!(plan.contains(CandidateChannel::Lexical, "{cfg:debug};"));
-        assert!(plan.contains(CandidateChannel::Lexical, "done"));
     }
 
     #[test]
@@ -381,10 +401,8 @@ mod tests {
         assert!(plan.contains(CandidateChannel::Entity, query));
         assert!(plan.contains(CandidateChannel::Entity, "path/to/weird,file.rs;"));
         assert!(plan.contains(CandidateChannel::Entity, "E0425"));
-        assert!(plan.contains(CandidateChannel::Lexical, "don't"));
+        assert!(plan.contains(CandidateChannel::Lexical, query));
         assert!(plan.contains(CandidateChannel::Entity, "panic!(\"x\")"));
-        assert!(plan.contains(CandidateChannel::Lexical, "日本語"));
-        assert!(plan.contains(CandidateChannel::Lexical, "🚨"));
         assert!(!plan.clauses().iter().any(|clause| clause.channel
             == CandidateChannel::ExactMessage
             && clause.value != query));
@@ -399,8 +417,7 @@ mod tests {
                 .iter()
                 .any(|clause| clause.channel == CandidateChannel::Phrase)
         );
-        assert!(plan.contains(CandidateChannel::Lexical, r#"prefix"not-a-phrase"#));
-        assert!(plan.contains(CandidateChannel::Lexical, "suffix"));
+        assert!(plan.contains(CandidateChannel::Lexical, r#"prefix"not-a-phrase suffix"#));
 
         let plan = plan_candidates(r#""unterminated phrase value"#);
         assert!(

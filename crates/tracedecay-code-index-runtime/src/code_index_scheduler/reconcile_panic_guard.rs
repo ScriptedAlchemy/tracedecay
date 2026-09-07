@@ -361,6 +361,10 @@ pub enum ReconcileFaultKindV1 {
     /// is shaped like a capacity refusal and is not one: no release by any
     /// other holder can ever admit it.
     OversizedCapacity,
+    /// A source observation superseded the active reconcile.
+    Cancelled,
+    /// The active reconcile exhausted its own deadline.
+    DeadlineExceeded,
     /// A refusal the same input reproduces forever.
     Permanent,
 }
@@ -422,6 +426,18 @@ impl ReconcileFaultInjectionV1 {
                     },
                 ))
             }
+            ReconcileFaultKindV1::Cancelled => Err(
+                crate::code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                )
+                .into(),
+            ),
+            ReconcileFaultKindV1::DeadlineExceeded => Err(
+                crate::code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+                )
+                .into(),
+            ),
             ReconcileFaultKindV1::Permanent => Err(super::CodeIndexSchedulerErrorV1::Identity(
                 "injected permanent reconcile refusal".to_owned(),
             )),
