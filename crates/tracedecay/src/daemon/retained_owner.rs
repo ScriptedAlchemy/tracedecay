@@ -9,7 +9,7 @@ use tracedecay_application::{
     RequestAdmission, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfacePortsV1, now_micros,
 };
-use tracedecay_daemon_service::DaemonInvocationService;
+use tracedecay_daemon_service::{DaemonInvocationService, RetainedRuntimeStoreAuthorityV1};
 use tracedecay_domain::ManifestDigest;
 
 use crate::tracedecay::TraceDecay;
@@ -57,6 +57,16 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
         Option<Arc<dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>>,
     pub(crate) configuration_digest: ManifestDigest,
     pub(crate) invocation_service: Option<DaemonInvocationService>,
+}
+
+/// The store authority the retained ports built over `graph` answer for: the
+/// project graph store's live binding and verified locator.
+pub(crate) fn retained_store_authority(graph: &TraceDecay) -> RetainedRuntimeStoreAuthorityV1 {
+    let client = graph.db().runtime_client();
+    RetainedRuntimeStoreAuthorityV1::new(
+        client.binding().clone(),
+        client.verified_locator().clone(),
+    )
 }
 
 pub(crate) fn retained_surface_ports(

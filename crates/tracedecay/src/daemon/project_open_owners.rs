@@ -815,6 +815,7 @@ pub(super) async fn register_project_open_production_owners(
             scope.clone(),
             requester.clone(),
             retained_grant,
+            super::retained_owner::retained_store_authority(&graph),
             retained_ports,
         ),
         label = "daemon.project.open.owners.retained"

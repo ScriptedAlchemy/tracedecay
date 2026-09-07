@@ -1236,6 +1236,7 @@ mod tests {
                     scope,
                     access.requester,
                     grant,
+                    crate::daemon::retained_owner::retained_store_authority(&memory),
                     retained_ports,
                 )
                 .await

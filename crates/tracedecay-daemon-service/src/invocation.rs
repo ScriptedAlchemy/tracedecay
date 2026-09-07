@@ -263,8 +263,8 @@ pub use types::{
 };
 pub use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredRetainedRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
-    UnavailableFeedbackCycleRuntimeV1,
+    RegisteredRetainedRuntime, RegisteredWorkRuntime, RetainedRuntimeStoreAuthorityV1,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use work::execute_work_application;

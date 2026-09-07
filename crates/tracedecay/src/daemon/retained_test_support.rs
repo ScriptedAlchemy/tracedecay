@@ -182,7 +182,14 @@ pub(crate) async fn register_project_retained_owner_for_test(
         access.configuration_digest.clone(),
     );
     DaemonRetainedRuntimeRegistrar::new(service)
-        .register(project_root, scope, access.requester, grant, ports)
+        .register(
+            project_root,
+            scope,
+            access.requester,
+            grant,
+            super::retained_owner::retained_store_authority(&graph),
+            ports,
+        )
         .await
 }
 

@@ -715,13 +715,71 @@ impl RegisteredWorkRuntime {
     }
 }
 
+/// The exact project store a retained runtime's ports answer for.
+///
+/// Retained-runtime identity is canonical authority, never object identity:
+/// every project open constructs fresh ports, so two registrations for one
+/// root are the same runtime exactly when their scope, actor, and this store
+/// authority agree. The verified locator names the physical store and the
+/// binding names its live publication; two stores that share a project id are
+/// distinct authorities, as are two publications of one store. The grant is
+/// deliberately not identity: it is minted per open from the then-current
+/// configuration revision, so the live route's grant supersedes the retired
+/// route's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedRuntimeStoreAuthorityV1 {
+    binding: tracedecay_store::StoreRuntimeBindingV1,
+    verified_locator: tracedecay_store::VerifiedStoreLocatorV1,
+}
+
+impl RetainedRuntimeStoreAuthorityV1 {
+    pub fn new(
+        binding: tracedecay_store::StoreRuntimeBindingV1,
+        verified_locator: tracedecay_store::VerifiedStoreLocatorV1,
+    ) -> Self {
+        Self {
+            binding,
+            verified_locator,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RegisteredRetainedRuntime {
     pub(super) scope: ResolvedScope,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
+    pub(super) store: RetainedRuntimeStoreAuthorityV1,
     pub(super) ports:
         Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+}
+
+impl RegisteredRetainedRuntime {
+    /// Whether this registration is the same runtime as one described by
+    /// `scope`, `actor`, and `store`.
+    pub(super) fn is_same_authority(
+        &self,
+        scope: &ResolvedScope,
+        actor: &ActorId,
+        store: &RetainedRuntimeStoreAuthorityV1,
+    ) -> bool {
+        self.scope == *scope && self.actor == *actor && self.store == *store
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ports_ptr_eq(
+        &self,
+        ports: &Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+    ) -> bool {
+        Arc::ptr_eq(&self.ports, ports)
+    }
+
+    /// Whether two registration snapshots execute through the same ports —
+    /// false once a same-authority reopen has rebound the route.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn shares_ports_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ports, &other.ports)
+    }
 }
 
 pub struct RegisteredFeedbackRuntime {

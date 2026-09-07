@@ -1173,6 +1173,16 @@ impl DaemonRetainedRuntimeRegistrar {
         }
     }
 
+    /// Register the retained runtime for `project_root`, or rebind the
+    /// incumbent when it is the same canonical authority.
+    ///
+    /// `store` must be the authority of the project store `ports` were built
+    /// over. A route that reopens the same root constructs new ports and a
+    /// grant from the current configuration revision; when its scope, actor,
+    /// and store authority match the incumbent, the incumbent's grant and
+    /// ports are replaced together so requests execute through the live route
+    /// rather than the retired one. Any other incumbent is a foreign runtime
+    /// and the registration is refused.
     #[hotpath::skip]
     pub async fn register(
         &self,
@@ -1180,6 +1190,7 @@ impl DaemonRetainedRuntimeRegistrar {
         scope: ResolvedScope,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
+        store: RetainedRuntimeStoreAuthorityV1,
         ports: Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
     ) -> Result<(), TraceDecayError> {
         if grant.scope != scope || grant.issuer != actor {
@@ -1192,16 +1203,15 @@ impl DaemonRetainedRuntimeRegistrar {
             .register_or_reconcile(
                 project_root,
                 |registered: &mut RegisteredRetainedRuntime| {
-                    if registered.scope == scope
-                        && registered.actor == actor
-                        && registered.grant.digest == grant.digest
-                        && Arc::ptr_eq(&registered.ports, &ports)
-                    {
+                    if registered.is_same_authority(&scope, &actor, &store) {
                         registered.grant = grant.clone();
+                        registered.ports = Arc::clone(&ports);
                         Ok(())
                     } else {
                         Err(TraceDecayError::Config {
-                            message: "a different retained runtime is already registered for this project"
+                            message: "a retained runtime for a different project scope, actor, \
+                                      or store authority is already registered for this \
+                                      project root"
                                 .to_owned(),
                         })
                     }
@@ -1211,6 +1221,7 @@ impl DaemonRetainedRuntimeRegistrar {
                         scope: scope.clone(),
                         actor: actor.clone(),
                         grant: grant.clone(),
+                        store: store.clone(),
                         ports: Arc::clone(&ports),
                     })
                 },

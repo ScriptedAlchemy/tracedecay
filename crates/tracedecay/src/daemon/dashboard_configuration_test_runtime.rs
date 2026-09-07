@@ -435,6 +435,7 @@ pub(crate) async fn register_dashboard_test_retained_runtime(
             scope,
             retained_access.requester,
             retained_grant,
+            super::retained_owner::retained_store_authority(cg),
             retained_ports,
         )
         .await

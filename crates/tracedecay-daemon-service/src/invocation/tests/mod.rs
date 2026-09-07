@@ -98,3 +98,4 @@ mod git_tests;
 mod handoff_tests;
 mod invocation_observability_tests;
 mod project_admission_tests;
+mod retained_registrar_tests;
