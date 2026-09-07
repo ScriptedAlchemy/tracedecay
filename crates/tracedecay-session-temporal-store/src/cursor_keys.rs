@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::fmt;
 
 use thiserror::Error;
