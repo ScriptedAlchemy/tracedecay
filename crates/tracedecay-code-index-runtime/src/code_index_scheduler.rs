@@ -4892,7 +4892,11 @@ impl LatestCodeTextGenerationV1 {
             *slot = CodeTextProjectionSlotV1::HeadOpening;
             drop(slot);
             let mut claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
-            match self.open_published_head_or_begin_build(control)? {
+            let outcome = hotpath::measure_block!(
+                "query.artifact.head_open",
+                self.open_published_head_or_begin_build(control)
+            )?;
+            match outcome {
                 TextHeadOpenOutcomeV1::Served => return Ok(true),
                 TextHeadOpenOutcomeV1::Build(initialized) => {
                     slot = claim.install_build(initialized);
@@ -5026,14 +5030,17 @@ impl LatestCodeTextGenerationV1 {
                             )
                         })
                     })?;
-                    self.publish_text_progress_boundary(
-                        artifact_build,
-                        progress,
-                        CodeIndexBuildPhaseV1::BulkCommit,
-                        u64::try_from(page_count).unwrap_or(u64::MAX),
-                        batch_payload_bytes,
-                        commit_latency_micros,
-                        true,
+                    hotpath::measure_block!(
+                        "query.artifact.batch.progress_publish",
+                        self.publish_text_progress_boundary(
+                            artifact_build,
+                            progress,
+                            CodeIndexBuildPhaseV1::BulkCommit,
+                            u64::try_from(page_count).unwrap_or(u64::MAX),
+                            batch_payload_bytes,
+                            commit_latency_micros,
+                            true,
+                        )
                     )?;
                     #[cfg(feature = "hotpath")]
                     {

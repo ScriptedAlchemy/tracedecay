@@ -55,14 +55,6 @@ pub enum GraphDurability {
     /// 6.4 GB (the new generation appended past the live one) and moved the
     /// mtime its verify-once marker was bound to.
     SealedReadOnly,
-    /// Creates the prospective container a sealed build writes: write-capable,
-    /// no sidecar WAL, so the closing checkpoint is the container's one and
-    /// only durable write. A build that does not reach `close` leaves nothing
-    /// recoverable, by design: the artifact directory is receipted only after
-    /// close and any interrupted build is discarded and rebuilt from the
-    /// source rows on the next attempt, so a WAL here logged every copied row
-    /// a second time for a recovery that never reads it.
-    SealedBuild,
 }
 
 #[derive(Clone)]
@@ -153,17 +145,6 @@ impl GraphDbOpenOptions {
                             ));
                         }
                         Config::read_only(&path).with_storage_format(StorageFormat::SingleFile)
-                    }
-                    GraphDurability::SealedBuild => {
-                        if preexisting_store {
-                            return Err(GraphDbError::invalid(
-                                "sealed builds require a prospective container path",
-                            ));
-                        }
-                        let mut config = Config::persistent(&path)
-                            .with_storage_format(StorageFormat::SingleFile);
-                        config.wal_enabled = false;
-                        config
                     }
                     GraphDurability::Memory => {
                         return Err(GraphDbError::invalid(

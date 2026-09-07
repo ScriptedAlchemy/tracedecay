@@ -38,7 +38,6 @@ mod code_graph_layout;
 mod metadata_replay;
 #[path = "verified_generation_contract/replay_decode.rs"]
 mod replay_decode;
-#[cfg(feature = "graph-sealed-store")]
 #[path = "verified_generation_contract/sealed_store.rs"]
 mod sealed_store;
 #[path = "verified_generation_contract/staging_footprint.rs"]

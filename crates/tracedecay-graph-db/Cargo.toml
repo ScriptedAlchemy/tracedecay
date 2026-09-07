@@ -31,7 +31,7 @@ hotpath-cpu = [
     "tracedecay-private-fs/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
 ]
-test-helpers = ["graph-sealed-store"]
+test-helpers = []
 eval-helpers = []
 
 # Opt-in tiered graph storage (never in `default`).
@@ -40,9 +40,10 @@ eval-helpers = []
 # things under the "tiered" name and only one of them is usable here.
 #
 # `graph-disk-tier` is the half that *could* be disk-backed:
-#   * `grafeo-engine/mmap` + `compact-store` compile in
-#     `database/compact_tiered.rs`, which serializes a `CompactStore`,
-#     mmaps it, and serves reads from the mapping.
+#   * `grafeo-engine/mmap` + `compact-store` (always on, see the
+#     dependency block below) compile in `database/compact_tiered.rs`,
+#     which serializes a `CompactStore`, mmaps it, and serves reads from
+#     the mapping.
 #   * `grafeo-engine/spill` enables the buffer manager's spill loop so
 #     `Config::with_spill_path` has any effect at all.
 # It also makes `GraphDbOpen` hand grafeo a spill directory and a bounded
@@ -64,29 +65,7 @@ eval-helpers = []
 # `CompactStore`; all writes still land in a RAM-only `LpgStore` overlay.
 # Spilling covers the vector/text/ring index buffers and query scratch,
 # never LPG data.
-graph-disk-tier = [
-    "graph-sealed-store",
-    "grafeo-engine/mmap",
-    "grafeo-engine/compact-store",
-    "grafeo-engine/spill",
-]
-
-# Per-generation sealed compact stores (`src/sealed_store.rs`): at seal time
-# the verified generation's rows are copied into their own single-generation
-# Grafeo database, compacted with `GrafeoDB::compact()` (whose whole-database
-# scope then coincides exactly with the one immutable generation), and served
-# read-only after a recovered-digest proof. This is the narrow slice of the
-# grafeo storage features that lane needs: `compact-store` for `compact()`
-# and the columnar section, `mmap` for the mmap-backed base on reopen. It
-# deliberately excludes `spill`, so the staging database's memory behavior is
-# untouched — see `graph-disk-tier` above for that half.
-#
-# Without this feature the sealed-store lane is compiled out and every read
-# serves from the staging database exactly as before.
-graph-sealed-store = [
-    "grafeo-engine/mmap",
-    "grafeo-engine/compact-store",
-]
+graph-disk-tier = ["grafeo-engine/spill"]
 
 # `graph-tiered-storage` adds grafeo-core's own `tiered-storage` feature on
 # top. Despite the name that feature is NOT about disk: it swaps the LPG
@@ -125,8 +104,17 @@ graph-tiered-storage = [
 [dependencies]
 grafeo-adapters.workspace = true
 grafeo-common.workspace = true
-grafeo-core.workspace = true
-grafeo-engine.workspace = true
+# Per-generation sealed compact stores (`src/sealed_store.rs`) are the one
+# production seal path: every verified generation's rows are streamed into a
+# columnar `CompactStore` (`IncrementalCompactStoreBuilder`) and written as
+# their own single-generation container (`GrafeoDB::write_compact_container`),
+# then served read-only after a recovered-digest proof. `compact-store`
+# supplies the builder and the columnar section, `mmap` the mmap-backed base
+# on reopen. `spill` stays opt-in (`graph-disk-tier`) so the staging
+# database's memory behavior is untouched. `TRACEDECAY_GRAPH_SEALED_STORE=off`
+# is the runtime kill-switch that keeps reads on the staging database.
+grafeo-core = { workspace = true, features = ["compact-store"] }
+grafeo-engine = { workspace = true, features = ["mmap", "compact-store"] }
 grafeo-storage.workspace = true
 fs2 = "0.4"
 hex = "0.4"

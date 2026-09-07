@@ -23,7 +23,7 @@ use super::publication_support::{
     retain_lease_closure, validate_exact_dependency_closure, validate_replay_cursor,
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
-use crate::generation::{metadata_manifest_from_replay, validate_supplied_manifest_binding};
+use crate::generation::{metadata_manifest_from_source, validate_supplied_manifest_binding};
 use crate::generation_runtime::{GenerationContentsDeletion, GenerationStageOutcome};
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
@@ -391,6 +391,12 @@ impl GraphDbRegistry {
                     &identity,
                     &relational_recovered_digest,
                 )?;
+            } else if database.sealed_generation_reader(&locator).is_none() {
+                // No staging trace and no installed reader: the retired
+                // generation was sealed straight from its manifest, or its
+                // rows were already released. Either way there is nothing
+                // left in the staging database for this sweep to delete.
+                return Ok(SealedStagingRelease::AlreadyReleased);
             }
         }
         if let Some(installed) = database.installed_verified_generation(&locator)? {
@@ -1163,7 +1169,20 @@ impl GraphDbRegistry {
                 ));
             }
         };
-        let metadata_manifest = metadata_manifest_from_replay(&replay.publication, &check)?;
+        let source = crate::generation::checked_decode_replay_source(
+            &replay.publication.canonical_replay_source,
+            &check,
+        )?;
+        // A code generation hydrated from its durable sealed replay can be
+        // sealed straight from that manifest: the journal (and the code
+        // generation it names) is the recovery source for every failure
+        // boundary of the build, so no staging copy is ever needed. Inline
+        // and supplied manifests keep the staging proof — their rows have no
+        // durable home other than the staging database.
+        let direct_seal_source =
+            matches!(source, GraphGenerationReplaySource::SealedCodeGeneration(_));
+        let metadata_manifest =
+            metadata_manifest_from_source(&replay.publication, &source, &check)?;
         let metadata_only = metadata_manifest.is_some();
         let has_supplied_manifest = supplied_manifest.is_some();
         let manifest = match supplied_manifest {
@@ -1173,8 +1192,9 @@ impl GraphDbRegistry {
             }
             None => match metadata_manifest {
                 Some(manifest) => Arc::new(manifest),
-                None => Arc::new(GraphGenerationManifest::from_replay(
+                None => Arc::new(GraphGenerationManifest::from_replay_source(
                     &replay.publication,
+                    source,
                     self.inner.manifest_provider.as_ref(),
                     &check,
                 )?),
@@ -1189,6 +1209,7 @@ impl GraphDbRegistry {
         // returns.
         let identity = manifest.identity();
         let (entity_rows, relation_rows) = manifest.row_counts();
+        let direct_seal_eligible = direct_seal_source && identity.dependencies.is_empty();
         crate::hotpath_observe::record_counts(entity_rows, relation_rows, 1, 0);
         crate::hotpath_observe::record_hydration_source(if has_supplied_manifest {
             crate::hotpath_observe::HydrationSource::Supplied
@@ -1400,43 +1421,54 @@ impl GraphDbRegistry {
                 let (historical_commit, recovered_digest) =
                     match (apply_native, has_supplied_manifest) {
                         (true, _) => {
-                            let staged = database
-                                .apply_generation_unverified_with_digest_observed(
-                                    manifest,
-                                    sealed_digest,
-                                    &check,
-                                )?;
-                            match staged {
-                                GenerationStageOutcome::Applied(commit) => {
-                                    // A repair that wrote missing native rows is
-                                    // a new seal: build and prove its derived
-                                    // artifact before seating it.
-                                    let (_, recovered) = database
-                                        .verify_generation_for_publication(
-                                            &identity,
-                                            sealed_digest,
-                                            row_counts,
-                                            true,
-                                            &check,
-                                        )?;
-                                    (commit, recovered)
-                                }
-                                GenerationStageOutcome::Reseated(commit) => {
-                                    // An already-complete generation is an
-                                    // activation. Verify the staging authority
-                                    // and adopt an existing sealed artifact, but
-                                    // never construct a missing whole-generation
-                                    // copy before the rows can serve.
-                                    let recovered = database.verify_activated_generation(
-                                        &identity,
+                            if let Some(commit) = direct_seal(
+                                &database,
+                                &manifest,
+                                sealed_digest,
+                                direct_seal_eligible,
+                                &check,
+                            )? {
+                                drop(manifest);
+                                (commit, sealed_digest.clone())
+                            } else {
+                                let staged = database
+                                    .apply_generation_unverified_with_digest_observed(
+                                        manifest,
                                         sealed_digest,
                                         &check,
                                     )?;
-                                    database.open_sealed_generation_store_if_present(
-                                        &identity,
-                                        sealed_digest,
-                                    )?;
-                                    (commit, recovered)
+                                match staged {
+                                    GenerationStageOutcome::Applied(commit) => {
+                                        // A repair that wrote missing native rows is
+                                        // a new seal: build and prove its derived
+                                        // artifact before seating it.
+                                        let (_, recovered) = database
+                                            .verify_generation_for_publication(
+                                                &identity,
+                                                sealed_digest,
+                                                row_counts,
+                                                true,
+                                                &check,
+                                            )?;
+                                        (commit, recovered)
+                                    }
+                                    GenerationStageOutcome::Reseated(commit) => {
+                                        // An already-complete generation is an
+                                        // activation. Verify the staging authority
+                                        // and adopt an existing sealed artifact, but
+                                        // never construct a missing whole-generation
+                                        // copy before the rows can serve.
+                                        let recovered = database.verify_activated_generation(
+                                            &identity,
+                                            sealed_digest,
+                                            &check,
+                                        )?;
+                                        database.open_sealed_generation_store_if_present(
+                                            &identity,
+                                            sealed_digest,
+                                        )?;
+                                        (commit, recovered)
+                                    }
                                 }
                             }
                         }
@@ -1541,21 +1573,40 @@ impl GraphDbRegistry {
             // last durable page commit, so the artifact proof below runs
             // without them resident.
             (true, _) | (false, true) => {
-                let staged = database.apply_generation_unverified_with_digest_observed(
-                    manifest,
+                // A sealed-replay code generation seals straight from the
+                // manifest; its reopen proof is the verification, so its
+                // faults are retained exactly like the staging proof's.
+                let direct = direct_seal(
+                    &database,
+                    &manifest,
                     sealed_digest,
+                    direct_seal_eligible,
                     &check,
-                )?;
-                let commit = staged.commit();
-                database
-                    .verify_generation_for_publication(
-                        &identity,
-                        sealed_digest,
-                        row_counts,
-                        true,
-                        &check,
-                    )
-                    .map(|(_, recovered)| (commit, recovered))
+                );
+                match direct {
+                    Ok(Some(commit)) => {
+                        drop(manifest);
+                        Ok((commit, sealed_digest.clone()))
+                    }
+                    Ok(None) => {
+                        let staged = database.apply_generation_unverified_with_digest_observed(
+                            manifest,
+                            sealed_digest,
+                            &check,
+                        )?;
+                        let commit = staged.commit();
+                        database
+                            .verify_generation_for_publication(
+                                &identity,
+                                sealed_digest,
+                                row_counts,
+                                true,
+                                &check,
+                            )
+                            .map(|(_, recovered)| (commit, recovered))
+                    }
+                    Err(error) => Err(error),
+                }
             }
             (false, false) if reopen_metadata => {
                 drop(manifest);
@@ -2030,18 +2081,19 @@ impl GraphDbRegistry {
         )?;
         require_head_replay(&head, &replay)?;
         let check = || operation.check(self, context);
-        let sealed_code_generation = matches!(
-            crate::generation::checked_decode_replay_source(
-                &replay.publication.canonical_replay_source,
-                &check,
-            )?,
-            GraphGenerationReplaySource::SealedCodeGeneration(_)
-        );
-        let metadata_manifest = metadata_manifest_from_replay(&replay.publication, &check)?;
+        let source = crate::generation::checked_decode_replay_source(
+            &replay.publication.canonical_replay_source,
+            &check,
+        )?;
+        let sealed_code_generation =
+            matches!(source, GraphGenerationReplaySource::SealedCodeGeneration(_));
+        let metadata_manifest =
+            metadata_manifest_from_source(&replay.publication, &source, &check)?;
         let manifest = match metadata_manifest {
             Some(manifest) => manifest,
-            None => GraphGenerationManifest::from_replay(
+            None => GraphGenerationManifest::from_replay_source(
                 &replay.publication,
+                source,
                 self.inner.manifest_provider.as_ref(),
                 &check,
             )?,
@@ -2213,6 +2265,26 @@ fn describe_verified_head(head: Option<&GraphVerifiedHeadV1>) -> String {
     }
 }
 
+/// Seals an eligible generation straight from its manifest, bypassing the
+/// staging database entirely; see [`GraphDb::seal_generation_from_manifest`].
+///
+/// `Ok(None)` means the generation must be staged and proven the ordinary
+/// way: it is not eligible (its rows have no durable home outside staging,
+/// or it carries dependencies whose endpoints live there), or the sealed
+/// lane cannot serve this database.
+fn direct_seal(
+    database: &GraphDbLeaseV1,
+    manifest: &GraphGenerationManifest,
+    expected: &GraphRecoveredGenerationDigestV1,
+    eligible: bool,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Option<GraphCommit>, GraphDbError> {
+    if !eligible {
+        return Ok(None);
+    }
+    database.seal_generation_from_manifest(manifest, expected, check)
+}
+
 /// Seats a verified lease for a historical (already durably linearized)
 /// publication and assembles its commit receipt.
 ///
@@ -2262,7 +2334,6 @@ mod historical_publication_reuse_tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::UtcMicros;
-    #[cfg(feature = "graph-sealed-store")]
     use tracedecay_domain::{CodeGenerationId, RepositoryId};
     use tracedecay_store::runtime::GraphReplayRetirementOutcomeV1;
     use tracedecay_store::{
@@ -2287,10 +2358,9 @@ mod historical_publication_reuse_tests {
 
     use crate::generation::{
         recovered_generation_enumerations, reset_recovered_generation_enumerations,
-        reset_sealed_copy_proofs, sealed_copy_proofs,
+        reset_sealed_copy_marker_hits, reset_sealed_copy_proofs, sealed_copy_marker_hits,
+        sealed_copy_proofs,
     };
-    #[cfg(feature = "graph-sealed-store")]
-    use crate::generation::{reset_sealed_copy_marker_hits, sealed_copy_marker_hits};
     use crate::lease::GenerationLocator;
     use crate::{
         GraphCancellation, GraphDbError, GraphDbOwnerRegistrationV1, GraphDbRegistration,
@@ -2299,7 +2369,6 @@ mod historical_publication_reuse_tests {
         GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark,
         SourceGeneration,
     };
-    #[cfg(feature = "graph-sealed-store")]
     use crate::{GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest};
 
     #[derive(Debug)]
@@ -2699,22 +2768,14 @@ mod historical_publication_reuse_tests {
             .unwrap();
         assert_eq!(
             recovered_generation_enumerations(),
-            if cfg!(feature = "graph-sealed-store") {
-                0
-            } else {
-                1
-            },
-            "the durable sealed proof must replace the staging proof when available"
+            0,
+            "the durable sealed proof must replace the staging proof"
         );
         // The sealed per-generation copy is proved after durable reopen,
         // before it can be installed or answer a read.
         assert_eq!(
             sealed_copy_proofs(),
-            if cfg!(feature = "graph-sealed-store") {
-                1
-            } else {
-                0
-            },
+            1,
             "a first seal proves the exact durable artifact before installation"
         );
         let head = first.head.clone();
@@ -2734,7 +2795,6 @@ mod historical_publication_reuse_tests {
         }
     }
 
-    #[cfg(feature = "graph-sealed-store")]
     #[test]
     fn sealed_snapshot_recovers_without_opening_the_staging_registry() {
         let mut fixture = published_fixture();
@@ -2976,7 +3036,6 @@ mod historical_publication_reuse_tests {
     /// ones the build's post-reopen proof ran over, so adoption resolves by
     /// stat instead of re-streaming the sealed row proof — which is exactly
     /// the second half of the boot-from-sealed double verification.
-    #[cfg(feature = "graph-sealed-store")]
     #[test]
     fn a_fresh_from_disk_recover_adopts_the_sealed_artifact_by_marker() {
         let mut fixture = published_fixture();

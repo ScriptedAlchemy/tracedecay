@@ -951,14 +951,18 @@ fn visit_lexical_rows(
         };
         let assigned_ids = match layout {
             LexicalArtifactLayoutV1::V10 => BTreeMap::new(),
-            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+            LexicalArtifactLayoutV1::V11
+            | LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13 => {
                 lookup_term_ids(connection, terms).map_err(map_query_artifact_error)?
             }
         };
         let v11_ids = assigned_ids.values().copied().collect::<Vec<_>>();
         let dynamic_binds = match layout {
             LexicalArtifactLayoutV1::V10 => terms.len(),
-            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => v11_ids.len(),
+            LexicalArtifactLayoutV1::V11
+            | LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13 => v11_ids.len(),
         };
         ensure_sqlite_bind_capacity(documents.parameters.len(), dynamic_binds)?;
         ensure_sqlite_bound_value_bytes(
@@ -970,7 +974,11 @@ fn visit_lexical_rows(
             Vec::with_capacity(documents.parameters.len().saturating_add(dynamic_binds));
         let frequencies = match layout {
             LexicalArtifactLayoutV1::V10 if terms.is_empty() => "'[]'".to_owned(),
-            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 if v11_ids.is_empty() => {
+            LexicalArtifactLayoutV1::V11
+            | LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13
+                if v11_ids.is_empty() =>
+            {
                 "'[]'".to_owned()
             }
             LexicalArtifactLayoutV1::V10 => {
@@ -985,14 +993,23 @@ fn visit_lexical_rows(
                      AND posting.term IN ({placeholders})), '[]')"
                 )
             }
-            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+            LexicalArtifactLayoutV1::V11
+            | LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13 => {
                 let placeholders = std::iter::repeat_n("?", v11_ids.len())
                     .collect::<Vec<_>>()
                     .join(", ");
                 parameters.extend(v11_ids.iter().copied().map(Value::Integer));
+                // Revision 13 clusters the table itself by document, so the
+                // primary key is the document-leading access path there.
+                let document_access = if layout.clusters_term_postings_by_document() {
+                    ""
+                } else {
+                    " INDEXED BY term_postings_by_document"
+                };
                 format!(
                     "COALESCE((SELECT json_group_array(json_array(posting.field, vocabulary.term, posting.frequency)) \
-                     FROM term_postings AS posting INDEXED BY term_postings_by_document \
+                     FROM term_postings AS posting{document_access} \
                      JOIN vocabulary ON vocabulary.term_id = posting.term_id \
                      WHERE posting.document_id = documents.document_id \
                      AND posting.term_id IN ({placeholders})), '[]')"
@@ -1035,7 +1052,9 @@ fn visit_lexical_rows(
                         ));
                     }
                 }
-                LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+                LexicalArtifactLayoutV1::V11
+                | LexicalArtifactLayoutV1::V12
+                | LexicalArtifactLayoutV1::V13 => {
                     let encoded: Vec<(i64, String, i64)> =
                         serde_json::from_str(&encoded_frequencies).map_err(contract_error)?;
                     entries.reserve(encoded.len());
@@ -1734,7 +1753,9 @@ impl<'a> ArtifactQueryV1<'a> {
                     ));
                 }
             }
-            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+            LexicalArtifactLayoutV1::V11
+            | LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13 => {
                 let subtoken_field = field_code(LexicalFieldV1::Subtoken);
                 for term in whole_terms {
                     if let Some(term_id) =
@@ -1799,7 +1820,7 @@ impl<'a> ArtifactQueryV1<'a> {
                         literal.canonical_bytes.clone(),
                     ));
                 }
-                LexicalArtifactLayoutV1::V12 => {
+                LexicalArtifactLayoutV1::V12 | LexicalArtifactLayoutV1::V13 => {
                     sources.push(DocumentQueryV1::exact_id(
                         literal.field,
                         &literal.canonical_bytes,
@@ -1912,9 +1933,9 @@ impl<'a> ArtifactQueryV1<'a> {
     fn vocabulary_sql(layout: LexicalArtifactLayoutV1) -> &'static str {
         match layout {
             LexicalArtifactLayoutV1::V10 => "SELECT term FROM vocabulary",
-            LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
-                "SELECT term FROM vocabulary WHERE in_fuzzy = 1"
-            }
+            LexicalArtifactLayoutV1::V11
+            | LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13 => "SELECT term FROM vocabulary WHERE in_fuzzy = 1",
         }
     }
 
@@ -1966,7 +1987,9 @@ impl<'a> ArtifactQueryV1<'a> {
                 LexicalArtifactLayoutV1::V10 => {
                     decode_field(&row.get::<_, String>(0).map_err(map_query_sql_error)?)?
                 }
-                LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+                LexicalArtifactLayoutV1::V11
+                | LexicalArtifactLayoutV1::V12
+                | LexicalArtifactLayoutV1::V13 => {
                     field_from_code(row.get::<_, i64>(0).map_err(map_query_sql_error)?)
                         .map_err(map_query_artifact_error)?
                 }
@@ -2011,7 +2034,9 @@ impl<'a> ArtifactQueryV1<'a> {
                     self.metrics.observe_statement(&statement)?;
                     self.metrics.rows(observed_rows);
                 }
-                LexicalArtifactLayoutV1::V11 | LexicalArtifactLayoutV1::V12 => {
+                LexicalArtifactLayoutV1::V11
+                | LexicalArtifactLayoutV1::V12
+                | LexicalArtifactLayoutV1::V13 => {
                     let assigned = lookup_term_ids(self.connection, terms)
                         .map_err(map_query_artifact_error)?;
                     let term_ids = assigned.values().copied().collect::<Vec<_>>();

@@ -1406,7 +1406,7 @@ checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1500,7 +1500,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1689,7 +1689,7 @@ checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes 2.0.4",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2238,7 +2238,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a791e6620676a875f362f3156ed213e73ca099a09bf992c18812abe65cc37b1"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -2728,7 +2728,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2743,7 +2743,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2763,7 +2763,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2788,7 +2788,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2810,7 +2810,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "bincode",
  "byteorder",
@@ -3374,7 +3374,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
 dependencies = [
  "io-lifetimes 3.0.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3422,7 +3422,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4441,7 +4441,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4884,7 +4884,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4897,7 +4897,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5444,10 +5444,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8105,7 +8105,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -8463,7 +8463,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.13.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
