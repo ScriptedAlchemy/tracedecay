@@ -162,21 +162,46 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         Ok(key)
     }
 
+    /// Loads the cursor key provider, provisioning the first active key only
+    /// when none exists.
+    ///
+    /// A provisioned store is served from one admitted read snapshot and takes
+    /// no writer transaction. Only `ActiveKeyMissing` enters the provisioning
+    /// transaction, which rechecks under the writer so concurrent first-use
+    /// callers mint exactly one key; the provider is then built from a fresh
+    /// read view that includes it. Every other read-side refusal — multiple
+    /// active keys, invalid id/version/material, retention — is returned as is
+    /// and never becomes a reason to mint a replacement.
     #[hotpath::skip]
     pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+        let read = self.cursor_key_read_snapshot().await?;
+        match GlobalDbCursorKeyProvider::from_registered_active(&read).await {
+            Err(cursor_keys::GlobalDbCursorKeyProviderError::ActiveKeyMissing) => {}
+            loaded => return loaded,
+        }
+        drop(read);
         let key = self
             .ensure_active_session_cursor_key_result()
             .await
             .map_err(|source| cursor_keys::GlobalDbCursorKeyProviderError::Provision { source })?;
-        let read = self.read_snapshot().await.map_err(|source| {
+        let read = self.cursor_key_read_snapshot().await?;
+        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
+    }
+
+    async fn cursor_key_read_snapshot(
+        &self,
+    ) -> Result<
+        tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+        cursor_keys::GlobalDbCursorKeyProviderError,
+    > {
+        self.read_snapshot().await.map_err(|source| {
             cursor_keys::GlobalDbCursorKeyProviderError::Storage {
                 operation: "load registered session cursor authentication key",
                 source: EngineError::invalid_operation(source.to_string()),
             }
-        })?;
-        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
+        })
     }
 
     #[hotpath::skip]
