@@ -464,23 +464,61 @@ pub struct WorkProjectionStateV1 {
 
 impl WorkProjectionStateV1 {
     /// Folds a whole history. This is the only full-history path; it is the
-    /// same fold `apply` performs, so the two can never disagree.
+    /// same transition `apply` and `fold` perform, so the three can never
+    /// disagree. The state moves through the fold, so the command set grows
+    /// by one entry per event instead of being copied at every step.
     pub fn rebuild(history: &[WorkEvent]) -> Result<Self, WorkContractError> {
         let (first, rest) = history
             .split_first()
             .ok_or(WorkContractError::EmptyHistory)?;
-        let mut state = Self::seed(first)?;
-        for event in rest {
-            state = state.apply(event)?;
-        }
-        Ok(state)
+        rest.iter().try_fold(Self::seed(first)?, Self::fold)
     }
 
-    /// Admits one event onto an already-validated state.
+    /// Admits one event onto an already-validated state, leaving this state
+    /// exactly as it was.
     ///
     /// Every rejection this returns is the rejection a full rebuild of the
     /// same history would have returned at the same event.
     pub fn apply(&self, event: &WorkEvent) -> Result<Self, WorkContractError> {
+        self.clone().fold(event)
+    }
+
+    /// [`Self::apply`] for a state the caller already owns: the same checks
+    /// and the same transition, mutating in place instead of copying. Every
+    /// check runs before the first mutation, so a rejection never leaves a
+    /// half-applied event behind; it consumes the state, so a caller that
+    /// must keep the prior state on rejection uses `apply`.
+    pub fn fold(mut self, event: &WorkEvent) -> Result<Self, WorkContractError> {
+        let next_version = self.admit(event)?;
+        match event.event() {
+            WorkEventKind::Created { .. } => {}
+            WorkEventKind::DependenciesReplanned { dependencies } => {
+                self.projection.dependencies.clone_from(dependencies);
+            }
+            WorkEventKind::ProposalAccepted { proposal_id, .. } => {
+                self.projection.accepted_proposal = Some(proposal_id.clone());
+            }
+            WorkEventKind::ProposalRejected { proposal_id, .. }
+            | WorkEventKind::ProposalSuperseded { proposal_id, .. } => {
+                if self.projection.accepted_proposal.as_ref() == Some(proposal_id) {
+                    self.projection.accepted_proposal = None;
+                }
+            }
+            WorkEventKind::ExecutionAdmitted => self.projection.execution_admitted = true,
+            WorkEventKind::TaskAccepted => self.projection.task_accepted = true,
+        }
+        self.command_ids.insert(event.command_id().clone());
+        self.projection.version = event.version();
+        self.projection.history_len += 1;
+        self.occurred_at = event.occurred_at();
+        self.next_version = next_version;
+        Ok(self)
+    }
+
+    /// Every rejection the transition can make, in the order a full rebuild
+    /// reports them, evaluated before anything is mutated. Returns the version
+    /// the state advances to.
+    fn admit(&self, event: &WorkEvent) -> Result<WorkVersion, WorkContractError> {
         if event.task_id() != &self.projection.task_id
             || event.authority() != &self.projection.authority
         {
@@ -498,40 +536,16 @@ impl WorkProjectionStateV1 {
         if self.projection.task_accepted && event.version() != WorkVersion::initial() {
             return Err(WorkContractError::InvalidTransition);
         }
-
-        let mut next = self.clone();
         match event.event() {
             WorkEventKind::Created { .. } if event.version() != WorkVersion::initial() => {
                 return Err(WorkContractError::InvalidTransition);
             }
-            WorkEventKind::Created { .. } => {}
-            WorkEventKind::DependenciesReplanned { dependencies } => {
-                next.projection.dependencies = dependencies.clone();
+            WorkEventKind::ExecutionAdmitted if self.projection.accepted_proposal.is_none() => {
+                return Err(WorkContractError::InvalidTransition);
             }
-            WorkEventKind::ProposalAccepted { proposal_id, .. } => {
-                next.projection.accepted_proposal = Some(proposal_id.clone());
-            }
-            WorkEventKind::ProposalRejected { proposal_id, .. }
-            | WorkEventKind::ProposalSuperseded { proposal_id, .. } => {
-                if next.projection.accepted_proposal.as_ref() == Some(proposal_id) {
-                    next.projection.accepted_proposal = None;
-                }
-            }
-            WorkEventKind::ExecutionAdmitted => {
-                if next.projection.accepted_proposal.is_none() {
-                    return Err(WorkContractError::InvalidTransition);
-                }
-                next.projection.execution_admitted = true;
-            }
-            WorkEventKind::TaskAccepted => next.projection.task_accepted = true,
+            _ => {}
         }
-
-        next.command_ids.insert(event.command_id().clone());
-        next.projection.version = event.version();
-        next.projection.history_len += 1;
-        next.occurred_at = event.occurred_at();
-        next.next_version = event.version().next()?;
-        Ok(next)
+        event.version().next()
     }
 
     fn seed(first: &WorkEvent) -> Result<Self, WorkContractError> {

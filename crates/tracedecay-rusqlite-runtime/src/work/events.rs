@@ -147,7 +147,7 @@ pub(crate) fn append_registered(
     // exactly this event, inside the transaction that holds the write lock,
     // so admitting the event onto it is the same fold a re-read would perform.
     let next = match current {
-        Some(state) => state.apply(&request.event),
+        Some(state) => state.fold(&request.event),
         None => WorkProjectionStateV1::rebuild(std::slice::from_ref(&request.event)),
     };
     let Ok(next) = next else {
