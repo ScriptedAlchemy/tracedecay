@@ -387,7 +387,15 @@ pub(super) async fn assert_secret_absent_from_observation_sinks(
 }
 
 fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> PathBuf {
-    let dir = home.join(".codex/sessions/2026/01/01");
+    // Joined per component so the fixture path is spelled exactly as the
+    // rollout walker reports it (a `/`-joined tail is not the native spelling
+    // on Windows), which is what `transcript_path` is asserted against.
+    let dir = home
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("01")
+        .join("01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("rollout-2026-01-01T00-00-00-{session}.jsonl"));
     let contents = format!(
