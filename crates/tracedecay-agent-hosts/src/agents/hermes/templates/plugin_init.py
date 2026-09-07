@@ -77,6 +77,30 @@ def _resolve_auxiliary_client(agent=None):
         return _hermes_auxiliary_client
     return None
 
+# schemas.json is generated from the MCP tool catalog by the same binary that
+# generated this module, so it is the one authority for exact tool names,
+# argument schemas, and the `readOnlyHint` annotation. Index it once; every
+# exact route below is derived from it rather than spelled again.
+TOOL_SCHEMAS_BY_NAME = {schema["name"]: schema for schema in schemas.TOOL_SCHEMAS}
+READ_ONLY_TOOL_NAMES = frozenset(
+    name
+    for name, schema in TOOL_SCHEMAS_BY_NAME.items()
+    if schema.get("read_only") is True
+)
+
+_FACT_STORE_ROUTE_PREFIX = "tracedecay_fact_store_"
+# action -> exact TraceDecay route, for every fact-store operation this
+# install's catalog advertises.
+FACT_STORE_EXACT_ROUTES = {
+    name[len(_FACT_STORE_ROUTE_PREFIX):]: name
+    for name in TOOL_SCHEMAS_BY_NAME
+    if name.startswith(_FACT_STORE_ROUTE_PREFIX)
+}
+
+# Hermes' legacy fixed-action memory wire (`fact_add`, `fact_search`, ...)
+# still dispatches, translated onto the exact fact-store routes. It is not
+# advertised as schemas any more; the collapsed `fact_store(action=...)`
+# surface is.
 MEMORY_FACT_ACTIONS = {
     "fact_add": "add",
     "fact_search": "search",
@@ -89,79 +113,22 @@ MEMORY_FACT_ACTIONS = {
     "fact_list": "list",
 }
 
-MEMORY_ACTION_DESCRIPTIONS = {
-    "fact_add": (
-        "Add a holographic memory fact. The result includes a write-time diff "
-        "report (diff/closest_fact_id/similarity/reason): 'near_duplicate' "
-        "means a very similar fact already exists (consider updating it "
-        "instead), 'possible_conflict' means a negation/state-change cue "
-        "suggests supersession (confirm which fact is current), and "
-        "'rejected_secret_like' means the content looked like a credential "
-        "and was NOT stored. Calibrate trust instead of defaulting high: "
-        "reserve >=0.85 for verified/durable facts, use ~0.7 for ordinary "
-        "observations and ~0.5 when unsure - aim for a spread across facts."
-    ),
-    "fact_search": (
-        "Search holographic memory facts by query. Recall memory FIRST "
-        "before reaching for external or web search - prior sessions often "
-        "already answered the question."
-    ),
-    "fact_probe": "Find facts connected to one entity.",
-    "fact_related": "List entities related to one entity.",
-    "fact_reason": "Reason over facts that connect multiple entities.",
-    "fact_contradict": "Scan memory facts for likely contradictions.",
-    "fact_update": "Update an existing holographic memory fact.",
-    "fact_remove": "Remove a holographic memory fact.",
-    "fact_list": "List holographic memory facts.",
-}
-
-FACT_STORE_EXACT_ROUTES = {
-    "add": "tracedecay_fact_store_add",
-    "search": "tracedecay_fact_store_search",
-    "probe": "tracedecay_fact_store_probe",
-    "related": "tracedecay_fact_store_related",
-    "reason": "tracedecay_fact_store_reason",
-    "contradict": "tracedecay_fact_store_contradict",
-    "get": "tracedecay_fact_store_get",
-    "update": "tracedecay_fact_store_update",
-    "remove": "tracedecay_fact_store_remove",
-    "supersede": "tracedecay_fact_store_supersede",
-    "list": "tracedecay_fact_store_list",
-    "curate": "tracedecay_fact_store_curate",
-}
-READ_ONLY_FACT_STORE_ROUTES = frozenset(
-    FACT_STORE_EXACT_ROUTES[action]
-    for action in (
-        "search",
-        "probe",
-        "related",
-        "reason",
-        "contradict",
-        "get",
-        "list",
-    )
-)
-
 MEMORY_TOOL_MAP = {"fact_store": {"resolve_action": True}}
 for _hermes_name, _action in MEMORY_FACT_ACTIONS.items():
     MEMORY_TOOL_MAP[_hermes_name] = {
-        "tracedecay_name": FACT_STORE_EXACT_ROUTES[_action],
+        "tracedecay_name": _FACT_STORE_ROUTE_PREFIX + _action,
         "legacy_alias": True,
     }
 MEMORY_TOOL_MAP["fact_feedback"] = {"tracedecay_name": "tracedecay_fact_feedback"}
 MEMORY_TOOL_MAP["memory_status"] = {"tracedecay_name": "tracedecay_memory_status"}
 
-LCM_TOOL_ALIASES = {
-    "lcm_grep": "tracedecay_lcm_grep",
-    "lcm_load_session": "tracedecay_lcm_load_session",
-    "lcm_describe": "tracedecay_lcm_describe",
-    "lcm_expand": "tracedecay_lcm_expand",
-    "lcm_expand_query": "tracedecay_lcm_expand_query",
-    "lcm_status": "tracedecay_lcm_status",
-    "lcm_doctor": "tracedecay_lcm_doctor",
-}
-LCM_DIRECT_TOOL_NAMES = frozenset(LCM_TOOL_ALIASES.values())
-LCM_DIRECT_TO_NATIVE = {tracedecay_name: native_name for native_name, tracedecay_name in LCM_TOOL_ALIASES.items()}
+# Canonical tools the memory provider must be able to describe. Reported at
+# register() time when this install's catalog does not advertise one, instead
+# of registering a schema-less stand-in.
+MEMORY_PROVIDER_REQUIRED_TOOLS = ("tracedecay_fact_feedback", "tracedecay_memory_status")
+MISSING_MEMORY_PROVIDER_TOOLS = tuple(
+    name for name in MEMORY_PROVIDER_REQUIRED_TOOLS if name not in TOOL_SCHEMAS_BY_NAME
+)
 
 LCM_NATIVE_SCHEMAS = [
     {
@@ -379,6 +346,14 @@ LCM_NATIVE_SCHEMAS = [
     },
 ]
 
+# Every Hermes-native LCM tool above fronts the TraceDecay tool of the same
+# name; only the argument shape differs (`_translate_lcm_args`).
+LCM_TOOL_ALIASES = {
+    schema["name"]: "tracedecay_" + schema["name"] for schema in LCM_NATIVE_SCHEMAS
+}
+LCM_DIRECT_TOOL_NAMES = frozenset(LCM_TOOL_ALIASES.values())
+LCM_DIRECT_TO_NATIVE = {tracedecay_name: native_name for native_name, tracedecay_name in LCM_TOOL_ALIASES.items()}
+
 # Public LCM readers never depend on forwarding the host's live message list.
 MESSAGE_DEPENDENT_TOOLS = frozenset()
 
@@ -398,16 +373,8 @@ LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
 # the provider does not expose transcript search.
 MEMORY_PROVIDER_TOOLS = frozenset((
     *FACT_STORE_EXACT_ROUTES.values(),
-    "tracedecay_fact_feedback",
-    "tracedecay_memory_status",
+    *MEMORY_PROVIDER_REQUIRED_TOOLS,
 ))
-
-
-def _is_memory_provider_tool(name: str) -> bool:
-    return name.startswith("tracedecay_fact_store") or name in (
-        "tracedecay_fact_feedback",
-        "tracedecay_memory_status",
-    )
 
 # Tool names successfully registered with this host. Consulted by the
 # first-turn guidance nudge so it never advertises tools that are not
@@ -718,21 +685,35 @@ def _bridge_preview(value, limit: int = 2048) -> str:
     return preview
 
 
-_LCM_CONTRACT_KEYS = frozenset((
-    "answer",
-    "context_blocks",
-    "expansion",
-    "frontier",
-    "lcm",
-    "matches",
-    "needs_synthesis",
-    "replay_messages",
-    "context_recovery_hint",
-    "should_compress",
-    "status",
-    "summary_request",
-))
-_RETRIEVAL_HANDLE_KEYS = ("handle", "response_handle", "retrieval_handle")
+# Response contract for `tracedecay tool <name> --json`, the only transport
+# `tools.call_tracedecay_tool` uses. Its stdout is one of:
+#
+#   1. `tools.error_payload(...)`: {"error": str, "stdout"?: str, "stderr"?: str}
+#      for a non-zero exit, timeout, or non-JSON stdout. The CLI exits non-zero
+#      for every daemon-classified failure (`isError`, typed problem envelopes)
+#      and for any truncation envelope it could not recover, so those states
+#      arrive here already typed as this error dict
+#      (crates/tracedecay-cli/src/tool_command.rs::tool_result_process_outcome,
+#      ::reject_tool_result_truncation).
+#   2. The daemon's MCP tool result, printed verbatim
+#      (crates/tracedecay-cli/src/tool_command.rs::rendered_tool_output):
+#      {"content": [{"type": "text", "text": <payload>}, ...], "isError"?: bool}.
+#      Exactly one text block holds the JSON payload; any other block is a
+#      prose trailer such as the stale-graph freshness note
+#      (crates/tracedecay/src/daemon/core_client.rs::tool_json_payload is the
+#      daemon-side reader of the same shape). Oversized payloads never reach
+#      this plugin as a handle envelope: the CLI pages `tracedecay_retrieve`
+#      under the original project handshake and request deadline and splices
+#      the reassembled payload back into the block before printing
+#      (crates/tracedecay-cli/src/commands/daemon.rs::recover_truncated_mcp_result).
+#   3. Inside that block, either the tool's own result object (compatibility
+#      tools such as tracedecay_status / tracedecay_hook_runtime) or, for
+#      retained application surfaces (fact_store_*, fact_feedback,
+#      memory_status, message_search, lcm_*), an ApplicationEnvelope whose
+#      result sits at outcome.value.payload
+#      (crates/tracedecay-application/src/result/envelope.rs::ApplicationOutcome,
+#      serde tag "outcome" / content "value").
+_APPLICATION_OUTCOMES = frozenset(("evidence", "preview", "effect"))
 
 def _json_or_none(text):
     if not isinstance(text, str):
@@ -742,120 +723,40 @@ def _json_or_none(text):
     except json.JSONDecodeError:
         return None
 
-def _content_text_candidates(content):
-    if isinstance(content, str):
-        return [content]
+def _content_json_payloads(content):
+    """Every content block whose text parses as JSON, in block order."""
     if not isinstance(content, list):
         return []
-    parts = [
-        item.get("text")
-        for item in content
-        if isinstance(item, dict) and isinstance(item.get("text"), str)
-    ]
-    candidates = []
-    if parts:
-        candidates.append("".join(parts))
-        joined = "\n".join(parts)
-        if joined != candidates[0]:
-            candidates.append(joined)
-        candidates.extend(parts)
-    return candidates
+    decoded = (
+        _json_or_none(block.get("text")) for block in content if isinstance(block, dict)
+    )
+    return [payload for payload in decoded if payload is not None]
 
-def _decode_content_json(content):
-    for candidate in _content_text_candidates(content):
-        decoded = _json_or_none(candidate)
-        if decoded is not None:
-            return decoded
-    return None
-
-def _looks_like_lcm_contract(value):
-    return isinstance(value, dict) and bool(_LCM_CONTRACT_KEYS.intersection(value))
-
-def _application_outcome_payload(value):
-    """Extract the typed payload from a successful mounted application outcome."""
-    if not isinstance(value, dict):
-        return None
-    outcome = value.get("outcome")
-    if not isinstance(outcome, dict):
-        return None
-    if outcome.get("outcome") not in ("evidence", "preview", "effect"):
-        return None
+def _application_envelope_payload(payload: dict):
+    """(result, None) for a plain result or an ApplicationEnvelope's payload;
+    (None, error) for an envelope that carries no result payload or for a
+    truncation envelope the CLI should have recovered or refused."""
+    if (
+        payload.get("truncated") is True
+        and isinstance(payload.get("original_chars"), int)
+        and isinstance(payload.get("preview"), str)
+    ):
+        # Same predicate as crates/tracedecay-cli/src/commands/daemon.rs::
+        # is_truncation_envelope. Recovery is the CLI's job; a preview is
+        # never a result.
+        return None, "tracedecay tool returned a truncated preview instead of its result"
+    outcome = payload.get("outcome")
+    if not (
+        "contract" in payload
+        and isinstance(outcome, dict)
+        and outcome.get("outcome") in _APPLICATION_OUTCOMES
+    ):
+        return payload, None
     packet = outcome.get("value")
-    if not isinstance(packet, dict):
-        return None
-    payload = packet.get("payload")
-    return payload if isinstance(payload, dict) else None
-
-def _retrieval_handle(value):
-    if not isinstance(value, dict):
-        return None
-    if value.get("truncated") is not True and not value.get("retrieve_tool"):
-        if not any(key in value for key in ("response_handle", "retrieval_handle")):
-            return None
-    for key in _RETRIEVAL_HANDLE_KEYS:
-        handle = value.get(key)
-        if isinstance(handle, str) and handle.strip():
-            return handle.strip()
-    return None
-
-def _lcm_retrieve_kwargs(args: dict, kwargs: dict) -> dict:
-    retrieve_kwargs = dict(kwargs or {})
-    if retrieve_kwargs.get("project_root"):
-        return retrieve_kwargs
-    if isinstance(args, dict):
-        root = args.get("response_handle_project_root") or args.get("project_root")
-        if isinstance(root, str) and root.strip():
-            retrieve_kwargs["project_root"] = root.strip()
-    return retrieve_kwargs
-
-def _retrieve_args(handle: str, args: dict) -> dict:
-    retrieve_args = {"handle": handle}
-    if isinstance(args, dict):
-        for key in ("project_id", "project_path", "project_selector"):
-            if args.get(key) is not None:
-                retrieve_args[key] = args[key]
-    return retrieve_args
-
-def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int = 0, seen_handles=None):
-    if depth > 8:
-        return value
-    if seen_handles is None:
-        seen_handles = set()
-    if isinstance(value, str):
-        decoded = _json_or_none(value)
-        if decoded is None:
-            return value
-        return _decode_tool_payload(decoded, name, args, kwargs, depth + 1, seen_handles)
-    if not isinstance(value, dict):
-        return value
-
-    application_payload = _application_outcome_payload(value)
-    if application_payload is not None:
-        return _decode_tool_payload(application_payload, name, args, kwargs, depth + 1, seen_handles)
-
-    handle = _retrieval_handle(value)
-    if handle and name != "tracedecay_retrieve":
-        if handle in seen_handles:
-            return value
-        seen_handles.add(handle)
-        retrieved = call_tracedecay_json(
-            "tracedecay_retrieve",
-            _retrieve_args(handle, args),
-            **_lcm_retrieve_kwargs(args, kwargs),
-        )
-        if isinstance(retrieved, dict) and not retrieved.get("error"):
-            return _decode_tool_payload(retrieved, name, args, kwargs, depth + 1, seen_handles)
-        return retrieved
-
-    if _looks_like_lcm_contract(value):
-        return value
-
-    if "content" in value:
-        decoded = _decode_content_json(value.get("content"))
-        if decoded is not None:
-            return _decode_tool_payload(decoded, name, args, kwargs, depth + 1, seen_handles)
-
-    return value
+    result = packet.get("payload") if isinstance(packet, dict) else None
+    if not isinstance(result, dict):
+        return None, f"tracedecay {outcome['outcome']} outcome omitted its result payload"
+    return result, None
 
 def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
     raw = tools.call_tracedecay_tool(name, args, **kwargs)
@@ -868,64 +769,45 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
         }
     if isinstance(outer, dict) and "error" in outer:
         return outer
-    if not isinstance(outer, dict):
+    if not isinstance(outer, dict) or "content" not in outer:
         return {
             "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
-    if (
-        not _looks_like_lcm_contract(outer)
-        and _application_outcome_payload(outer) is None
-        and "content" not in outer
-    ):
+    payloads = _content_json_payloads(outer.get("content"))
+    if not payloads:
+        if any(
+            isinstance(block, dict) and isinstance(block.get("text"), str)
+            for block in outer.get("content") or []
+        ):
+            return {
+                "error": "tracedecay tool returned invalid nested JSON",
+                "text_preview": _bridge_preview(outer.get("content")),
+            }
         return {
             "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
-    if "content" in outer and not _content_text_candidates(outer.get("content")):
+    if len(payloads) != 1 or not isinstance(payloads[0], dict):
         return {
-            "error": "tracedecay tool response missing text content",
-            "raw_preview": _bridge_preview(raw),
-        }
-    payload = _decode_tool_payload(outer, name, args, kwargs)
-    if isinstance(payload, dict) and "content" in outer and payload is outer:
-        return {
-            "error": "tracedecay tool returned invalid nested JSON",
+            "error": f"tracedecay tool {name} returned {len(payloads)} JSON payloads; expected one object",
             "text_preview": _bridge_preview(outer.get("content")),
         }
-    if not isinstance(payload, dict):
-        return {
-            "error": "tracedecay tool response missing text content",
-            "raw_preview": _bridge_preview(raw),
-        }
-    return payload
+    result, error = _application_envelope_payload(payloads[0])
+    if error is not None:
+        return {"error": error, "text_preview": _bridge_preview(payloads[0])}
+    return result
 
-def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -> dict:
-    for schema in schemas.TOOL_SCHEMAS:
-        if schema.get("name") == tracedecay_name:
-            parameters = json.loads(json.dumps(schema.get("parameters", {})))
-            if action is not None:
-                properties = parameters.get("properties")
-                if isinstance(properties, dict):
-                    properties.pop("action", None)
-                required = parameters.get("required")
-                if isinstance(required, list):
-                    required = [field for field in required if field != "action"]
-                    if required:
-                        parameters["required"] = required
-                    else:
-                        parameters.pop("required", None)
-            return {
-                "name": hermes_name,
-                "description": MEMORY_ACTION_DESCRIPTIONS.get(
-                    hermes_name, schema.get("description", "")
-                ),
-                "parameters": parameters,
-            }
+def _memory_schema(tracedecay_name: str, hermes_name: str):
+    """The canonical schema republished under its Hermes provider name, or
+    None when this install's catalog does not advertise the tool."""
+    schema = TOOL_SCHEMAS_BY_NAME.get(tracedecay_name)
+    if schema is None:
+        return None
     return {
         "name": hermes_name,
-        "description": f"Tracedecay memory tool {hermes_name}.",
-        "parameters": {"type": "object", "properties": {}},
+        "description": schema.get("description", ""),
+        "parameters": copy.deepcopy(schema.get("parameters", {})),
     }
 
 
@@ -939,13 +821,9 @@ def _collapsed_fact_store_schema() -> dict:
         }
     }
     for tracedecay_name in FACT_STORE_EXACT_ROUTES.values():
-        for schema in schemas.TOOL_SCHEMAS:
-            if schema.get("name") != tracedecay_name:
-                continue
-            params = schema.get("parameters") or {}
-            for key, value in (params.get("properties") or {}).items():
-                if key not in properties:
-                    properties[key] = value
+        params = TOOL_SCHEMAS_BY_NAME[tracedecay_name].get("parameters") or {}
+        for key, value in (params.get("properties") or {}).items():
+            properties.setdefault(key, value)
     return {
         "name": "fact_store",
         "description": (
@@ -961,15 +839,12 @@ def _collapsed_fact_store_schema() -> dict:
 
 def _agent_visible_schema(schema: dict) -> dict:
     """Hide routing fields selected by the Hermes session integration."""
-    visible = json.loads(json.dumps(schema))
+    visible = copy.deepcopy(schema)
     properties = (visible.get("parameters") or {}).get("properties")
     if isinstance(properties, dict):
         properties.pop("storage_scope", None)
         properties.pop("hermes_home", None)
     return visible
-
-def _lcm_tool_schemas() -> list:
-    return list(LCM_NATIVE_SCHEMAS)
 
 def _decode_tool_args(arguments):
     if arguments is None:
@@ -1147,44 +1022,10 @@ _UNSCOPED_DIRECT_TOOLS = frozenset((
     "tracedecay_project_search",
 ))
 
-_READ_ONLY_SELECTOR_TOOLS = frozenset((
-    "tracedecay_search",
-    "tracedecay_grep",
-    "tracedecay_context",
-    "tracedecay_retrieve",
-    "tracedecay_callers",
-    "tracedecay_callees",
-    "tracedecay_impact",
-    "tracedecay_node",
-    "tracedecay_files",
-    "tracedecay_body",
-    "tracedecay_read",
-    "tracedecay_outline",
-    "tracedecay_signature_search",
-    "tracedecay_implementations",
-    "tracedecay_callers_for",
-    "tracedecay_call_chain",
-    "tracedecay_file_dependents",
-    "tracedecay_find_exact_symbol",
-    "tracedecay_by_qualified_name",
-    "tracedecay_signature",
-    "tracedecay_impls",
-    "tracedecay_derives",
-    "tracedecay_project_context",
-    "tracedecay_memory_status",
-    "tracedecay_message_search",
-    "tracedecay_analytics",
-))
-
 def _project_selector_path(selector):
     if not isinstance(selector, dict):
         return None
     return selector.get("path") or selector.get("project_path")
-
-def _read_only_selector_call(name, args):
-    if name in _READ_ONLY_SELECTOR_TOOLS or name in READ_ONLY_FACT_STORE_ROUTES:
-        return True
-    return False
 
 def _make_project_safe_handler(name, handler, hermes_home):
     def safe_handler(args, **kwargs):
@@ -1197,7 +1038,9 @@ def _make_project_safe_handler(name, handler, hermes_home):
             or selector_path
             or (isinstance(selector, dict) and selector.get("project_id"))
         )
-        if explicit_selector and not _read_only_selector_call(name, tool_args):
+        # Only a tool the catalog annotates read-only (`readOnlyHint`) may be
+        # routed at another registered project by an explicit selector.
+        if explicit_selector and name not in READ_ONLY_TOOL_NAMES:
             return tools.error_payload(
                 f"{name} does not permit a cross-project mutating selector"
             )
@@ -1258,7 +1101,7 @@ def _make_project_safe_handler(name, handler, hermes_home):
         if name.startswith("tracedecay_lcm_"):
             tool_args.setdefault("storage_scope", "user")
             return handler(tool_args, **routed_kwargs)
-        if _is_memory_provider_tool(name):
+        if name in MEMORY_PROVIDER_TOOLS:
             tool_args.setdefault("memory_scope", "user")
             return handler(tool_args, **routed_kwargs)
         if name == "tracedecay_message_search":
@@ -2229,7 +2072,7 @@ class TraceDecayContextEngine(ContextEngine):
         )
 
     def get_tool_schemas(self):
-        return _lcm_tool_schemas()
+        return list(LCM_NATIVE_SCHEMAS)
 
     def get_status(self):
         last_result = self.last_compress_result
@@ -2714,11 +2557,13 @@ class TracedecayMemoryProvider(MemoryProvider):
         # fixed-action fact_* aliases, which remain dispatchable through
         # handle_tool_call for compatibility with older transcripts/configs
         # but no longer cost per-call schema footprint.
-        return [
-            _collapsed_fact_store_schema(),
+        # A required canonical tool this catalog does not advertise is left
+        # out (reported by register()) rather than described by a stand-in.
+        described = (
             _memory_schema("tracedecay_fact_feedback", "fact_feedback"),
             _memory_schema("tracedecay_memory_status", "memory_status"),
-        ]
+        )
+        return [_collapsed_fact_store_schema(), *(s for s in described if s is not None)]
 
     def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
         tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
@@ -2736,6 +2581,10 @@ class TracedecayMemoryProvider(MemoryProvider):
                 )
         else:
             tracedecay_name = mapping["tracedecay_name"]
+            if tracedecay_name not in TOOL_SCHEMAS_BY_NAME:
+                return tools.error_payload(
+                    f"{tool_name} routes to {tracedecay_name}, which this install's tool catalog does not advertise"
+                )
             resolved_action = next(
                 (
                     action
@@ -2816,6 +2665,11 @@ def register(ctx):
         )
 
     if callable(getattr(ctx, "register_memory_provider", None)):
+        for missing in MISSING_MEMORY_PROVIDER_TOOLS:
+            logger.warning(
+                "tracedecay memory provider cannot describe %s: this install's tool catalog does not advertise it",
+                missing,
+            )
         memory_provider = TracedecayMemoryProvider()
         memory_provider._registered_hermes_home = context_hermes_home
         memory_provider.hermes_home = context_hermes_home
@@ -2848,7 +2702,7 @@ def register(ctx):
             name = schema["name"]
             if name in MESSAGE_DEPENDENT_TOOLS and not host_forwards_messages:
                 continue
-            if _is_memory_provider_tool(name) and tracedecay_is_memory_provider:
+            if name in MEMORY_PROVIDER_TOOLS and tracedecay_is_memory_provider:
                 # The active memory provider already exposes this store as
                 # fact_store/fact_feedback/memory_status — registering the
                 # prefixed twins would double the schema footprint.

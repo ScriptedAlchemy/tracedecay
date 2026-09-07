@@ -56,6 +56,9 @@ pub(super) fn plugin_schemas_json(advertised_tools: &[AdvertisedToolV1]) -> Resu
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.input_schema,
+                // `readOnlyHint`: the plugin derives which tools may be routed
+                // at another registered project from this, not from its own list.
+                "read_only": tool.read_only,
             })
         })
         .collect::<Vec<_>>();
