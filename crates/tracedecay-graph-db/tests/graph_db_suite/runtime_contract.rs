@@ -14,7 +14,7 @@ use tracedecay_graph_db::{
     TraversalRequest, VectorMetric, VectorSearchRequest,
 };
 
-mod support;
+use crate::support;
 
 use support::{RegisteredGraph, graph_path};
 

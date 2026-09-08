@@ -42,7 +42,7 @@ mod replay_decode;
 mod sealed_store;
 #[path = "verified_generation_contract/staging_footprint.rs"]
 mod staging_footprint;
-mod support;
+use crate::support;
 #[path = "verified_generation_contract/verify_once.rs"]
 mod verify_once;
 

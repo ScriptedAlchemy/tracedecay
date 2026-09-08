@@ -299,8 +299,9 @@ fn a_marker_forged_for_a_different_digest_is_refused_and_the_proof_runs() {
 ///
 /// ```text
 /// TRACEDECAY_VERIFY_ROWS=500000 cargo test -p tracedecay-graph-db \
-///   --features test-helpers --test verified_generation_contract \
-///   verify_once::activation_verify_cost_probe -- --ignored --nocapture
+///   --features test-helpers --test graph_db_suite \
+///   verified_generation_contract::verify_once::activation_verify_cost_probe \
+///   -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "activation measurement harness; run explicitly with TRACEDECAY_VERIFY_ROWS"]

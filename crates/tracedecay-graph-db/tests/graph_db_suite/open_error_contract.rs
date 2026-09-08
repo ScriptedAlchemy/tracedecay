@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_graph_db::{GraphDbError, GraphEntityId, GraphNamespace, NeverCancelled};
 
-mod support;
+use crate::support;
 
 use support::{RegisteredGraph, graph_path};
 

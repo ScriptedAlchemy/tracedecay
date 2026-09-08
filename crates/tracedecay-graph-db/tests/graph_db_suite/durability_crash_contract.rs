@@ -43,7 +43,7 @@ use tracedecay_store::{
     RuntimeRequestControlV1, RuntimeRequestProbeV1,
 };
 
-mod support;
+use crate::support;
 
 use support::{
     RegisteredGraph, TestCancellation, capture_unclean_crash_image, crash_child_root, graph_path,

@@ -9,7 +9,7 @@ use tracedecay_graph_db::{
     GraphWriteBatch, NeverCancelled, SourceGeneration,
 };
 
-mod support;
+use crate::support;
 
 use support::RegisteredGraph;
 

@@ -9,7 +9,7 @@ use tracedecay_graph_db::{
     NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
 };
 
-mod support;
+use crate::support;
 
 use support::RegisteredGraph;
 

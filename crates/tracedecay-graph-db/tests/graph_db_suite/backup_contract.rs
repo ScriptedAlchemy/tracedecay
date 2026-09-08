@@ -12,7 +12,7 @@ use tracedecay_graph_db::{
     TraversalRequest,
 };
 
-mod support;
+use crate::support;
 
 use support::{RegisteredGraph, graph_path};
 

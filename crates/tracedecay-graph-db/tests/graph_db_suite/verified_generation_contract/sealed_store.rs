@@ -1351,8 +1351,8 @@ fn probe_reads(
 /// ```text
 /// TRACEDECAY_SEALED_PROBE_ROWS=500000 \
 ///   cargo test -p tracedecay-graph-db --features test-helpers --profile perf \
-///   --test verified_generation_contract -- --ignored --nocapture \
-///   sealed_store::sealed_artifact_open_probe
+///   --test graph_db_suite -- --ignored --nocapture \
+///   verified_generation_contract::sealed_store::sealed_artifact_open_probe
 /// ```
 #[test]
 #[ignore = "at-rest measurement harness; see doc comment"]
