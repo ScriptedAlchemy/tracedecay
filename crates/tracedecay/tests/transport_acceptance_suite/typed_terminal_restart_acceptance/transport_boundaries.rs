@@ -40,9 +40,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode, OperationRequestOptions};
 use tracedecay_sdk::operations::{ApplicationFactStoreAdd, ApplicationStorageStatus};
+use tracedecay_session_memory::memory::hygiene::detect_secret_like;
 
 use crate::common::{TestChildProcess, http_agent_with_timeout, tracedecay_command_with_home};
 

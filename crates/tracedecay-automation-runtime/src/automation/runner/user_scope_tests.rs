@@ -68,7 +68,8 @@ impl UserRuntimeHarness {
         let session_runtime = RegisteredGlobalDbTestRuntime::profile(&profile_root)
             .await
             .expect("registered profile session runtime");
-        let memory_path = tracedecay_runtime_core::memory::user::user_memory_db_path(&profile_root);
+        let memory_path =
+            tracedecay_session_memory::memory::user::user_memory_db_path(&profile_root);
         let authority =
             DatabaseAuthority::acquire_test(&memory_path, "profile automation memory fixture")
                 .expect("profile memory authority");

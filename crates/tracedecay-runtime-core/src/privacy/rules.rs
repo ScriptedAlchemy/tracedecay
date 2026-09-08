@@ -72,7 +72,7 @@ const VENDORED_PRIVATE_KEY_RULE: &str = "private-key";
 const DOCUMENT_ALLOWLIST_ID: &str = "<document allowlist>";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialPatternKind {
+pub enum CredentialPatternKind {
     PrivateKey,
     BearerToken,
     KnownCredential,
@@ -80,7 +80,7 @@ pub(crate) enum CredentialPatternKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialPatternProfile {
+pub enum CredentialPatternProfile {
     Observation,
     Memory,
 }
@@ -101,7 +101,7 @@ impl CredentialPatternProfile {
 /// allowed to reach a log, and the privacy boundary's whole contract is that
 /// matched bytes never do.
 #[derive(Debug, Error)]
-pub(crate) enum CredentialRuleSetError {
+pub enum CredentialRuleSetError {
     #[error("credential rule document `{document}` is not valid TOML: {reason}")]
     Document {
         document: &'static str,
@@ -240,7 +240,7 @@ impl KeywordMatcher {
 /// [`Self::is_match`], [`Self::ranges`] — so every caller kept working. What
 /// changed is behind it: matches now pass a rule's entropy floor and its
 /// allowlists before they count.
-pub(crate) struct CredentialPattern {
+pub struct CredentialPattern {
     id: String,
     kind: CredentialPatternKind,
     regex: Regex,
@@ -435,7 +435,7 @@ fn line_containing(text: &str, offset: usize) -> &str {
 /// which resolves overlapping candidates by kind priority and, at equal
 /// priority, by the order it saw them.
 #[hotpath::measure(label = "runtime_core.privacy.rules_compile")]
-pub(crate) fn compile_credential_patterns(
+pub fn compile_credential_patterns(
     profile: CredentialPatternProfile,
 ) -> Result<Vec<CredentialPattern>, CredentialRuleSetError> {
     let mut patterns = compile_document(

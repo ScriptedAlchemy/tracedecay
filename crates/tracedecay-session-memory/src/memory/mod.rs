@@ -1,4 +1,6 @@
-//! Canonical memory use cases over the append-only fact authority.
+//! Canonical memory use cases over the append-only fact authority, plus the
+//! memory model they and [`crate::fact_store`] share: sanitization hygiene,
+//! scoring, entity, encoding, and trust utilities.
 
 use crate::fact_store::DatabaseFactStore;
 use tracedecay_domain::FactOwnerV1;
@@ -10,11 +12,18 @@ mod canonical;
 mod context;
 mod curation;
 mod dashboard;
+pub mod diff;
+pub mod encoding;
+pub mod entities;
 mod error;
 mod graph;
+pub mod hygiene;
 mod privacy_remediation;
 mod project_memory;
 mod sanitize;
+pub mod similarity;
+pub mod trust;
+pub mod user;
 
 #[cfg(test)]
 mod tests;

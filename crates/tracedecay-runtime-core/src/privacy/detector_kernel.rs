@@ -7,7 +7,7 @@ use serde_json::Value;
 // compilation. They are re-exported here because this is the module every
 // consumer already imports the detector kernel from, and moving the rules out
 // of hand-written code should not move every caller with them.
-pub(crate) use super::rules::{
+pub use super::rules::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
     compile_credential_patterns,
 };
@@ -244,7 +244,7 @@ pub(crate) fn entropy_bits_per_mille(token: &str) -> Option<u32> {
     u32::try_from(entropy_sum * 1_000 / (len * ENTROPY_SCALE)).ok()
 }
 
-pub(crate) fn looks_high_entropy_token(token: &str) -> bool {
+pub fn looks_high_entropy_token(token: &str) -> bool {
     if token.len() < 36
         || !token.bytes().all(token_byte)
         || token.bytes().all(|byte| byte.is_ascii_hexdigit())

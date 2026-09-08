@@ -71,6 +71,7 @@ test-transport = ["tracedecay-runtime-core/test-transport"]
 amari-holographic = "0.23.0"
 fs2 = "0.4"
 hex = "0.4"
+regex = "1.12.3"
 hotpath.workspace = true
 memmap2 = "0.9"
 schemars = "1.2.1"

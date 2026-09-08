@@ -2,10 +2,10 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::memory::hygiene::detect_secret_like;
 use tracedecay_domain::RunId;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{FactId, FactLineageEventV1, FactOwnerV1, LocatorDigest, ProvenanceId};
-use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_store::ProjectMemoryAutomationRunReceiptsV1;
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryAutomaticFactApplyDispositionV1,

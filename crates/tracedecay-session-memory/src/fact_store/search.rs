@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_runtime_core::memory::entities::normalize_entity;
+use crate::memory::entities::normalize_entity;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::db::build_qmark_placeholders;
@@ -46,7 +46,7 @@ use super::scoring::{
     project_memory_millionths, project_memory_score_millionths, project_memory_temporal_decay,
     project_memory_term_coverage, project_memory_tokens,
 };
-use tracedecay_runtime_core::memory::encoding::{HolographicEncoder, HolographicQueryVector};
+use crate::memory::encoding::{HolographicEncoder, HolographicQueryVector};
 
 /// Raw score components retained so the `why` explanation string is only
 /// formatted for hits that survive the zero-score and threshold filters.

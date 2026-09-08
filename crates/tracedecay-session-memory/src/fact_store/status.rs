@@ -1,8 +1,8 @@
 //! Canonical project-memory status derived from current facts and payloads.
 
+use crate::memory::encoding::HolographicEncoder;
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_runtime_core::memory::encoding::HolographicEncoder;
 
 use amari_holographic::{BindingAlgebra, FHRRAlgebra};
 use tracedecay_domain::FactOwnerV1;
@@ -71,7 +71,7 @@ async fn project_memory_owner_status_counts_tx(
                 key.kind,
                 key.project_id.as_str(),
                 key.json.as_str(),
-                tracedecay_runtime_core::memory::trust::DEFAULT_MIN_TRUST,
+                crate::memory::trust::DEFAULT_MIN_TRUST,
             ],
         )
         .await

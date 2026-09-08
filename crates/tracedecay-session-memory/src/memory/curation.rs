@@ -1,11 +1,11 @@
 //! Owner-bound construction and settlement for canonical memory curation.
 
+use crate::memory::hygiene::detect_secret_like;
 use serde_json::Value;
 use tracedecay_domain::{
     ActorId, Confidence, FactEventId, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactOwnerV1, FactRelationKindV1, FactRelationV1, ProvenanceId, RunId,
 };
-use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_store::{
     FactWriteControl, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1,
     ProjectMemoryFactCurationAddV1, ProjectMemoryFactCurationBatchV1,

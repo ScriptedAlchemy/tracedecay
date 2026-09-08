@@ -6793,7 +6793,6 @@ name = "tracedecay-runtime-core"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
- "amari-holographic",
  "chrono",
  "criterion",
  "dirs",
@@ -6947,6 +6946,7 @@ dependencies = [
  "hex",
  "hotpath",
  "memmap2",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

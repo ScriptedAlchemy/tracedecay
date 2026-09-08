@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::managed_skills::{ManagedSkill, ManagedSkillState};
-use tracedecay_runtime_core::memory::similarity::lexical_overlap;
+use tracedecay_session_memory::memory::similarity::lexical_overlap;
 
 /// Minimum content (title+summary+body) token Jaccard for a pair to count as
 /// a consolidation candidate on its own.

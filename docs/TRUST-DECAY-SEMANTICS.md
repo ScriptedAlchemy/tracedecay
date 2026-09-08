@@ -8,7 +8,7 @@ An earlier version of this document was written against a single-crate
 `src/memory/{retrieval,store,trust}.rs` layout, a `src/db/migrations.rs`
 schema, and MCP/dashboard modules under `src/mcp` / `src/dashboard` — none of
 which exist anymore. The relevant logic is now split across
-`crates/tracedecay-runtime-core/src/memory/trust.rs` (trust constants and
+`crates/tracedecay-session-memory/src/memory/trust.rs` (trust constants and
 bucketing), `crates/tracedecay-session-memory/src/fact_store/scoring.rs`
 (the ranking-time decay formula), `crates/tracedecay-session-memory/src/
 fact_store/crud/{commands.rs,feedback.rs,lineage.rs}` (the writers of trust),
@@ -89,7 +89,7 @@ The complete, current set of writers:
    and also bumps `helpful_count`/`unhelpful_count`/`last_feedback_at` via
    `project_memory_update_feedback_projection_tx` and appends a row to
    `memory_v2_feedback_history`. These deltas match the constants in
-   `crates/tracedecay-runtime-core/src/memory/trust.rs`
+   `crates/tracedecay-session-memory/src/memory/trust.rs`
    (`HELPFUL_DELTA = 0.05`, `UNHELPFUL_DELTA = -0.10`).
 
 That is the complete set — there is no separate "manual trust bump" tool with

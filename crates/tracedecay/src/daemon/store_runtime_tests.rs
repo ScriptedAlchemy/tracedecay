@@ -409,7 +409,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     )
     .expect("daemon database scope");
     let memory_path =
-        tracedecay_runtime_core::memory::user::user_memory_db_path(identity.profile_root());
+        tracedecay_session_memory::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
     tracedecay_runtime_core::db::migrations::create_schema_connection(&seed)
         .await
