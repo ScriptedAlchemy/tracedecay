@@ -9,7 +9,7 @@
 //! and states that "retention expiry is eligibility for a fresh cleanup
 //! preflight, not delete authority".
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 

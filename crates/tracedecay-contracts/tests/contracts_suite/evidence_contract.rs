@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use tracedecay_contracts::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,

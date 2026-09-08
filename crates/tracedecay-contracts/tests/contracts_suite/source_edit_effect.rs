@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use tracedecay_contracts::{
     EffectId, IdempotencyKey, RenamePreviewAcceptanceV1, RenameSymbolBindingV1,

@@ -2,7 +2,7 @@
 //! citation completeness, preservation of failures/unknowns/disagreement,
 //! and the unsynthesized-set answer when nothing is citable.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU16;

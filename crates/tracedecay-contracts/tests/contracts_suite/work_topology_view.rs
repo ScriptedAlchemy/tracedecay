@@ -3,7 +3,7 @@
 //! Work is a typed state, and an invalid resolved policy is a typed
 //! unavailability rather than a fabricated view.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU16;

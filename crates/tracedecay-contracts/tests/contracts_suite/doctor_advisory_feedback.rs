@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use std::future::Future;
 use std::task::{Context, Poll, Waker};

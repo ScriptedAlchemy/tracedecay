@@ -2,7 +2,7 @@
 //! idempotent starts, the cancellation ladder, restart fencing, staleness
 //! refusal, and typed provider-availability terminal journeys.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::ops::Deref;

@@ -55,7 +55,7 @@ pub const SHA256_A: &str =
 pub const SHA256_B: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
-    include_str!("../../../tracedecay-policy/tests/fixtures/source_authorization/core.json");
+    include_str!("../../../../tracedecay-policy/tests/fixtures/source_authorization/core.json");
 
 pub fn id<T>(value: &str) -> T
 where

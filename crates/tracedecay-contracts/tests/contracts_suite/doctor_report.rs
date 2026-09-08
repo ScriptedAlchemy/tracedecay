@@ -4,7 +4,7 @@
 //! mixed healthy/degraded/unavailable families, assert the coverage statement is
 //! truthful, and exercise every finding family supported by the kernel.
 
-mod common;
+use crate::common;
 
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
