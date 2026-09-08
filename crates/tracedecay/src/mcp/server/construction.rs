@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::{
     ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
-    remote::status::RemoteOperationalStatusReadPort,
+    remote::status::RemoteOperationalStatusReaderV1,
 };
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -145,7 +145,7 @@ pub(crate) struct McpServerConstructionContext {
     /// Live Remote Brain operational read composed from the mounted remote
     /// authorities. Daemon-owned servers install it; direct servers leave it
     /// absent and remote operator surfaces report typed unavailable.
-    pub(crate) remote_operational_status: Option<Arc<dyn RemoteOperationalStatusReadPort>>,
+    pub(crate) remote_operational_status: Option<RemoteOperationalStatusReaderV1>,
     pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
@@ -605,7 +605,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_remote_operational_status(
         mut self,
-        provider: Arc<dyn RemoteOperationalStatusReadPort>,
+        provider: RemoteOperationalStatusReaderV1,
     ) -> Self {
         self.remote_operational_status = Some(provider);
         self

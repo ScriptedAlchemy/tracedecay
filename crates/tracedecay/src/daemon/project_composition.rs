@@ -1282,13 +1282,13 @@ impl ProjectOpenInputs<'_> {
         // spool, replay, backup, and failover state through this one provider;
         // typed `Unavailable` remains only when the remote plane is genuinely
         // unreadable.
-        let remote_operational_status: tracedecay_store_runtime::RemoteOperationalStatusProviderV1 = {
+        let remote_operational_status: tracedecay_contracts::RemoteOperationalStatusReaderV1 = {
             let remote_credentials = core.graph_runtime.remote_credential_authority();
             Arc::new(move || remote_credentials.operational_status())
         };
         let remote_operational_read: doctor_kernel::RemoteOperationalReadProviderV1 = {
             let remote_operational_status = Arc::clone(&remote_operational_status);
-            Arc::new(move || remote_operational_status.read().doctor_read())
+            Arc::new(move || remote_operational_status().doctor_read())
         };
         let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
             self.canonical_project_path.to_path_buf(),

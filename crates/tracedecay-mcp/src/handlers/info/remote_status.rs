@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort;
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReaderV1;
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_domain::errors::Result;
 
@@ -18,10 +18,10 @@ use crate::tool_json;
 pub fn handle_remote_status(
     project_root: &Path,
     args: &Value,
-    provider: Option<&dyn RemoteOperationalStatusReadPort>,
+    provider: Option<&RemoteOperationalStatusReaderV1>,
 ) -> Result<ToolResult> {
     let status = match provider {
-        Some(provider) => provider.read(),
+        Some(provider) => provider(),
         None => RemoteOperationalStatusReadV1::Unavailable,
     };
     let value = serde_json::to_value(&status)?;
@@ -104,7 +104,7 @@ mod tests {
         let result = handle_remote_status(
             Path::new("."),
             &json!({ "format": "json" }),
-            Some(provider.as_ref()),
+            Some(&provider),
         )
         .expect("observed remote status serializes");
         assert_eq!(

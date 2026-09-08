@@ -250,7 +250,7 @@ pub use project_registry::{
     ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
     list_registered_projects, read_registered_project_context, render_project_registry_view,
 };
-pub use remote::status::RemoteOperationalStatusReadPort;
+pub use remote::status::RemoteOperationalStatusReaderV1;
 pub use result::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationExecutionFailureClassV1,
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
