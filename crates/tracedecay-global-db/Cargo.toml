@@ -13,6 +13,7 @@ include = ["/src/**"]
 # the feature off, so instrumented call sites compile identically both ways.
 hotpath = [
     "tracedecay-domain/hotpath",
+    "tracedecay-privacy/hotpath",
     "hotpath/hotpath",
     "hotpath/tokio",
     "tracedecay-contracts/hotpath",
@@ -27,6 +28,7 @@ hotpath = [
 ]
 hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
+    "tracedecay-privacy/hotpath-alloc",
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-contracts/hotpath-alloc",
@@ -41,6 +43,7 @@ hotpath-alloc = [
 ]
 hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
+    "tracedecay-privacy/hotpath-cpu",
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-contracts/hotpath-cpu",
@@ -85,6 +88,7 @@ tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version
 tracedecay-semantic-contracts.workspace = true
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }

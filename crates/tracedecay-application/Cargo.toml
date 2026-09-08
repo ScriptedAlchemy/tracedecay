@@ -34,6 +34,7 @@ hotpath = [
     "tracedecay-lsp/hotpath",
     "tracedecay-policy/hotpath",
     "tracedecay-private-fs/hotpath",
+    "tracedecay-privacy/hotpath",
     "tracedecay-query/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
@@ -63,6 +64,7 @@ hotpath-alloc = [
     "tracedecay-lsp/hotpath-alloc",
     "tracedecay-policy/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-privacy/hotpath-alloc",
     "tracedecay-query/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
@@ -92,6 +94,7 @@ hotpath-cpu = [
     "tracedecay-lsp/hotpath-cpu",
     "tracedecay-policy/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-privacy/hotpath-cpu",
     "tracedecay-query/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
@@ -164,6 +167,7 @@ tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }

@@ -1,12 +1,22 @@
 //! `TraceDecay` runtime kernel.
 //!
 //! This crate owns the load-bearing runtime substrate that every other
-//! `TraceDecay` subsystem sits on: shared value types, the storage layout
-//! resolver, the `SQLite` database facade and its
-//! migrations, the observation/memory/session stores, git and worktree
-//! topology reads, process-level leases, and the privacy detectors.
+//! `TraceDecay` subsystem sits on: cancellation and task ownership, process
+//! and profile leases, resource accounting (resident memory, background CPU),
+//! the storage layout and store-identity resolver with the repository and
+//! worktree reads it depends on, the `SQLite` database facade with its
+//! migrations and read snapshots, and the per-shard runtime registry.
 //!
 //! ## What sits above this kernel
+//!
+//! Product runtimes live with their vertical owners, not here: the fact store
+//! and memory model in `tracedecay-session-memory`, privacy detection and
+//! sanitization in `tracedecay-privacy`, Work/Workflow topology projections in
+//! `tracedecay-application`, and the token-savings monitor ring in
+//! `tracedecay-session-memory`. Branch tracking (`branch`, `branch_meta`)
+//! remains here only because its consumers (`tracedecay-global-db`,
+//! `tracedecay-maintenance`, the CLI) sit below every crate that could own it,
+//! and [`worktree`] identity reads depend on [`branch::current_branch`].
 //!
 //! [`shard_runtime`] is the per-shard runtime and registry that `db::Database`
 //! is built on. The store runtime that decides which shards a daemon opens and
@@ -93,20 +103,22 @@ pub mod git;
 pub mod git_discovery;
 pub mod git_repository;
 pub mod lifecycle_lease;
-pub mod memory;
-pub mod monitor_ring;
 pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
-pub mod privacy;
+// #1090: `crates/tracedecay/src/mcp/tools/handlers/dispatch_groups.rs` belongs
+// to the session-refresh lane (#1108) and still imports these two through the
+// kernel; that lane repoints it to `tracedecay_privacy`, then this forward goes.
+pub mod privacy {
+    pub use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
+}
 mod profiled_lock;
 pub mod resident_memory;
 pub mod runtime_identity;
 pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;
-pub mod store;
 pub mod sync;
 pub mod text;
 pub mod timeutil;
@@ -115,8 +127,6 @@ pub mod weak_registry;
 pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
-pub mod work_topology;
-pub mod workflow_topology;
 pub mod worktree;
 
 /// Ports the kernel exposes so the root crate can inject subsystems that stay

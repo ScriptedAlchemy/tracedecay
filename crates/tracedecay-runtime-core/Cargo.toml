@@ -3,7 +3,7 @@ name = "tracedecay-runtime-core"
 version = "0.1.0"
 publish = false
 edition.workspace = true
-description = "TraceDecay runtime kernel: storage layout, database engine, stores, memory, git/worktree topology, and process leases"
+description = "TraceDecay runtime kernel: cancellation, leases, resource accounting, storage layout and identity, database engine, and shard runtime"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
@@ -16,6 +16,7 @@ hotpath = [
     "tracedecay-capture/hotpath",
     "tracedecay-graph-db/hotpath",
     "tracedecay-private-fs/hotpath",
+    "tracedecay-privacy/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-store/hotpath",
 ]
@@ -26,6 +27,7 @@ hotpath-alloc = [
     "tracedecay-capture/hotpath-alloc",
     "tracedecay-graph-db/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-privacy/hotpath-alloc",
     "tracedecay-rusqlite-runtime/hotpath-alloc",
     "tracedecay-store/hotpath-alloc",
 ]
@@ -36,6 +38,7 @@ hotpath-cpu = [
     "tracedecay-capture/hotpath-cpu",
     "tracedecay-graph-db/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-privacy/hotpath-cpu",
     "tracedecay-rusqlite-runtime/hotpath-cpu",
     "tracedecay-store/hotpath-cpu",
 ]
@@ -51,39 +54,32 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 test-helpers = []
 
 [dependencies]
-memmap2 = "0.9"
-aho-corasick = "1.1.5"
 hotpath.workspace = true
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 
-amari-holographic = "0.23.0"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
-percent-encoding = "2"
-regex = "1.12.3"
 reflink-copy = "0.1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml_ng = "0.10"
 sha2 = "0.11"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7.19"
-toml = "1"
 tracing = "0.1"
-url = "2"
 
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"

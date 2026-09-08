@@ -1,11 +1,11 @@
 //! Canonical project-memory add preflight and execution.
 
+use crate::memory::trust::DEFAULT_TRUST;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactOwnerV1, ProvenanceId, canonical_sha256,
 };
-use tracedecay_runtime_core::memory::trust::DEFAULT_TRUST;
 use tracedecay_store::{
     FactWriteControl, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactStore,

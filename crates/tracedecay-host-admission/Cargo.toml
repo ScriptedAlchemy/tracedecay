@@ -16,6 +16,7 @@ hotpath = [
     "tracedecay-domain/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-private-fs/hotpath",
+    "tracedecay-privacy/hotpath",
     "tracedecay-runtime-core/hotpath",
     "tracedecay-session-memory/hotpath",
     "tracedecay-sessions/hotpath",
@@ -27,6 +28,7 @@ hotpath-alloc = [
     "tracedecay-domain/hotpath-alloc",
     "tracedecay-global-db/hotpath-alloc",
     "tracedecay-private-fs/hotpath-alloc",
+    "tracedecay-privacy/hotpath-alloc",
     "tracedecay-runtime-core/hotpath-alloc",
     "tracedecay-session-memory/hotpath-alloc",
     "tracedecay-sessions/hotpath-alloc",
@@ -38,6 +40,7 @@ hotpath-cpu = [
     "tracedecay-domain/hotpath-cpu",
     "tracedecay-global-db/hotpath-cpu",
     "tracedecay-private-fs/hotpath-cpu",
+    "tracedecay-privacy/hotpath-cpu",
     "tracedecay-runtime-core/hotpath-cpu",
     "tracedecay-session-memory/hotpath-cpu",
     "tracedecay-sessions/hotpath-cpu",
@@ -58,6 +61,7 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tracing = "0.1"
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }

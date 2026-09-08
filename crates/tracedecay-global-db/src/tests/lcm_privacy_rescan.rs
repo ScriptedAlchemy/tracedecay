@@ -8,10 +8,10 @@ use tracedecay_domain::{
 };
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{payload, schema};
-use tracedecay_runtime_core::db::engine::params;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     LCM_PAYLOAD_SANITIZER_VERSION_V1, lcm_payload_detector_revision, sanitize_lcm_payload_text,
 };
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::SessionMessageRecord;
 
 use crate::LcmPrivacyRescanOutcomeV1;

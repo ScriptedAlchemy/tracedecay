@@ -22,7 +22,7 @@ use tracedecay_store::{FactWriteControl, ProjectMemoryFactProjectionV1};
 
 use super::{DaemonSessionRuntimeRegistryV1, ProjectRuntimeOwnerStateV1};
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 fn enrolled_root(base: &Path, project_id: &ProjectId) -> PathBuf {
     let root = base.join(project_id.as_str());

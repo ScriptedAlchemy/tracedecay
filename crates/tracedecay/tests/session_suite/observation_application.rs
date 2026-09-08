@@ -16,7 +16,7 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
     PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,

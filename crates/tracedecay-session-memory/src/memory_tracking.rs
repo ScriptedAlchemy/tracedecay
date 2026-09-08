@@ -1,8 +1,8 @@
 //! Canonical retrieval telemetry for explicit retained-memory search.
 
+use crate::fact_store::DatabaseFactStore;
 use tracedecay_contracts::{RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1};
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProvenanceId};
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_store::{
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactRetrievalReceiptV1, ProjectMemoryFactSearchPageV1,

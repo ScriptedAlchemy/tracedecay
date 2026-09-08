@@ -9,7 +9,7 @@ use crate::runtime::source::{
     JsonlFrameDeferral, JsonlResumeState, RawJsonlSkippedReason, TranscriptCursorCheckpoint,
     TranscriptCursorKey, TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume,
 };
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
     parse_normalized_observation_record_v1, protect_sensitive_structural_id,
 };

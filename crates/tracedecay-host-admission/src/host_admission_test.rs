@@ -129,8 +129,8 @@ fn application_errors_map_to_bounded_static_outcomes() {
         "storage operation must not escape onto the host-admission wire: {serialized}"
     );
     for error in [
-        tracedecay_runtime_core::privacy::PrivacySanitizerError::DetectorUnavailable,
-        tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,
+        tracedecay_privacy::PrivacySanitizerError::DetectorUnavailable,
+        tracedecay_privacy::PrivacySanitizerError::InvalidPolicy,
     ] {
         assert_eq!(
             classify_error(&ObservationApplicationError::Privacy(error)),

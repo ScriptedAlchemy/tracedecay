@@ -10,7 +10,7 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 use tracedecay_store::ParseOffset;
 
 use crate::admission::HostAdmission;

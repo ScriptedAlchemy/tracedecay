@@ -33,7 +33,7 @@ pub use access::{
 };
 pub use connection::Database;
 pub use connection::MemoryGraphReconciliationTaskOwnerV1;
-pub(crate) use connection::MemoryGraphReconciliationTaskScheduleV1;
+pub use connection::MemoryGraphReconciliationTaskScheduleV1;
 pub use connection::{
     DatabaseAccessMode, DatabaseClientGuardV1, DatabaseEngineReadConnection,
     DatabaseEngineReadSnapshot, DatabaseMemoryTransaction, DatabaseRuntimeClientV1,
@@ -64,7 +64,7 @@ pub use file_identity::{
 };
 pub use memory_connection::MemoryConnection;
 pub use metadata::BoundedMetadataValue;
-pub(crate) use retrieval_anchor_authority::{
+pub use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
 };
 pub use sql::{

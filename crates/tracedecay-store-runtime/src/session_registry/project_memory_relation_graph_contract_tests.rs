@@ -23,7 +23,7 @@ use tracedecay_store::{
 
 use super::DaemonSessionRuntimeRegistryV1;
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 const CORE_RELATIONS_BEFORE_CHORD: usize = 9;
 const CORE_RELATIONS_AFTER_CHORD: usize = 10;

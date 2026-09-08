@@ -54,7 +54,7 @@ use super::{
 };
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 mod early_gate;
 

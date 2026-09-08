@@ -554,7 +554,7 @@ impl RegisteredTemporalHarness {
             }
         })
         .to_string();
-        let sanitization = tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(payload)
+        let sanitization = tracedecay_privacy::sanitize_lcm_payload_text(payload)
             .expect("sanitize fixture LCM payload");
         let raw_metadata = json!({
             "ingest_protection": {
@@ -648,9 +648,8 @@ impl RegisteredTemporalHarness {
             None,
         )
         .expect("write external payload through production filesystem authority");
-        let sanitization =
-            tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(EXTERNAL_PAYLOAD)
-                .expect("sanitize external fixture LCM payload");
+        let sanitization = tracedecay_privacy::sanitize_lcm_payload_text(EXTERNAL_PAYLOAD)
+            .expect("sanitize external fixture LCM payload");
         let raw_metadata = json!({
             "ingest_protection": {
                 "sanitization_receipt": sanitization.receipt()

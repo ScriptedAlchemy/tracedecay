@@ -164,7 +164,7 @@ pub(crate) async fn resolve_anchor_derivative(
         .map(|row| row.is_some())
 }
 
-pub(crate) async fn tombstone_fact_derivatives_tx<E>(
+pub async fn tombstone_fact_derivatives_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,
@@ -216,7 +216,7 @@ where
         .map_err(database_error)
 }
 
-pub(crate) async fn publish_fact_feedback_finding_tx<E>(
+pub async fn publish_fact_feedback_finding_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,

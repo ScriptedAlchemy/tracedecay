@@ -33,8 +33,8 @@ use crate::ports::session_store::AutomationSessionStore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_policy::CurationApplyAuthorityV1;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplication;
 
 mod curation;

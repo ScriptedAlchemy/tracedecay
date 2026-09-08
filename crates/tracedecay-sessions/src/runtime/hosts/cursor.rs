@@ -43,9 +43,7 @@ use crate::runtime::source::{
     collect_files_with_ext_bounded, persist_host_provider_coverage,
     run_blocking_transcript_section, stream_new_jsonl,
 };
-use tracedecay_runtime_core::privacy::{
-    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 const CURSOR_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
         "cursor_session_cwd",

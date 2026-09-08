@@ -19,7 +19,7 @@
 //! is derived from immutable Hermes session and message evidence.
 
 use crate::runtime::source::STRICT_JSONL_BATCH_BYTES;
-use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
+use tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES;
 
 mod coverage;
 mod ingest;

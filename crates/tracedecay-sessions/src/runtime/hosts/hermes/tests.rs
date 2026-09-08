@@ -16,9 +16,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 use crate::admission::test_support::PanicHostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::StoredCursor;
-use tracedecay_runtime_core::privacy::{
-    MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
 
 use super::coverage::{admit_rows_with_admission_and_cancellation, sqlite_incarnation};
 use super::ingest::HermesProfileSource;
@@ -425,7 +423,7 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
         record.native_record_id,
     )
     .unwrap();
-    let outcome = tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = tracedecay_privacy::ClaudeRecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(
             parsed,
@@ -433,10 +431,7 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
             RetentionClass::new(OBSERVATION_RETENTION).unwrap(),
         )
         .unwrap();
-    let tracedecay_runtime_core::privacy::ObservationSanitizationOutcomeV1::Durable {
-        observation,
-        ..
-    } = outcome
+    let tracedecay_privacy::ObservationSanitizationOutcomeV1::Durable { observation, .. } = outcome
     else {
         panic!("safe Hermes fixture must remain durable");
     };

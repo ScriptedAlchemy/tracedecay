@@ -10,7 +10,7 @@ use tracedecay_session_memory::memory::MemoryApplication;
 // functions instead of keeping independent copies.
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
-use tracedecay_runtime_core::store::memory::{ProjectFactStore, ProjectMemoryDbHandle};
+use tracedecay_session_memory::fact_store::{ProjectFactStore, ProjectMemoryDbHandle};
 use tracedecay_session_memory::memory::memory_application_error;
 
 use super::TraceDecay;

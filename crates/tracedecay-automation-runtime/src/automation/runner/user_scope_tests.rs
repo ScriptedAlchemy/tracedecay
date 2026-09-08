@@ -21,7 +21,7 @@ use crate::automation::run_ledger::AutomationRunStatus;
 use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplicationError;
 use tracedecay_session_memory::memory::{
     MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
@@ -68,7 +68,8 @@ impl UserRuntimeHarness {
         let session_runtime = RegisteredGlobalDbTestRuntime::profile(&profile_root)
             .await
             .expect("registered profile session runtime");
-        let memory_path = tracedecay_runtime_core::memory::user::user_memory_db_path(&profile_root);
+        let memory_path =
+            tracedecay_session_memory::memory::user::user_memory_db_path(&profile_root);
         let authority =
             DatabaseAuthority::acquire_test(&memory_path, "profile automation memory fixture")
                 .expect("profile memory authority");

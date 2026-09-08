@@ -15,7 +15,7 @@ use tracedecay_store::{
 use super::{ContractFixture, await_mounted_graph_operation, project_id};
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 async fn publish_foreign_memory_owner(
     path: &Path,

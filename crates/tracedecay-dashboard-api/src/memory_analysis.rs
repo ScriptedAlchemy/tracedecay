@@ -6,13 +6,15 @@
 mod pca;
 
 use serde_json::{Value, json};
-use tracedecay_runtime_core::memory::encoding::{HolographicEncoder, HolographicEncodingError};
+use tracedecay_session_memory::memory::encoding::{HolographicEncoder, HolographicEncodingError};
 use tracedecay_store::FactReadControl;
 
 pub use pca::pca_scores;
-// Similarity primitives live in `tracedecay_runtime_core::memory::similarity`;
+// Similarity primitives live in `tracedecay_session_memory::memory::similarity`;
 // re-export them so every dashboard similarity view uses that one classifier.
-pub use tracedecay_runtime_core::memory::similarity::{lexical_overlap, similarity_classification};
+pub use tracedecay_session_memory::memory::similarity::{
+    lexical_overlap, similarity_classification,
+};
 
 pub const SIMILARITY_FACT_CAP: i64 = 2000;
 pub const SIMILARITY_DEFAULT_THRESHOLD: f64 = 0.85;

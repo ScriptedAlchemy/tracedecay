@@ -6,7 +6,7 @@ records which of the previously-identified quality risks still hold against
 the current implementation.
 
 The retrieval pipeline described here lives in
-`crates/tracedecay-runtime-core/src/store/memory/{candidates.rs,scoring.rs,search.rs}`
+`crates/tracedecay-session-memory/src/fact_store/{candidates.rs,scoring.rs,search.rs}`
 — async, transaction-scoped, `project_memory_*`-prefixed functions operating
 over the `memory_v2_*` SQLite tables
 (`crates/tracedecay-runtime-core/src/db/memory_v2/schema/`). This is a full
@@ -90,7 +90,7 @@ computes:
   (fact tokens are content + tags + entities, tokenized identically).
 - **`holographic`** = `project_memory_holographic_score`: FHRR-2048 binding of
   content + normalized entities via `HolographicEncoder`
-  (`crates/tracedecay-runtime-core/src/memory/encoding.rs`, unchanged in
+  (`crates/tracedecay-session-memory/src/memory/encoding.rs`, unchanged in
   spirit from the pre-rewrite code) — every token still becomes a
   deterministic SHA-256-derived coefficient vector; there is no semantic
   embedding model. The raw FHRR similarity is rescaled with
@@ -146,7 +146,7 @@ These modes still carry **no query-relevance signal** — a fact is ranked by
 trust alone once it matches the requested entity/entities, same as the
 pre-rewrite pipeline.
 
-## 2. Entity extraction (`crates/tracedecay-runtime-core/src/memory/entities.rs`)
+## 2. Entity extraction (`crates/tracedecay-session-memory/src/memory/entities.rs`)
 
 `extract_entities` combines five sources, in document order, de-duplicated
 case-insensitively:
@@ -222,7 +222,7 @@ current binary before citing exact scores again.
   higher-trust, less-relevant peer.
 - **The holographic signal is still a lexical hash, not a semantic
   embedding.** Atoms are still deterministic SHA-256 hashes of literal token
-  text (`crates/tracedecay-runtime-core/src/memory/encoding.rs`), with the
+  text (`crates/tracedecay-session-memory/src/memory/encoding.rs`), with the
   same `(sim + 1) / 2` floor. It remains a narrow re-ranking signal on top of
   an already lexically-filtered candidate set, not an independent semantic
   channel.

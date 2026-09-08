@@ -33,7 +33,7 @@ use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_runtime_core::memory::entities::normalize_entity;
+use tracedecay_session_memory::memory::entities::normalize_entity;
 
 const MAX_CALL_CHAIN_DEPTH: usize = 20;
 const TEST_CALLER_DEPTH: usize = 3;

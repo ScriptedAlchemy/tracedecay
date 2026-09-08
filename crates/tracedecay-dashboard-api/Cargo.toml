@@ -32,6 +32,7 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-semantic-contracts.workspace = true
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
@@ -46,6 +47,7 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 hotpath = [
     "hotpath/hotpath",
     "tracedecay-domain/hotpath",
+    "tracedecay-privacy/hotpath",
     "tracedecay-automation/hotpath",
     "tracedecay-automation-runtime/hotpath",
     "tracedecay-api/hotpath",
@@ -68,6 +70,7 @@ hotpath-alloc = [
     "hotpath",
     "hotpath/hotpath-alloc",
     "tracedecay-domain/hotpath-alloc",
+    "tracedecay-privacy/hotpath-alloc",
     "tracedecay-automation/hotpath-alloc",
     "tracedecay-automation-runtime/hotpath-alloc",
     "tracedecay-api/hotpath-alloc",
@@ -90,6 +93,7 @@ hotpath-cpu = [
     "hotpath",
     "hotpath/hotpath-cpu",
     "tracedecay-domain/hotpath-cpu",
+    "tracedecay-privacy/hotpath-cpu",
     "tracedecay-automation/hotpath-cpu",
     "tracedecay-automation-runtime/hotpath-cpu",
     "tracedecay-api/hotpath-cpu",

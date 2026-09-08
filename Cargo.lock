@@ -5905,6 +5905,7 @@ dependencies = [
  "tracedecay-maintenance",
  "tracedecay-mcp",
  "tracedecay-policy",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
@@ -6037,6 +6038,7 @@ dependencies = [
  "tracedecay-lcm",
  "tracedecay-lsp",
  "tracedecay-policy",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
@@ -6095,6 +6097,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-lcm",
  "tracedecay-policy",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
@@ -6285,6 +6288,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-lsp",
  "tracedecay-policy",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
@@ -6471,6 +6475,7 @@ dependencies = [
  "tracedecay-graph-query",
  "tracedecay-hooks",
  "tracedecay-lsp",
+ "tracedecay-privacy",
  "tracedecay-runtime-core",
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
@@ -6524,6 +6529,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-lcm",
+ "tracedecay-privacy",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-semantic-contracts",
@@ -6608,6 +6614,7 @@ dependencies = [
  "tokio",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
@@ -6643,6 +6650,7 @@ dependencies = [
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6725,6 +6733,7 @@ dependencies = [
  "tracedecay-framing",
  "tracedecay-graph-query",
  "tracedecay-hooks",
+ "tracedecay-privacy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
  "tracedecay-sessions",
@@ -6743,6 +6752,25 @@ dependencies = [
  "serde",
  "serde_json",
  "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-privacy"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "hotpath",
+ "percent-encoding",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+ "toml",
+ "tracedecay-capture",
+ "tracedecay-domain",
+ "url",
 ]
 
 [[package]]
@@ -6792,8 +6820,6 @@ dependencies = [
 name = "tracedecay-runtime-core"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
- "amari-holographic",
  "chrono",
  "criterion",
  "dirs",
@@ -6803,29 +6829,24 @@ dependencies = [
  "hex",
  "hotpath",
  "libc",
- "memmap2",
- "percent-encoding",
  "reflink-copy",
- "regex",
  "rusqlite",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "sha2 0.11.0",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "toml",
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",
- "url",
  "windows-sys 0.61.2",
 ]
 
@@ -6943,9 +6964,12 @@ dependencies = [
 name = "tracedecay-session-memory"
 version = "0.1.0"
 dependencies = [
+ "amari-holographic",
  "fs2",
  "hex",
  "hotpath",
+ "memmap2",
+ "regex",
  "schemars",
  "serde",
  "serde_json",
@@ -6959,7 +6983,9 @@ dependencies = [
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-lcm",
+ "tracedecay-privacy",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-session-temporal-store",
@@ -6967,6 +6993,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
@@ -7058,6 +7085,7 @@ dependencies = [
  "tracedecay-framing",
  "tracedecay-graph-db",
  "tracedecay-lcm",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",

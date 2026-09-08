@@ -7,10 +7,10 @@ use serde_json::{Map, json};
 use tracedecay_domain::HydrationStateV1;
 
 use crate::retrieval_content::projected_content_hash;
-use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     bind_sanitized_lcm_payload_text, sanitize_lcm_payload_text, sanitize_provider_metadata_json,
 };
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
 
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use super::{
