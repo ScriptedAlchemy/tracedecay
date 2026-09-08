@@ -28,7 +28,7 @@ use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
     HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
-use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest};
 use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
@@ -55,7 +55,8 @@ use tracedecay_domain::{
     RepositoryDirtyStateV1, RepositoryId, RerankPolicy, RetrievalBudget, RetrievalFailure,
     RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark,
+    SingleRootScopeV1, SnapshotFileDispositionV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorWatermark,
 };
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
@@ -286,9 +287,17 @@ fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
     key
 }
 
+/// Build every scoped retrieval projection the workload's queries need.
+///
+/// Preparation is measured on its own span so query evaluation timing can
+/// neither absorb nor hide it. Cost is O(chunks + scope memberships): the
+/// corpus is classified once through a reverse scope map rather than once per
+/// distinct scope set.
+#[hotpath::measure(label = "search_eval.corpus.query_projections")]
 fn build_query_projections(
     generation: &CodeIndexPublishedGenerationV1,
     file_scopes: &BTreeMap<String, String>,
+    qualified_names: &BTreeMap<SymbolOccurrenceId, String>,
     queries: &[WorkloadQueryV1],
 ) -> Result<
     (
@@ -322,54 +331,79 @@ fn build_query_projections(
         )?,
         exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
     };
-    // Keep the generation's weak admission memo alive across every scoped
-    // projection so each scope does not re-admit the complete corpus.
-    let admitted = generation
-        .admitted_chunks()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let mut lexical = BTreeMap::new();
-    let mut graph = BTreeMap::new();
-    let mut semantic_allowed_chunks = BTreeMap::new();
-    for scope_key in queries
+    // Canonical scope keys, deduplicated once; the position is the bucket id.
+    let scope_keys = queries
         .iter()
         .map(|query| canonical_scope_key(&query.allowed_scopes))
         .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Reverse map from a file scope to every scope key admitting it, so one
+    // corpus pass places each chunk in all of its buckets instead of scanning
+    // the corpus once per distinct scope set.
+    let mut interested_buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (bucket, scope_key) in scope_keys.iter().enumerate() {
+        for scope in scope_key {
+            interested_buckets
+                .entry(scope.as_str())
+                .or_default()
+                .push(bucket);
+        }
+    }
+    let buckets_for = |file_occurrence_id: &str| {
+        file_scopes
+            .get(file_occurrence_id)
+            .and_then(|scope| interested_buckets.get(scope.as_str()))
+            .into_iter()
+            .flatten()
+            .copied()
+    };
+    // Corpus order within each bucket is the order the admitted sweep and the
+    // chunk manifest already carry, exactly what a per-scope filter yielded.
+    let admitted = generation
+        .admitted_chunks()
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let mut lexical_chunks: Vec<Vec<ExtractionAdmittedCodeSearchChunkV1>> =
+        vec![Vec::new(); scope_keys.len()];
+    for chunk in admitted.iter() {
+        for bucket in buckets_for(chunk.chunk().anchor.file_occurrence_id.as_str()) {
+            lexical_chunks[bucket].push(chunk.clone());
+        }
+    }
+    drop(admitted);
+    let mut graph_chunks: Vec<Vec<Arc<CodeSearchChunkV1>>> = vec![Vec::new(); scope_keys.len()];
+    let mut semantic_chunks: Vec<BTreeSet<CodeSearchChunkId>> =
+        vec![BTreeSet::new(); scope_keys.len()];
+    for chunk in generation.chunks().chunks() {
+        for bucket in buckets_for(chunk.anchor.file_occurrence_id.as_str()) {
+            graph_chunks[bucket].push(Arc::clone(chunk));
+            semantic_chunks[bucket].insert(chunk.id.clone());
+        }
+    }
+    let mut lexical = BTreeMap::new();
+    let mut graph = BTreeMap::new();
+    let mut semantic_allowed_chunks = BTreeMap::new();
+    for (((scope_key, chunks), graph_chunks), semantic) in scope_keys
+        .into_iter()
+        .zip(lexical_chunks)
+        .zip(graph_chunks)
+        .zip(semantic_chunks)
     {
-        let scope_contains = |file_occurrence_id: &str| {
-            file_scopes
-                .get(file_occurrence_id)
-                .is_some_and(|scope| scope_key.binary_search(scope).is_ok())
-        };
-        let allowed_files = generation
-            .snapshot()
-            .files
+        // The lexical build reads only the names of the chunks it projects, so
+        // a scope receives that slice of the corpus-wide map, never a copy of
+        // all of it.
+        let scoped_names = chunks
             .iter()
-            .filter(|file| scope_contains(file.file_occurrence_id.as_str()))
-            .map(|file| file.file_occurrence_id.clone())
-            .collect();
+            .filter_map(|chunk| chunk.chunk().anchor.symbol_occurrence_id.as_ref())
+            .filter_map(|symbol| qualified_names.get_key_value(symbol))
+            .map(|(symbol, name)| (symbol.clone(), name.clone()))
+            .collect::<BTreeMap<_, _>>();
         lexical.insert(
             scope_key.clone(),
-            CodeLexicalProjectionAdapterV1::new_published(
-                metadata.clone(),
-                generation,
-                &allowed_files,
-            )
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+            CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), chunks, scoped_names)
+                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
-        let graph_chunks = generation
-            .chunks()
-            .chunks()
-            .iter()
-            .filter(|chunk| scope_contains(chunk.anchor.file_occurrence_id.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        semantic_allowed_chunks.insert(
-            scope_key.clone(),
-            graph_chunks
-                .iter()
-                .map(|chunk| chunk.id.clone())
-                .collect::<BTreeSet<_>>(),
-        );
+        semantic_allowed_chunks.insert(scope_key.clone(), semantic);
         graph.insert(
             scope_key,
             CodeGraphEvidenceReader::new_for_evaluation(
@@ -382,7 +416,6 @@ fn build_query_projections(
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         );
     }
-    drop(admitted);
     Ok((lexical, graph, semantic_allowed_chunks))
 }
 
@@ -2373,7 +2406,12 @@ fn publish_corpus_with_scale(
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
         .len() as u64;
     let (lexical_projections, graph_projections, semantic_allowed_chunks) =
-        build_query_projections(&generation, &file_scopes, &workload.queries)?;
+        build_query_projections(
+            &generation,
+            &file_scopes,
+            &qualified_names,
+            &workload.queries,
+        )?;
     Ok(PublishedCorpus {
         generation,
         lexical_projections,
@@ -3904,6 +3942,98 @@ pub(crate) mod tests {
                 Some(&expected)
             );
         }
+    }
+
+    /// A file in one scope must land in every scope set admitting that scope
+    /// and in no other; overlapping sets are the path a singleton workload
+    /// never exercises.
+    #[test]
+    fn scoped_projections_partition_chunks_into_every_admitting_scope_set_only() {
+        let fixture = authenticated_repo_fixture();
+        let workload = workload();
+        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+            .expect("published corpus");
+        let file_scopes = published
+            .generation
+            .chunks()
+            .chunks()
+            .iter()
+            .map(|chunk| {
+                let entry = published
+                    .occurrence_map
+                    .get(&format!("code-chunk:{}", chunk.id.as_str()))
+                    .expect("every chunk maps to a corpus document");
+                (
+                    chunk.anchor.file_occurrence_id.as_str().to_owned(),
+                    entry.scope.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let qualified_names = published
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut queries = workload.queries.clone();
+        let mut overlapping = queries[0].clone();
+        overlapping.allowed_scopes = vec![
+            "research".to_owned(),
+            "project".to_owned(),
+            "research".to_owned(),
+        ];
+        queries.push(overlapping);
+
+        let (lexical, graph, semantic) = build_query_projections(
+            &published.generation,
+            &file_scopes,
+            &qualified_names,
+            &queries,
+        )
+        .expect("scoped projections");
+
+        let expected_keys = queries
+            .iter()
+            .map(|query| canonical_scope_key(&query.allowed_scopes))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            lexical.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_keys
+        );
+        assert_eq!(
+            graph.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_keys
+        );
+        assert_eq!(
+            semantic.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_keys
+        );
+        for (scope_key, chunks) in &semantic {
+            let expected = published
+                .generation
+                .chunks()
+                .chunks()
+                .iter()
+                .filter(|chunk| {
+                    scope_key.contains(&file_scopes[chunk.anchor.file_occurrence_id.as_str()])
+                })
+                .map(|chunk| chunk.id.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(chunks, &expected, "scope set {scope_key:?}");
+        }
+        let union = semantic[&vec!["project".to_owned()]]
+            .union(&semantic[&vec!["research".to_owned()]])
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            semantic[&vec!["project".to_owned(), "research".to_owned()]],
+            union
+        );
+        assert!(
+            semantic[&vec!["project".to_owned()]]
+                .is_disjoint(&semantic[&vec!["research".to_owned()]])
+        );
     }
 
     #[test]
