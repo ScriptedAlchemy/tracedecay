@@ -81,10 +81,23 @@ pub fn application_catalog_contributions()
     ])
 }
 
+/// Resolves the page size an omitted transport control receives from the
+/// canonical primitive descriptor.
+///
+/// Operations outside this primitive family retain the inert page envelope's
+/// established value of 10.
+pub fn application_operation_default_page_size(operation: ApplicationSurfaceOperation) -> u32 {
+    PRIMITIVE_READ_SPECS
+        .iter()
+        .find(|spec| spec.operation == operation.as_str())
+        .map_or(10, |spec| spec.default_page_size)
+}
+
 struct PrimitiveReadSpec {
     operation: &'static str,
     capability: &'static str,
     use_case: &'static str,
+    default_page_size: u32,
 }
 
 fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
@@ -157,7 +170,7 @@ const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 27] = [
     primitive_spec("health_read"),
     primitive_spec("health_delta"),
     primitive_spec("storage_status"),
-    primitive_spec("diagnostics_read"),
+    primitive_spec_with_default_page_size("diagnostics_read", 1_000),
 ];
 
 const PRE_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 3] = [
@@ -188,10 +201,18 @@ fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface
 }
 
 const fn primitive_spec(operation: &'static str) -> PrimitiveReadSpec {
+    primitive_spec_with_default_page_size(operation, 10)
+}
+
+const fn primitive_spec_with_default_page_size(
+    operation: &'static str,
+    default_page_size: u32,
+) -> PrimitiveReadSpec {
     PrimitiveReadSpec {
         operation,
         capability: operation,
         use_case: operation,
+        default_page_size,
     }
 }
 
@@ -319,7 +340,11 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 CancellationPoint::DuringRead,
             ])?,
             deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
-            pagination: Some(PaginationContract::new(10, 1_000, 60_000)?),
+            pagination: Some(PaginationContract::new(
+                spec.default_page_size,
+                1_000,
+                60_000,
+            )?),
             idempotency: IdempotencyContract::NotRequired,
             inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
             authority_revalidation: RevalidationContract::required(vec![
@@ -738,5 +763,22 @@ mod tests {
                 "{operation} must remain callable from the paired default profile"
             );
         }
+    }
+
+    #[test]
+    fn diagnostics_catalog_preserves_the_shipped_default_page_size() {
+        let operation = primitive_read_operation("diagnostics_read")
+            .expect("primitive operation")
+            .expect("diagnostics operation");
+        let contribution = primitive_read_contribution().expect("primitive contribution");
+        let diagnostics = contribution
+            .capabilities()
+            .iter()
+            .find(|capability| capability.capability_id() == operation.capability_id())
+            .expect("diagnostics capability");
+        let pagination = diagnostics.pagination().expect("diagnostics pagination");
+
+        assert_eq!(pagination.default_page_size(), 1_000);
+        assert_eq!(pagination.maximum_page_size(), 1_000);
     }
 }

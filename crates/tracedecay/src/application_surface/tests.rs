@@ -34,9 +34,9 @@ use super::{
     adapt_application_tool_request, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
-    parse_application_surface_request, resolve_application_binding,
-    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
-    surface_rejection_metadata,
+    parse_application_surface_request, parse_http_application_surface_request,
+    resolve_application_binding, resolve_application_surface_dispatch,
+    resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
 use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
@@ -2028,4 +2028,35 @@ fn diagnostics_public_name_adapts_the_shipped_flat_request() {
             "cursor": "opaque-http"
         })
     );
+
+    let omitted_mcp =
+        adapt_application_tool_request("tracedecay_diagnostics", json!({"scope": "workspace"}))
+            .expect("omitted MCP page controls");
+    let omitted_mcp = parse_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        omitted_mcp.request,
+    )
+    .expect("canonical MCP request");
+    let omitted_http = parse_http_application_surface_request(
+        ApplicationSurfaceOperation::DiagnosticsRead,
+        json!({"scope": "workspace"}),
+        &PageRequest::first(
+            tracedecay_contracts::application_operation_default_page_size(
+                ApplicationSurfaceOperation::DiagnosticsRead,
+            ),
+        )
+        .expect("HTTP page"),
+    )
+    .expect("canonical HTTP request");
+    assert_eq!(
+        serde_json::to_value(&omitted_http).expect("HTTP diagnostics request"),
+        serde_json::to_value(&omitted_mcp).expect("MCP diagnostics request")
+    );
+    let ApplicationSurfaceRequest::Primitive(PrimitiveRequest::DiagnosticsRead(request)) =
+        omitted_http
+    else {
+        panic!("HTTP omission must decode to diagnostics read");
+    };
+    assert_eq!(request.maximum_diagnostics, 1_000);
+    assert!(request.cursor.is_none());
 }

@@ -14,7 +14,7 @@ use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationProblemKind, CancellationSignal, Deadline, OpaqueCursor, PageRequest,
     ProblemOwningLayer, RequestId, ResultContractRef, RetainedSurfaceOperation, RetryDirective,
-    SafeDiagnostic,
+    SafeDiagnostic, application_operation_default_page_size,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId,
@@ -26,7 +26,6 @@ mod application_operation_owner;
 pub use application_operation_owner::http_application_owner_kind;
 
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
-const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
 
 /// Define the handlers that name one fixed operation.
 ///
@@ -84,14 +83,10 @@ pub(crate) use constant_operation_handlers;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpPageQuery {
-    #[serde(default = "default_http_page_size")]
-    page_size: u32,
+    #[serde(default)]
+    page_size: Option<u32>,
     #[serde(default)]
     cursor: Option<OpaqueCursor>,
-}
-
-const fn default_http_page_size() -> u32 {
-    DEFAULT_HTTP_PAGE_SIZE
 }
 
 /// The canonical application owner family responsible for one HTTP binding.
@@ -695,7 +690,11 @@ fn admit_http_application_request(
             )));
         }
     };
-    let page = match PageRequest::new(page.page_size, page.cursor) {
+    let page_size = match page.page_size {
+        Some(page_size) => page_size,
+        None => application_operation_default_page_size(operation),
+    };
+    let page = match PageRequest::new(page_size, page.cursor) {
         Ok(page) => page,
         Err(_) => {
             return Err(Box::new(invalid_request_response(

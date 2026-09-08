@@ -114,7 +114,6 @@ use request_control::{
 pub(crate) use workflow::invoke_workflow_operation;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
-const DEFAULT_PAGE_SIZE: u32 = 10;
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
@@ -190,12 +189,17 @@ fn adapt_shipped_diagnostics_request(
         }),
         _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
     };
+    let maximum_diagnostics = match args.get("maximum_diagnostics") {
+        Some(maximum_diagnostics) => maximum_diagnostics.clone(),
+        None => Value::from(
+            tracedecay_contracts::application_operation_default_page_size(
+                ApplicationSurfaceOperation::DiagnosticsRead,
+            ),
+        ),
+    };
     Ok(serde_json::json!({
         "scope": scope,
-        "maximum_diagnostics": args
-            .get("maximum_diagnostics")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!(1000)),
+        "maximum_diagnostics": maximum_diagnostics,
         "cursor": args.get("cursor").cloned().unwrap_or(Value::Null),
     }))
 }
@@ -3387,7 +3391,9 @@ pub fn resolve_application_surface_dispatch(
         operation,
         request_id,
         request,
-        PageRequest::first(DEFAULT_PAGE_SIZE)?,
+        PageRequest::first(
+            tracedecay_contracts::application_operation_default_page_size(operation),
+        )?,
         None,
         cancellation,
         requested_format,
