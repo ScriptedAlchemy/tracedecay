@@ -10,7 +10,9 @@ use std::os::windows::io::AsRawHandle;
 
 use super::LcmError;
 
+mod payload_stream;
 mod verified_read;
+pub use payload_stream::{PayloadStreamError, VerifiedPayloadStream};
 use verified_read::{
     authority_for_content, authority_for_content_with_checkpoint,
     read_stable_payload_bytes_bounded_with, read_stable_payload_bytes_bounded_with_checkpoint,
