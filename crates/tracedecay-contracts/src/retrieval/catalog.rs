@@ -1,21 +1,19 @@
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey,
-    ContributionContractRef, ContributionId, CoverageContractRef, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
-    ExecutableBindingRegistryV1, ExecutableBindingV1, ExecutableSchemaAuthority,
-    IdempotencyContract, LifecycleClass, OmissionContractRef, OperationId, PaginationContract,
-    PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
-    RetrievalFamily, RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, RetrieverId,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef, ServiceId, SortContract,
-    SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
+    BindingStatus, BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionContractRef, ContributionId, CoverageContractRef,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OmissionContractRef,
+    PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract,
+    ReconciliationContract, RetrievalFamily, RetrievalPrimitiveManifestInputV1,
+    RetrievalPrimitiveManifestV1, RetrieverId, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef,
+    SortContract, SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
     SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract,
 };
 
-use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -43,6 +41,7 @@ use crate::retrieval::symbol_graph::{
     SignatureSearchRequest, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
     TypeHierarchyRecord, TypeHierarchyRequest,
 };
+use crate::{current_application_bindings, current_bindings};
 
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.application.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.application.symbol-search";
@@ -80,133 +79,6 @@ pub fn application_catalog_contributions()
         crate::retained_surfaces::retained_surface_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
     ])
-}
-
-/// Public HTTP executables for the complete code-query route family.
-///
-/// Code-query schemas and lifecycles remain owned by their three canonical
-/// catalog contributions. This registry joins only current structured HTTP
-/// bindings and preserves the daemon owner for primitive-backed versus
-/// callable-code-backed queries.
-pub fn code_search_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contributions = [
-        (
-            symbol_search_contribution()?,
-            ServiceId::new("service.application.primitive")?,
-        ),
-        (
-            primitive_read_contribution()?,
-            ServiceId::new("service.application.primitive")?,
-        ),
-        (
-            super::callable_code_catalog_contribution()?,
-            ServiceId::new("service.application.callable-code")?,
-        ),
-    ];
-    let mut bindings = Vec::new();
-    for (contribution, service_id) in contributions {
-        for http_binding in contribution.bindings().iter().filter(|binding| {
-            binding.surface() == BindingSurface::Http
-                && matches!(binding.status(), BindingStatus::Current)
-                && !binding.is_alias()
-                && binding.operation().as_str().starts_with("code_")
-        }) {
-            let capability_id = http_binding.capability_id();
-            let manifest = contribution
-                .capabilities()
-                .iter()
-                .find(|manifest| manifest.capability_id() == capability_id)
-                .ok_or(ApplicationContractError::Inconsistent {
-                    field: "code search executable capability",
-                })?;
-            let schema = contribution.executable_schema(capability_id).ok_or(
-                ApplicationContractError::Inconsistent {
-                    field: "code search executable schema",
-                },
-            )?;
-            let operation = http_binding.operation().as_str();
-            bindings.push(ExecutableBindingAvailabilityV1::available(
-                ExecutableBindingV1::daemon_owned(
-                    manifest,
-                    OperationId::new(format!("operation.application.{operation}"))?,
-                    service_id.clone(),
-                    schema.request_schema().clone(),
-                    schema.result_schema().clone(),
-                    CodecBindingKey::new(format!(
-                        "codec.application.code-search.{operation}.json.v1"
-                    ))?,
-                    RouteExposureV1::Public {
-                        binding_id: http_binding.binding_id().clone(),
-                        route_path: format!("/application/code/{operation}"),
-                    },
-                )?,
-            ));
-        }
-    }
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
-}
-
-/// Daemon-owned public HTTP bindings for the mounted primitive read routes.
-///
-/// Code queries have their own `/application/code` registry above. Session
-/// lookup is intentionally absent because its independently owned transport
-/// cutover is not part of this route family.
-pub fn primitive_http_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = primitive_read_contribution()?;
-    let service_id = ServiceId::new("service.application.primitive")?;
-    let mut bindings = Vec::new();
-    for spec in PRIMITIVE_READ_SPECS.iter().filter(|spec| {
-        !spec.operation.starts_with("code_")
-            && spec.operation != "session_lookup"
-            && primitive_read_surfaces(spec).contains(&BindingSurface::Http)
-    }) {
-        let capability_id = CapabilityId::new(format!(
-            "capability.application.primitive.{}",
-            spec.capability.replace('_', "-")
-        ))?;
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == &capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "primitive HTTP executable capability",
-            })?;
-        let schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "primitive HTTP executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "primitive HTTP surface binding",
-            })?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", spec.operation))?,
-                service_id.clone(),
-                schema.request_schema().clone(),
-                schema.result_schema().clone(),
-                CodecBindingKey::new(format!(
-                    "codec.application.primitive.{}.json.v1",
-                    spec.operation
-                ))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path: format!("/application/primitives/{}", spec.operation),
-                },
-            )?,
-        ));
-    }
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
 struct PrimitiveReadSpec {
@@ -366,7 +238,9 @@ pub fn primitive_read_handler_descriptors()
     PRIMITIVE_READ_SPECS
         .iter()
         .map(|spec| {
-            ApplicationHandlerDescriptor::new(
+            ApplicationHandlerDescriptor::for_catalog_operation(
+                spec.operation,
+                "service.application.primitive",
                 primitive_operation(spec)?,
                 primitive_schema(spec.operation, "request")?,
                 primitive_schema(spec.operation, "result")?,
@@ -392,7 +266,14 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
         ))?;
         let surfaces = primitive_read_surfaces(spec);
         let (surface_bindings, mut binding_ids) =
-            current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?;
+            match ApplicationSurfaceOperation::from_catalog_name(spec.operation) {
+                Some(operation) => current_application_bindings(
+                    &capability_id,
+                    operation,
+                    surfaces.iter().copied(),
+                )?,
+                None => current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?,
+            };
         bindings.extend(surface_bindings);
         binding_ids.reserve(primitive_lsp_methods(spec.operation).len());
         for method in primitive_lsp_methods(spec.operation) {
@@ -654,7 +535,9 @@ pub fn symbol_search_operation() -> Result<ApplicationOperation, ApplicationCont
 
 pub fn symbol_search_handler_descriptor()
 -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        "code_symbol_search",
+        "service.application.primitive",
         symbol_search_operation()?,
         symbol_search_request_schema()?,
         symbol_search_result_schema()?,
@@ -669,9 +552,9 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;
     let result_schema = symbol_search_result_schema()?;
-    let (mut bindings, mut binding_ids) = current_bindings(
+    let (mut bindings, mut binding_ids) = current_application_bindings(
         &capability_id,
-        "code_symbol_search",
+        ApplicationSurfaceOperation::CodeSymbolSearch,
         [
             BindingSurface::Cli,
             BindingSurface::Mcp,

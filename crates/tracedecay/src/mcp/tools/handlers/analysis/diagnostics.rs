@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use tracedecay_contracts::retrieval::{DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveScope};
+use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -27,37 +29,14 @@ use super::super::support::{generic_tool_result, unique_file_paths};
 
 const ANALYSIS_SYMBOL_BUDGET: usize = 500_000;
 
-fn diagnostics_scope_arg(args: &Value) -> Result<(&str, Scope)> {
-    let scope_str = args
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("workspace");
-
-    let scope = match scope_str {
-        "workspace" => Scope::Workspace,
-        "package" => Scope::Package {
-            name: required_diagnostics_scope_value(args, "package", "name")?,
-        },
-        "file" => Scope::File {
-            path: required_diagnostics_scope_value(args, "file", "path")?,
-        },
-        other => {
-            return Err(TraceDecayError::Config {
-                message: format!("unknown scope '{other}'; expected workspace, package, or file"),
-            });
+fn diagnostics_scope(request: &DiagnosticsPrimitiveRequest) -> (&'static str, Scope) {
+    match &request.scope {
+        DiagnosticsPrimitiveScope::Workspace => ("workspace", Scope::Workspace),
+        DiagnosticsPrimitiveScope::Package(name) => {
+            ("package", Scope::Package { name: name.clone() })
         }
-    };
-
-    Ok((scope_str, scope))
-}
-
-fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Result<String> {
-    args.get(name)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!("scope='{scope}' requires a '{name}' argument"),
-        })
-        .map(str::to_string)
+        DiagnosticsPrimitiveScope::File(path) => ("file", Scope::File { path: path.clone() }),
+    }
 }
 
 fn enclosing_diagnostic_node(
@@ -108,7 +87,10 @@ fn diagnostics_prewarm_enabled(config_flag: bool) -> bool {
 
 /// Build the early-return `warming` payload for a cold prewarm. Factored out so
 /// the warming path is unit-testable without spawning cargo.
-fn diagnostics_warming_result(project_root: &Path, args: &Value) -> ToolResult {
+fn diagnostics_warming_result(
+    project_root: &Path,
+    requested_format: RequestedOutputFormat,
+) -> ToolResult {
     let target_dir = rust_diagnostics_target_dir(project_root);
     let payload = json!({
         "status": "warming",
@@ -120,7 +102,19 @@ fn diagnostics_warming_result(project_root: &Path, args: &Value) -> ToolResult {
         "target_dir": target_dir.display().to_string(),
         "diagnostic_count": 0,
     });
-    generic_tool_result(Some(project_root), args, &payload, vec![])
+    generic_tool_result(
+        Some(project_root),
+        &format_arguments(requested_format),
+        &payload,
+        vec![],
+    )
+}
+
+fn format_arguments(requested_format: RequestedOutputFormat) -> Value {
+    match requested_format {
+        RequestedOutputFormat::Markdown => json!({}),
+        RequestedOutputFormat::Json => json!({"format": "json"}),
+    }
 }
 
 /// Best-effort per-project session↔git evidence graph health.
@@ -170,13 +164,21 @@ async fn session_correlation_health_json(session_db: Option<&RegisteredGlobalDb>
 pub(crate) async fn handle_diagnostics(
     cg: &TraceDecay,
     graph: &VerifiedGraphQuery,
-    args: Value,
+    request: DiagnosticsPrimitiveRequest,
+    requested_format: RequestedOutputFormat,
     diagnostics_cache: Option<&DiagnosticsCache>,
     diagnostics_change_generation: Option<&DiagnosticsChangeGenerationResolver>,
     diagnostics_lsp: Option<&Mutex<DiagnosticBroker>>,
     session_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
-    let (scope_str, scope) = diagnostics_scope_arg(&args)?;
+    if !(1..=1_000).contains(&request.maximum_diagnostics)
+        || request.cursor.as_ref().is_some_and(String::is_empty)
+    {
+        return Err(TraceDecayError::Config {
+            message: "invalid diagnostics request bounds".to_owned(),
+        });
+    }
+    let (scope_str, scope) = diagnostics_scope(&request);
     let project_root = cg.project_root().to_path_buf();
 
     // Cold-start avoidance: on a fresh tree the first cargo check builds every
@@ -188,7 +190,7 @@ pub(crate) async fn handle_diagnostics(
         && is_rust_diagnostics_cold(&project_root)
     {
         spawn_rust_diagnostics_prewarm(&project_root)?;
-        return Ok(diagnostics_warming_result(&project_root, &args));
+        return Ok(diagnostics_warming_result(&project_root, requested_format));
     }
 
     let collect_scope = scope.clone();
@@ -222,6 +224,7 @@ pub(crate) async fn handle_diagnostics(
     if let Scope::File { path } = &scope {
         diagnostics.retain(|d| d.file == *path);
     }
+    diagnostics.truncate(request.maximum_diagnostics as usize);
 
     let (entries, error_count, warning_count) =
         hotpath::measure_block!("mcp.analysis.diagnostics.map", {
@@ -276,7 +279,7 @@ pub(crate) async fn handle_diagnostics(
     );
     Ok(generic_tool_result(
         Some(cg.project_root()),
-        &args,
+        &format_arguments(requested_format),
         &payload,
         unique_file_paths(diagnostics.iter().map(|d| d.file.as_str())),
     ))
@@ -365,15 +368,38 @@ fn lsp_diagnostic_to_compiler_diagnostic(diagnostic: CodeDiagnostic) -> Diagnost
 #[allow(clippy::unwrap_used)]
 mod diagnostics_warming_tests {
     use super::{
-        diagnostics_prewarm_enabled, diagnostics_warming_result, session_correlation_health_json,
+        diagnostics_prewarm_enabled, diagnostics_scope, diagnostics_warming_result,
+        session_correlation_health_json,
     };
-    use serde_json::{Value, json};
+    use serde_json::Value;
     use std::path::Path;
+    use tracedecay_contracts::retrieval::{DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveScope};
+    use tracedecay_daemon_protocol::RequestedOutputFormat;
+    use tracedecay_lsp::compile_diagnostics::Scope;
 
     #[test]
     fn prewarm_follows_resolved_config_snapshot() {
         assert!(!diagnostics_prewarm_enabled(false));
         assert!(diagnostics_prewarm_enabled(true));
+    }
+
+    #[test]
+    fn fallback_uses_the_canonical_diagnostics_scope() {
+        let request = DiagnosticsPrimitiveRequest {
+            scope: DiagnosticsPrimitiveScope::File("src/lib.rs".to_owned()),
+            maximum_diagnostics: 25,
+            cursor: None,
+        };
+
+        assert_eq!(
+            diagnostics_scope(&request),
+            (
+                "file",
+                Scope::File {
+                    path: "src/lib.rs".to_owned()
+                }
+            )
+        );
     }
 
     #[tokio::test]
@@ -388,7 +414,7 @@ mod diagnostics_warming_tests {
     #[test]
     fn warming_result_reports_status_and_target_dir() {
         let root = Path::new("/tmp/tracedecay-warming-proj");
-        let result = diagnostics_warming_result(root, &json!({}));
+        let result = diagnostics_warming_result(root, RequestedOutputFormat::Markdown);
         let text = result.value["content"][0]["text"].as_str().unwrap();
         assert!(
             text.contains("warming"),
@@ -409,7 +435,7 @@ mod diagnostics_warming_tests {
             "default output should be Markdown: {text}"
         );
 
-        let json_result = diagnostics_warming_result(root, &json!({ "format": "json" }));
+        let json_result = diagnostics_warming_result(root, RequestedOutputFormat::Json);
         let Some(json_text) = json_result.value["content"][0]["text"].as_str() else {
             panic!("format=json should include text content");
         };

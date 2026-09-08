@@ -137,10 +137,8 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     );
 }
 
-/// `DiagnosticsRead` answers to two tool names, and the classifier only
-/// declines the surface for one of them. The deferred name must land on a
-/// group that owns a concrete handler; it previously resolved to nothing,
-/// so every executor-less server answered `unknown tool`.
+/// The canonical diagnostics tool uses the daemon application owner when
+/// mounted and the in-process read owner in direct MCP servers.
 #[test]
 fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
     assert_eq!(
@@ -156,13 +154,10 @@ fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
         Some(McpToolDispatchGroup::Analysis),
         "the deferred lookup has no other table to resolve against",
     );
-    for executor_available in [true, false] {
-        assert_eq!(
-            classify_mcp_tool_dispatch_group("tracedecay_diagnostics_read", executor_available),
-            Some(McpToolDispatchGroup::ApplicationSurface),
-            "the reviewed request shape has no in-process handler to fall back to",
-        );
-    }
+    assert_eq!(
+        classify_mcp_tool_dispatch_group("tracedecay_diagnostics_read", true),
+        None,
+    );
 }
 
 #[tokio::test]

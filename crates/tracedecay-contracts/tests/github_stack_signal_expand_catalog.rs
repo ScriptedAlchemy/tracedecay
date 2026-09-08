@@ -1,9 +1,10 @@
 use schemars::schema_for;
 use tracedecay_contracts::git::{
     GitHubStackSignalExpandSurfaceRequest, GitHubStackSignalExpandSurfaceResultV1,
-    git_surface_executable_binding_registry,
 };
-use tracedecay_contracts::git_surface_catalog_contribution;
+use tracedecay_contracts::{
+    application_http_executable_binding_registry, git_surface_catalog_contribution,
+};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, RouteExposureV1};
 
 const CAPABILITY: &str = "capability.application.github-stack.signal-expand";
@@ -50,7 +51,8 @@ fn github_stack_signal_expand_is_schema_backed_and_publicly_mounted() {
             })
     }));
 
-    let registry = git_surface_executable_binding_registry().expect("Git HTTP registry");
+    let registry =
+        application_http_executable_binding_registry().expect("application HTTP registry");
     let binding = registry
         .iter()
         .filter_map(|availability| availability.binding())

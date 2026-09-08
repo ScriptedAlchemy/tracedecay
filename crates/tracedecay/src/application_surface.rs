@@ -126,18 +126,16 @@ const SURFACE_TRANSPORT_ARGUMENT_KEYS: [&str; 2] = ["format", "__mcp_request_id"
 /// A reviewed application request body together with the presentation format
 /// that travelled alongside it in the caller's argument object.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NormalizedApplicationToolArgs {
+pub struct ApplicationToolRequest {
     pub request: Value,
     pub requested_format: RequestedOutputFormat,
 }
 
-/// Normalizes compatibility tool arguments before every CLI/MCP transport
-/// parses the canonical application request.
-#[hotpath::measure(label = "application_surface.normalize")]
-pub fn normalize_application_tool_args(
-    tool_name: &str,
+/// Separates transport-only metadata from the canonical application request.
+#[hotpath::measure(label = "application_surface.transport_metadata")]
+pub fn separate_application_tool_request(
     mut args: Value,
-) -> Result<NormalizedApplicationToolArgs, ApplicationSurfaceAdapterError> {
+) -> Result<ApplicationToolRequest, ApplicationSurfaceAdapterError> {
     if let Some(format) = args.get("format")
         && !matches!(format.as_str(), Some("markdown" | "json"))
     {
@@ -149,45 +147,10 @@ pub fn normalize_application_tool_args(
             object.remove(key);
         }
     }
-    let request = if tool_name == "tracedecay_diagnostics" {
-        compatibility_diagnostics_request(&args)?
-    } else {
-        args
-    };
-    Ok(NormalizedApplicationToolArgs {
-        request,
+    Ok(ApplicationToolRequest {
+        request: args,
         requested_format,
     })
-}
-
-/// Rewrites the compatibility `tracedecay_diagnostics` argument shape into the
-/// reviewed `diagnostics_read` request body.
-fn compatibility_diagnostics_request(
-    args: &Value,
-) -> Result<Value, ApplicationSurfaceAdapterError> {
-    let scope = match args
-        .get("scope")
-        .and_then(Value::as_str)
-        .unwrap_or("workspace")
-    {
-        "workspace" => serde_json::json!("workspace"),
-        "package" => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        "file" => serde_json::json!({
-            "file": args
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
-        }),
-        _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-    };
-    Ok(serde_json::json!({
-        "scope": scope,
-        "maximum_diagnostics": args
-            .get("maximum_diagnostics")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!(1000)),
-        "cursor": args.get("cursor").cloned().unwrap_or(Value::Null),
-    }))
 }
 
 pub type FeedbackSurfaceRequest = tracedecay_contracts::feedback::FeedbackHandleRequestV1;
@@ -329,7 +292,7 @@ fn application_invoker_for_surface(
     for &operation in operations {
         // Only the HTTP enumeration walks operations the mount is not meant to
         // publish; a caller-supplied list is required exactly as it was given.
-        if surface == BindingSurface::Http && !is_http_application_operation_exposed(operation) {
+        if surface == BindingSurface::Http && !is_http_application_operation_exposed(operation)? {
             continue;
         }
         let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
@@ -1945,6 +1908,7 @@ pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSur
 }
 
 pub fn application_surface_dispatch_input_with_controls(
+    surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
     request: ApplicationSurfaceRequest,
@@ -1960,7 +1924,7 @@ pub fn application_surface_dispatch_input_with_controls(
         request_id,
         binding: BindingResolution {
             profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?,
-            operation: SurfaceOperationName::new(operation.as_str())?,
+            operation: SurfaceOperationName::new(operation.name_for_surface(surface))?,
             protocol_revision: APPLICATION_PROTOCOL_REVISION,
             negotiated_features: application_negotiated_features(),
         },
@@ -2696,7 +2660,7 @@ pub async fn execute_application_surface(
         let binding = tracedecay_contracts::ApplicationInvocationBinding::new(
             binding_id.clone(),
             surface,
-            SurfaceOperationName::new(operation.as_str())?,
+            SurfaceOperationName::new(operation.name_for_surface(surface))?,
             result_contract.clone(),
             invocation.page,
         )?;
@@ -3471,6 +3435,7 @@ pub fn resolve_application_surface_dispatch_with_controls(
     let catalog = application_surface_catalog_ref()?;
     let resolver = CatalogBindingResolver::new(catalog);
     let input = application_surface_dispatch_input_with_controls(
+        surface,
         operation,
         request_id,
         request,
@@ -3490,7 +3455,7 @@ fn invoke_catalog_bound_application_request(
 ) -> HttpApplicationInvocationFuture {
     let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)
         .unwrap_or_else(|_| panic!("the application profile id is static"));
-    let operation_name = SurfaceOperationName::new(request.operation.as_str())
+    let operation_name = SurfaceOperationName::new(request.operation.name_for_surface(surface))
         .unwrap_or_else(|_| panic!("the application operation name is static"));
     let capability = composition
         .snapshot()
@@ -3543,6 +3508,7 @@ async fn invoke_application_adapter_request(
         }
     };
     let input = match application_surface_dispatch_input_with_controls(
+        surface,
         operation,
         request_id.clone(),
         application_request,
@@ -3678,7 +3644,7 @@ fn resolve_application_binding(
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
 ) -> Option<tracedecay_daemon_protocol::ResolvedBinding> {
-    resolve_named_binding(resolver, surface, operation.as_str())
+    resolve_named_binding(resolver, surface, operation.name_for_surface(surface))
 }
 
 fn resolve_named_binding(

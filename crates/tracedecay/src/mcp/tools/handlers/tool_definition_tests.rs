@@ -58,6 +58,46 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
 }
 
 #[test]
+fn diagnostics_public_name_projects_one_canonical_request_schema() {
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
+        .expect("MCP executable binding registry");
+    let operation_id = OperationId::new("operation.application.diagnostics_read")
+        .expect("diagnostics operation id");
+    let canonical = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .expect("diagnostics executable binding")
+        .request_schema()
+        .body();
+    let definitions = get_tool_definitions().expect("tool definitions");
+    let diagnostics = definitions
+        .iter()
+        .filter(|definition| {
+            matches!(
+                definition.name.as_str(),
+                "tracedecay_diagnostics" | "tracedecay_diagnostics_read"
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "diagnostics must have one public tool name and request shape"
+    );
+    assert_eq!(diagnostics[0].name, "tracedecay_diagnostics");
+    let mut projected = diagnostics[0].input_schema.clone();
+    projected["properties"]
+        .as_object_mut()
+        .expect("diagnostics request properties")
+        .remove("format");
+    assert_eq!(
+        &projected, canonical,
+        "the public diagnostics tool must parse the canonical diagnostics-read request directly"
+    );
+}
+
+#[test]
 fn canonical_and_retired_tools_keep_truthful_discovery() {
     let tools = get_tool_definitions().expect("tool definitions");
     let tool_names = tools
@@ -66,9 +106,9 @@ fn canonical_and_retired_tools_keep_truthful_discovery() {
         .collect::<std::collections::BTreeSet<_>>();
 
     for operation in ApplicationSurfaceOperation::ALL {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         assert!(
-            tool_names.contains(tool_name.as_str()),
+            tool_names.contains(tool_name),
             "{tool_name} must be projected from the application registry"
         );
     }
@@ -241,7 +281,7 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 fn every_advertised_application_surface_uses_canonical_output_formats() {
     let tools = get_tool_definitions().expect("tool definitions");
     for operation in ApplicationSurfaceOperation::ALL {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         let tool = tools
             .iter()
             .find(|tool| tool.name == tool_name)

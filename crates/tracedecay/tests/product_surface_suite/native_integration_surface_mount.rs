@@ -120,7 +120,7 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
         // Apply is an authoritative native mutation and this journey has no
         // transport fallback, so HTTP stays deliberately unexposed.
         assert!(
-            !is_http_application_operation_exposed(operation),
+            !is_http_application_operation_exposed(operation).expect("HTTP exposure registry"),
             "{name} must not be exposed over HTTP"
         );
         assert!(
@@ -133,7 +133,7 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
     for (operation, name) in WORKTREE_JOURNEY {
         assert_cli_and_mcp_bindings(&contribution, name);
         assert!(
-            is_http_application_operation_exposed(operation),
+            is_http_application_operation_exposed(operation).expect("HTTP exposure registry"),
             "{name} is the read/admin worktree journey and must stay on HTTP"
         );
         assert!(

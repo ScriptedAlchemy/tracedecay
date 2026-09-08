@@ -863,7 +863,7 @@ fn dispatch_application_surface_tools_inner<'a>(
             return Err(unknown_tool_error(tool_name));
         };
         let normalized_args =
-            match crate::application_surface::normalize_application_tool_args(tool_name, args) {
+            match crate::application_surface::separate_application_tool_request(args) {
                 Ok(args) => args,
                 Err(error) => {
                     return Err(TraceDecayError::Config {
@@ -1005,10 +1005,20 @@ fn dispatch_analysis_tools_inner<'a>(
             }
             "tracedecay_diagnostics" => {
                 let graph = admitted_graph_query(cg, &options, "diagnostics_read").await?;
+                let separated = crate::application_surface::separate_application_tool_request(args)
+                    .map_err(|error| TraceDecayError::Config {
+                        message: error.to_string(),
+                    })?;
+                let request = serde_json::from_value(separated.request).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!("invalid diagnostics request: {error}"),
+                    }
+                })?;
                 analysis::handle_diagnostics(
                     cg,
                     &graph,
-                    args,
+                    request,
+                    separated.requested_format,
                     options.diagnostics_cache,
                     options.diagnostics_change_generation.as_ref(),
                     options.diagnostics_lsp.as_deref(),
@@ -1251,12 +1261,10 @@ fn dispatch_retained_application_tools_inner<'a>(
         // session's own runtime, and only the selector names the project the
         // retained owner actually opened.
         let selected_project_id = super::tool_call_support::selected_project_id_argument(&args);
-        let normalized = crate::application_surface::normalize_application_tool_args(
-            tool_name, args,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
+        let normalized = crate::application_surface::separate_application_tool_request(args)
+            .map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })?;
         let requested_format = normalized.requested_format;
         let request = hotpath::measure_block!(
             "mcp.retained.decode",

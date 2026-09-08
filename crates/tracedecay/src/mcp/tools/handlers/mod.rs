@@ -519,8 +519,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         let selected_scope_prefix = scope_prefix;
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
-        // `tracedecay_diagnostics` without an executor falls through to the
-        // analysis group, whose binding row routes it to the local handler.
+        // diagnostics without an executor falls through to its in-process read owner.
         let dispatch_group =
             classify_mcp_tool_dispatch_group(tool_name, application_executor_available);
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
@@ -787,10 +786,6 @@ fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
     }
 }
 
-/// The `diagnostics_read` name that still carries the pre-application argument
-/// shape, and so the only one [`dispatch_analysis_tools`] can serve in-process.
-const DIAGNOSTICS_COMPATIBILITY_TOOL: &str = "tracedecay_diagnostics";
-
 #[cfg(any(feature = "hotpath", test))]
 fn mcp_tool_hotpath_identity(
     tool_name: &str,
@@ -811,16 +806,11 @@ fn classify_mcp_tool_dispatch_group(
     application_invocation_executor_available: bool,
 ) -> Option<McpToolDispatchGroup> {
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
-        // `DiagnosticsRead` answers to two tool names. Only the compatibility
-        // name has an in-process analysis handler that accepts its arguments,
-        // so only that name is deferred when no executor is attached.
-        // `tracedecay_diagnostics_read` stays on the surface, which reports the
-        // transport as unavailable rather than failing as an unknown tool.
-        let defer_diagnostics_without_executor = operation
-            == ApplicationSurfaceOperation::DiagnosticsRead
-            && tool_name == DIAGNOSTICS_COMPATIBILITY_TOOL
-            && !application_invocation_executor_available;
-        if !defer_diagnostics_without_executor {
+        // Diagnostics alone retains an in-process read owner for direct MCP
+        // servers that have not attached the daemon invocation executor.
+        if operation != ApplicationSurfaceOperation::DiagnosticsRead
+            || application_invocation_executor_available
+        {
             return Some(McpToolDispatchGroup::ApplicationSurface);
         }
     }

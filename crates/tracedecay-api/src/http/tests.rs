@@ -8,7 +8,8 @@ use super::{
     parse_git_read_operation, parse_native_integration_operation,
 };
 use tracedecay_contracts::{
-    configuration::CONFIGURATION_SURFACE_OPERATION_NAMES, configuration_executable_binding_registry,
+    application_http_executable_binding_registry,
+    configuration::configuration_surface_operation_names,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId, RouteExposureV1};
 
@@ -36,7 +37,14 @@ fn git_read_operation_parser_is_exact_and_read_only() {
         );
         assert_eq!(operation.as_str(), format!("git_{route}"));
     }
-    for rejected in ["", "preview", "apply", "git_status", "status/"] {
+    for (route, operation) in [
+        ("preview", ApplicationSurfaceOperation::GitPreview),
+        ("apply", ApplicationSurfaceOperation::GitApply),
+    ] {
+        assert_eq!(parse_git_read_operation(route), Some(operation));
+        assert!(!is_http_application_operation_exposed(operation).unwrap());
+    }
+    for rejected in ["", "git_status", "status/"] {
         assert_eq!(parse_git_read_operation(rejected), None);
     }
 }
@@ -233,9 +241,10 @@ fn configuration_operation_parser_is_exact_and_closed() {
 
 #[test]
 fn configuration_http_routes_match_the_executable_sdk_catalog() {
-    let registry = configuration_executable_binding_registry().expect("configuration registry");
+    let registry =
+        application_http_executable_binding_registry().expect("application HTTP registry");
 
-    for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for name in configuration_surface_operation_names() {
         let operation =
             ApplicationSurfaceOperation::from_catalog_name(name).expect("HTTP operation");
         let operation_id =
@@ -289,10 +298,7 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
             "canonical operation names must be unique"
         );
         assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(&format!(
-                "tracedecay_{}",
-                operation.as_str()
-            )),
+            ApplicationSurfaceOperation::from_tool_name(operation.mcp_tool_name()),
             Some(operation),
             "{} must round-trip through the canonical tool name",
             operation.as_str()
@@ -302,15 +308,14 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
         ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics"),
         Some(ApplicationSurfaceOperation::DiagnosticsRead)
     );
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitPreview
-    ));
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitApply
-    ));
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::ObservatoryRead
-    ));
+    assert!(
+        !is_http_application_operation_exposed(ApplicationSurfaceOperation::GitPreview).unwrap()
+    );
+    assert!(!is_http_application_operation_exposed(ApplicationSurfaceOperation::GitApply).unwrap());
+    assert!(
+        !is_http_application_operation_exposed(ApplicationSurfaceOperation::ObservatoryRead)
+            .unwrap()
+    );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::ObservatoryRead),
         HttpApplicationOwnerKind::Observatory
@@ -323,9 +328,10 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
         http_application_owner_kind(ApplicationSurfaceOperation::GitApply),
         HttpApplicationOwnerKind::Git
     );
-    assert!(is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitHubStackSignalExpand
-    ));
+    assert!(
+        is_http_application_operation_exposed(ApplicationSurfaceOperation::GitHubStackSignalExpand)
+            .unwrap()
+    );
     assert_eq!(
         http_application_full_route_path(ApplicationSurfaceOperation::GitHubStackSignalExpand),
         "/application/github-stack/signal-expand"
@@ -333,7 +339,7 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
 }
 
 #[test]
-fn native_worktree_http_parser_admits_only_the_five_public_operations() {
+fn native_integration_parser_and_catalog_keep_exposure_distinct() {
     for operation in [
         ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
         ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect,
@@ -349,6 +355,7 @@ fn native_worktree_http_parser_admits_only_the_five_public_operations() {
             http_application_full_route_path(operation),
             format!("/application/native-integration/{}", operation.as_str())
         );
+        assert!(is_http_application_operation_exposed(operation).unwrap());
     }
     for operation in [
         ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
@@ -358,6 +365,10 @@ fn native_worktree_http_parser_admits_only_the_five_public_operations() {
         ApplicationSurfaceOperation::NativeIntegrationStatus,
         ApplicationSurfaceOperation::NativeIntegrationCancel,
     ] {
-        assert_eq!(parse_native_integration_operation(operation.as_str()), None);
+        assert_eq!(
+            parse_native_integration_operation(operation.as_str()),
+            Some(operation)
+        );
+        assert!(!is_http_application_operation_exposed(operation).unwrap());
     }
 }

@@ -31,7 +31,8 @@ use tracedecay_domain::{
 };
 use tracedecay_mcp::get_tool_definitions;
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingSurface, ProfileId, SchemaId, SurfaceOperationName,
+    ApplicationSurfaceOperation, BindingSurface, OperationId, ProfileId, SchemaId,
+    SurfaceOperationName,
 };
 
 const PARITY_FIXTURE: &str = include_str!(
@@ -243,12 +244,6 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
             );
             continue;
         }
-        let resolution = BindingResolution {
-            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
-            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
-            protocol_revision: 1,
-            negotiated_features: BTreeSet::new(),
-        };
         let mut direct = Vec::new();
         for surface in expected["bindings"]
             .as_object()
@@ -302,6 +297,13 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
             (BindingSurface::Mcp, "mcp"),
             (BindingSurface::Http, "http"),
         ] {
+            let resolution = BindingResolution {
+                profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
+                operation: SurfaceOperationName::new(operation.name_for_surface(surface))
+                    .expect("operation"),
+                protocol_revision: 1,
+                negotiated_features: BTreeSet::new(),
+            };
             match expected["bindings"][surface_name].as_str() {
                 Some(binding_id) => {
                     let resolved = resolver
@@ -369,6 +371,8 @@ fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
     let definitions = get_tool_definitions().expect("tool definitions");
+    let mcp_registry =
+        tracedecay_contracts::mcp_executable_binding_registry().expect("MCP registry");
 
     for operation in CURSOR_CARRYING_CODE_OPERATIONS {
         let expected = &fixture["operations"][operation.as_str()];
@@ -406,14 +410,28 @@ fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
             );
         }
 
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         let definition = definitions
             .iter()
             .find(|definition| definition.name == tool_name)
             .unwrap_or_else(|| panic!("{tool_name} definition"));
-        assert!(
-            definition.input_schema["properties"]["meta"]["properties"]["cursor"].is_object(),
-            "{tool_name} must advertise its continuation cursor over MCP"
+        let operation_id =
+            OperationId::new(format!("operation.application.{}", operation.as_str()))
+                .expect("operation ID");
+        let canonical = mcp_registry
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .expect("MCP executable")
+            .request_schema()
+            .body();
+        let mut projected = definition.input_schema.clone();
+        projected["properties"]
+            .as_object_mut()
+            .expect("request properties")
+            .remove("format");
+        assert_eq!(
+            &projected, canonical,
+            "{tool_name} must advertise its canonical continuation request"
         );
     }
 }
@@ -442,17 +460,18 @@ fn extended_primitive_reads_bind_cli_mcp_and_http() {
         ApplicationSurfaceOperation::StorageStatus,
         ApplicationSurfaceOperation::DiagnosticsRead,
     ] {
-        let resolution = BindingResolution {
-            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
-            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
-            protocol_revision: 1,
-            negotiated_features: BTreeSet::new(),
-        };
         for surface in [
             BindingSurface::Cli,
             BindingSurface::Mcp,
             BindingSurface::Http,
         ] {
+            let resolution = BindingResolution {
+                profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
+                operation: SurfaceOperationName::new(operation.name_for_surface(surface))
+                    .expect("operation"),
+                protocol_revision: 1,
+                negotiated_features: BTreeSet::new(),
+            };
             assert!(
                 resolver.resolve_binding(surface, &resolution).is_some(),
                 "{} must bind on {surface:?}",
@@ -495,7 +514,7 @@ fn mcp_primitive_definitions_use_application_contracts() {
             &[][..],
         ),
     ] {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         let definition = definitions
             .iter()
             .find(|definition| definition.name == tool_name)
@@ -516,10 +535,12 @@ fn mcp_primitive_definitions_use_application_contracts() {
                 "{tool_name} must declare {property}"
             );
         }
-        let required = definition.input_schema["required"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{tool_name} required properties"))
-            .iter()
+        let required = definition
+            .input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
             .map(|property| property.as_str().expect("required property name"))
             .collect::<BTreeSet<_>>();
         assert_eq!(

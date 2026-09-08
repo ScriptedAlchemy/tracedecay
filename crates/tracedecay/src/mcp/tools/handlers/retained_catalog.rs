@@ -8,7 +8,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
-use crate::application_surface::normalize_application_tool_args;
+use crate::application_surface::separate_application_tool_request;
 use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -197,11 +197,10 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
             arguments.remove("action");
         }
     }
-    let normalized = normalize_application_tool_args(tool_name, args).map_err(|error| {
-        TraceDecayError::Config {
+    let normalized =
+        separate_application_tool_request(args).map_err(|error| TraceDecayError::Config {
             message: error.to_string(),
-        }
-    })?;
+        })?;
     let requested_format = normalized.requested_format;
     let typed_request = hotpath::measure_block!(
         "mcp.retained.profile.decode",

@@ -1154,11 +1154,8 @@ fn documented_format_argument_never_reaches_the_reviewed_request() {
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
             .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
 
-        let (request, format) =
-            cli_surface_invocation(tool_name, with_format(args.clone(), "json"), false)
-                .unwrap_or_else(|error| {
-                    panic!("{tool_name} rejected a documented argument: {error}")
-                });
+        let (request, format) = cli_surface_invocation(with_format(args.clone(), "json"), false)
+            .unwrap_or_else(|error| panic!("{tool_name} rejected a documented argument: {error}"));
         assert_eq!(format, RequestedOutputFormat::Json, "{tool_name}");
         assert_eq!(request, args, "{tool_name}");
 
@@ -1169,17 +1166,17 @@ fn documented_format_argument_never_reaches_the_reviewed_request() {
 }
 
 #[test]
-fn cli_and_mcp_normalize_documented_arguments_identically() {
+fn cli_and_mcp_separate_transport_metadata_identically() {
     for (tool_name, args) in documented_json_invocations() {
         let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
             .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
         let arguments = with_format(args, "json");
 
-        let (cli_request, cli_format) = cli_surface_invocation(tool_name, arguments.clone(), false)
+        let (cli_request, cli_format) = cli_surface_invocation(arguments.clone(), false)
             .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
         // The MCP transport reaches the reviewed schema through the same
         // adapter; an argument accepted there must be accepted here.
-        let mcp = normalize_application_tool_args(tool_name, arguments)
+        let mcp = separate_application_tool_request(arguments)
             .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
 
         assert_eq!(cli_request, mcp.request, "{tool_name}");
@@ -1199,14 +1196,9 @@ fn cli_and_mcp_normalize_documented_arguments_identically() {
 
 #[test]
 fn json_flag_and_json_format_select_the_same_output() {
-    let (flag_request, flag_format) =
-        cli_surface_invocation("tracedecay_storage_status", json!({}), true).expect("flag");
-    let (format_request, format_format) = cli_surface_invocation(
-        "tracedecay_storage_status",
-        json!({"format": "json"}),
-        false,
-    )
-    .expect("format");
+    let (flag_request, flag_format) = cli_surface_invocation(json!({}), true).expect("flag");
+    let (format_request, format_format) =
+        cli_surface_invocation(json!({"format": "json"}), false).expect("format");
 
     assert_eq!(flag_format, RequestedOutputFormat::Json);
     assert_eq!(format_format, RequestedOutputFormat::Json);
@@ -1215,20 +1207,15 @@ fn json_flag_and_json_format_select_the_same_output() {
 
 #[test]
 fn markdown_remains_the_default_presentation() {
-    let (_request, format) =
-        cli_surface_invocation("tracedecay_storage_status", json!({}), false).expect("default");
+    let (_request, format) = cli_surface_invocation(json!({}), false).expect("default");
     assert_eq!(format, RequestedOutputFormat::Markdown);
 }
 
 #[test]
 fn application_surface_rejects_invalid_output_formats() {
     for format in [json!("yaml"), json!(42), Value::Null] {
-        let error = cli_surface_invocation(
-            "tracedecay_storage_status",
-            json!({"format": format}),
-            false,
-        )
-        .expect_err("format outside the schema must fail");
+        let error = cli_surface_invocation(json!({"format": format}), false)
+            .expect_err("format outside the schema must fail");
         assert!(matches!(
             error,
             ApplicationSurfaceAdapterError::InvalidSurfaceRequest
