@@ -89,6 +89,19 @@ pub enum DaemonServiceState {
     Masked,
 }
 
+/// Whether a [`QuiescedDaemonLifecycle`] still owes the daemon its restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoreSettlement {
+    /// No restore has succeeded yet; `Drop` is the fallback that attempts it.
+    Owed,
+    /// The captured state was restored, or the caller explicitly waived it.
+    Complete,
+    /// An explicit finish attempted the restore and returned its failure to
+    /// the caller, who owns it. `Drop` neither retries (a failed readiness
+    /// wait already spent its whole window) nor reports it a second time.
+    FailureReturned,
+}
+
 /// Owns the exclusive maintenance lease after stopping the managed daemon and
 /// restores the captured daemon state only after releasing that lease.
 pub struct QuiescedDaemonLifecycle {
@@ -100,7 +113,7 @@ pub struct QuiescedDaemonLifecycle {
     /// restore starts that binary, so readiness must validate it.
     expected_version: String,
     runner: ServiceRunner,
-    restored: bool,
+    settlement: RestoreSettlement,
 }
 
 impl QuiescedDaemonLifecycle {
@@ -157,7 +170,7 @@ impl QuiescedDaemonLifecycle {
                     lifecycle_lease: Some(lifecycle_lease),
                     expected_version: expected_version.to_owned(),
                     runner,
-                    restored: false,
+                    settlement: RestoreSettlement::Owed,
                 };
                 match verify_installed_service_quiesced_under_lease_with_runner(&guard.runner) {
                     Ok(_) => Ok(guard),
@@ -229,11 +242,11 @@ impl QuiescedDaemonLifecycle {
 
     pub fn finish_without_restore(mut self) {
         drop(self.lifecycle_lease.take());
-        self.restored = true;
+        self.settlement = RestoreSettlement::Complete;
     }
 
     fn restore(&mut self) -> Result<()> {
-        if self.restored {
+        if self.settlement != RestoreSettlement::Owed {
             return Ok(());
         }
         self.restore_state(self.previous_state)
@@ -247,19 +260,30 @@ impl QuiescedDaemonLifecycle {
         }
     }
 
+    /// Restores `state` and records the outcome: only a successful restore
+    /// completes the settlement, while a failure is handed to the caller so
+    /// `Drop` does not attempt or report it again.
     fn restore_state(&mut self, state: DaemonServiceState) -> Result<()> {
+        let result = self.apply_restore_state(state);
+        self.settlement = match result {
+            Ok(()) => RestoreSettlement::Complete,
+            Err(_) => RestoreSettlement::FailureReturned,
+        };
+        result
+    }
+
+    fn apply_restore_state(&mut self, state: DaemonServiceState) -> Result<()> {
         if state.is_running() {
             self.downgrade_to_shared()?;
             restore_installed_service_after_update_with_runner(
                 &self.runner,
                 state,
                 &self.expected_version,
-            )?;
+            )
         } else {
             drop(self.lifecycle_lease.take());
+            Ok(())
         }
-        self.restored = true;
-        Ok(())
     }
 
     fn downgrade_to_shared(&mut self) -> Result<()> {
@@ -297,9 +321,26 @@ impl QuiescedDaemonLifecycle {
     }
 }
 
+/// The unwind-path safety net. Explicit `finish*` calls stay authoritative and
+/// leave nothing owed here; this only runs the restore when maintenance code
+/// unwound before finishing, and it must never panic (a second panic while
+/// one is in flight aborts the process), so a failed restore is reported once
+/// through the operator log with the evidence a repair needs.
 impl Drop for QuiescedDaemonLifecycle {
     fn drop(&mut self) {
-        let _ = self.restore();
+        if self.settlement != RestoreSettlement::Owed {
+            return;
+        }
+        let lease_owned = self.lifecycle_lease.is_some();
+        if let Err(error) = self.restore_state(self.previous_state) {
+            tracing::error!(
+                previous_state = ?self.previous_state,
+                expected_version = %self.expected_version,
+                lease_owned,
+                error = %error,
+                "quiesced daemon lifecycle fallback restore failed; the managed daemon may still be stopped"
+            );
+        }
     }
 }
 

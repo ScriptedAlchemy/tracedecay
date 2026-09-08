@@ -473,11 +473,32 @@ impl DaemonInvocationConnectionPool {
     }
 }
 
+/// What the pool does with a lease's stream when the lease drops.
+///
+/// A request-local failure proves only that *this* stream may be
+/// desynchronized; retiring unrelated idle streams on that evidence turns one
+/// broken socket into a reconnect storm for every concurrent caller. Only
+/// evidence that the daemon generation changed makes every pooled stream
+/// suspect, so only that evidence empties the pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaseDisposition {
+    /// The request settled on this stream; it is reusable.
+    Return,
+    /// Retire this stream only; idle siblings stay reusable.
+    DiscardOne,
+    /// Retire this stream and every idle stream: none of them can belong to
+    /// the current daemon generation.
+    InvalidatePool,
+}
+
 struct InvocationConnectionLease {
     pool: Arc<DaemonInvocationConnectionPool>,
     connection: Option<DaemonInvocationConnection>,
     permit: Option<OwnedSemaphorePermit>,
-    return_to_pool: bool,
+    /// Starts as [`LeaseDisposition::DiscardOne`]: a lease that is dropped
+    /// without settling (cancellation, timeout, an indeterminate effect, a
+    /// mid-request failure) never returns a possibly desynchronized stream.
+    disposition: LeaseDisposition,
 }
 
 impl InvocationConnectionLease {
@@ -492,29 +513,64 @@ impl InvocationConnectionLease {
     }
 
     fn release_to_pool(&mut self) {
-        self.return_to_pool = true;
+        self.disposition = LeaseDisposition::Return;
+    }
+
+    fn invalidate_pool(&mut self) {
+        self.disposition = LeaseDisposition::InvalidatePool;
     }
 }
 
 impl Drop for InvocationConnectionLease {
     fn drop(&mut self) {
-        if self.return_to_pool {
-            if let Some(connection) = self.connection.take() {
+        match self.disposition {
+            LeaseDisposition::Return => {
+                if let Some(connection) = self.connection.take() {
+                    self.pool
+                        .idle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(connection);
+                }
+            }
+            LeaseDisposition::DiscardOne => {
+                // The leased stream drops with the lease; idle siblings stay.
+                hotpath::gauge!("daemon.invocation.client.pool.discarded_total").inc(1u64);
+            }
+            LeaseDisposition::InvalidatePool => {
                 self.pool
                     .idle
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(connection);
+                    .clear();
+                hotpath::gauge!("daemon.invocation.client.pool.invalidated_total").inc(1u64);
             }
-        } else {
-            self.pool
-                .idle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
         }
         drop(self.permit.take());
     }
+}
+
+/// Whether a failed exchange proves the daemon generation changed, so no idle
+/// stream in the pool can belong to the daemon now behind `connection`.
+///
+/// Two sources of evidence qualify: the daemon itself refused this client's
+/// handshake (a wire-revision or credential rotation), or the authority record
+/// that named this endpoint is no longer current (a restart). Anything else —
+/// a reset or closed socket, a stalled or malformed response — is settled
+/// against the one stream that failed.
+async fn daemon_generation_changed(
+    connection: &crate::connection::DaemonConnection,
+    error: &tracedecay_domain::errors::TraceDecayError,
+    request_label: &str,
+) -> bool {
+    if let Some((code, _, _)) = error.project_route_context()
+        && (code == DAEMON_PROTOCOL_REVISION_SKEW || code == DAEMON_AUTHENTICATION_REJECTED)
+    {
+        return true;
+    }
+    crate::connection::ensure_daemon_connection_live(connection, request_label)
+        .await
+        .is_err()
 }
 
 /// Response plus same-connection delivery settlement authority when required.
@@ -635,13 +691,31 @@ impl DaemonInvocationClient {
                 pool: Arc::clone(&self.pool),
                 connection: Some(connection),
                 permit: Some(permit),
-                return_to_pool: false,
+                disposition: LeaseDisposition::DiscardOne,
             },
             in_flight,
         ))
     }
 
+    /// One request/response exchange on the leased stream, settling a failure
+    /// against the pool: generation-change evidence retires every idle
+    /// stream, any other failure retires only this one (the lease default).
     async fn invoke_on_connection(
+        &self,
+        lease: &mut InvocationConnectionLease,
+        request: crate::contract::DaemonInvocationRequest,
+    ) -> tracedecay_domain::errors::Result<crate::contract::DaemonInvocationResponse> {
+        let request_label = request.operation().as_str();
+        let result = self.exchange_on_connection(lease, request).await;
+        if let Err(error) = &result
+            && daemon_generation_changed(&self.connection, error, request_label).await
+        {
+            lease.invalidate_pool();
+        }
+        result
+    }
+
+    async fn exchange_on_connection(
         &self,
         lease: &mut InvocationConnectionLease,
         request: crate::contract::DaemonInvocationRequest,
@@ -1136,8 +1210,15 @@ impl DaemonInvocationDelivery {
             reason,
         )
         .await;
-        if result.is_ok() {
-            self.lease.release_to_pool();
+        match &result {
+            Ok(()) => self.lease.release_to_pool(),
+            Err(error) => {
+                if daemon_generation_changed(&daemon_connection, error, "invocation_delivery_ack")
+                    .await
+                {
+                    self.lease.invalidate_pool();
+                }
+            }
         }
         result
     }
