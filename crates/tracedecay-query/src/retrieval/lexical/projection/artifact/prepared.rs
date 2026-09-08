@@ -14,11 +14,15 @@ use super::format::{
     encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt, ngram_page_digest,
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
-use super::row_codec::encode_artifact_row;
+use super::row_codec::{RowDictionaryTableV1, encode_artifact_row};
 use super::schema::LexicalArtifactLayoutV1;
 use super::{
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
 };
+
+/// Amortized per-entry b-tree node overhead charged on top of each dictionary
+/// entry's key/value payload (same constant the builder ledger uses).
+const BTREE_MAP_ENTRY_OVERHEAD_BYTES: usize = 16;
 
 #[derive(Debug)]
 pub struct PreparedCodeLexicalArtifactPageV1 {
@@ -37,6 +41,9 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) ngram_shards: Vec<PreparedNgramShardV1>,
     pub(super) ngram_digest: ManifestDigest,
     pub(super) base_sections_receipt: Vec<u8>,
+    /// Every dictionary entry this page's rows reference (revision 14);
+    /// empty for layouts whose rows carry their strings inline.
+    pub(super) row_dictionary: RowDictionaryTableV1,
     source_retained_bytes: usize,
     prepared_retained_bytes: usize,
     preparation_scratch_bytes: usize,
@@ -139,6 +146,7 @@ pub(super) fn prepare_page(
             )
         })?;
     let mut documents = Vec::with_capacity(page.chunks().len());
+    let mut row_dictionary = RowDictionaryTableV1::new();
     let mut ngram_documents = BTreeMap::<(i64, i64), RoaringBitmap>::new();
     let mut logical_ngram_postings = 0usize;
     if page.symbol_displays().len() != page.chunks().len() {
@@ -163,6 +171,7 @@ pub(super) fn prepare_page(
             i64::try_from(document).map_err(contract_number)?,
             admitted.chunk(),
             display.as_ref(),
+            &mut row_dictionary,
             control,
         )?;
         let document = u32::try_from(prepared.document_id).map_err(contract_number)?;
@@ -264,6 +273,7 @@ pub(super) fn prepare_page(
         ngram_shards,
         ngram_digest,
         base_sections_receipt,
+        row_dictionary,
         source_retained_bytes: page.retained_owned_bytes(),
         prepared_retained_bytes: 0,
         preparation_scratch_bytes,
@@ -366,6 +376,7 @@ fn prepare_document(
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,
     display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
+    row_dictionary: &mut RowDictionaryTableV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(PreparedDocumentV1, Vec<(i64, i64)>), CodeLexicalArtifactErrorV1> {
     u32::try_from(document_id).map_err(|_| {
@@ -445,7 +456,7 @@ fn prepare_document(
     }
     let artifact_row = ArtifactRowV1::from(row);
     let chunk_id = artifact_row.id.as_str().to_owned();
-    let row = encode_artifact_row(layout, &artifact_row)?;
+    let row = encode_artifact_row(layout, &artifact_row, row_dictionary)?;
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
     let integrity_digest = document_integrity_digest(
         document_id,
@@ -653,6 +664,16 @@ fn prepared_retained_bytes(
             .checked_add(shard.documents.capacity())
             .ok_or_else(prepared_charge_overflow)?;
     }
+    for entry in page.row_dictionary.values() {
+        bytes = bytes
+            .checked_add(entry.capacity())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    std::mem::size_of::<(i64, Vec<u8>)>() + BTREE_MAP_ENTRY_OVERHEAD_BYTES,
+                )
+            })
+            .ok_or_else(prepared_charge_overflow)?;
+    }
     Ok(bytes)
 }
 
@@ -705,6 +726,15 @@ fn estimated_sqlite_writes(
         bytes = bytes
             .checked_add(shard.documents.len())
             .and_then(|bytes| bytes.checked_add(32))
+            .ok_or_else(prepared_write_overflow)?;
+    }
+    rows = rows
+        .checked_add(page.row_dictionary.len())
+        .ok_or_else(prepared_write_overflow)?;
+    for entry in page.row_dictionary.values() {
+        bytes = bytes
+            .checked_add(entry.len())
+            .and_then(|bytes| bytes.checked_add(16))
             .ok_or_else(prepared_write_overflow)?;
     }
     Ok((rows, bytes))

@@ -164,7 +164,7 @@ fn configure_hotpath() {
 const USAGE: &str = "\
 usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
                                [--warmups N] [--fuzzy-budget N] [--artifact FILE]
-                               [--format-revision 11|12|13]
+                               [--format-revision 11|12|13|14]
                                [--class NAME]... [--term CLASS=QUERY]...
 
   --corpus DIR       fixture corpus to index and query
@@ -176,7 +176,7 @@ usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
   --warmups N        untimed warmup iterations per class (default: 3)
   --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
   --artifact FILE    reopen an existing sealed lexical artifact and skip ingest
-  --format-revision  select the writer revision for build A/B runs (default: 13)
+  --format-revision  select the writer revision for build A/B runs (default: 14)
   --class NAME       run only the named classes (repeatable; default: all)
   --term CLASS=QUERY override one class's query text (repeatable)
   -h, --help         print this message
@@ -278,12 +278,13 @@ impl Options {
                 "--format-revision" => {
                     let value = arguments
                         .next()
-                        .ok_or_else(|| "--format-revision needs 11, 12, or 13".to_owned())?;
+                        .ok_or_else(|| "--format-revision needs 11, 12, 13, or 14".to_owned())?;
                     writer_revision = match value.as_str() {
                         "11" => CodeLexicalArtifactWriterRevisionV1::V11,
                         "12" => CodeLexicalArtifactWriterRevisionV1::V12,
                         "13" => CodeLexicalArtifactWriterRevisionV1::V13,
-                        _ => return Err("--format-revision needs 11, 12, or 13".to_owned()),
+                        "14" => CodeLexicalArtifactWriterRevisionV1::V14,
+                        _ => return Err("--format-revision needs 11, 12, 13, or 14".to_owned()),
                     };
                 }
                 "--term" => {

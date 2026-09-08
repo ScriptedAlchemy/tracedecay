@@ -40,9 +40,9 @@ use super::prepared::{
     PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1, prepare_page as prepare_page_values,
 };
 use super::schema::{
-    CodeLexicalArtifactWriterRevisionV1, LexicalArtifactLayoutV1, exact_field_code_from_encoded,
-    field_code, field_code_from_encoded, intern_exact_terms, intern_terms, stable_exact_term_id,
-    stable_term_id,
+    CodeLexicalArtifactWriterRevisionV1, LexicalArtifactLayoutV1, derive_row_dictionary,
+    exact_field_code_from_encoded, field_code, field_code_from_encoded, intern_exact_terms,
+    intern_terms, stable_exact_term_id, stable_term_id, stage_row_dictionary,
 };
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -200,13 +200,13 @@ impl PreparedExactInsertRefV1<'_> {
                     document_id: self.document_id,
                 }
             }
-            LexicalArtifactLayoutV1::V12 | LexicalArtifactLayoutV1::V13 => {
-                PreparedExactInsertKeyV1::V12 {
-                    term_id: self.term_id,
-                    field: self.field_code,
-                    document_id: self.document_id,
-                }
-            }
+            LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13
+            | LexicalArtifactLayoutV1::V14 => PreparedExactInsertKeyV1::V12 {
+                term_id: self.term_id,
+                field: self.field_code,
+                document_id: self.document_id,
+            },
         }
     }
 }
@@ -398,6 +398,41 @@ const EXACT_VOCABULARY_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] =
         "immutable lexical exact vocabulary",
     ),
 ];
+/// Revision 14 stages row dictionary entries per page during the append
+/// phase (`row_dictionary_pages`) under the same private-builder gate and
+/// immutability guards as the exact vocabulary; finalization derives the
+/// sealed `row_dictionary` from it and drops the staging table.
+const ROW_DICTIONARY_PAGES_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
+    (
+        "builder_gate_row_dictionary_pages_insert",
+        "row_dictionary_pages",
+        "INSERT",
+    ),
+    (
+        "builder_gate_row_dictionary_pages_update",
+        "row_dictionary_pages",
+        "UPDATE",
+    ),
+    (
+        "builder_gate_row_dictionary_pages_delete",
+        "row_dictionary_pages",
+        "DELETE",
+    ),
+];
+const ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
+    (
+        "immutable_row_dictionary_pages_update",
+        "row_dictionary_pages",
+        "UPDATE",
+        "immutable lexical row dictionary pages",
+    ),
+    (
+        "immutable_row_dictionary_pages_delete",
+        "row_dictionary_pages",
+        "DELETE",
+        "immutable lexical row dictionary pages",
+    ),
+];
 
 struct BuilderMutationGuardV1 {
     gate: Arc<AtomicU8>,
@@ -536,7 +571,8 @@ impl FinalizationSectionV1 {
                 Self::TermPostings,
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
-                | LexicalArtifactLayoutV1::V13,
+                | LexicalArtifactLayoutV1::V13
+                | LexicalArtifactLayoutV1::V14,
             ) => {
                 "SELECT term_id, field, document_id, frequency FROM term_postings ORDER BY term_id, field, document_id"
             }
@@ -556,7 +592,8 @@ impl FinalizationSectionV1 {
                 Self::TermStatistics,
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
-                | LexicalArtifactLayoutV1::V13,
+                | LexicalArtifactLayoutV1::V13
+                | LexicalArtifactLayoutV1::V14,
             ) => {
                 "SELECT term_id, field, document_frequency FROM term_stats ORDER BY term_id, field"
             }
@@ -567,7 +604,8 @@ impl FinalizationSectionV1 {
                 Self::Vocabulary,
                 LexicalArtifactLayoutV1::V11
                 | LexicalArtifactLayoutV1::V12
-                | LexicalArtifactLayoutV1::V13,
+                | LexicalArtifactLayoutV1::V13
+                | LexicalArtifactLayoutV1::V14,
             ) => "SELECT term_id, term, in_fuzzy FROM vocabulary ORDER BY term_id",
         }
     }
@@ -1513,6 +1551,12 @@ impl CodeLexicalArtifactBuilderV1 {
                     Ok::<(), CodeLexicalArtifactErrorV1>(())
                 })?;
                 record_batch_import_metrics(pages);
+                if self.layout.interns_row_dictionary() {
+                    hotpath::measure_block!(
+                        "query.artifact.batch.rows.stage_dictionary",
+                        stage_row_dictionary(&transaction, pages, control)
+                    )?;
+                }
                 hotpath::measure_block!(
                     "query.artifact.batch.rows",
                     append_prepared_rows(&transaction, pages, control)
@@ -3135,7 +3179,9 @@ fn append_prepared_postings(
     // row, so `OR IGNORE` could only mask a real corruption bug. A plain
     // INSERT lets that surface as a constraint failure instead of vanishing.
     let exact_insert_sql = match layout {
-        LexicalArtifactLayoutV1::V12 | LexicalArtifactLayoutV1::V13 => {
+        LexicalArtifactLayoutV1::V12
+        | LexicalArtifactLayoutV1::V13
+        | LexicalArtifactLayoutV1::V14 => {
             "INSERT INTO exact_postings(term_id, field, document_id) VALUES (?1, ?2, ?3)"
         }
         LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
@@ -3195,7 +3241,9 @@ fn append_prepared_postings(
                         .execute(params![entry.field, entry.term, entry.document_id])
                         .map_err(sqlite_error)?;
                 }
-                LexicalArtifactLayoutV1::V12 | LexicalArtifactLayoutV1::V13 => {
+                LexicalArtifactLayoutV1::V12
+                | LexicalArtifactLayoutV1::V13
+                | LexicalArtifactLayoutV1::V14 => {
                     exact_statement
                         .execute(params![entry.term_id, entry.field_code, entry.document_id])
                         .map_err(sqlite_error)?;
@@ -3482,7 +3530,43 @@ fn create_schema(
             )
             .map_err(sqlite_error)?;
     }
+    if layout.interns_row_dictionary() {
+        // `row_dictionary` stays empty until finalization derives it; the
+        // append phase only stages `(page_ordinal, entry_id, entry)` rows,
+        // which are sequential in page order.
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE row_dictionary (
+                    entry_id INTEGER PRIMARY KEY,
+                    entry BLOB NOT NULL
+                );
+                CREATE TABLE row_dictionary_pages (
+                    page_ordinal INTEGER NOT NULL,
+                    entry_id INTEGER NOT NULL,
+                    entry BLOB NOT NULL,
+                    PRIMARY KEY(page_ordinal, entry_id)
+                ) WITHOUT ROWID;
+                CREATE TRIGGER builder_gate_row_dictionary_pages_insert BEFORE INSERT ON row_dictionary_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_row_dictionary_pages_update BEFORE UPDATE ON row_dictionary_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER builder_gate_row_dictionary_pages_delete BEFORE DELETE ON row_dictionary_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                CREATE TRIGGER immutable_row_dictionary_pages_update BEFORE UPDATE ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical row dictionary pages'); END;
+                CREATE TRIGGER immutable_row_dictionary_pages_delete BEFORE DELETE ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical row dictionary pages'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
     Ok(())
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool, CodeLexicalArtifactErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)
 }
 
 fn verify_builder_mutation_gate_schema(
@@ -3494,37 +3578,60 @@ fn verify_builder_mutation_gate_schema(
         );
         verify_trigger_schema(connection, name, table, &expected)?;
     }
-    let has_exact_vocabulary: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'exact_vocabulary')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(sqlite_error)?;
-    if has_exact_vocabulary {
-        for (name, table, operation) in EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT {
-            let expected = format!(
-                "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
-            );
-            verify_trigger_schema(connection, name, table, &expected)?;
-        }
+    // Layout-dependent tables are verified only when present: `exact_vocabulary`
+    // from revision 12, and the revision-14 dictionary staging table, which
+    // finalization drops once the sealed dictionary is derived.
+    let has_exact_vocabulary = table_exists(connection, "exact_vocabulary")?;
+    let has_row_dictionary_pages = table_exists(connection, "row_dictionary_pages")?;
+    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 2] = [
+        (
+            has_exact_vocabulary,
+            &EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_row_dictionary_pages,
+            &ROW_DICTIONARY_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
+        ),
+    ];
+    for (name, table, operation) in gated_layouts
+        .into_iter()
+        .filter(|(present, _)| *present)
+        .flat_map(|(_, layout)| layout.iter().copied())
+    {
+        let expected = format!(
+            "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
+        );
+        verify_trigger_schema(connection, name, table, &expected)?;
     }
-    for (name, table, operation, message) in IMMUTABLE_TRIGGER_LAYOUT {
+    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 3] = [
+        (true, &IMMUTABLE_TRIGGER_LAYOUT),
+        (
+            has_exact_vocabulary,
+            &EXACT_VOCABULARY_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+        (
+            has_row_dictionary_pages,
+            &ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
+        ),
+    ];
+    for (name, table, operation, message) in immutable_layouts
+        .into_iter()
+        .filter(|(present, _)| *present)
+        .flat_map(|(_, layout)| layout.iter().copied())
+    {
         let expected = format!(
             "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
         );
         verify_trigger_schema(connection, name, table, &expected)?;
     }
-    if has_exact_vocabulary {
-        for (name, table, operation, message) in EXACT_VOCABULARY_IMMUTABLE_TRIGGER_LAYOUT {
-            let expected = format!(
-                "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
-            );
-            verify_trigger_schema(connection, name, table, &expected)?;
-        }
-    }
     Ok(())
 }
+
+/// `(trigger name, table, operation)` of one private-builder gate trigger.
+type GateTriggerLayoutV1 = (&'static str, &'static str, &'static str);
+/// `(trigger name, table, operation, abort message)` of one immutability
+/// trigger.
+type ImmutableTriggerLayoutV1 = (&'static str, &'static str, &'static str, &'static str);
 
 fn verify_trigger_schema(
     connection: &Connection,
@@ -3585,6 +3692,17 @@ fn install_base_freeze(
                 CREATE TRIGGER frozen_exact_vocabulary_insert BEFORE INSERT ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical exact vocabulary'); END;
                 CREATE TRIGGER frozen_exact_vocabulary_update BEFORE UPDATE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical exact vocabulary'); END;
                 CREATE TRIGGER frozen_exact_vocabulary_delete BEFORE DELETE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'frozen lexical exact vocabulary'); END;
+                ",
+            )
+            .map_err(sqlite_error)?;
+    }
+    if layout.interns_row_dictionary() {
+        transaction
+            .execute_batch(
+                "
+                CREATE TRIGGER frozen_row_dictionary_pages_insert BEFORE INSERT ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'frozen lexical row dictionary pages'); END;
+                CREATE TRIGGER frozen_row_dictionary_pages_update BEFORE UPDATE ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'frozen lexical row dictionary pages'); END;
+                CREATE TRIGGER frozen_row_dictionary_pages_delete BEFORE DELETE ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'frozen lexical row dictionary pages'); END;
                 ",
             )
             .map_err(sqlite_error)?;
@@ -3864,6 +3982,15 @@ fn build_serving_index_step(
     ordinal: u64,
     layout: LexicalArtifactLayoutV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    // Revision 14 derives the sealed row dictionary before the first serving
+    // index: dropping the staging table frees its pages for the
+    // `rows_by_chunk` index built in the same wake.
+    if ordinal == 0 && layout.interns_row_dictionary() {
+        hotpath::measure_block!(
+            "query.artifact.finalization.derive_row_dictionary",
+            derive_row_dictionary(transaction)
+        )?;
+    }
     match ordinal {
         0 => hotpath::measure_block!(
             "query.artifact.finalization.index.rows_by_chunk",
@@ -3886,7 +4013,9 @@ fn build_serving_index_step(
                 LexicalArtifactLayoutV1::V10 | LexicalArtifactLayoutV1::V11 => {
                     "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term)"
                 }
-                LexicalArtifactLayoutV1::V12 | LexicalArtifactLayoutV1::V13 => {
+                LexicalArtifactLayoutV1::V12
+            | LexicalArtifactLayoutV1::V13
+            | LexicalArtifactLayoutV1::V14 => {
                     "CREATE INDEX exact_postings_by_document ON exact_postings(document_id, field, term_id)"
                 }
             };
@@ -4026,7 +4155,8 @@ fn read_staged_artifact_layout(
         )),
         layout @ (LexicalArtifactLayoutV1::V11
         | LexicalArtifactLayoutV1::V12
-        | LexicalArtifactLayoutV1::V13) => Ok(layout),
+        | LexicalArtifactLayoutV1::V13
+        | LexicalArtifactLayoutV1::V14) => Ok(layout),
     }
 }
 
