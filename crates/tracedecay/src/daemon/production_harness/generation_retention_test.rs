@@ -1171,7 +1171,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     restarted.shutdown().await;
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
     let graph = harness.server(project).expect("project server").cg().await;
     let project_id = graph
@@ -1232,7 +1232,7 @@ async fn set_semantic_disabled(harness: &ProductionProjectCompositionHarnessV1, 
     );
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 async fn vector_generation_exists(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -1252,7 +1252,7 @@ async fn vector_generation_exists(
         .is_some()
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 async fn run_generation_cadence(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
@@ -1275,10 +1275,10 @@ async fn run_generation_cadence(
     .is_complete()
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 const EIGHT_DAYS_SECS: i64 = 8 * 24 * 60 * 60;
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn age_scope_for_reconciliation(scope: &Path) {
     let old = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(EIGHT_DAYS_SECS as u64))
@@ -1295,7 +1295,7 @@ fn age_scope_for_reconciliation(scope: &Path) {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey() {
     use super::semantic_activation_journey_test::{

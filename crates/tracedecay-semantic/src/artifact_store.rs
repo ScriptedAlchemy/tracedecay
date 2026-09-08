@@ -132,7 +132,9 @@ impl RuntimeEnvironmentV1 {
         backend: EmbeddingRuntimeFamilyV1,
     ) -> Result<Self, SemanticCapabilityDisabledV1> {
         let compiled = match backend {
-            EmbeddingRuntimeFamilyV1::FastEmbedOrt => cfg!(feature = "semantic-fastembed"),
+            EmbeddingRuntimeFamilyV1::FastEmbedOrt => {
+                cfg!(all(feature = "semantic-fastembed", not(windows)))
+            }
             EmbeddingRuntimeFamilyV1::Model2VecStatic => cfg!(feature = "semantic-model2vec"),
         };
         if !compiled {

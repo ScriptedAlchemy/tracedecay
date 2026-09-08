@@ -248,11 +248,10 @@ rmcp-benchmark = [
     "rmcp/transport-async-rw",
 ]
 
-# SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
-# image defaults disabled. Runtime inference still loads only from locally
-# verified artifact bytes; daemon-owned acquisition uses hf-hub against the
-# immutable catalog pins, never query-time ambient cache discovery. The
-# adapter itself lives in `tracedecay-semantic`, which owns the pins.
+# SEMANTIC FastEmbed adapter (Plan 31). On non-Windows targets it bundles ORT
+# while leaving FastEmbed's image defaults disabled. Windows keeps the feature
+# alias but `tracedecay-semantic` resolves it to the typed unavailable backend.
+# The adapter itself lives in `tracedecay-semantic`, which owns the pins.
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-application/semantic-fastembed",

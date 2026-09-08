@@ -1236,6 +1236,14 @@ impl SemanticModelLifecycleOwnerV1 {
         let Some(model_id) = selected else {
             return false;
         };
+        if cfg!(windows)
+            && catalog.get(&model_id).is_some_and(|model| {
+                model.backend.runtime_family()
+                    == crate::embedding_backend::EmbeddingRuntimeFamilyV1::FastEmbedOrt
+            })
+        {
+            return false;
+        }
         let worker_root = root.clone();
         let worker_catalog = catalog.clone();
         let worker_model_id = model_id.clone();

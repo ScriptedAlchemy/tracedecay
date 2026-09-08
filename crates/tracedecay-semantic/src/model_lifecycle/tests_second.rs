@@ -113,7 +113,7 @@
     // capability absence without the bundled runtime. Workspace builds unify
     // `semantic-fastembed` on via the root crate's `production` default; the
     // gate keeps scoped `-p tracedecay-semantic` runs truthful.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn restart_re_admits_explicit_import_without_legacy_acquisition() {
         let fixture = tempfile::tempdir().unwrap();
@@ -573,7 +573,7 @@
         }
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn pinned_reranker_fixture_catalog(fixture: &Path) -> (FastEmbedModelCatalogV1, String) {
         let mut members = BTreeMap::new();
         for (role, name) in [
@@ -623,7 +623,7 @@
         (catalog, model.model_id)
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     #[ignore = "requires TRACEDECAY_FASTEMBED_FIXTURE_DIR with a pinned local reranker"]
     fn pinned_reranker_cold_first_and_warm_queries_reuse_one_session() {
@@ -803,7 +803,7 @@
 
     // Reranker publication admits the artifact for runtime against
     // `detect_fastembed_process()` evidence; see the gate rationale above.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn independent_reranker_import_rotates_active_and_rollback_leases() {
         let fixture = tempfile::tempdir().unwrap();
@@ -865,13 +865,13 @@
         ));
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     struct FixtureRerankerHttpsTransport {
         members: BTreeMap<String, Vec<u8>>,
         revision: String,
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     impl ExplicitHttpsArtifactTransportV1 for FixtureRerankerHttpsTransport {
         fn fetch_range(
             &self,
@@ -900,7 +900,7 @@
     }
 
     // Same runtime-evidence gate as the local reranker import above.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn configured_https_reranker_acquisition_uses_immutable_member_pins() {
         let fixture = tempfile::tempdir().unwrap();
@@ -1122,6 +1122,19 @@
         assert!(status.state.is_none());
         assert!(status.semantics_omitted);
         assert!(status.auto_download);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fastembed_selection_never_queues_acquisition() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open_default(root.path()).unwrap();
+
+        assert!(matches!(
+            owner.status().state,
+            Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
+        ));
+        assert!(!owner.enqueue_demand_acquisition_if_needed());
     }
 
     #[test]
@@ -1446,7 +1459,7 @@
     /// its own active lease without fetching again. Re-admission verifies the
     /// manifest against the bundled runtime, so the gate matches
     /// `restart_re_admits_explicit_import_without_legacy_acquisition`.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn scoped_acquisition_re_admits_after_restart_under_catalog_identity() {
         let temp = tempfile::tempdir().unwrap();

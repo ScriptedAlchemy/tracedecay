@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex, TryLockError};
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use fastembed::{
     RerankInitOptionsUserDefined, RerankerModel, TextRerank, TokenizerFiles,
     UserDefinedRerankingModel,
@@ -44,13 +44,13 @@ pub enum RerankArtifactAdmissionErrorV1 {
 
 #[derive(Clone)]
 struct AdmittedRerankArtifactV1 {
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     artifact: AdmittedArtifactV1,
     pins: RerankCompatibilityPinsV1,
     max_batch_size: u32,
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     max_sequence_length: u32,
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     max_threads: u32,
     resident_byte_ceiling: u64,
 }
@@ -71,13 +71,13 @@ impl AdmittedRerankArtifactV1 {
             resources
         };
         Ok(Self {
-            #[cfg(feature = "semantic-fastembed")]
+            #[cfg(all(feature = "semantic-fastembed", not(windows)))]
             artifact,
             pins,
             max_batch_size: resources.max_batch_size,
-            #[cfg(feature = "semantic-fastembed")]
+            #[cfg(all(feature = "semantic-fastembed", not(windows)))]
             max_sequence_length: resources.max_sequence_length,
-            #[cfg(feature = "semantic-fastembed")]
+            #[cfg(all(feature = "semantic-fastembed", not(windows)))]
             max_threads: resources.max_threads,
             resident_byte_ceiling: resources.max_resident_bytes,
         })
@@ -128,7 +128,7 @@ pub fn validate_reranker_manifest_pins(
     {
         return Err(RerankArtifactAdmissionErrorV1::IncompatiblePins);
     }
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     supported_reranker_model(&payload.upstream.name, &payload.artifact_id)
         .ok_or(RerankArtifactAdmissionErrorV1::IncompatibleArtifact)?;
     Ok(payload.resource_ceiling)
@@ -171,12 +171,12 @@ pub(super) fn warm_reranker_executor(
     FastEmbedRerankExecutorV1::new(authority).map(Arc::new)
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 struct FastEmbedRerankSessionV1 {
     model: TextRerank,
 }
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 struct FastEmbedRerankSessionV1;
 
 impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
@@ -238,7 +238,7 @@ impl AdmittedNativeRerankExecutorV1 for FastEmbedRerankExecutorV1 {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn open_session(
     authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
@@ -264,7 +264,7 @@ fn open_session(
         .map_err(|_| LocalRerankFailureV1::Unavailable(SanitizedStageFailure::AuthorityUnavailable))
 }
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 fn open_session(
     _authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
@@ -273,7 +273,7 @@ fn open_session(
     ))
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn member_bytes(
     authority: &AdmittedRerankArtifactV1,
     role: ArtifactMemberRoleV1,
@@ -284,7 +284,7 @@ fn member_bytes(
         .map_err(|_| LocalRerankFailureV1::Unavailable(SanitizedStageFailure::AuthorityUnavailable))
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn run_session(
     session: &mut FastEmbedRerankSessionV1,
     query: &str,
@@ -335,7 +335,7 @@ fn run_session(
         .collect())
 }
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 fn run_session(
     _session: &mut FastEmbedRerankSessionV1,
     _query: &str,
@@ -348,7 +348,7 @@ fn run_session(
     ))
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn supported_reranker_model(upstream: &str, artifact_id: &str) -> Option<RerankerModel> {
     match [upstream, artifact_id] {
         values if values.contains(&"BAAI/bge-reranker-base") => {
@@ -533,7 +533,7 @@ impl ProductionCodeRerankAuthorityV1 {
         self.executor.as_ref()
     }
 
-    #[cfg(all(test, feature = "semantic-fastembed"))]
+    #[cfg(all(test, feature = "semantic-fastembed", not(windows)))]
     pub(crate) fn executor_handle(&self) -> &Arc<dyn MountedRerankExecutorV1> {
         &self.executor
     }
