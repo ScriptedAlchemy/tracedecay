@@ -5,9 +5,8 @@ use axum::extract::Extension;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use tracedecay::application_surface::{
-    AffectedTestsSurfaceRequest, ApplicationSurfaceRequest, FeedbackImpactSurfaceRequest,
-    FeedbackSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
-    GitReadSurfaceRequest, TestResultsSurfaceRequest, parse_application_surface_request,
+    ApplicationSurfaceRequest, FeedbackSurfaceRequest, GitApplySurfaceRequest,
+    GitPreviewSurfaceRequest, GitReadSurfaceRequest, parse_application_surface_request,
     resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
 };
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
@@ -15,6 +14,7 @@ use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
     application_router,
 };
+use tracedecay_application::feedback::TestResultsSurfaceRequestV1;
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, CancellationSignal, Deadline,
     IdempotencyKey, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
@@ -672,18 +672,12 @@ fn application_request(
         }
         ApplicationSurfaceOperation::GitPreview => git_requests().0,
         ApplicationSurfaceOperation::GitApply => git_requests().1,
-        ApplicationSurfaceOperation::FeedbackImpact => {
-            ApplicationSurfaceRequest::FeedbackImpact(FeedbackImpactSurfaceRequest {
-                request_handle: "rh_missing-application-parity".to_owned(),
-            })
-        }
-        ApplicationSurfaceOperation::AffectedTests => {
-            ApplicationSurfaceRequest::AffectedTests(AffectedTestsSurfaceRequest {
-                request_handle: "rh_missing-application-parity".to_owned(),
-            })
+        ApplicationSurfaceOperation::FeedbackImpact
+        | ApplicationSurfaceOperation::AffectedTests => {
+            feedback_request("rh_missing-application-parity")
         }
         ApplicationSurfaceOperation::TestResults => {
-            ApplicationSurfaceRequest::TestResults(TestResultsSurfaceRequest::default())
+            ApplicationSurfaceRequest::TestResults(TestResultsSurfaceRequestV1::default())
         }
         // Cursor-carrying code operations decode straight from the golden's
         // pinned request body, so the fixture proves the reviewed request
