@@ -101,18 +101,82 @@ async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path)
     )
     .await
 }
+/// One `tracedecay_search` read that consumes the executor's contract the way
+/// a production client does. Search admission is single-flight per project:
+/// a request arriving while another holds the execution permit is answered
+/// with the typed, retryable `search_capacity_unavailable` state rather than
+/// queued or served empty, so a concurrent reader retries it.
 async fn search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     query: &str,
 ) -> Value {
-    tool(
-        harness,
-        project,
-        "tracedecay_search",
-        json!({"query": query, "limit": 100, "format": "json"}),
-    )
+    let payload = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let payload = tool(
+                harness,
+                project,
+                "tracedecay_search",
+                json!({"query": query, "limit": 100, "format": "json"}),
+            )
+            .await;
+            if payload["status"] == "unavailable"
+                && payload["reason"] == "search_capacity_unavailable"
+            {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            return payload;
+        }
+    })
     .await
+    .unwrap_or_else(|_| panic!("search {query:?} never acquired the execution permit"));
+    resolve_truncated_tool_payload(harness, project, payload).await
+}
+
+/// A `tracedecay_search` body over the MCP response cap arrives as a handle
+/// envelope whose preview is not the JSON the journey reads. Reassemble the
+/// stored original through `tracedecay_retrieve` pages exactly as an agent
+/// does, so `code_generation` and `results` come from the full answer.
+async fn resolve_truncated_tool_payload(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    payload: Value,
+) -> Value {
+    if payload.get("truncated") != Some(&json!(true)) {
+        return payload;
+    }
+    let handle = payload["handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("truncated search omitted retrieve handle: {payload}"));
+    let mut content = String::new();
+    let mut offset = 0_u64;
+    loop {
+        let retrieved = tool(
+            harness,
+            project,
+            "tracedecay_retrieve",
+            json!({"handle": handle, "format": "json", "offset": offset}),
+        )
+        .await;
+        content.push_str(retrieved["content"].as_str().unwrap_or_else(|| {
+            panic!("truncated search handle carried no content page: {retrieved}")
+        }));
+        if retrieved["has_more"] != json!(true) {
+            break;
+        }
+        let next_offset = retrieved["next_offset"].as_u64().unwrap_or_else(|| {
+            panic!("retrieve reported more pages without a next offset: {retrieved}")
+        });
+        assert!(
+            next_offset > offset,
+            "retrieve did not advance past offset {offset}: {retrieved}"
+        );
+        offset = next_offset;
+    }
+    serde_json::from_str(&content).unwrap_or_else(|error| {
+        panic!("truncated search handle did not retrieve JSON: {error}; content={content}")
+    })
 }
 fn symbol_count(payload: &Value, name: &str) -> usize {
     payload["results"]
@@ -374,10 +438,10 @@ async fn concurrent_reconciliations_converge_on_one_sealed_generation() {
         search(&harness, &project, "racy"),
         search(&harness, &project, "racy")
     );
-    assert_eq!(left["code_generation"], fresh);
-    assert_eq!(right["code_generation"], fresh);
-    assert_eq!(symbol_count(&left, "racy"), 1);
-    assert_eq!(symbol_count(&right, "racy"), 1);
+    assert_eq!(left["code_generation"], fresh, "{left}");
+    assert_eq!(right["code_generation"], fresh, "{right}");
+    assert_eq!(symbol_count(&left, "racy"), 1, "{left}");
+    assert_eq!(symbol_count(&right, "racy"), 1, "{right}");
     assert_eq!(generation_index_len(&data_root, &project), before + 1);
     harness.shutdown().await;
 }
